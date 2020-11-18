@@ -22,4 +22,6 @@
 //!
 //! The implementation is not finished.
 
+mod crypto;
+mod fsverity;
 mod reader;
