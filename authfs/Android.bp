@@ -2,18 +2,25 @@ rust_defaults {
     name: "authfs_defaults",
     crate_name: "authfs",
     srcs: [
-        "src/lib.rs",
+        "src/main.rs",
     ],
     edition: "2018",
     rustlibs: [
         "libanyhow",
         "libauthfs_crypto_bindgen",
+        "libcfg_if",
+        "libfuse_rust",
         "liblibc",
+        "libstructopt",
         "libthiserror",
     ],
-    host_supported: true,
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
     shared_libs: ["libcrypto"],
-    clippy_lints: "android",
+    defaults: ["crosvm_defaults"],
 }
 
 // TODO(b/172687320): remove once there is a canonical bindgen.
@@ -27,23 +34,15 @@ rust_bindgen {
     ],
     bindgen_flags: ["--size_t-is-usize"],
     cflags: ["-D BORINGSSL_NO_CXX"],
-    host_supported: true,
 }
 
-rust_library {
-    name: "libauthfs",
+rust_binary {
+    name: "authfs",
     defaults: ["authfs_defaults"],
 }
 
-rust_test_host {
-    name: "authfs_host_test_src_lib",
-    test_suites: ["general-tests"],
+rust_test {
+    name: "authfs_device_test_src_lib",
     defaults: ["authfs_defaults"],
+    test_suites: ["device-tests"],
 }
-
-// TODO(victorhsieh): Enable the test once "undefined symbol: _Unwind_Resume" is fixed, then add to
-// TEST_MAPPING.
-//rust_test {
-//    name: "authfs_device_test_src_lib",
-//    defaults: ["authfs_defaults"],
-//}

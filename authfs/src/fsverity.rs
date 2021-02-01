@@ -19,6 +19,7 @@ use std::io;
 use thiserror::Error;
 
 use crate::auth::Authenticator;
+use crate::common::divide_roundup;
 use crate::crypto::{CryptoError, Sha256Hasher};
 use crate::reader::ReadOnlyDataByChunk;
 
@@ -42,10 +43,6 @@ pub enum FsverityError {
 }
 
 type HashBuffer = [u8; Sha256Hasher::HASH_SIZE];
-
-fn divide_roundup(dividend: u64, divisor: u64) -> u64 {
-    (dividend + divisor - 1) / divisor
-}
 
 fn hash_with_padding(chunk: &[u8], pad_to: usize) -> Result<HashBuffer, CryptoError> {
     let padding_size = pad_to - chunk.len();
@@ -91,11 +88,11 @@ fn log128_ceil(num: u64) -> Option<u64> {
 /// offset of the child node's hash. It is up to the iterator user to use the node and hash,
 /// e.g. for the actual verification.
 #[allow(clippy::needless_collect)]
-fn fsverity_walk<'a, T: ReadOnlyDataByChunk>(
+fn fsverity_walk<T: ReadOnlyDataByChunk>(
     chunk_index: u64,
     file_size: u64,
-    merkle_tree: &'a T,
-) -> Result<impl Iterator<Item = Result<([u8; 4096], usize), FsverityError>> + 'a, FsverityError> {
+    merkle_tree: &T,
+) -> Result<impl Iterator<Item = Result<([u8; 4096], usize), FsverityError>> + '_, FsverityError> {
     let hashes_per_node = T::CHUNK_SIZE / Sha256Hasher::HASH_SIZE as u64;
     let hash_pages = divide_roundup(file_size, hashes_per_node * T::CHUNK_SIZE);
     debug_assert_eq!(hashes_per_node, 128u64);
@@ -168,7 +165,6 @@ pub struct FsverityChunkedFileReader<F: ReadOnlyDataByChunk, M: ReadOnlyDataByCh
 }
 
 impl<F: ReadOnlyDataByChunk, M: ReadOnlyDataByChunk> FsverityChunkedFileReader<F, M> {
-    #[allow(dead_code)]
     pub fn new<A: Authenticator>(
         authenticator: &A,
         chunked_file: F,
