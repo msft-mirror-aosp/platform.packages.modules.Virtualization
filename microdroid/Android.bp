@@ -91,6 +91,26 @@ prebuilt_etc {
     installable: false, // avoid collision with system partition's init.rc
 }
 
+logical_partition {
+    name: "microdroid_super",
+    sparse: true,
+    // TODO(b/181107248): remove this hard-coded value
+    size: "104857600",
+    groups: [
+        {
+            name: "mygroup",
+            // TODO(b/181107248): remove this hard-coded value
+            size: "80000000",
+            partitions: [
+                {
+                    name: "system",
+                    filesystem: ":microdroid",
+                },
+            ],
+        },
+    ],
+}
+
 bootimg {
     name: "microdroid_boot-5.10",
     ramdisk_module: "microdroid_ramdisk-5.10",
@@ -158,7 +178,28 @@ android_filesystem {
             deps: ["virt_device_prebuilts_kernel_modules-5.10-x86_64"],
         },
     },
+    deps: [
+        "microdroid_fstab",
+    ],
+    base_dir: "first_stage_ramdisk",
     type: "compressed_cpio",
+    symlinks: [
+        {
+            target: "etc/fstab",
+            name: "first_stage_ramdisk/fstab.microdroid",
+        },
+        {
+            target: "first_stage_ramdisk/lib",
+            name: "lib",
+        },
+    ],
+}
+
+prebuilt_etc {
+    name: "microdroid_fstab",
+    src: "fstab",
+    filename: "fstab",
+    installable: false,
 }
 
 prebuilt_etc {
