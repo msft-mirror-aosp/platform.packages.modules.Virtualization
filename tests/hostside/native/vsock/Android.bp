@@ -12,15 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
 cc_test {
     name: "virt_hostside_tests_vsock_server",
     srcs: ["server.cc"],
     static_libs: [
-        "libbase",
-        "liblog",
+        // The existence of the library in the system partition is not guaranteed.
+        // Let's have our own copy of it.
+        "android.system.virtmanager-cpp",
     ],
-    static_executable: true,
+    shared_libs: [
+        "libbase",
+        "libbinder",
+        "liblog",
+        "libutils",
+    ],
     test_suites: ["device-tests"],
+    stem: "vsock_server",
 }
 
 cc_binary {
@@ -32,4 +43,5 @@ cc_binary {
     ],
     static_executable: true,
     installable: false,
+    stem: "vsock_client",
 }

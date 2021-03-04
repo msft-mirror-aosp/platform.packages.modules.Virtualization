@@ -1,3 +1,7 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
 rust_defaults {
     name: "authfs_defaults",
     crate_name: "authfs",
@@ -6,6 +10,7 @@ rust_defaults {
     ],
     edition: "2018",
     rustlibs: [
+        "authfs_aidl_interface-rust",
         "libanyhow",
         "libauthfs_crypto_bindgen",
         "libcfg_if",
@@ -41,9 +46,20 @@ rust_binary {
     defaults: ["authfs_defaults"],
 }
 
-// TODO(victorhsieh): Enable the test once "undefined symbol: _Unwind_Resume" is fixed, then add to
-// TEST_MAPPING.
 rust_test {
     name: "authfs_device_test_src_lib",
     defaults: ["authfs_defaults"],
+    test_suites: ["device-tests"],
+    data: [
+        "testdata/input.4k",
+        "testdata/input.4k.fsv_sig",
+        "testdata/input.4k.merkle_dump",
+        "testdata/input.4k1",
+        "testdata/input.4k1.fsv_sig",
+        "testdata/input.4k1.merkle_dump",
+        "testdata/input.4m",
+        "testdata/input.4m.fsv_sig",
+        "testdata/input.4m.merkle_dump",
+        "testdata/input.4m.merkle_dump.bad",
+    ],
 }
