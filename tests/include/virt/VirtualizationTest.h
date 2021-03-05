@@ -14,10 +14,21 @@
  * limitations under the License.
  */
 
-mod builder;
-mod common;
-mod sys;
-mod verifier;
+#include "android/system/virtmanager/IVirtManager.h"
+#include "android/system/virtmanager/IVirtualMachine.h"
+#include "binder/IServiceManager.h"
+#include "gtest/gtest.h"
 
-pub use self::builder::MerkleLeaves;
-pub use self::verifier::FsverityChunkedFileReader;
+using namespace android;
+using namespace android::system::virtmanager;
+
+namespace virt {
+
+class VirtualizationTest : public ::testing::Test {
+protected:
+    void SetUp() override;
+
+    sp<IVirtManager> mVirtManager;
+};
+
+} // namespace virt
