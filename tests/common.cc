@@ -14,10 +14,13 @@
  * limitations under the License.
  */
 
-mod builder;
-mod common;
-mod sys;
-mod verifier;
+#include "virt/VirtualizationTest.h"
 
-pub use self::builder::MerkleLeaves;
-pub use self::verifier::FsverityChunkedFileReader;
+namespace virt {
+
+void VirtualizationTest::SetUp() {
+    status_t err = getService<IVirtManager>(String16("android.system.virtmanager"), &mVirtManager);
+    ASSERT_EQ(err, 0);
+}
+
+} // namespace virt
