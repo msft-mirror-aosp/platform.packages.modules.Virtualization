@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Android Open Source Project
+ * Copyright (C) 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,9 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package android.system.virtmanager;
 
-interface IVirtualMachine {
-    /** Get the CID allocated to the VM. */
-    int getCid();
+#include "virt/VirtualizationTest.h"
+
+namespace virt {
+
+void VirtualizationTest::SetUp() {
+    status_t err = getService<IVirtManager>(String16("android.system.virtmanager"), &mVirtManager);
+    ASSERT_EQ(err, 0);
 }
+
+} // namespace virt

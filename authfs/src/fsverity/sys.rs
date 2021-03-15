@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Android Open Source Project
+ * Copyright (C) 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,9 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package android.system.virtmanager;
 
-interface IVirtualMachine {
-    /** Get the CID allocated to the VM. */
-    int getCid();
-}
+/// Magic used in fs-verity digest
+pub const FS_VERITY_MAGIC: &[u8; 8] = b"FSVerity";
+
+/// fs-verity version that we are using
+pub const FS_VERITY_VERSION: u8 = 1;
+
+/// Hash algorithm to use from linux/fsverity.h
+pub const FS_VERITY_HASH_ALG_SHA256: u8 = 1;
+
+/// Log 2 of the block size (only 4096 is supported now)
+pub const FS_VERITY_LOG_BLOCKSIZE: u8 = 12;
