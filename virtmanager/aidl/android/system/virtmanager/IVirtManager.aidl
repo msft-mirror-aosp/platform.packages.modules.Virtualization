@@ -19,12 +19,28 @@ import android.system.virtmanager.IVirtualMachine;
 import android.system.virtmanager.VirtualMachineDebugInfo;
 
 interface IVirtManager {
-    /** Start the VM with the given config file, and return a handle to it. */
-    IVirtualMachine startVm(String configPath);
+    /**
+     * Start the VM with the given config file, and return a handle to it. If `logFd` is provided
+     * then console logs from the VM will be sent to it.
+     */
+    IVirtualMachine startVm(String configPath, in @nullable ParcelFileDescriptor logFd);
 
     /**
      * Get a list of all currently running VMs. This method is only intended for debug purposes,
      * and as such is only permitted from the shell user.
      */
     VirtualMachineDebugInfo[] debugListVms();
+
+    /**
+     * Hold a strong reference to a VM in Virt Manager. This method is only intended for debug
+     * purposes, and as such is only permitted from the shell user.
+     */
+    void debugHoldVmRef(IVirtualMachine vm);
+
+    /**
+     * Drop reference to a VM that is being held by Virt Manager. Returns the reference if VM was
+     * found and null otherwise. This method is only intended for debug purposes, and as such is
+     * only permitted from the shell user.
+     */
+    @nullable IVirtualMachine debugDropVmRef(int cid);
 }
