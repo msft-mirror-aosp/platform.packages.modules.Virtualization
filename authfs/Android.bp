@@ -39,18 +39,26 @@ rust_bindgen {
     ],
     bindgen_flags: ["--size_t-is-usize"],
     cflags: ["-D BORINGSSL_NO_CXX"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_binary {
     name: "authfs",
     defaults: ["authfs_defaults"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_test {
     name: "authfs_device_test_src_lib",
     defaults: ["authfs_defaults"],
     test_suites: ["device-tests"],
-    data: [
+    data: [":authfs_test_files"],
+}
+
+filegroup {
+    name: "authfs_test_files",
+    srcs: [
+        "testdata/cert.der",
         "testdata/input.4k",
         "testdata/input.4k.fsv_sig",
         "testdata/input.4k.merkle_dump",
