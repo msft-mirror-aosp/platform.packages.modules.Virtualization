@@ -30,15 +30,25 @@ pub struct VmInstance {
     child: Child,
     /// The CID assigned to the VM for vsock communication.
     pub cid: Cid,
-    /// The filename of the config file that was used to start the VM. This may have changed since
-    /// it was read so it shouldn't be trusted; it is only stored for debugging purposes.
-    pub config_path: String,
+    /// The UID of the process which requested the VM.
+    pub requester_uid: u32,
+    /// The SID of the process which requested the VM.
+    pub requester_sid: Option<String>,
+    /// The PID of the process which requested the VM. Note that this process may no longer exist
+    /// and the PID may have been reused for a different process, so this should not be trusted.
+    pub requester_pid: i32,
 }
 
 impl VmInstance {
     /// Create a new `VmInstance` for the given process.
-    fn new(child: Child, cid: Cid, config_path: &str) -> VmInstance {
-        VmInstance { child, cid, config_path: config_path.to_owned() }
+    fn new(
+        child: Child,
+        cid: Cid,
+        requester_uid: u32,
+        requester_sid: Option<String>,
+        requester_pid: i32,
+    ) -> VmInstance {
+        VmInstance { child, cid, requester_uid, requester_sid, requester_pid }
     }
 
     /// Start an instance of `crosvm` to manage a new VM. The `crosvm` instance will be killed when
@@ -46,11 +56,13 @@ impl VmInstance {
     pub fn start(
         config: &VmConfig,
         cid: Cid,
-        config_path: &str,
         log_fd: Option<File>,
+        requester_uid: u32,
+        requester_sid: Option<String>,
+        requester_pid: i32,
     ) -> Result<VmInstance, Error> {
         let child = run_vm(config, cid, log_fd)?;
-        Ok(VmInstance::new(child, cid, config_path))
+        Ok(VmInstance::new(child, cid, requester_uid, requester_sid, requester_pid))
     }
 }
 
