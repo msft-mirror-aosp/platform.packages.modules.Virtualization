@@ -24,7 +24,7 @@ use anyhow::{Context, Error};
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 use sync::AtomicFlag;
@@ -73,13 +73,16 @@ fn main() -> Result<(), Error> {
 /// Run a VM from the given configuration file.
 fn command_run(
     virt_manager: Strong<dyn IVirtManager>,
-    config_path: &PathBuf,
+    config_path: &Path,
     daemonize: bool,
 ) -> Result<(), Error> {
     let config_filename = config_path.to_str().context("Failed to parse VM config path")?;
+    let config_file = ParcelFileDescriptor::new(
+        File::open(config_filename).context("Failed to open config file")?,
+    );
     let stdout_file = ParcelFileDescriptor::new(duplicate_stdout()?);
     let stdout = if daemonize { None } else { Some(&stdout_file) };
-    let vm = virt_manager.startVm(config_filename, stdout).context("Failed to start VM")?;
+    let vm = virt_manager.startVm(&config_file, stdout).context("Failed to start VM")?;
 
     let cid = vm.getCid().context("Failed to get CID")?;
     println!("Started VM from {} with CID {}.", config_filename, cid);
