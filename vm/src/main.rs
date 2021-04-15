@@ -17,17 +17,19 @@
 mod sync;
 
 use android_system_virtmanager::aidl::android::system::virtmanager::IVirtManager::IVirtManager;
-use android_system_virtmanager::binder::{
-    get_interface, ParcelFileDescriptor, ProcessState, Strong,
+use android_system_virtmanager::aidl::android::system::virtmanager::IVirtualMachine::IVirtualMachine;
+use android_system_virtmanager::aidl::android::system::virtmanager::IVirtualMachineCallback::{
+    BnVirtualMachineCallback, IVirtualMachineCallback,
 };
+use android_system_virtmanager::binder::{
+    get_interface, DeathRecipient, IBinder, ParcelFileDescriptor, ProcessState, Strong,
+};
+use android_system_virtmanager::binder::{Interface, Result as BinderResult};
 use anyhow::{Context, Error};
-// TODO: Import these via android_system_virtmanager::binder once https://r.android.com/1619403 is
-// submitted.
-use binder::{DeathRecipient, IBinder};
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 use sync::AtomicFlag;
@@ -42,6 +44,15 @@ enum Opt {
         /// Path to VM config JSON
         #[structopt(parse(from_os_str))]
         config: PathBuf,
+
+        /// Detach VM from the terminal and run in the background
+        #[structopt(short, long)]
+        daemonize: bool,
+    },
+    /// Stop a virtual machine running in the background
+    Stop {
+        /// CID of the virtual machine
+        cid: u32,
     },
     /// List running virtual machines
     List,
@@ -58,24 +69,59 @@ fn main() -> Result<(), Error> {
         .context("Failed to find Virt Manager service")?;
 
     match opt {
-        Opt::Run { config } => command_run(virt_manager, &config),
+        Opt::Run { config, daemonize } => command_run(virt_manager, &config, daemonize),
+        Opt::Stop { cid } => command_stop(virt_manager, cid),
         Opt::List => command_list(virt_manager),
     }
 }
 
 /// Run a VM from the given configuration file.
-fn command_run(virt_manager: Strong<dyn IVirtManager>, config_path: &PathBuf) -> Result<(), Error> {
+fn command_run(
+    virt_manager: Strong<dyn IVirtManager>,
+    config_path: &Path,
+    daemonize: bool,
+) -> Result<(), Error> {
     let config_filename = config_path.to_str().context("Failed to parse VM config path")?;
+    let config_file = ParcelFileDescriptor::new(
+        File::open(config_filename).context("Failed to open config file")?,
+    );
     let stdout_file = ParcelFileDescriptor::new(duplicate_stdout()?);
-    let vm =
-        virt_manager.startVm(config_filename, Some(&stdout_file)).context("Failed to start VM")?;
+    let stdout = if daemonize { None } else { Some(&stdout_file) };
+    let vm = virt_manager.startVm(&config_file, stdout).context("Failed to start VM")?;
+
     let cid = vm.getCid().context("Failed to get CID")?;
     println!("Started VM from {} with CID {}.", config_filename, cid);
 
-    // Wait until the VM dies. If we just returned immediately then the IVirtualMachine Binder
-    // object would be dropped and the VM would be killed.
-    wait_for_death(&mut vm.as_binder())?;
-    println!("VM died");
+    if daemonize {
+        // Pass the VM reference back to Virt Manager and have it hold it in the background.
+        virt_manager.debugHoldVmRef(&vm).context("Failed to pass VM to Virt Manager")
+    } else {
+        // Wait until the VM or VirtManager dies. If we just returned immediately then the
+        // IVirtualMachine Binder object would be dropped and the VM would be killed.
+        wait_for_vm(vm)
+    }
+}
+
+/// Wait until the given VM or the VirtManager itself dies.
+fn wait_for_vm(vm: Strong<dyn IVirtualMachine>) -> Result<(), Error> {
+    let dead = AtomicFlag::default();
+    let callback =
+        BnVirtualMachineCallback::new_binder(VirtualMachineCallback { dead: dead.clone() });
+    vm.registerCallback(&callback)?;
+    let death_recipient = wait_for_death(&mut vm.as_binder(), dead.clone())?;
+    dead.wait();
+    // Ensure that death_recipient isn't dropped before we wait on the flag, as it is removed
+    // from the Binder when it's dropped.
+    drop(death_recipient);
+    Ok(())
+}
+
+/// Retrieve reference to a previously daemonized VM and stop it.
+fn command_stop(virt_manager: Strong<dyn IVirtManager>, cid: u32) -> Result<(), Error> {
+    virt_manager
+        .debugDropVmRef(cid as i32)
+        .context("Failed to get VM from Virt Manager")?
+        .context("CID does not correspond to a running background VM")?;
     Ok(())
 }
 
@@ -86,18 +132,31 @@ fn command_list(virt_manager: Strong<dyn IVirtManager>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Block until the given Binder object dies.
-fn wait_for_death(binder: &mut impl IBinder) -> Result<(), Error> {
-    let dead = AtomicFlag::default();
-    let mut death_recipient = {
-        let dead = dead.clone();
-        DeathRecipient::new(move || {
-            dead.raise();
-        })
-    };
+/// Raise the given flag when the given Binder object dies.
+///
+/// If the returned DeathRecipient is dropped then this will no longer do anything.
+fn wait_for_death(binder: &mut impl IBinder, dead: AtomicFlag) -> Result<DeathRecipient, Error> {
+    let mut death_recipient = DeathRecipient::new(move || {
+        println!("VirtManager died");
+        dead.raise();
+    });
     binder.link_to_death(&mut death_recipient)?;
-    dead.wait();
-    Ok(())
+    Ok(death_recipient)
+}
+
+#[derive(Debug)]
+struct VirtualMachineCallback {
+    dead: AtomicFlag,
+}
+
+impl Interface for VirtualMachineCallback {}
+
+impl IVirtualMachineCallback for VirtualMachineCallback {
+    fn onDied(&self, _cid: i32) -> BinderResult<()> {
+        println!("VM died");
+        self.dead.raise();
+        Ok(())
+    }
 }
 
 /// Safely duplicate the standard output file descriptor.

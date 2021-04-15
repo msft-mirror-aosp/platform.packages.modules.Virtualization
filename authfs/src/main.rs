@@ -31,7 +31,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use structopt::StructOpt;
 
@@ -207,8 +207,8 @@ fn new_config_remote_verified_file(remote_id: i32, file_size: u64) -> Result<Fil
 
     let service = Arc::new(Mutex::new(service));
     let authenticator = FakeAuthenticator::always_succeed();
-    Ok(FileConfig::RemoteVerifiedReadonlyFile(
-        VerifiedFileReader::new(
+    Ok(FileConfig::RemoteVerifiedReadonlyFile {
+        reader: VerifiedFileReader::new(
             &authenticator,
             RemoteFileReader::new(Arc::clone(&service), remote_id),
             file_size,
@@ -216,19 +216,18 @@ fn new_config_remote_verified_file(remote_id: i32, file_size: u64) -> Result<Fil
             RemoteMerkleTreeReader::new(Arc::clone(&service), remote_id),
         )?,
         file_size,
-    ))
+    })
 }
 
 fn new_config_remote_unverified_file(remote_id: i32, file_size: u64) -> Result<FileConfig> {
-    let file_reader =
-        RemoteFileReader::new(Arc::new(Mutex::new(file::get_local_binder())), remote_id);
-    Ok(FileConfig::RemoteUnverifiedReadonlyFile(file_reader, file_size))
+    let reader = RemoteFileReader::new(Arc::new(Mutex::new(file::get_local_binder())), remote_id);
+    Ok(FileConfig::RemoteUnverifiedReadonlyFile { reader, file_size })
 }
 
 fn new_config_local_ro_file(
-    protected_file: &PathBuf,
-    merkle_tree_dump: &PathBuf,
-    signature: &PathBuf,
+    protected_file: &Path,
+    merkle_tree_dump: &Path,
+    signature: &Path,
 ) -> Result<FileConfig> {
     let file = File::open(&protected_file)?;
     let file_size = file.metadata()?.len();
@@ -237,21 +236,21 @@ fn new_config_local_ro_file(
     let authenticator = FakeAuthenticator::always_succeed();
     let mut sig = Vec::new();
     let _ = File::open(signature)?.read_to_end(&mut sig)?;
-    let file_reader =
+    let reader =
         VerifiedFileReader::new(&authenticator, file_reader, file_size, sig, merkle_tree_reader)?;
-    Ok(FileConfig::LocalVerifiedReadonlyFile(file_reader, file_size))
+    Ok(FileConfig::LocalVerifiedReadonlyFile { reader, file_size })
 }
 
-fn new_config_local_ro_file_unverified(file_path: &PathBuf) -> Result<FileConfig> {
-    let file_reader = LocalFileReader::new(File::open(file_path)?)?;
-    let file_size = file_reader.len();
-    Ok(FileConfig::LocalUnverifiedReadonlyFile(file_reader, file_size))
+fn new_config_local_ro_file_unverified(file_path: &Path) -> Result<FileConfig> {
+    let reader = LocalFileReader::new(File::open(file_path)?)?;
+    let file_size = reader.len();
+    Ok(FileConfig::LocalUnverifiedReadonlyFile { reader, file_size })
 }
 
 fn new_config_remote_new_verified_file(remote_id: i32) -> Result<FileConfig> {
     let remote_file =
         RemoteFileEditor::new(Arc::new(Mutex::new(file::get_local_binder())), remote_id);
-    Ok(FileConfig::RemoteVerifiedNewFile(VerifiedFileEditor::new(remote_file)))
+    Ok(FileConfig::RemoteVerifiedNewFile { editor: VerifiedFileEditor::new(remote_file) })
 }
 
 fn prepare_file_pool(args: &Args) -> Result<BTreeMap<Inode, FileConfig>> {

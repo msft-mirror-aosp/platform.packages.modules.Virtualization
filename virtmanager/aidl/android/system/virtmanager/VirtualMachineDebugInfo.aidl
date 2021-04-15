@@ -20,9 +20,18 @@ parcelable VirtualMachineDebugInfo {
     /** The CID assigned to the VM. */
     int cid;
 
+    /** The UID of the process which requested the VM. */
+    int requesterUid;
+
+    /** The SID of the process which requested the VM. */
+    @nullable String requesterSid;
+
     /**
-     * The filename of the config file used to start the VM. This may have changed since it was
-     * read so it shouldn't be trusted; it is only stored for debugging purposes.
+     * The PID of the process which requested the VM. Note that this process may no longer exist and
+     * the PID may have been reused for a different process, so this should not be trusted.
      */
-    String configPath;
+    int requesterPid;
+
+    /** Whether the VM is still running. */
+    boolean running;
 }

@@ -30,9 +30,6 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
-import java.io.File;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -44,17 +41,6 @@ public class MicrodroidTestCase extends BaseHostJUnit4Test {
     private static final int TEST_VM_ADB_PORT = 8000;
     private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
     private static final long MICRODROID_BOOT_TIMEOUT_MILLIS = 15000;
-
-    private void pushFile(String localName, String remoteName) {
-        try {
-            File localFile = getTestInformation().getDependencyFile(localName, false);
-            Path remotePath = Paths.get(TEST_ROOT, remoteName);
-            getDevice().executeShellCommand("mkdir -p " + remotePath.getParent());
-            getDevice().pushFile(localFile, remotePath.toString());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
 
     private String executeCommand(String cmd) {
         final long defaultCommandTimeoutMillis = 1000; // 1 sec
@@ -69,50 +55,65 @@ public class MicrodroidTestCase extends BaseHostJUnit4Test {
     @Test
     public void testMicrodroidBoots() throws Exception {
         // Prepare input files
-        pushFile("u-boot.bin", "bootloader");
-        pushFile("microdroid_super.img", "super.img");
-        pushFile("microdroid_boot-5.10.img", "boot.img");
-        pushFile("microdroid_vendor_boot-5.10.img", "vendor_boot.img");
-        pushFile("uboot_env.img", "cuttlefish_runtime.1/uboot_env.img");
-        pushFile("empty.img", "userdata.img");
-        pushFile("microdroid_vbmeta.img", "vbmeta.img");
-        pushFile("microdroid_vbmeta_system.img", "vbmeta_system.img");
-        pushFile("empty.img", "cache.img");
-        getDevice().executeShellCommand("mkdir -p " + TEST_ROOT + "etc/cvd_config");
-        getDevice().pushString("{}", TEST_ROOT + "etc/cvd_config/cvd_config_phone.json");
+        String prepareImagesCmd =
+                String.format(
+                        "mkdir -p %s; cd %s; "
+                                + "cp %setc/microdroid_bootloader bootloader && "
+                                + "cp %setc/fs/*.img . && "
+                                + "cp %setc/uboot_env.img . && "
+                                + "dd if=/dev/zero of=misc.img bs=4k count=256",
+                        TEST_ROOT, TEST_ROOT, VIRT_APEX, VIRT_APEX, VIRT_APEX);
+        getDevice().executeShellCommand(prepareImagesCmd);
 
-        // Run assemble_cvd to create composite.img
-        getDevice().executeShellCommand("HOME=" + TEST_ROOT + "; "
-                + "PATH=$PATH:" + VIRT_APEX + "bin; "
-                + VIRT_APEX + "bin/assemble_cvd -protected_vm < /dev/null");
+        // Create os_composite.img and env_composite.img
+        String makeOsCompositeCmd =
+                String.format(
+                        "cd %s; %sbin/mk_cdisk %setc/microdroid_cdisk.json os_composite.img",
+                        TEST_ROOT, VIRT_APEX, VIRT_APEX);
+        getDevice().executeShellCommand(makeOsCompositeCmd);
+        String makeEnvCompositeCmd =
+                String.format(
+                        "cd %s; %sbin/mk_cdisk %setc/microdroid_cdisk_env.json env_composite.img",
+                        TEST_ROOT, VIRT_APEX, VIRT_APEX);
+        getDevice().executeShellCommand(makeEnvCompositeCmd);
 
-        // Make sure that composite.img is created
-        final String compositeImg = TEST_ROOT + "cuttlefish_runtime/composite.img";
-        CommandResult result = getDevice().executeShellV2Command("du -b " + compositeImg);
+        // Make sure that the composite images are created
+        final String compositeImg = TEST_ROOT + "/os_composite.img";
+        final String envCompositeImg = TEST_ROOT + "/env_composite.img";
+        CommandResult result =
+                getDevice().executeShellV2Command("du -b " + compositeImg + " " + envCompositeImg);
         assertThat(result.getExitCode(), is(0));
         assertThat(result.getStdout(), is(not("")));
 
         // Start microdroid using crosvm
         ExecutorService executor = Executors.newFixedThreadPool(1);
-        executor.execute(() -> {
-            try {
-                getDevice().executeShellV2Command("cd " + TEST_ROOT + "; "
-                        + VIRT_APEX + "bin/crosvm run "
-                        + "--cid=" + TEST_VM_CID + " "
-                        + "--disable-sandbox "
-                        + "--bios=bootloader "
-                        + "--serial=type=syslog "
-                        + "--disk=cuttlefish_runtime/composite.img");
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
+        String runMicrodroidCmd =
+                String.format(
+                        "cd %s; %sbin/crosvm run --cid=%d --disable-sandbox --bios=bootloader"
+                                + " --serial=type=syslog --disk=os_composite.img"
+                                + " --disk=env_composite.img",
+                        TEST_ROOT, VIRT_APEX, TEST_VM_CID);
+        executor.execute(
+                () -> {
+                    try {
+                        getDevice().executeShellV2Command(runMicrodroidCmd);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
         // .. and wait for microdroid to boot
         // TODO(jiyong): don't wait too long. We can wait less by monitoring log from microdroid
         Thread.sleep(MICRODROID_BOOT_TIMEOUT_MILLIS);
 
         // Connect to microdroid and read a system property from there
-        executeCommand("adb forward tcp:" + TEST_VM_ADB_PORT + " vsock:" + TEST_VM_CID + ":5555");
+        executeCommand(
+                "adb -s "
+                        + getDevice().getSerialNumber()
+                        + " forward tcp:"
+                        + TEST_VM_ADB_PORT
+                        + " vsock:"
+                        + TEST_VM_CID
+                        + ":5555");
         executeCommand("adb connect " + MICRODROID_SERIAL);
         String prop = executeCommand("adb -s " + MICRODROID_SERIAL + " shell getprop ro.hardware");
         assertThat(prop, is("microdroid"));
