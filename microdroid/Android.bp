@@ -32,7 +32,7 @@ microdroid_symlinks = [
     },
 ]
 
-android_filesystem {
+android_system_image {
     name: "microdroid",
     use_avb: true,
     avb_private_key: ":avb_testkey_rsa4096",
@@ -41,6 +41,7 @@ android_filesystem {
     deps: [
         "init_second_stage",
         "microdroid_init_rc",
+        "microdroid_build_prop",
         "ueventd.rc",
         "libbinder",
         "libstdc++",
@@ -56,6 +57,7 @@ android_filesystem {
         "servicemanager",
         "tombstoned",
         "cgroups.json",
+        "public.libraries.android.txt",
 
         "plat_sepolicy_and_mapping.sha256",
     ] + microdroid_shell_and_utilities,
@@ -73,6 +75,7 @@ android_filesystem {
             ],
         },
     },
+    linker_config_src: "linker.config.json",
     base_dir: "system",
     dirs: microdroid_rootdirs,
     symlinks: microdroid_symlinks,
@@ -85,6 +88,13 @@ prebuilt_etc {
     src: "init.rc",
     relative_install_path: "init/hw",
     installable: false, // avoid collision with system partition's init.rc
+}
+
+prebuilt_root {
+    name: "microdroid_build_prop",
+    filename: "build.prop",
+    src: "build.prop",
+    installable: false,
 }
 
 android_filesystem {
@@ -132,6 +142,14 @@ logical_partition {
     ],
 }
 
+// TODO(jiyong): change the name to init, cause it's confusing
+microdroid_boot_cmdline = "rdinit=/bin/init_vendor " +
+    "panic=-1 " +
+    // TODO(b/181936135) make the ratelimiting conditional; ratelimiting on prod build
+    "printk.devkmsg=on " +
+    "androidboot.first_stage_console=1 " +
+    "androidboot.hardware=microdroid "
+
 bootimg {
     name: "microdroid_boot-5.10",
     ramdisk_module: "microdroid_ramdisk-5.10",
@@ -141,19 +159,16 @@ bootimg {
     arch: {
         arm64: {
             kernel_prebuilt: ":kernel_prebuilts-5.10-arm64",
+            cmdline: microdroid_boot_cmdline +
+                "androidboot.boot_devices=10000.pci",
         },
         x86_64: {
             kernel_prebuilt: ":kernel_prebuilts-5.10-x86_64",
+            cmdline: microdroid_boot_cmdline +
+                "pci=noacpi " +
+                "androidboot.boot_devices=pci0000:00/0000:00:01.0",
         },
     },
-    // TODO(jiyong): change the name to init, cause it's confusing
-    cmdline: "rdinit=/bin/init_vendor " +
-        "panic=-1 " +
-        // TODO(b/181936135) make the ratelimiting conditional; ratelimiting on prod build
-        "printk.devkmsg=on " +
-        "androidboot.first_stage_console=1 " +
-        "androidboot.hardware=microdroid " +
-        "androidboot.boot_devices=10000.pci ",
     dtb_prebuilt: "dummy_dtb.img",
     header_version: "4",
     partition_name: "boot",
@@ -227,6 +242,14 @@ prebuilt_etc {
 prebuilt_etc {
     name: "microdroid_bootloader",
     src: ":microdroid_bootloader_gen",
+    arch: {
+        x86_64: {
+            // For unknown reason, the signed bootloader doesn't work on x86_64. Until the problem
+            // is fixed, let's use the unsigned bootloader for the architecture.
+            // TODO(b/185115783): remove this
+            src: ":cuttlefish_crosvm_bootloader",
+        },
+    },
     filename: "microdroid_bootloader",
 }
 
@@ -262,6 +285,11 @@ genrule {
 prebuilt_etc {
     name: "microdroid_uboot_env",
     src: ":microdroid_uboot_env_gen",
+    arch: {
+        x86_64: {
+            src: ":microdroid_uboot_env_gen_x86_64",
+        },
+    },
     filename: "uboot_env.img",
 }
 
@@ -269,6 +297,14 @@ genrule {
     name: "microdroid_uboot_env_gen",
     tools: ["mkenvimage_host"],
     srcs: ["uboot-env.txt"],
+    out: ["output.img"],
+    cmd: "$(location mkenvimage_host) -s 4096 -o $(out) $(in)",
+}
+
+genrule {
+    name: "microdroid_uboot_env_gen_x86_64",
+    tools: ["mkenvimage_host"],
+    srcs: ["uboot-env-x86_64.txt"],
     out: ["output.img"],
     cmd: "$(location mkenvimage_host) -s 4096 -o $(out) $(in)",
 }
@@ -337,4 +373,9 @@ vbmeta {
 prebuilt_etc {
     name: "microdroid_cdisk.json",
     src: "microdroid_cdisk.json",
+}
+
+prebuilt_etc {
+    name: "microdroid_cdisk_env.json",
+    src: "microdroid_cdisk_env.json",
 }
