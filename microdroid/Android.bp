@@ -18,6 +18,7 @@ microdroid_rootdirs = [
     "vendor",
     "debug_ramdisk",
     "mnt",
+    "data",
 
     "apex",
     "linkerconfig",
@@ -109,7 +110,7 @@ android_filesystem {
     name: "microdroid_vendor",
     use_avb: true,
     deps: [
-        "microdroid_plat_sepolicy_vers.txt",
+        "microdroid_fstab",
         "microdroid_precompiled_sepolicy",
         "microdroid_precompiled_sepolicy.plat_sepolicy_and_mapping.sha256",
     ],
@@ -118,20 +119,13 @@ android_filesystem {
             deps: [
                 "microdroid_vendor_sepolicy.cil",
                 "microdroid_plat_pub_versioned.cil",
+                "microdroid_plat_sepolicy_vers.txt",
             ],
         },
     },
     avb_private_key: ":avb_testkey_rsa4096",
     avb_algorithm: "SHA256_RSA4096",
     file_contexts: "microdroid_vendor_file_contexts",
-}
-
-prebuilt_etc {
-    name: "microdroid_plat_sepolicy_vers.txt",
-    src: "plat_sepolicy_vers.txt",
-    filename: "plat_sepolicy_vers.txt",
-    sub_dir: "selinux",
-    installable: false,
 }
 
 logical_partition {
@@ -386,6 +380,11 @@ prebuilt_etc {
 prebuilt_etc {
     name: "microdroid_cdisk_env.json",
     src: "microdroid_cdisk_env.json",
+}
+
+prebuilt_etc {
+    name: "microdroid_cdisk_userdata.json",
+    src: "microdroid_cdisk_userdata.json",
 }
 
 prebuilt_etc {
