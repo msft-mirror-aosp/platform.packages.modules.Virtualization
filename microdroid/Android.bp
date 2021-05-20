@@ -49,6 +49,7 @@ android_system_image {
         "microdroid_build_prop",
         "ueventd.rc",
         "libbinder",
+        "libbinder_ndk",
         "libstdc++",
         "logcat",
         "logd",
@@ -84,6 +85,11 @@ android_system_image {
                 "plat_property_contexts",
                 "plat_service_contexts",
                 "plat_keystore2_key_contexts",
+            ],
+        },
+        lib64: {
+            deps: [
+                "zipfuse",
             ],
         },
     },
