@@ -1,18 +1,25 @@
 {
+  "version": 1,
   "os": {
     "name": "microdroid"
   },
   "task": {
-    "type": "microdroid_launcher",
-    "command": "MicrodroidTestNativeLib.so",
+    "type": "executable",
+    "command": "/apex/com.android.compos/bin/compsvc",
     "args": [
-      "hello",
-      "microdroid"
+      "--rpc-binder",
+      "/apex/com.android.art/bin/dex2oat64"
     ]
   },
   "apexes": [
     {
       "name": "com.android.adbd"
+    },
+    {
+      "name": "com.android.art"
+    },
+    {
+      "name": "com.android.compos"
     },
     {
       "name": "com.android.i18n"
