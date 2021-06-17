@@ -138,7 +138,7 @@ public class MicrodroidTestCase extends BaseHostJUnit4Test {
 
     // Run a shell command on Microdroid
     private String runOnMicrodroid(String... cmd) {
-        final long timeout = 3000; // 3 sec. Microdroid is extremely slow on GCE-on-CF.
+        final long timeout = 30000; // 30 sec. Microdroid is extremely slow on GCE-on-CF.
         CommandResult result =
                 RunUtil.getDefault()
                         .runTimedCmd(timeout, "adb", "-s", MICRODROID_SERIAL, "shell", join(cmd));
@@ -148,14 +148,6 @@ public class MicrodroidTestCase extends BaseHostJUnit4Test {
 
     private String join(String... strs) {
         return String.join(" ", Arrays.asList(strs));
-    }
-
-    // TODO(b/191131043) remove this step
-    private String createMiscImage() throws Exception {
-        final String output = TEST_ROOT + "misc.img";
-        runOnAndroid("dd", "if=/dev/zero", "of=" + output, "bs=4k", "count=256");
-        assertThat(runOnAndroid("du", "-b", output), is(not("")));
-        return output;
     }
 
     private String createPayloadImage(String apkName, String packageName, String configPath)
@@ -223,9 +215,8 @@ public class MicrodroidTestCase extends BaseHostJUnit4Test {
 
     private void startMicrodroid(String apkName, String packageName, String configPath)
             throws Exception {
-        // Create misc.img and payload.img
+        // Create payload.img
         final String payloadImg = createPayloadImage(apkName, packageName, configPath);
-        final String miscImg = createMiscImage();
 
         // Tools and executables
         final String mkCdisk = VIRT_APEX + "bin/mk_cdisk";

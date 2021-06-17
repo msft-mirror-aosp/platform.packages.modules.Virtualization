@@ -53,15 +53,7 @@ microdroid.json:
     {
       "partitions": [
         {
-          "label": "misc",
-          "path": "/data/local/tmp/microdroid/misc.img"
-        },
-        {
           "label": "boot_a",
-          "path": "/apex/com.android.virt/etc/fs/microdroid_boot-5.10.img"
-        },
-        {
-          "label": "boot_b",
           "path": "/apex/com.android.virt/etc/fs/microdroid_boot-5.10.img"
         },
         {
@@ -69,23 +61,11 @@ microdroid.json:
           "path": "/apex/com.android.virt/etc/fs/microdroid_vendor_boot-5.10.img"
         },
         {
-          "label": "vendor_boot_b",
-          "path": "/apex/com.android.virt/etc/fs/microdroid_vendor_boot-5.10.img"
-        },
-        {
           "label": "vbmeta_a",
           "path": "/apex/com.android.virt/etc/fs/microdroid_vbmeta.img"
         },
         {
-          "label": "vbmeta_b",
-          "path": "/apex/com.android.virt/etc/fs/microdroid_vbmeta.img"
-        },
-        {
           "label": "vbmeta_system_a",
-          "path": "/apex/com.android.virt/etc/fs/microdroid_vbmeta_system.img"
-        },
-        {
-          "label": "vbmeta_system_b",
           "path": "/apex/com.android.virt/etc/fs/microdroid_vbmeta_system.img"
         },
         {
@@ -131,7 +111,6 @@ via [`virtualizationservice`](../virtualizationservice/).
 ```sh
 $ adb root
 $ adb shell 'mkdir /data/local/tmp/microdroid'
-$ adb shell 'dd if=/dev/zero of=/data/local/tmp/microdroid/misc.img bs=4k count=256'
 $ adb push payload.json /data/local/tmp/microdroid/payload.json
 $ adb shell 'cd /data/local/tmp/microdroid; /apex/com.android.virt/bin/mk_payload payload.json payload.img'
 $ adb shell 'chmod go+r /data/local/tmp/microdroid/payload*'
