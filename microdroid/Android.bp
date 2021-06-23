@@ -77,6 +77,8 @@ android_system_image {
         "cgroups.json",
         "public.libraries.android.txt",
 
+        "android.system.keystore2-V1-ndk_platform",
+
         // TODO(b/185767624): remove hidl after full keymint support
         "hwservicemanager",
 
@@ -391,13 +393,8 @@ vbmeta {
 }
 
 prebuilt_etc {
-    name: "microdroid_cdisk.json",
-    src: "microdroid_cdisk.json",
-}
-
-prebuilt_etc {
-    name: "microdroid_cdisk_env.json",
-    src: "microdroid_cdisk_env.json",
+    name: "microdroid.json",
+    src: "microdroid.json",
 }
 
 prebuilt_etc {
