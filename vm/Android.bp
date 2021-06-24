@@ -8,11 +8,14 @@ rust_binary {
     srcs: ["src/main.rs"],
     edition: "2018",
     rustlibs: [
-        "android.system.virtmanager-rust",
+        "android.system.virtualizationservice-rust",
         "libanyhow",
+        "libcompositediskconfig",
         "libenv_logger",
         "liblibc",
         "liblog_rust",
+        "libserde_json",
+        "libserde",
         "libstructopt",
     ],
     apex_available: [

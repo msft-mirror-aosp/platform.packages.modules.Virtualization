@@ -19,13 +19,8 @@ use std::convert::TryFrom;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use super::{ChunkBuffer, RandomWrite, ReadByChunk};
+use super::{ChunkBuffer, RandomWrite, ReadByChunk, VirtFdService};
 use crate::common::CHUNK_SIZE;
-
-use authfs_aidl_interface::aidl::com::android::virt::fs::IVirtFdService;
-use authfs_aidl_interface::binder::Strong;
-
-type VirtFdService = Strong<dyn IVirtFdService::IVirtFdService>;
 
 fn remote_read_chunk(
     service: &Arc<Mutex<VirtFdService>>,
@@ -117,6 +112,17 @@ impl RandomWrite for RemoteFileEditor {
             .writeFile(self.file_fd, &buf, offset)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.get_description()))?;
         Ok(size as usize) // within range because size is supposed to <= buf.len(), which is a usize
+    }
+
+    fn resize(&self, size: u64) -> io::Result<()> {
+        let size =
+            i64::try_from(size).map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+        self.service
+            .lock()
+            .unwrap()
+            .resize(self.file_fd, size)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.get_description()))?;
+        Ok(())
     }
 }
 

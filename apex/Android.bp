@@ -13,29 +13,51 @@ apex {
     key: "com.android.virt.key",
     certificate: ":com.android.virt.certificate",
 
-    // crosvm is enabled for only 64-bit targets on device
+    // crosvm and virtualizationservice are only enabled for 64-bit targets on device
     arch: {
         arm64: {
             binaries: [
                 "authfs", // TODO(victorhsieh): move to microdroid once we can run the test in VM.
                 "crosvm",
+                "virtualizationservice",
+            ],
+            filesystems: [
+                "microdroid_super",
+                "microdroid_boot-5.10",
+                "microdroid_vendor_boot-5.10",
+                "microdroid_vbmeta",
+                "microdroid_vbmeta_system",
             ],
         },
         x86_64: {
             binaries: [
                 "authfs", // TODO(victorhsieh): move to microdroid once we can run the test in VM.
                 "crosvm",
+                "virtualizationservice",
+            ],
+            filesystems: [
+                "microdroid_super",
+                "microdroid_boot-5.10",
+                "microdroid_vendor_boot-5.10",
+                "microdroid_vbmeta",
+                "microdroid_vbmeta_system",
             ],
         },
     },
     binaries: [
-        "assemble_cvd",
         "fd_server",
-        "virtmanager",
         "vm",
+
+        // tools to create composite images
+        "mk_cdisk",
+        "mk_payload",
     ],
-    filesystems: ["microdroid"],
-    prebuilts: ["com.android.virt.init.rc"],
+    prebuilts: [
+        "com.android.virt.init.rc",
+        "microdroid.json",
+        "microdroid_uboot_env",
+        "microdroid_bootloader",
+    ],
     file_contexts: ":com.android.virt-file_contexts",
 }
 
@@ -52,6 +74,6 @@ android_app_certificate {
 
 prebuilt_etc {
     name: "com.android.virt.init.rc",
-    src: "virtmanager.rc",
+    src: "virtualizationservice.rc",
     filename: "init.rc",
 }

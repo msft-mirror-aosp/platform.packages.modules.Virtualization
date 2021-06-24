@@ -1,0 +1,27 @@
+{
+  "os": {
+    "name": "microdroid"
+  },
+  "task": {
+    "type": "microdroid_launcher",
+    "command": "MicrodroidTestNativeLib.so",
+    "args": [
+      "hello",
+      "microdroid"
+    ]
+  },
+  "apexes": [
+    {
+      "name": "com.android.adbd"
+    },
+    {
+      "name": "com.android.i18n"
+    },
+    {
+      "name": "com.android.os.statsd"
+    },
+    {
+      "name": "com.android.sdkext"
+    }
+  ]
+}

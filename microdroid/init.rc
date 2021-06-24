@@ -12,22 +12,28 @@ import /init.environ.rc
 
 # Cgroups are mounted right before early-init using list from /etc/cgroups.json
 on early-init
+    # set RLIMIT_NICE to allow priorities from 19 to -20
+    setrlimit nice 40 40
+
+    # in microdroid, we don't use "bootstrap" mount namespace
+    # because APEXes are passed from host and are available
+    # from the start. We don't need to wait till /data is ready.
+    enter_default_mount_ns
+
     start ueventd
-    setprop ro.apex.updatable true
-    setprop ro.debuggable 1
-    setprop ro.adb.secure 0
 
-    # Generate ld.config.txt
-    exec -- /system/bin/bootstrap/linkerconfig --target /linkerconfig
-    chmod 644 /linkerconfig/ld.config.txt
+    # TODO(b/190343842) verify apexes/apk before mounting them.
 
-    # Run apexd-bootstrap so that APEXes that provide critical libraries
-    # become available. Note that this is executed as exec_start to ensure that
-    # the libraries are available to the processes started after this statement.
-    exec_start apexd-bootstrap
+    # Exec apexd in the VM mode to avoid unnecessary overhead of normal mode.
+    # (e.g. session management)
+    exec - root system -- /system/bin/apexd --vm
 
-    # Generate linker config based on apex mounted in bootstrap namespace
-    update_linker_config
+    perform_apex_config
+    exec_start derive_sdk
+
+    exec - root system -- /system/bin/apkdmverity /dev/block/by-name/microdroid-apk /dev/block/by-name/microdroid-apk-idsig microdroid-apk
+    mkdir /mnt/apk 0755 system system
+    start zipfuse
 
 on init
     # Mount binderfs
@@ -47,6 +53,15 @@ on init
     start logd
 
     start servicemanager
+
+    # TODO(b/185767624): remove hidl after full keymint support
+    start hwservicemanager
+
+    start adbd
+
+    # TODO(b/186396070) microdroid_manager starts zipfuse if necessary
+    # TODO(b/186396070) move this before apexd for DICE derivation
+    start microdroid_manager
 
 on load_persist_props_action
     start logd
@@ -70,17 +85,10 @@ on late-init
     # some services can be started.
     trigger late-fs
 
+    trigger post-fs-data
+
     # Load persist properties and override properties (if enabled) from /data.
     trigger load_persist_props_action
-
-    # Should be before netd, but after apex, properties and logging is available.
-    trigger load_bpf_programs
-
-    # Now we can start zygote for devices with file based encryption
-    trigger zygote-start
-
-    # Remove a file to wake up anything waiting for firmware.
-    trigger firmware_mounts_complete
 
     trigger early-boot
     trigger boot
@@ -90,13 +98,54 @@ on post-fs
     # The bind+remount combination allows this to work in containers.
     mount rootfs rootfs / remount bind ro nodev
 
-    # Currently, exec_start apexd-bootstrap is enough to run adb.
-    # TODO(b/179342589): uncomment after turning off APEX session on microdroid
-    # start apexd
-    # Wait for apexd to finish activating APEXes before starting more processes.
-    # wait_for_prop apexd.status activated
+    start keystore2
 
-    start adbd
+on late-fs
+    start vendor.keymint-microdroid
+
+    # TODO(b/185767624): change the hard-coded size?
+    mount tmpfs tmpfs /data noatime nosuid nodev rw size=128M
+
+on post-fs-data
+    mark_post_data
+
+    # We chown/chmod /data again so because mount is run as root + defaults
+    chown system system /data
+    chmod 0771 /data
+
+    # We restorecon /data in case the userdata partition has been reset.
+    restorecon /data
+
+    mkdir /data/vendor 0771 root root
+    mkdir /data/vendor_ce 0771 root root
+    mkdir /data/vendor_de 0771 root root
+    mkdir /data/vendor/hardware 0771 root root
+
+    # Start tombstoned early to be able to store tombstones.
+    # microdroid doesn't have anr, but tombstoned requires it
+    mkdir /data/anr 0775 system system
+    mkdir /data/tombstones 0771 system system
+    mkdir /data/vendor/tombstones 0771 root root
+
+    start tombstoned
+
+    # set up keystore directory structure first so that we can end early boot
+    # and start apexd
+    mkdir /data/misc 01771 system misc
+    mkdir /data/misc/keystore 0700 keystore keystore
+    # work around b/183668221
+    restorecon /data/misc /data/misc/keystore
+
+    # Boot level 30
+    # odsign signing keys have MAX_BOOT_LEVEL=30
+    # This is currently the earliest boot level, but we start at 30
+    # to leave room for earlier levels.
+    setprop keystore.boot_level 30
+
+    # For security reasons, /data/local/tmp should always be empty.
+    # Do not place files or directories in /data/local/tmp
+    mkdir /data/local 0751 root root
+    mkdir /data/local/tmp 0771 shell shell
 
 service ueventd /system/bin/ueventd
     class core
@@ -113,13 +162,6 @@ service console /system/bin/sh
     seclabel u:r:shell:s0
     setenv HOSTNAME console
 
-# TODO(b/181093750): remove these after adding apex support
-service adbd /system/bin/adbd --root_seclabel=u:r:su:s0
-    class core
-    socket adbd seqpacket 660 system system
-    disabled
-    seclabel u:r:adbd:s0
-
 on fs
     write /dev/event-log-tags "# content owned by logd
 "
@@ -128,4 +170,3 @@ on fs
 
 on property:sys.boot_completed=1
     start logd-auditctl
-

@@ -1,0 +1,21 @@
+{
+  "postsubmit": [
+    {
+      "name": "MicrodroidHostTestCases"
+    },
+    {
+      "name": "VirtualizationTestCases"
+    }
+  ],
+  "imports": [
+    {
+      "path": "packages/modules/Virtualization/apkdmverity"
+    },
+    {
+      "path": "packages/modules/Virtualization/authfs"
+    },
+    {
+      "path": "packages/modules/Virtualization/zipfuse"
+    }
+  ]
+}

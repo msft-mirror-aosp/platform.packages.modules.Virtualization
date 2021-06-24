@@ -14,22 +14,22 @@
 
 //! Android VM control tool.
 
+mod config;
+mod run;
 mod sync;
 
-use android_system_virtmanager::aidl::android::system::virtmanager::IVirtManager::IVirtManager;
-use android_system_virtmanager::binder::{
-    get_interface, DeathRecipient, IBinder, ParcelFileDescriptor, ProcessState, Strong,
-};
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::IVirtualizationService;
+use android_system_virtualizationservice::binder::{wait_for_interface, ProcessState, Strong, ParcelFileDescriptor};
 use anyhow::{Context, Error};
-use std::fs::File;
-use std::io;
-use std::os::unix::io::{AsRawFd, FromRawFd};
-use std::path::PathBuf;
+use run::command_run;
+use std::convert::TryInto;
+use std::fs::OpenOptions;
+use std::path::{PathBuf, Path};
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
-use sync::AtomicFlag;
 
-const VIRT_MANAGER_BINDER_SERVICE_IDENTIFIER: &str = "android.system.virtmanager";
+const VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER: &str =
+    "android.system.virtualizationservice";
 
 #[derive(StructOpt)]
 #[structopt(no_version, global_settings = &[AppSettings::DisableVersion])]
@@ -51,6 +51,15 @@ enum Opt {
     },
     /// List running virtual machines
     List,
+    /// Create a new empty partition to be used as a writable partition for a VM
+    CreatePartition {
+        /// Path at which to create the image file
+        #[structopt(parse(from_os_str))]
+        path: PathBuf,
+
+        /// The desired size of the partition, in bytes.
+        size: u64,
+    },
 }
 
 fn main() -> Result<(), Error> {
@@ -60,86 +69,47 @@ fn main() -> Result<(), Error> {
     // We need to start the thread pool for Binder to work properly, especially link_to_death.
     ProcessState::start_thread_pool();
 
-    let virt_manager = get_interface(VIRT_MANAGER_BINDER_SERVICE_IDENTIFIER)
-        .context("Failed to find Virt Manager service")?;
+    let service = wait_for_interface(VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER)
+        .context("Failed to find VirtualizationService")?;
 
     match opt {
-        Opt::Run { config, daemonize } => command_run(virt_manager, &config, daemonize),
-        Opt::Stop { cid } => command_stop(virt_manager, cid),
-        Opt::List => command_list(virt_manager),
-    }
-}
-
-/// Run a VM from the given configuration file.
-fn command_run(
-    virt_manager: Strong<dyn IVirtManager>,
-    config_path: &PathBuf,
-    daemonize: bool,
-) -> Result<(), Error> {
-    let config_filename = config_path.to_str().context("Failed to parse VM config path")?;
-    let config_file = ParcelFileDescriptor::new(
-        File::open(config_filename).context("Failed to open config file")?,
-    );
-    let stdout_file = ParcelFileDescriptor::new(duplicate_stdout()?);
-    let stdout = if daemonize { None } else { Some(&stdout_file) };
-    let vm = virt_manager.startVm(&config_file, stdout).context("Failed to start VM")?;
-
-    let cid = vm.getCid().context("Failed to get CID")?;
-    println!("Started VM from {} with CID {}.", config_filename, cid);
-
-    if daemonize {
-        // Pass the VM reference back to Virt Manager and have it hold it in the background.
-        virt_manager.debugHoldVmRef(&*vm).context("Failed to pass VM to Virt Manager")
-    } else {
-        // Wait until the VM dies. If we just returned immediately then the IVirtualMachine Binder
-        // object would be dropped and the VM would be killed.
-        wait_for_death(&mut vm.as_binder())?;
-        println!("VM died");
-        Ok(())
+        Opt::Run { config, daemonize } => command_run(service, &config, daemonize),
+        Opt::Stop { cid } => command_stop(service, cid),
+        Opt::List => command_list(service),
+        Opt::CreatePartition { path, size } => command_create_partition(service, &path, size),
     }
 }
 
 /// Retrieve reference to a previously daemonized VM and stop it.
-fn command_stop(virt_manager: Strong<dyn IVirtManager>, cid: u32) -> Result<(), Error> {
-    virt_manager
+fn command_stop(service: Strong<dyn IVirtualizationService>, cid: u32) -> Result<(), Error> {
+    service
         .debugDropVmRef(cid as i32)
-        .context("Failed to get VM from Virt Manager")?
+        .context("Failed to get VM from VirtualizationService")?
         .context("CID does not correspond to a running background VM")?;
     Ok(())
 }
 
 /// List the VMs currently running.
-fn command_list(virt_manager: Strong<dyn IVirtManager>) -> Result<(), Error> {
-    let vms = virt_manager.debugListVms().context("Failed to get list of VMs")?;
+fn command_list(service: Strong<dyn IVirtualizationService>) -> Result<(), Error> {
+    let vms = service.debugListVms().context("Failed to get list of VMs")?;
     println!("Running VMs: {:#?}", vms);
     Ok(())
 }
 
-/// Block until the given Binder object dies.
-fn wait_for_death(binder: &mut impl IBinder) -> Result<(), Error> {
-    let dead = AtomicFlag::default();
-    let mut death_recipient = {
-        let dead = dead.clone();
-        DeathRecipient::new(move || {
-            dead.raise();
-        })
-    };
-    binder.link_to_death(&mut death_recipient)?;
-    dead.wait();
+/// Initialise an empty partition image of the given size to be used as a writable partition.
+fn command_create_partition(
+    service: Strong<dyn IVirtualizationService>,
+    image_path: &Path,
+    size: u64,
+) -> Result<(), Error> {
+    let image = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(image_path)
+        .with_context(|| format!("Failed to create {:?}", image_path))?;
+    service
+        .initializeWritablePartition(&ParcelFileDescriptor::new(image), size.try_into()?)
+        .context("Failed to initialize partition with size {}, size")?;
     Ok(())
-}
-
-/// Safely duplicate the standard output file descriptor.
-fn duplicate_stdout() -> io::Result<File> {
-    let stdout_fd = io::stdout().as_raw_fd();
-    // Safe because this just duplicates a file descriptor which we know to be valid, and we check
-    // for an error.
-    let dup_fd = unsafe { libc::dup(stdout_fd) };
-    if dup_fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        // Safe because we have just duplicated the file descriptor so we own it, and `from_raw_fd`
-        // takes ownership of it.
-        Ok(unsafe { File::from_raw_fd(dup_fd) })
-    }
 }

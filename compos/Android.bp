@@ -1,0 +1,74 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_binary {
+    name: "pvm_exec",
+    srcs: ["src/pvm_exec.rs"],
+    rustlibs: [
+        "compos_aidl_interface-rust",
+        "libanyhow",
+        "libbinder_rpc_unstable_bindgen",
+        "libbinder_rs",
+        "libclap",
+        "liblibc",
+        "liblog_rust",
+        "libminijail_rust",
+        "libnix",
+        "libscopeguard",
+    ],
+    prefer_rlib: true,
+    shared_libs: [
+        "libbinder_rpc_unstable",
+    ],
+    apex_available: [
+        "com.android.compos",
+    ],
+}
+
+rust_binary {
+    name: "compsvc",
+    srcs: ["src/compsvc.rs"],
+    rustlibs: [
+        "compos_aidl_interface-rust",
+        "libandroid_logger",
+        "libanyhow",
+        "libbinder_rpc_unstable_bindgen",
+        "libbinder_rs",
+        "libclap",
+        "liblog_rust",
+        "libminijail_rust",
+    ],
+    prefer_rlib: true,
+    shared_libs: [
+        "libbinder_rpc_unstable",
+    ],
+    apex_available: [
+        "com.android.compos",
+    ],
+}
+
+rust_binary {
+    name: "compsvc_worker",
+    srcs: ["src/compsvc_worker.rs"],
+    rustlibs: [
+        "libandroid_logger",
+        "libanyhow",
+        "libclap",
+        "liblog_rust",
+        "libminijail_rust",
+        "libnix",
+        "libscopeguard",
+    ],
+    prefer_rlib: true,
+    apex_available: [
+        "com.android.compos",
+    ],
+}
+
+// TODO(b/190503456) Remove this when vm/virtualizationservice generates payload.img from vm_config
+prebuilt_etc {
+    name: "compos_payload_config",
+    src: "payload_config.json",
+    filename: "payload_config.json",
+}
