@@ -7,18 +7,20 @@ apex {
 
     // TODO(jiyong): make it updatable
     updatable: false,
+    platform_apis: true,
 
     manifest: "manifest.json",
 
     key: "com.android.virt.key",
     certificate: ":com.android.virt.certificate",
 
-    // crosvm is enabled for only 64-bit targets on device
+    // crosvm and virtualizationservice are only enabled for 64-bit targets on device
     arch: {
         arm64: {
             binaries: [
                 "authfs", // TODO(victorhsieh): move to microdroid once we can run the test in VM.
                 "crosvm",
+                "virtualizationservice",
             ],
             filesystems: [
                 "microdroid_super",
@@ -32,6 +34,7 @@ apex {
             binaries: [
                 "authfs", // TODO(victorhsieh): move to microdroid once we can run the test in VM.
                 "crosvm",
+                "virtualizationservice",
             ],
             filesystems: [
                 "microdroid_super",
@@ -44,23 +47,16 @@ apex {
     },
     binaries: [
         "fd_server",
-        "virtualizationservice",
         "vm",
+        "compos_key_cmd",
 
         // tools to create composite images
         "mk_cdisk",
         "mk_payload",
     ],
-    apps: [
-        // TODO(jiyong): remove this when microdroid_payload.json is created by virt manager
-        "MicrodroidTestApp",
-    ],
     prebuilts: [
         "com.android.virt.init.rc",
-        "microdroid_cdisk.json",
-        "microdroid_cdisk_env.json",
-        "microdroid_cdisk_userdata.json",
-        "microdroid_payload.json",
+        "microdroid.json",
         "microdroid_uboot_env",
         "microdroid_bootloader",
     ],

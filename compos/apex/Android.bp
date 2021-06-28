@@ -34,10 +34,20 @@ apex {
 
     // TODO(victorhsieh): make it updatable
     updatable: false,
+    platform_apis: true,
 
     binaries: [
+        "compos_key_service",
         "compsvc",
         "compsvc_worker",
         "pvm_exec",
+    ],
+
+    apps: [
+        "CompOSPayloadApp",
+    ],
+
+    prebuilts: [
+        "compos_payload_config",
     ],
 }

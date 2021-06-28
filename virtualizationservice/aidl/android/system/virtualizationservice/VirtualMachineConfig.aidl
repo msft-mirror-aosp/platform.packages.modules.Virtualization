@@ -29,7 +29,7 @@ parcelable VirtualMachineConfig {
      * Parameters to pass to the kernel. As far as the VMM and boot protocol are concerned this is
      * just a string, but typically it will contain multiple parameters separated by spaces.
      */
-    @nullable String params;
+    @nullable @utf8InCpp String params;
 
     /**
      * The bootloader to use. If this is supplied then the kernel and initrd must not be supplied;
@@ -39,4 +39,7 @@ parcelable VirtualMachineConfig {
 
     /** Disk images to be made available to the VM. */
     DiskImage[] disks;
+
+    /** Whether the VM should be a protected VM. */
+    boolean protected_vm;
 }

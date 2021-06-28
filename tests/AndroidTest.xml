@@ -15,19 +15,9 @@
 -->
 
 <configuration description="Config for Virtualization tests">
-
-    <!-- Basic checks that the device has all the prerequisites. -->
-    <target_preparer class="com.android.tradefed.targetprep.RunCommandTargetPreparer">
-        <option name="throw-if-cmd-fail" value="true" />
-        <!-- Kernel has KVM enabled. -->
-        <option name="run-command" value="ls /dev/kvm" />
-        <!-- Kernel has vhost-vsock enabled. -->
-        <option name="run-command" value="ls /dev/vhost-vsock" />
-        <!-- CrosVM is installed. -->
-        <option name="run-command" value="ls /apex/com.android.virt/bin/crosvm" />
-        <!-- VirtualizationService is installed. -->
-        <option name="run-command" value="ls /apex/com.android.virt/bin/virtualizationservice" />
-    </target_preparer>
+    <!-- virtualizationservice doesn't have access to shell_data_file. Instead of giving it
+      a test-only permission, run it without selinux -->
+    <target_preparer class="com.android.tradefed.targetprep.DisableSELinuxTargetPreparer"/>
 
     <!-- Push test binaries to the device. -->
     <target_preparer class="com.android.tradefed.targetprep.PushFilePreparer">
@@ -36,17 +26,6 @@
         <option name="push-file" key="VirtualizationTestCases" value="/data/local/tmp/virt-test/VirtualizationTestCases" />
         <option name="push-file" key="virt_test_kernel"        value="/data/local/tmp/virt-test/kernel" />
         <option name="push-file" key="virt_test_initramfs.img" value="/data/local/tmp/virt-test/initramfs" />
-    </target_preparer>
-
-    <!-- Root currently needed to run CrosVM.
-         TODO: Give sufficient permissions to the adb shell user (b/171240450). -->
-    <target_preparer class="com.android.tradefed.targetprep.RootTargetPreparer"/>
-
-    <!-- Run VirtualizationService for the duration of the test.
-         TODO: Run VirtualizationService as a system service. -->
-    <target_preparer class="com.android.tradefed.targetprep.RunCommandTargetPreparer">
-        <option name="throw-if-cmd-fail" value="true" />
-        <option name="run-command" value="start virtualizationservice" />
     </target_preparer>
 
     <test class="com.android.tradefed.testtype.GTest" >
