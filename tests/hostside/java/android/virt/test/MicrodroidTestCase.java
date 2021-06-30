@@ -46,6 +46,8 @@ import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -132,7 +134,7 @@ public class MicrodroidTestCase extends BaseHostJUnit4Test {
         return result.getStdout().trim();
     }
 
-    // Run a shell command on Android
+    // Run a shell command on Android. the default timeout is 2 min by tradefed
     private String runOnAndroid(String... cmd) throws Exception {
         CommandResult result = getDevice().executeShellV2Command(join(cmd));
         if (result.getStatus() != CommandStatus.SUCCESS) {
@@ -141,9 +143,22 @@ public class MicrodroidTestCase extends BaseHostJUnit4Test {
         return result.getStdout().trim();
     }
 
-    // Same as runOnAndroid, but failutre is not an error
+    // Same as runOnAndroid, but failure is not an error
     private String tryRunOnAndroid(String... cmd) throws Exception {
         CommandResult result = getDevice().executeShellV2Command(join(cmd));
+        return result.getStdout().trim();
+    }
+
+    private String runOnAndroidWithTimeout(long timeoutMillis, String... cmd) throws Exception {
+        CommandResult result =
+                getDevice()
+                        .executeShellV2Command(
+                                join(cmd),
+                                timeoutMillis,
+                                java.util.concurrent.TimeUnit.MILLISECONDS);
+        if (result.getStatus() != CommandStatus.SUCCESS) {
+            fail(join(cmd) + " has failed: " + result);
+        }
         return result.getStdout().trim();
     }
 
@@ -234,6 +249,8 @@ public class MicrodroidTestCase extends BaseHostJUnit4Test {
         // Create payload.img
         createPayloadImage(apkName, packageName, configPath);
 
+        final String logPath = TEST_ROOT + "log.txt";
+
         // Run the VM
         runOnAndroid("start", "virtualizationservice");
         String ret =
@@ -241,7 +258,26 @@ public class MicrodroidTestCase extends BaseHostJUnit4Test {
                         VIRT_APEX + "bin/vm",
                         "run",
                         "--daemonize",
+                        "--log " + logPath,
                         VIRT_APEX + "etc/microdroid.json");
+
+        // Redirect log.txt to logd using logwrapper
+        ExecutorService executor = Executors.newFixedThreadPool(1);
+        executor.execute(
+                () -> {
+                    try {
+                        // Keep redirecting sufficiently long enough
+                        runOnAndroidWithTimeout(
+                                MICRODROID_BOOT_TIMEOUT_MINUTES * 60 * 1000,
+                                "logwrapper",
+                                "tail",
+                                "-f",
+                                "-n +0",
+                                logPath);
+                    } catch (Exception e) {
+                        // Consume
+                    }
+                });
 
         // Retrieve the CID from the vm tool output
         Pattern pattern = Pattern.compile("with CID (\\d+)");
