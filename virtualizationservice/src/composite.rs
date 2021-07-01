@@ -72,9 +72,14 @@ fn align_to_power_of_2(val: u64, align_log: u8) -> u64 {
     ((val + (align - 1)) / align) * align
 }
 
+/// Round `val` to partition size(4K)
+pub fn align_to_partition_size(val: u64) -> u64 {
+    align_to_power_of_2(val, PARTITION_SIZE_SHIFT)
+}
+
 impl PartitionInfo {
     fn aligned_size(&self) -> u64 {
-        align_to_power_of_2(self.files.iter().map(|file| file.size).sum(), PARTITION_SIZE_SHIFT)
+        align_to_partition_size(self.files.iter().map(|file| file.size).sum())
     }
 }
 
@@ -336,9 +341,9 @@ pub fn make_composite_image(
     Ok((composite_image, files))
 }
 
-/// Given the AIDL config containing a list of partitions, with a [`ParcelFileDescriptor`] for each
-/// partition, return the list of file descriptors which must be passed to the mk_cdisk child
-/// process and the composite disk image partition configuration for it.
+/// Given the AIDL config containing a list of partitions, with [`ParcelFileDescriptor`]s for each
+/// partition, return the list of file descriptors which must be passed to the composite disk image
+/// partition configuration for it.
 fn convert_partitions(partitions: &[Partition]) -> Result<(Vec<PartitionInfo>, Vec<File>), Error> {
     // File descriptors to pass to child process.
     let mut files = vec![];
@@ -346,24 +351,27 @@ fn convert_partitions(partitions: &[Partition]) -> Result<(Vec<PartitionInfo>, V
     let partitions = partitions
         .iter()
         .map(|partition| {
-            // TODO(b/187187765): This shouldn't be an Option.
-            let file = partition
-                .image
-                .as_ref()
-                .context("Invalid partition image file descriptor")?
-                .as_ref()
-                .try_clone()
-                .context("Failed to clone partition image file descriptor")?;
-            let size = get_partition_size(&file)?;
-            let fd = file.as_raw_fd();
-            files.push(file);
+            let image_files = partition
+                .images
+                .iter()
+                .map(|image| {
+                    let file = image
+                        .as_ref()
+                        .try_clone()
+                        .context("Failed to clone partition image file descriptor")?;
+
+                    let size = get_partition_size(&file)?;
+                    let fd = file.as_raw_fd();
+                    let partition_info_file =
+                        PartitionFileInfo { path: format!("/proc/self/fd/{}", fd).into(), size };
+                    files.push(file);
+                    Ok(partition_info_file)
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
 
             Ok(PartitionInfo {
                 label: partition.label.to_owned(),
-                files: vec![PartitionFileInfo {
-                    path: format!("/proc/self/fd/{}", fd).into(),
-                    size,
-                }],
+                files: image_files,
                 partition_type: ImagePartitionType::LinuxFilesystem,
                 writable: partition.writable,
             })

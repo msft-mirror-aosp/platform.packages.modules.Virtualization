@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Struct for VM configuration.
+//! Struct for VM configuration with JSON (de)serialization and AIDL parcelables
 
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::DiskImage::DiskImage as AidlDiskImage,
     aidl::android::system::virtualizationservice::Partition::Partition as AidlPartition,
-    aidl::android::system::virtualizationservice::VirtualMachineConfig::VirtualMachineConfig,
+    aidl::android::system::virtualizationservice::VirtualMachineRawConfig::VirtualMachineRawConfig,
     binder::ParcelFileDescriptor,
 };
-use anyhow::{bail, Context, Error};
-use compositediskconfig::Partition;
+
+use anyhow::{bail, Context, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::BufReader;
@@ -76,8 +76,8 @@ impl VmConfig {
 
     /// Convert the `VmConfig` to a [`VirtualMachineConfig`] which can be passed to the Virt
     /// Manager.
-    pub fn to_parcelable(&self) -> Result<VirtualMachineConfig, Error> {
-        Ok(VirtualMachineConfig {
+    pub fn to_parcelable(&self) -> Result<VirtualMachineRawConfig, Error> {
+        Ok(VirtualMachineRawConfig {
             kernel: maybe_open_parcel_file(&self.kernel, false)?,
             initrd: maybe_open_parcel_file(&self.initrd, false)?,
             params: self.params.clone(),
@@ -105,7 +105,7 @@ pub struct DiskImage {
 impl DiskImage {
     fn to_parcelable(&self) -> Result<AidlDiskImage, Error> {
         let partitions =
-            self.partitions.iter().map(partition_to_parcelable).collect::<Result<_, Error>>()?;
+            self.partitions.iter().map(Partition::to_parcelable).collect::<Result<_>>()?;
         Ok(AidlDiskImage {
             image: maybe_open_parcel_file(&self.image, self.writable)?,
             writable: self.writable,
@@ -114,16 +114,35 @@ impl DiskImage {
     }
 }
 
-fn partition_to_parcelable(partition: &Partition) -> Result<AidlPartition, Error> {
-    Ok(AidlPartition {
-        image: Some(open_parcel_file(&partition.path, partition.writable)?),
-        writable: partition.writable,
-        label: partition.label.to_owned(),
-    })
+/// A partition to be assembled into a composite image.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Partition {
+    /// A label for the partition.
+    pub label: String,
+    /// The filename of the partition image.
+    #[serde(default)]
+    pub paths: Vec<PathBuf>,
+    /// Whether the partition should be writable.
+    #[serde(default)]
+    pub writable: bool,
+}
+
+impl Partition {
+    fn to_parcelable(&self) -> Result<AidlPartition> {
+        if self.paths.is_empty() {
+            bail!("Partition {} contains no paths", &self.label);
+        }
+        let images = self
+            .paths
+            .iter()
+            .map(|path| open_parcel_file(&path, self.writable))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(AidlPartition { images, writable: self.writable, label: self.label.to_owned() })
+    }
 }
 
 /// Try to open the given file and wrap it in a [`ParcelFileDescriptor`].
-fn open_parcel_file(filename: &Path, writable: bool) -> Result<ParcelFileDescriptor, Error> {
+fn open_parcel_file(filename: &Path, writable: bool) -> Result<ParcelFileDescriptor> {
     Ok(ParcelFileDescriptor::new(
         OpenOptions::new()
             .read(true)
@@ -137,6 +156,6 @@ fn open_parcel_file(filename: &Path, writable: bool) -> Result<ParcelFileDescrip
 fn maybe_open_parcel_file(
     filename: &Option<PathBuf>,
     writable: bool,
-) -> Result<Option<ParcelFileDescriptor>, Error> {
+) -> Result<Option<ParcelFileDescriptor>> {
     filename.as_deref().map(|filename| open_parcel_file(filename, writable)).transpose()
 }
