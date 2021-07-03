@@ -16,7 +16,7 @@
 
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, VmInstance};
-use crate::payload;
+use crate::payload::{make_payload_disk, ApexInfoList};
 use crate::{Cid, FIRST_GUEST_CID};
 
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::IVirtualizationService;
@@ -34,7 +34,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
 use android_system_virtualizationservice::binder::{
     self, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor, Status, Strong, ThreadState,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use disk::QcowFile;
 use log::{debug, error, warn};
 use microdroid_payload_config::{ApexConfig, VmPayloadConfig};
@@ -45,6 +45,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use vmconfig::VmConfig;
+use zip::ZipArchive;
 
 pub const BINDER_SERVICE_IDENTIFIER: &str = "android.system.virtualizationservice";
 
@@ -55,10 +56,25 @@ const TEMPORARY_DIRECTORY: &str = "/data/misc/virtualizationservice";
 /// Only processes running with one of these UIDs are allowed to call debug methods.
 const DEBUG_ALLOWED_UIDS: [u32; 2] = [0, 2000];
 
+/// The list of APEXes which microdroid requires.
+/// TODO(b/192200378) move this to microdroid.json?
+const MICRODROID_REQUIRED_APEXES: [&str; 4] =
+    ["com.android.adbd", "com.android.i18n", "com.android.os.statsd", "com.android.sdkext"];
+
 /// Implementation of `IVirtualizationService`, the entry point of the AIDL service.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct VirtualizationService {
     state: Mutex<State>,
+    apex_info_list: ApexInfoList,
+}
+
+impl VirtualizationService {
+    pub fn new() -> Result<VirtualizationService> {
+        Ok(VirtualizationService {
+            state: Default::default(),
+            apex_info_list: ApexInfoList::load()?,
+        })
+    }
 }
 
 impl Interface for VirtualizationService {}
@@ -101,21 +117,21 @@ impl IVirtualizationService for VirtualizationService {
             )
         })?;
 
-        let mut opt_raw_config = None;
         let config = match config {
-            VirtualMachineConfig::AppConfig(config) => {
-                let raw_config = load_app_config(config, &temporary_directory).map_err(|e| {
-                    error!("Failed to load app config from {}: {}", &config.configPath, e);
-                    new_binder_exception(
-                        ExceptionCode::SERVICE_SPECIFIC,
-                        format!("Failed to load app config from {}: {}", &config.configPath, e),
-                    )
-                })?;
-                opt_raw_config.replace(raw_config);
-                opt_raw_config.as_ref().unwrap()
-            }
-            VirtualMachineConfig::RawConfig(config) => config,
+            VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
+                load_app_config(&self.apex_info_list, config, &temporary_directory).map_err(
+                    |e| {
+                        error!("Failed to load app config from {}: {}", &config.configPath, e);
+                        new_binder_exception(
+                            ExceptionCode::SERVICE_SPECIFIC,
+                            format!("Failed to load app config from {}: {}", &config.configPath, e),
+                        )
+                    },
+                )?,
+            ),
+            VirtualMachineConfig::RawConfig(config) => BorrowedOrOwned::Borrowed(config),
         };
+        let config = config.as_ref();
 
         // Assemble disk images if needed.
         let disks = config
@@ -282,6 +298,7 @@ fn assemble_disk_image(
 }
 
 fn load_app_config(
+    apex_info_list: &ApexInfoList,
     config: &VirtualMachineAppConfig,
     temporary_directory: &Path,
 ) -> Result<VirtualMachineRawConfig> {
@@ -289,27 +306,29 @@ fn load_app_config(
     let idsig_file = config.idsig.as_ref().unwrap().as_ref();
     let config_path = &config.configPath;
 
-    let mut apk_zip = zip::ZipArchive::new(apk_file)?;
+    let mut apk_zip = ZipArchive::new(apk_file)?;
     let config_file = apk_zip.by_name(config_path)?;
     let vm_payload_config: VmPayloadConfig = serde_json::from_reader(config_file)?;
 
     let os_name = &vm_payload_config.os.name;
+    // For now, the only supported "os" value is "microdroid"
+    if os_name != "microdroid" {
+        bail!("unknown os: {}", os_name);
+    }
     let vm_config_path = PathBuf::from(format!("/apex/com.android.virt/etc/{}.json", os_name));
     let vm_config_file = File::open(vm_config_path)?;
     let mut vm_config = VmConfig::load(&vm_config_file)?;
 
     // Microdroid requires additional payload disk image
     if os_name == "microdroid" {
-        // TODO (b/192200378) move this to microdroid.json?
         let mut apexes = vm_payload_config.apexes.clone();
         apexes.extend(
-            ["com.android.adbd", "com.android.i18n", "com.android.os.statsd", "com.android.sdkext"]
-                .iter()
-                .map(|name| ApexConfig { name: name.to_string() }),
+            MICRODROID_REQUIRED_APEXES.iter().map(|name| ApexConfig { name: name.to_string() }),
         );
         apexes.dedup_by(|a, b| a.name == b.name);
 
-        vm_config.disks.push(payload::make_disk_image(
+        vm_config.disks.push(make_payload_disk(
+            apex_info_list,
             format!("/proc/self/fd/{}", apk_file.as_raw_fd()).into(),
             format!("/proc/self/fd/{}", idsig_file.as_raw_fd()).into(),
             config_path,
@@ -519,4 +538,20 @@ fn clone_file(file: &ParcelFileDescriptor) -> Result<File, Status> {
 /// Constructs a new Binder error `Status` with the given `ExceptionCode` and message.
 fn new_binder_exception<T: AsRef<str>>(exception: ExceptionCode, message: T) -> Status {
     Status::new_exception(exception, CString::new(message.as_ref()).ok().as_deref())
+}
+
+/// Simple utility for referencing Borrowed or Owned. Similar to std::borrow::Cow, but
+/// it doesn't require that T implements Clone.
+enum BorrowedOrOwned<'a, T> {
+    Borrowed(&'a T),
+    Owned(T),
+}
+
+impl<'a, T> AsRef<T> for BorrowedOrOwned<'a, T> {
+    fn as_ref(&self) -> &T {
+        match self {
+            Self::Borrowed(b) => b,
+            Self::Owned(o) => &o,
+        }
+    }
 }
