@@ -16,7 +16,7 @@
 
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, VmInstance};
-use crate::payload::{make_payload_disk, ApexInfoList};
+use crate::payload::make_payload_disk;
 use crate::{Cid, FIRST_GUEST_CID};
 
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::IVirtualizationService;
@@ -44,7 +44,7 @@ use std::fs::{File, create_dir};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
-use vmconfig::VmConfig;
+use vmconfig::{VmConfig, Partition};
 use zip::ZipArchive;
 
 pub const BINDER_SERVICE_IDENTIFIER: &str = "android.system.virtualizationservice";
@@ -62,19 +62,9 @@ const MICRODROID_REQUIRED_APEXES: [&str; 4] =
     ["com.android.adbd", "com.android.i18n", "com.android.os.statsd", "com.android.sdkext"];
 
 /// Implementation of `IVirtualizationService`, the entry point of the AIDL service.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct VirtualizationService {
     state: Mutex<State>,
-    apex_info_list: ApexInfoList,
-}
-
-impl VirtualizationService {
-    pub fn new() -> Result<VirtualizationService> {
-        Ok(VirtualizationService {
-            state: Default::default(),
-            apex_info_list: ApexInfoList::load()?,
-        })
-    }
 }
 
 impl Interface for VirtualizationService {}
@@ -119,15 +109,13 @@ impl IVirtualizationService for VirtualizationService {
 
         let config = match config {
             VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
-                load_app_config(&self.apex_info_list, config, &temporary_directory).map_err(
-                    |e| {
-                        error!("Failed to load app config from {}: {}", &config.configPath, e);
-                        new_binder_exception(
-                            ExceptionCode::SERVICE_SPECIFIC,
-                            format!("Failed to load app config from {}: {}", &config.configPath, e),
-                        )
-                    },
-                )?,
+                load_app_config(config, &temporary_directory).map_err(|e| {
+                    error!("Failed to load app config from {}: {}", &config.configPath, e);
+                    new_binder_exception(
+                        ExceptionCode::SERVICE_SPECIFIC,
+                        format!("Failed to load app config from {}: {}", &config.configPath, e),
+                    )
+                })?,
             ),
             VirtualMachineConfig::RawConfig(config) => BorrowedOrOwned::Borrowed(config),
         };
@@ -298,7 +286,6 @@ fn assemble_disk_image(
 }
 
 fn load_app_config(
-    apex_info_list: &ApexInfoList,
     config: &VirtualMachineAppConfig,
     temporary_directory: &Path,
 ) -> Result<VirtualMachineRawConfig> {
@@ -319,7 +306,7 @@ fn load_app_config(
     let vm_config_file = File::open(vm_config_path)?;
     let mut vm_config = VmConfig::load(&vm_config_file)?;
 
-    // Microdroid requires additional payload disk image
+    // Microdroid requires additional payload disk image and the bootconfig partition
     if os_name == "microdroid" {
         let mut apexes = vm_payload_config.apexes.clone();
         apexes.extend(
@@ -328,13 +315,22 @@ fn load_app_config(
         apexes.dedup_by(|a, b| a.name == b.name);
 
         vm_config.disks.push(make_payload_disk(
-            apex_info_list,
             format!("/proc/self/fd/{}", apk_file.as_raw_fd()).into(),
             format!("/proc/self/fd/{}", idsig_file.as_raw_fd()).into(),
             config_path,
             &apexes,
             temporary_directory,
         )?);
+
+        if config.debug {
+            vm_config.disks[1].partitions.push(Partition {
+                label: "bootconfig".to_owned(),
+                paths: vec![PathBuf::from(
+                    "/apex/com.android.virt/etc/microdroid_bootconfig.debug",
+                )],
+                writable: false,
+            });
+        }
     }
 
     vm_config.to_parcelable()
