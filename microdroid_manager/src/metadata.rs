@@ -12,28 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Payload metadata from /dev/block/by-name/metadata
+//! Payload metadata from /dev/block/by-name/payload-metadata
 
+use anyhow::Result;
 use log::info;
-use microdroid_metadata::metadata::Metadata;
-use protobuf::Message;
+use microdroid_metadata::{read_metadata, Metadata};
 use std::fs::File;
-use std::io;
-use std::io::Read;
 
-const METADATA_PATH: &str = "/dev/block/by-name/metadata";
+const PAYLOAD_METADATA_PATH: &str = "/dev/block/by-name/payload-metadata";
 
-/// loads payload metadata from /dev/block/by-name/metadata
-pub fn load() -> io::Result<Metadata> {
+/// loads payload metadata from /dev/block/by-name/paylaod-metadata
+pub fn load() -> Result<Metadata> {
     info!("loading payload metadata...");
-
-    let mut f = File::open(METADATA_PATH)?;
-    // metadata partition is
-    //  4 bytes : size(N) in big endian
-    //  N bytes : message for Metadata
-    let mut buf = [0u8; 4];
-    f.read_exact(&mut buf)?;
-    let size = i32::from_be_bytes(buf);
-
-    Ok(Metadata::parse_from_reader(&mut f.take(size as u64))?)
+    read_metadata(File::open(PAYLOAD_METADATA_PATH)?)
 }

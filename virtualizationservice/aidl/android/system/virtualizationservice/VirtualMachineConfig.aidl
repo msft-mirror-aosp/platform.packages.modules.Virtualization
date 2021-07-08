@@ -15,31 +15,14 @@
  */
 package android.system.virtualizationservice;
 
-import android.system.virtualizationservice.DiskImage;
+import android.system.virtualizationservice.VirtualMachineAppConfig;
+import android.system.virtualizationservice.VirtualMachineRawConfig;
 
-/** Configuration for running a VM. */
-parcelable VirtualMachineConfig {
-    /** The kernel image, if any. */
-    @nullable ParcelFileDescriptor kernel;
+/** Configuration for running a VM */
+union VirtualMachineConfig {
+    /** Configuration for a VM to run an app */
+    VirtualMachineAppConfig appConfig;
 
-    /** The initial ramdisk for the kernel, if any. */
-    @nullable ParcelFileDescriptor initrd;
-
-    /**
-     * Parameters to pass to the kernel. As far as the VMM and boot protocol are concerned this is
-     * just a string, but typically it will contain multiple parameters separated by spaces.
-     */
-    @nullable String params;
-
-    /**
-     * The bootloader to use. If this is supplied then the kernel and initrd must not be supplied;
-     * the bootloader is instead responsibly for loading the kernel from one of the disks.
-     */
-    @nullable ParcelFileDescriptor bootloader;
-
-    /** Disk images to be made available to the VM. */
-    DiskImage[] disks;
-
-    /** Whether the VM should be a protected VM. */
-    boolean protected_vm;
+    /** Configuration for a VM with low-level configuration */
+    VirtualMachineRawConfig rawConfig;
 }

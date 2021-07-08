@@ -7,6 +7,7 @@ apex {
 
     // TODO(jiyong): make it updatable
     updatable: false,
+    platform_apis: true,
 
     manifest: "manifest.json",
 
@@ -48,16 +49,16 @@ apex {
         "fd_server",
         "vm",
         "compos_key_cmd",
-
-        // tools to create composite images
-        "mk_cdisk",
-        "mk_payload",
+    ],
+    java_libs: [
+        "android.system.virtualmachine",
     ],
     prebuilts: [
         "com.android.virt.init.rc",
         "microdroid.json",
         "microdroid_uboot_env",
         "microdroid_bootloader",
+        "microdroid_bootconfig_debug",
     ],
     file_contexts: ":com.android.virt-file_contexts",
 }

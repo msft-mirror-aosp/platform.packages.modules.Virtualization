@@ -11,7 +11,7 @@ Any 64-bit target (either x86\_64 or arm64) is supported. 32-bit target is not
 supported. Note that we currently don't support user builds; only userdebug
 builds are supported.
 
-The only remaining requirment is that `com.android.virt` APEX has to be
+The only remaining requirement is that `com.android.virt` APEX has to be
 pre-installed. To do this, add the following line in your product makefile.
 
 ```make
@@ -73,21 +73,22 @@ multiple configuration files if needed.
   "task": {
     "type": "microdroid_launcher",
     "command": "MyMicrodroidApp.so"
-  },
-  "apexes": [
-    {"name": "com.android.adbd"},
-    {"name": "com.android.i18n"},
-    {"name": "com.android.os.statsd"},
-    {"name": "com.android.sdkext"}
-  ]
+  }
 }
 ```
 
 The value of `task.command` should match with the name of the shared library
-defined above. The `apexes` array is the APEXes that will be imported to
-microdroid. The above four APEXes are essential ones and therefore shouldn't be
-omitted. In the future, you wouldn't need to add the default ones manually. If
-more APEXes are required for you app, add their names too.
+defined above. If your app rquires APEXes to be imported, you can declare the list
+in `apexes` key like following.
+```json
+{
+  "os": ...,
+  "task": ...,
+  "apexes": [
+    {"name": "com.android.awesome_apex"}
+  ]
+}
+```
 
 Embed the shared library and the VM configuration file in an APK:
 
@@ -130,62 +131,24 @@ First of all, install the signed APK to the target device.
 adb install out/dist/MyApp.apk
 ```
 
-### Creating `payload.img` manually (temporary step)
-
-This is a step that needs to be done manually for now. Eventually, this will be
-automatically done by a service named `virtualizationservice` which is part of
-the `com.android.virt` APEX.
-
-Create `payload.json` file:
-
-```json
-{
-  "payload_config_path": "/mnt/apk/assets/VM_CONFIG_NAME,
-  "system_apexes": [
-    "com.android.adbd",
-    "com.android.i18n",
-    "com.android.os.statsd",
-    "com.android.sdkext"
-  ],
-  "apk": {
-    "name": "PACKAGE_NAME_OF_YOUR_APP",
-    "path": "PATH_TO_YOUR_APP",
-    "idsig_path": "PATH_TO_APK_IDSIG"
-  }
-}
-```
-
-`ALL_CAP`s in the above are placeholders. They need to be replaced with correct
+`ALL_CAP`s below are placeholders. They need to be replaced with correct
 values:
-
 * `VM_CONFIG_FILE`: the name of the VM config file that you embedded in the APK.
-* `PACKAGE_NAME_OF_YOUR_APP`: package name of your app(e.g. `com.acme.app`).
+  (e.g. `vm_config.json`)
+* `PACKAGE_NAME_OF_YOUR_APP`: package name of your app (e.g. `com.acme.app`).
 * `PATH_TO_YOUR_APP`: path to the installed APK on the device. Can be obtained
   via the following command.
+  ```sh
+  adb shell pm path PACKAGE_NAME_OF_YOUR_APP
+  ```
+  It shall report a cryptic path similar to `/data/app/~~OgZq==/com.acme.app-HudMahQ==/base.apk`.
 
-```sh
-adb shell pm path PACKAGE_NAME_OF_YOUR_APP
-```
-
-It shall report a cryptic path similar to
-`/data/app/~~OgZq==/com.acme.app-HudMahQ==/base.apk`.
-
-* `PATH_TO_APK_IDSIG`: path to the pushed APK idsig on the device. See below
-  `adb push` command: it will be `/data/local/tmp/virt/MyApp.apk.idsig` in this
-  example.
-
-Once the file is done, execute the following command to push it to the device
-and run `mk_payload` to create `payload.img`:
+Push idsig of the APK to the device.
 
 ```sh
 TEST_ROOT=/data/local/tmp/virt
-adb push out/dist/MyApp.apk.idsig $TEST_ROOT/MyApp.apk.idsig
-adb push path_to_payload.json $TEST_ROOT/payload.json
-adb shell /apex/com.android.virt/bin/my_payload $TEST_ROOT/payload.json $TEST_ROOT/payload.img
-adb shell chmod go+r $TEST_ROOT/payload*
+adb push out/dist/MyApp.apk.idsig $TEST_ROOT
 ```
-
-### Running the VM
 
 Execute the following commands to launch a VM. The VM will boot to microdroid
 and then automatically execute your app (the shared library
@@ -193,14 +156,13 @@ and then automatically execute your app (the shared library
 
 ```sh
 TEST_ROOT=/data/local/tmp/virt
-adb push packages/modules/Virtualization/microdroid/microdroid.json $TEST_ROOT/microdroid.json
 adb root
 adb shell setenforce 0
-adb shell start virtualizationservice
-adb shell /apex/com.android.virt/bin/vm run $TEST_ROOT/microdroid.json
+adb shell /apex/com.android.virt/bin/vm run-app --daemonize --log $TEST_ROOT/log.txt PATH_TO_YOUR_APP $TEST_ROOT/MyApp.apk.idsig assets/VM_CONFIG_FILE
 ```
 
-The last command lets you know the CID assigned to the VM.
+The last command lets you know the CID assigned to the VM. The console output
+from the VM is stored to `$TEST_ROOT/log.txt` file for debugging purpose.
 
 Note: the disabling of SELinux is a temporary step. The restriction will
 eventually be removed.
@@ -211,7 +173,8 @@ Stopping the VM can be done as follows:
 adb shell /apex/com.android.virt/bin/vm stop CID
 ```
 
-, where `CID` is the reported CID value.
+, where `CID` is the reported CID value. This works only when the `vm` was
+invoked with the `--daemonize` flag.
 
 ## ADB
 

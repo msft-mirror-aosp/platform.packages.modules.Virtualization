@@ -1,0 +1,15 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+java_test_helper_library {
+    name: "VirtualizationTestHelper",
+    host_supported: true,
+    device_supported: false,
+    srcs: ["java/**/*.java"],
+    test_suites: ["device-tests"],
+    libs: [
+        "tradefed",
+        "compatibility-tradefed",
+    ],
+}

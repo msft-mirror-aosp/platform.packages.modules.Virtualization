@@ -14,14 +14,13 @@
 
 //! Android VM control tool.
 
-mod config;
 mod run;
 mod sync;
 
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::IVirtualizationService;
 use android_system_virtualizationservice::binder::{wait_for_interface, ProcessState, Strong, ParcelFileDescriptor};
 use anyhow::{Context, Error};
-use run::command_run;
+use run::{command_run, command_run_app};
 use std::convert::TryInto;
 use std::fs::OpenOptions;
 use std::path::{PathBuf, Path};
@@ -34,6 +33,31 @@ const VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER: &str =
 #[derive(StructOpt)]
 #[structopt(no_version, global_settings = &[AppSettings::DisableVersion])]
 enum Opt {
+    /// Run a virtual machine with a config in APK
+    RunApp {
+        /// Path to VM Payload APK
+        #[structopt(parse(from_os_str))]
+        apk: PathBuf,
+
+        /// Path to idsig of the APK
+        #[structopt(parse(from_os_str))]
+        idsig: PathBuf,
+
+        /// Path to VM config JSON within APK (e.g. assets/vm_config.json)
+        config_path: String,
+
+        /// Detach VM from the terminal and run in the background
+        #[structopt(short, long)]
+        daemonize: bool,
+
+        /// Path to file for VM log output.
+        #[structopt(short, long)]
+        log: Option<PathBuf>,
+
+        /// Whether to run VM in debug mode.
+        #[structopt(short, long)]
+        debug: bool,
+    },
     /// Run a virtual machine
     Run {
         /// Path to VM config JSON
@@ -43,6 +67,10 @@ enum Opt {
         /// Detach VM from the terminal and run in the background
         #[structopt(short, long)]
         daemonize: bool,
+
+        /// Path to file for VM log output.
+        #[structopt(short, long)]
+        log: Option<PathBuf>,
     },
     /// Stop a virtual machine running in the background
     Stop {
@@ -73,7 +101,12 @@ fn main() -> Result<(), Error> {
         .context("Failed to find VirtualizationService")?;
 
     match opt {
-        Opt::Run { config, daemonize } => command_run(service, &config, daemonize),
+        Opt::RunApp { apk, idsig, config_path, daemonize, log, debug } => {
+            command_run_app(service, &apk, &idsig, &config_path, daemonize, log.as_deref(), debug)
+        }
+        Opt::Run { config, daemonize, log } => {
+            command_run(service, &config, daemonize, log.as_deref())
+        }
         Opt::Stop { cid } => command_stop(service, cid),
         Opt::List => command_list(service),
         Opt::CreatePartition { path, size } => command_create_partition(service, &path, size),

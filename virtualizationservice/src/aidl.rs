@@ -16,27 +16,37 @@
 
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, VmInstance};
+use crate::payload::make_payload_disk;
 use crate::{Cid, FIRST_GUEST_CID};
+
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::IVirtualizationService;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::DiskImage::DiskImage;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualMachine::{
     BnVirtualMachine, IVirtualMachine,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualMachineCallback::IVirtualMachineCallback;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::VirtualMachineConfig::VirtualMachineConfig;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    VirtualMachineAppConfig::VirtualMachineAppConfig,
+    VirtualMachineConfig::VirtualMachineConfig,
+    VirtualMachineRawConfig::VirtualMachineRawConfig,
+};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::VirtualMachineDebugInfo::VirtualMachineDebugInfo;
 use android_system_virtualizationservice::binder::{
     self, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor, Status, Strong, ThreadState,
 };
-use command_fds::FdMapping;
+use anyhow::{bail, Result};
 use disk::QcowFile;
 use log::{debug, error, warn};
+use microdroid_payload_config::{ApexConfig, VmPayloadConfig};
 use std::convert::TryInto;
 use std::ffi::CString;
 use std::fs::{File, create_dir};
+use std::num::NonZeroU32;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use vmconfig::{VmConfig, Partition};
+use zip::ZipArchive;
 
 pub const BINDER_SERVICE_IDENTIFIER: &str = "android.system.virtualizationservice";
 
@@ -46,6 +56,11 @@ const TEMPORARY_DIRECTORY: &str = "/data/misc/virtualizationservice";
 // TODO(qwandor): Use PermissionController once it is available to Rust.
 /// Only processes running with one of these UIDs are allowed to call debug methods.
 const DEBUG_ALLOWED_UIDS: [u32; 2] = [0, 2000];
+
+/// The list of APEXes which microdroid requires.
+/// TODO(b/192200378) move this to microdroid.json?
+const MICRODROID_REQUIRED_APEXES: [&str; 4] =
+    ["com.android.adbd", "com.android.i18n", "com.android.os.statsd", "com.android.sdkext"];
 
 /// Implementation of `IVirtualizationService`, the entry point of the AIDL service.
 #[derive(Debug, Default)]
@@ -93,6 +108,20 @@ impl IVirtualizationService for VirtualizationService {
             )
         })?;
 
+        let config = match config {
+            VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
+                load_app_config(config, &temporary_directory).map_err(|e| {
+                    error!("Failed to load app config from {}: {}", &config.configPath, e);
+                    new_binder_exception(
+                        ExceptionCode::SERVICE_SPECIFIC,
+                        format!("Failed to load app config from {}: {}", &config.configPath, e),
+                    )
+                })?,
+            ),
+            VirtualMachineConfig::RawConfig(config) => BorrowedOrOwned::Borrowed(config),
+        };
+        let config = config.as_ref();
+
         // Assemble disk images if needed.
         let disks = config
             .disks
@@ -116,18 +145,14 @@ impl IVirtualizationService for VirtualizationService {
             disks,
             params: config.params.to_owned(),
             protected: config.protected_vm,
+            memory_mib: config.memory_mib.try_into().ok().and_then(NonZeroU32::new),
         };
-        let composite_disk_mappings: Vec<_> = indirect_files
-            .iter()
-            .map(|file| {
-                let fd = file.as_raw_fd();
-                FdMapping { parent_fd: fd, child_fd: fd }
-            })
-            .collect();
+        let composite_disk_fds: Vec<_> =
+            indirect_files.iter().map(|file| file.as_raw_fd()).collect();
         let instance = VmInstance::start(
             &crosvm_config,
             log_fd,
-            &composite_disk_mappings,
+            &composite_disk_fds,
             temporary_directory,
             requester_uid,
             requester_sid,
@@ -260,6 +285,57 @@ fn assemble_disk_image(
     };
 
     Ok(DiskFile { image, writable: disk.writable })
+}
+
+fn load_app_config(
+    config: &VirtualMachineAppConfig,
+    temporary_directory: &Path,
+) -> Result<VirtualMachineRawConfig> {
+    let apk_file = config.apk.as_ref().unwrap().as_ref();
+    let idsig_file = config.idsig.as_ref().unwrap().as_ref();
+    let config_path = &config.configPath;
+
+    let mut apk_zip = ZipArchive::new(apk_file)?;
+    let config_file = apk_zip.by_name(config_path)?;
+    let vm_payload_config: VmPayloadConfig = serde_json::from_reader(config_file)?;
+
+    let os_name = &vm_payload_config.os.name;
+    // For now, the only supported "os" value is "microdroid"
+    if os_name != "microdroid" {
+        bail!("unknown os: {}", os_name);
+    }
+    let vm_config_path = PathBuf::from(format!("/apex/com.android.virt/etc/{}.json", os_name));
+    let vm_config_file = File::open(vm_config_path)?;
+    let mut vm_config = VmConfig::load(&vm_config_file)?;
+
+    // Microdroid requires additional payload disk image and the bootconfig partition
+    if os_name == "microdroid" {
+        let mut apexes = vm_payload_config.apexes.clone();
+        apexes.extend(
+            MICRODROID_REQUIRED_APEXES.iter().map(|name| ApexConfig { name: name.to_string() }),
+        );
+        apexes.dedup_by(|a, b| a.name == b.name);
+
+        vm_config.disks.push(make_payload_disk(
+            format!("/proc/self/fd/{}", apk_file.as_raw_fd()).into(),
+            format!("/proc/self/fd/{}", idsig_file.as_raw_fd()).into(),
+            config_path,
+            &apexes,
+            temporary_directory,
+        )?);
+
+        if config.debug {
+            vm_config.disks[1].partitions.push(Partition {
+                label: "bootconfig".to_owned(),
+                paths: vec![PathBuf::from(
+                    "/apex/com.android.virt/etc/microdroid_bootconfig.debug",
+                )],
+                writable: false,
+            });
+        }
+    }
+
+    vm_config.to_parcelable()
 }
 
 /// Generates a unique filename to use for a composite disk image.
@@ -460,4 +536,20 @@ fn clone_file(file: &ParcelFileDescriptor) -> Result<File, Status> {
 /// Constructs a new Binder error `Status` with the given `ExceptionCode` and message.
 fn new_binder_exception<T: AsRef<str>>(exception: ExceptionCode, message: T) -> Status {
     Status::new_exception(exception, CString::new(message.as_ref()).ok().as_deref())
+}
+
+/// Simple utility for referencing Borrowed or Owned. Similar to std::borrow::Cow, but
+/// it doesn't require that T implements Clone.
+enum BorrowedOrOwned<'a, T> {
+    Borrowed(&'a T),
+    Owned(T),
+}
+
+impl<'a, T> AsRef<T> for BorrowedOrOwned<'a, T> {
+    fn as_ref(&self) -> &T {
+        match self {
+            Self::Borrowed(b) => b,
+            Self::Owned(o) => &o,
+        }
+    }
 }

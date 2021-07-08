@@ -18,10 +18,10 @@ package android.system.virtualizationservice;
 /** A partition to be assembled into a composite image. */
 parcelable Partition {
     /** A label for the partition. */
-    String label;
+    @utf8InCpp String label;
 
-    /** The backing file descriptor of the partition image. */
-    ParcelFileDescriptor image;
+    /** The backing file descriptors of the partition images. */
+    ParcelFileDescriptor[] images;
 
     /** Whether the partition should be writable by the VM. */
     boolean writable;
