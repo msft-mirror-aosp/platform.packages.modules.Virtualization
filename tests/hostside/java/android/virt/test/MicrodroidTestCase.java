@@ -29,15 +29,14 @@ import org.junit.runner.RunWith;
 
 @RunWith(DeviceJUnit4ClassRunner.class)
 public class MicrodroidTestCase extends VirtualizationTestCaseBase {
-    private static final long MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES = 5;
     private static final String APK_NAME = "MicrodroidTestApp.apk";
     private static final String PACKAGE_NAME = "com.android.microdroid.test";
 
     @Test
     public void testMicrodroidBoots() throws Exception {
         final String configPath = "assets/vm_config.json"; // path inside the APK
-        final String cid = startMicrodroid(APK_NAME, PACKAGE_NAME, configPath);
-        adbConnectToMicrodroid(cid, MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES);
+        final String cid = startMicrodroid(APK_NAME, PACKAGE_NAME, configPath, /* debug */ false);
+        adbConnectToMicrodroid(cid);
 
         // Test writing to /data partition
         runOnMicrodroid("echo MicrodroidTest > /data/local/tmp/test.txt");
@@ -73,6 +72,18 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
 
         // Check that keystore was found by the payload
         assertThat(runOnMicrodroid("getprop", "debug.microdroid.test.keystore"), is("PASS"));
+
+        shutdownMicrodroid(cid);
+    }
+
+    @Test
+    public void testDebugMode() throws Exception {
+        final String configPath = "assets/vm_config.json"; // path inside the APK
+        final boolean debug = true;
+        final String cid = startMicrodroid(APK_NAME, PACKAGE_NAME, configPath, debug);
+        adbConnectToMicrodroid(cid);
+
+        assertThat(runOnMicrodroid("getenforce"), is("Permissive"));
 
         shutdownMicrodroid(cid);
     }
