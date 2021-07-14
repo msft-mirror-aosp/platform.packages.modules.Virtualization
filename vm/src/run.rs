@@ -30,7 +30,7 @@ use android_system_virtualizationservice::binder::{
 use android_system_virtualizationservice::binder::{Interface, Result as BinderResult};
 use anyhow::{Context, Error};
 use std::fs::File;
-use std::io;
+use std::io::{self, BufRead, BufReader};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::Path;
 use vmconfig::VmConfig;
@@ -43,6 +43,7 @@ pub fn command_run_app(
     config_path: &str,
     daemonize: bool,
     log_path: Option<&Path>,
+    debug: bool,
 ) -> Result<(), Error> {
     let apk_file = File::open(apk).context("Failed to open APK file")?;
     let idsig_file = File::open(idsig).context("Failed to open idsig file")?;
@@ -50,6 +51,7 @@ pub fn command_run_app(
         apk: ParcelFileDescriptor::new(apk_file).into(),
         idsig: ParcelFileDescriptor::new(idsig_file).into(),
         configPath: config_path.to_owned(),
+        debug,
     });
     run(service, &config, &format!("{:?}!{:?}", apk, config_path), daemonize, log_path)
 }
@@ -127,7 +129,7 @@ fn wait_for_vm(vm: Strong<dyn IVirtualMachine>) -> Result<(), Error> {
 /// If the returned DeathRecipient is dropped then this will no longer do anything.
 fn wait_for_death(binder: &mut impl IBinder, dead: AtomicFlag) -> Result<DeathRecipient, Error> {
     let mut death_recipient = DeathRecipient::new(move || {
-        println!("VirtualizationService died");
+        eprintln!("VirtualizationService unexpectedly died");
         dead.raise();
     });
     binder.link_to_death(&mut death_recipient)?;
@@ -142,8 +144,26 @@ struct VirtualMachineCallback {
 impl Interface for VirtualMachineCallback {}
 
 impl IVirtualMachineCallback for VirtualMachineCallback {
+    fn onPayloadStarted(&self, _cid: i32, stdout: &ParcelFileDescriptor) -> BinderResult<()> {
+        // Show the stdout of the payload
+        let mut reader = BufReader::new(stdout.as_ref());
+        loop {
+            let mut s = String::new();
+            match reader.read_line(&mut s) {
+                Ok(0) => break,
+                Ok(_) => print!("{}", s),
+                Err(e) => eprintln!("error reading from virtual machine: {}", e),
+            };
+        }
+        Ok(())
+    }
+
     fn onDied(&self, _cid: i32) -> BinderResult<()> {
-        println!("VM died");
+        // No need to explicitly report the event to the user (e.g. via println!) because this
+        // callback is registered only when the vm tool is invoked as interactive mode (e.g. not
+        // --daemonize) in which case the tool will exit to the shell prompt upon VM shutdown.
+        // Printing something will actually even confuse the user as the output from the app
+        // payload is printed.
         self.dead.raise();
         Ok(())
     }

@@ -20,10 +20,12 @@ mod crosvm;
 mod gpt;
 mod payload;
 
-use crate::aidl::{VirtualizationService, BINDER_SERVICE_IDENTIFIER};
+use crate::aidl::{VirtualizationService, BINDER_SERVICE_IDENTIFIER, TEMPORARY_DIRECTORY};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::BnVirtualizationService;
 use android_system_virtualizationservice::binder::{add_service, BinderFeatures, ProcessState};
+use anyhow::Error;
 use log::{info, Level};
+use std::fs::{remove_dir_all, remove_file, read_dir};
 
 /// The first CID to assign to a guest VM managed by the VirtualizationService. CIDs lower than this
 /// are reserved for the host or other usage.
@@ -39,7 +41,9 @@ fn main() {
         android_logger::Config::default().with_tag(LOG_TAG).with_min_level(Level::Trace),
     );
 
-    let service = VirtualizationService::default();
+    clear_temporary_files().expect("Failed to delete old temporary files");
+
+    let service = VirtualizationService::init();
     let service = BnVirtualizationService::new_binder(
         service,
         BinderFeatures { set_requesting_sid: true, ..BinderFeatures::default() },
@@ -47,4 +51,18 @@ fn main() {
     add_service(BINDER_SERVICE_IDENTIFIER, service.as_binder()).unwrap();
     info!("Registered Binder service, joining threadpool.");
     ProcessState::join_thread_pool();
+}
+
+/// Remove any files under `TEMPORARY_DIRECTORY`.
+fn clear_temporary_files() -> Result<(), Error> {
+    for dir_entry in read_dir(TEMPORARY_DIRECTORY)? {
+        let dir_entry = dir_entry?;
+        let path = dir_entry.path();
+        if dir_entry.file_type()?.is_dir() {
+            remove_dir_all(path)?;
+        } else {
+            remove_file(path)?;
+        }
+    }
+    Ok(())
 }

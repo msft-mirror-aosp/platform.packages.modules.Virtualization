@@ -6,8 +6,7 @@ type microdroid_manager_exec, exec_type, file_type, system_file_type;
 # allow domain transition from init
 init_daemon_domain(microdroid_manager)
 
-# microdroid_manager accesses /dev/block/by-name/metadata which points to
-# a /dev/vd* block device file.
+# microdroid_manager accesses a virtual disk block device to read VM payload
 allow microdroid_manager block_device:dir r_dir_perms;
 allow microdroid_manager block_device:lnk_file r_file_perms;
 allow microdroid_manager vd_device:blk_file r_file_perms;
@@ -24,9 +23,15 @@ allow microdroid_manager {shell_exec toolbox_exec}:file rx_file_perms;
 # Let microdroid_manager kernel-log.
 allow microdroid_manager kmsg_device:chr_file w_file_perms;
 
+# Let microdroid_manager initialize the derived VM secrets.
+set_prop(microdroid_manager, vmsecret_keymint_prop);
+
 # Let microdroid_manager read a config file from /mnt/apk (fusefs)
 # TODO(b/188400186) remove the below two rules
 userdebug_or_eng(`
   allow microdroid_manager fuse:dir r_dir_perms;
   allow microdroid_manager fuse:file rx_file_perms;
 ')
+
+# Let microdroid_manager to create a vsock connection back to the host VM
+allow microdroid_manager self:vsock_socket { create_socket_perms_no_ioctl };
