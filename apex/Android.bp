@@ -48,10 +48,12 @@ apex {
     binaries: [
         "fd_server",
         "vm",
-        "compos_key_cmd",
     ],
     java_libs: [
         "android.system.virtualmachine",
+    ],
+    apps: [
+        "android.system.virtualmachine.res",
     ],
     prebuilts: [
         "com.android.virt.init.rc",

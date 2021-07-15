@@ -17,17 +17,21 @@
 package android.system.virtualmachine;
 
 import android.content.Context;
+import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.system.virtualizationservice.IVirtualMachine;
+import android.system.virtualizationservice.IVirtualMachineCallback;
 import android.system.virtualizationservice.IVirtualizationService;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.util.Optional;
 
@@ -83,6 +87,9 @@ public class VirtualMachine {
     /** Handle to the "running" VM. */
     private IVirtualMachine mVirtualMachine;
 
+    /** The registered callback */
+    private VirtualMachineCallback mCallback;
+
     private ParcelFileDescriptor mConsoleReader;
     private ParcelFileDescriptor mConsoleWriter;
 
@@ -105,16 +112,25 @@ public class VirtualMachine {
     /* package */ static VirtualMachine create(
             Context context, String name, VirtualMachineConfig config)
             throws VirtualMachineException {
-        // TODO(jiyong): trigger an error if the VM having 'name' already exists.
+        if (config == null) {
+            throw new VirtualMachineException("null config");
+        }
         VirtualMachine vm = new VirtualMachine(context, name, config);
 
         try {
-            final File vmRoot = vm.mConfigFilePath.getParentFile();
-            Files.createDirectories(vmRoot.toPath());
+            final File thisVmDir = vm.mConfigFilePath.getParentFile();
+            Files.createDirectories(thisVmDir.getParentFile().toPath());
 
-            FileOutputStream output = new FileOutputStream(vm.mConfigFilePath);
-            vm.mConfig.serialize(output);
-            output.close();
+            // The checking of the existence of this directory and the creation of it is done
+            // atomically. If the directory already exists (i.e. the VM with the same name was
+            // already created), FileAlreadyExistsException is thrown
+            Files.createDirectory(thisVmDir.toPath());
+
+            try (FileOutputStream output = new FileOutputStream(vm.mConfigFilePath)) {
+                vm.mConfig.serialize(output);
+            }
+        } catch (FileAlreadyExistsException e) {
+            throw new VirtualMachineException("virtual machine already exists", e);
         } catch (IOException e) {
             throw new VirtualMachineException(e);
         }
@@ -126,7 +142,6 @@ public class VirtualMachine {
     /** Loads a virtual machine that is already created before. */
     /* package */ static VirtualMachine load(Context context, String name)
             throws VirtualMachineException {
-        // TODO(jiyong): return null if the VM having the 'name' doesn't exist.
         VirtualMachine vm = new VirtualMachine(context, name, /* config */ null);
 
         try {
@@ -134,6 +149,9 @@ public class VirtualMachine {
             VirtualMachineConfig config = VirtualMachineConfig.from(input);
             input.close();
             vm.mConfig = config;
+        } catch (FileNotFoundException e) {
+            // The VM doesn't exist.
+            return null;
         } catch (IOException e) {
             throw new VirtualMachineException(e);
         }
@@ -176,6 +194,19 @@ public class VirtualMachine {
     }
 
     /**
+     * Registers the callback object to get events from the virtual machine. If a callback was
+     * already registered, it is replaced with the new one.
+     */
+    public void setCallback(VirtualMachineCallback callback) {
+        mCallback = callback;
+    }
+
+    /** Returns the currently registered callback. */
+    public VirtualMachineCallback getCallback() {
+        return mCallback;
+    }
+
+    /**
      * Runs this virtual machine. The returning of this method however doesn't mean that the VM has
      * actually started running or the OS has booted there. Such events can be notified by
      * registering a callback object (not implemented currently).
@@ -185,7 +216,8 @@ public class VirtualMachine {
             throw new VirtualMachineException(this + " is not in stopped state");
         }
         IVirtualizationService service =
-                IVirtualizationService.Stub.asInterface(ServiceManager.getService(SERVICE_NAME));
+                IVirtualizationService.Stub.asInterface(
+                        ServiceManager.waitForService(SERVICE_NAME));
 
         try {
             if (mConsoleReader == null && mConsoleWriter == null) {
@@ -198,6 +230,40 @@ public class VirtualMachine {
                             android.system.virtualizationservice.VirtualMachineConfig.appConfig(
                                     getConfig().toParcel()),
                             mConsoleWriter);
+
+            mVirtualMachine.registerCallback(
+                    new IVirtualMachineCallback.Stub() {
+                        @Override
+                        public void onPayloadStarted(int cid, ParcelFileDescriptor stream) {
+                            final VirtualMachineCallback cb = mCallback;
+                            if (cb == null) {
+                                return;
+                            }
+                            cb.onPayloadStarted(VirtualMachine.this, stream);
+                        }
+
+                        @Override
+                        public void onDied(int cid) {
+                            final VirtualMachineCallback cb = mCallback;
+                            if (cb == null) {
+                                return;
+                            }
+                            cb.onDied(VirtualMachine.this);
+                        }
+                    });
+            service.asBinder()
+                    .linkToDeath(
+                            new IBinder.DeathRecipient() {
+                                @Override
+                                public void binderDied() {
+                                    final VirtualMachineCallback cb = mCallback;
+                                    if (cb != null) {
+                                        cb.onDied(VirtualMachine.this);
+                                    }
+                                }
+                            },
+                            0);
+
         } catch (IOException e) {
             throw new VirtualMachineException(e);
         } catch (RemoteException e) {
@@ -265,8 +331,25 @@ public class VirtualMachine {
      */
     public VirtualMachineConfig setConfig(VirtualMachineConfig newConfig)
             throws VirtualMachineException {
-        // TODO(jiyong): implement this
-        throw new VirtualMachineException("Not implemented");
+        final VirtualMachineConfig oldConfig = getConfig();
+        if (!oldConfig.isCompatibleWith(newConfig)) {
+            throw new VirtualMachineException("incompatible config");
+        }
+        if (getStatus() != Status.STOPPED) {
+            throw new VirtualMachineException(
+                    "can't change config while virtual machine is not stopped");
+        }
+
+        try {
+            FileOutputStream output = new FileOutputStream(mConfigFilePath);
+            newConfig.serialize(output);
+            output.close();
+        } catch (IOException e) {
+            throw new VirtualMachineException(e);
+        }
+        mConfig = newConfig;
+
+        return oldConfig;
     }
 
     @Override

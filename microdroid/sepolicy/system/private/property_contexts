@@ -32,7 +32,6 @@ service.adb.root u:object_r:shell_prop:s0 exact bool
 ro.logd.kernel u:object_r:logd_prop:s0 exact bool
 
 ro.boottime.adbd                      u:object_r:boottime_prop:s0 exact int
-ro.boottime.derive_sdk                u:object_r:boottime_prop:s0 exact int
 ro.boottime.hwservicemanager          u:object_r:boottime_prop:s0 exact int
 ro.boottime.init                      u:object_r:boottime_prop:s0 exact int
 ro.boottime.init.cold_boot_wait       u:object_r:boottime_prop:s0 exact int
@@ -51,6 +50,8 @@ ro.boottime.zipfuse                   u:object_r:boottime_prop:s0 exact int
 
 ro.build.fingerprint u:object_r:fingerprint_prop:s0 exact string
 
+ro.vmsecret.keymint u:object_r:vmsecret_keymint_prop:s0 exact string
+
 hwservicemanager.ready u:object_r:hwservicemanager_prop:s0 exact bool
 
 apexd.status u:object_r:apexd_prop:s0 exact enum starting activated ready
@@ -59,7 +60,6 @@ ro.cold_boot_done u:object_r:cold_boot_done_prop:s0 exact bool
 
 sys.usb.controller u:object_r:usb_control_prop:s0 exact string
 
-init.svc.derive_sdk                u:object_r:init_service_status_private_prop:s0 exact string
 init.svc.hwservicemanager          u:object_r:init_service_status_private_prop:s0 exact string
 init.svc.keystore2                 u:object_r:init_service_status_private_prop:s0 exact string
 init.svc.logd                      u:object_r:init_service_status_private_prop:s0 exact string
