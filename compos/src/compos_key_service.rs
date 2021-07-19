@@ -27,24 +27,28 @@ use android_system_keystore2::aidl::android::system::keystore2::{
 };
 use anyhow::{anyhow, Context, Result};
 use compos_aidl_interface::aidl::com::android::compos::{
-    CompOsKeyData::CompOsKeyData,
-    ICompOsKeyService::{BnCompOsKeyService, ICompOsKeyService},
+    CompOsKeyData::CompOsKeyData, ICompOsKeyService::ICompOsKeyService,
 };
 use compos_aidl_interface::binder::{
-    self, add_service, get_interface, BinderFeatures, ExceptionCode, Interface, ProcessState,
-    Status, Strong,
+    self, wait_for_interface, ExceptionCode, Interface, Status, Strong,
 };
-use log::{info, warn, Level};
+use log::warn;
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature;
 use scopeguard::ScopeGuard;
 use std::ffi::CString;
 
-const LOG_TAG: &str = "CompOsKeyService";
-const OUR_SERVICE_NAME: &str = "android.system.composkeyservice";
+/// Keystore2 namespace IDs, used for access control to keys.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum KeystoreNamespace {
+    /// In the host we re-use the ID assigned to odsign. See system/sepolicy/private/keystore2_key_contexts.
+    // TODO(alanstokes): Remove this.
+    Odsign = 101,
+    /// In a VM we can use the generic ID allocated for payloads. See microdroid's keystore2_key_contexts.
+    VmPayload = 140,
+}
 
 const KEYSTORE_SERVICE_NAME: &str = "android.system.keystore2.IKeystoreService/default";
-const COMPOS_NAMESPACE: i64 = 101;
 const PURPOSE_SIGN: KeyParameter =
     KeyParameter { tag: Tag::PURPOSE, value: KeyParameterValue::KeyPurpose(KeyPurpose::SIGN) };
 const ALGORITHM: KeyParameter =
@@ -62,10 +66,11 @@ const EXPONENT: KeyParameter =
 const NO_AUTH_REQUIRED: KeyParameter =
     KeyParameter { tag: Tag::NO_AUTH_REQUIRED, value: KeyParameterValue::BoolValue(true) };
 
-const KEY_DESCRIPTOR: KeyDescriptor =
-    KeyDescriptor { domain: Domain::BLOB, nspace: COMPOS_NAMESPACE, alias: None, blob: None };
+const BLOB_KEY_DESCRIPTOR: KeyDescriptor =
+    KeyDescriptor { domain: Domain::BLOB, nspace: 0, alias: None, blob: None };
 
-struct CompOsKeyService {
+pub struct CompOsKeyService {
+    namespace: KeystoreNamespace,
     random: SystemRandom,
     security_level: Strong<dyn IKeystoreSecurityLevel>,
 }
@@ -99,16 +104,21 @@ fn new_binder_exception<T: AsRef<str>>(exception: ExceptionCode, message: T) -> 
 }
 
 impl CompOsKeyService {
-    fn new(keystore_service: &Strong<dyn IKeystoreService>) -> Self {
-        Self {
+    pub fn new(namespace: KeystoreNamespace) -> Result<Self> {
+        let keystore_service = wait_for_interface::<dyn IKeystoreService>(KEYSTORE_SERVICE_NAME)
+            .context("No Keystore service")?;
+
+        Ok(Self {
+            namespace,
             random: SystemRandom::new(),
             security_level: keystore_service
                 .getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT)
-                .unwrap(),
-        }
+                .context("Getting SecurityLevel failed")?,
+        })
     }
 
     fn do_generate(&self) -> Result<CompOsKeyData> {
+        let key_descriptor = KeyDescriptor { nspace: self.namespace as i64, ..BLOB_KEY_DESCRIPTOR };
         let key_parameters =
             [PURPOSE_SIGN, ALGORITHM, PADDING, DIGEST, KEY_SIZE, EXPONENT, NO_AUTH_REQUIRED];
         let attestation_key = None;
@@ -117,7 +127,7 @@ impl CompOsKeyService {
 
         let key_metadata = self
             .security_level
-            .generateKey(&KEY_DESCRIPTOR, attestation_key, &key_parameters, flags, &entropy)
+            .generateKey(&key_descriptor, attestation_key, &key_parameters, flags, &entropy)
             .context("Generating key failed")?;
 
         if let (Some(certificate), Some(blob)) = (key_metadata.certificate, key_metadata.key.blob) {
@@ -141,7 +151,11 @@ impl CompOsKeyService {
     }
 
     fn do_sign(&self, key_blob: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-        let key_descriptor = KeyDescriptor { blob: Some(key_blob.to_vec()), ..KEY_DESCRIPTOR };
+        let key_descriptor = KeyDescriptor {
+            nspace: self.namespace as i64,
+            blob: Some(key_blob.to_vec()),
+            ..BLOB_KEY_DESCRIPTOR
+        };
         let operation_parameters = [PURPOSE_SIGN, ALGORITHM, PADDING, DIGEST];
         let forced = false;
 
@@ -164,25 +178,4 @@ impl CompOsKeyService {
 
         signature.ok_or_else(|| anyhow!("No signature returned"))
     }
-}
-
-fn main() -> Result<()> {
-    android_logger::init_once(
-        android_logger::Config::default().with_tag(LOG_TAG).with_min_level(Level::Trace),
-    );
-
-    // We need to start the thread pool for Binder to work properly.
-    ProcessState::start_thread_pool();
-
-    let keystore_service = get_interface::<dyn IKeystoreService>(KEYSTORE_SERVICE_NAME)
-        .context("No Keystore service")?;
-    let service = CompOsKeyService::new(&keystore_service);
-    let service = BnCompOsKeyService::new_binder(service, BinderFeatures::default());
-
-    add_service(OUR_SERVICE_NAME, service.as_binder()).context("Adding service failed")?;
-    info!("It's alive!");
-
-    ProcessState::join_thread_pool();
-
-    Ok(())
 }
