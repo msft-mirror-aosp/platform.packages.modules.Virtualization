@@ -28,7 +28,7 @@ rust_binary {
 
 rust_binary {
     name: "compsvc",
-    srcs: ["src/compsvc.rs"],
+    srcs: ["src/compsvc_main.rs"],
     rustlibs: [
         "compos_aidl_interface-rust",
         "libandroid_logger",
@@ -58,7 +58,6 @@ rust_binary {
         "liblog_rust",
         "libminijail_rust",
         "libnix",
-        "libscopeguard",
     ],
     prefer_rlib: true,
     apex_available: [
@@ -80,6 +79,7 @@ rust_binary {
         "libbinder_rpc_unstable_bindgen",
         "libclap",
         "liblog_rust",
+        "libminijail_rust",
         "libring",
         "libscopeguard",
     ],
