@@ -362,8 +362,7 @@ fn load_app_config(
 ) -> Result<VirtualMachineRawConfig> {
     let apk_file = clone_file(config.apk.as_ref().unwrap())?;
     let idsig_file = clone_file(config.idsig.as_ref().unwrap())?;
-    // TODO(b/193504400) pass this to crosvm
-    let _instance_file = clone_file(config.instanceImage.as_ref().unwrap())?;
+    let instance_file = clone_file(config.instanceImage.as_ref().unwrap())?;
     let config_path = &config.configPath;
 
     let mut apk_zip = ZipArchive::new(&apk_file)?;
@@ -383,6 +382,10 @@ fn load_app_config(
     let vm_config_file = File::open(vm_config_path)?;
     let mut vm_config = VmConfig::load(&vm_config_file)?.to_parcelable()?;
 
+    if config.memory_mib > 0 {
+        vm_config.memory_mib = config.memory_mib;
+    }
+
     // Microdroid requires an additional payload disk image and the bootconfig partition.
     if os_name == "microdroid" {
         let apexes = vm_payload_config.apexes.clone();
@@ -391,6 +394,7 @@ fn load_app_config(
             temporary_directory,
             apk_file,
             idsig_file,
+            instance_file,
             apexes,
             &mut vm_config,
         )?;
