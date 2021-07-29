@@ -93,8 +93,8 @@ impl VmConfig {
             params: self.params.clone(),
             bootloader: maybe_open_parcel_file(&self.bootloader, false)?,
             disks: self.disks.iter().map(DiskImage::to_parcelable).collect::<Result<_, Error>>()?,
-            protected_vm: self.protected,
-            memory_mib,
+            protectedVm: self.protected,
+            memoryMib: memory_mib,
         })
     }
 }
@@ -146,7 +146,7 @@ impl Partition {
         let images = self
             .paths
             .iter()
-            .map(|path| open_parcel_file(&path, self.writable))
+            .map(|path| open_parcel_file(path, self.writable))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(AidlPartition { images, writable: self.writable, label: self.label.to_owned() })
     }

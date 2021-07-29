@@ -70,6 +70,14 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         // disconnect from microdroid
         tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
 
+        // Make sure we're connected to the host adb again (b/194219111)
+        for (int retry = 0; retry < 3; ++retry) {
+            if (android.tryRun("true") != null) {
+                break;
+            }
+            androidDevice.waitForDeviceOnline(1000);
+        }
+
         // kill stale VMs and directories
         android.tryRun("killall", "crosvm");
         android.tryRun("rm", "-rf", "/data/misc/virtualizationservice/*");
@@ -84,7 +92,7 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         // don't run the test (instead of failing)
         android.assumeSuccess("ls /dev/kvm");
         android.assumeSuccess("ls /dev/vhost-vsock");
-        android.assumeSuccess("ls /apex/com.android.virt/bin/crosvm");
+        android.assumeSuccess("ls /apex/com.android.virt");
     }
 
     // Run an arbitrary command in the host side and returns the result
@@ -181,7 +189,6 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         final String debugFlag = debug ? "--debug " : "";
 
         // Run the VM
-        android.run("start", "virtualizationservice");
         String ret =
                 android.run(
                         VIRT_APEX + "bin/vm",
@@ -273,7 +280,8 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
             disconnected = ret.equals("failed to connect to " + MICRODROID_SERIAL);
             if (disconnected) {
                 // adb demands us to disconnect if the prior connection was a failure.
-                runOnHost("adb", "disconnect", MICRODROID_SERIAL);
+                // b/194375443: this somtimes fails, thus 'try*'.
+                tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
             }
         }
 
