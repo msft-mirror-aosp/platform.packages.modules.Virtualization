@@ -46,9 +46,9 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
     private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
     private static final String INSTANCE_IMG = "instance.img";
 
-    // This is really slow on GCE (2m 40s) but fast on localhost or actual Android phones (< 10s)
-    // Set the maximum timeout value big enough.
-    private static final long MICRODROID_BOOT_TIMEOUT_MINUTES = 5;
+    // This is really slow on GCE (2m 40s) but fast on localhost or actual Android phones (< 10s).
+    // Then there is time to run the actual task. Set the maximum timeout value big enough.
+    private static final long MICRODROID_MAX_LIFETIME_MINUTES = 20;
 
     private static final long MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES = 5;
 
@@ -206,9 +206,12 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         executor.execute(
                 () -> {
                     try {
-                        // Keep redirecting sufficiently long enough
+                        // Keep redirecting as long as the expecting maximum test time. When an adb
+                        // command times out, it may trigger the device recovery process, which
+                        // disconnect adb, which terminates any live adb commands. See an example at
+                        // b/194974010#comment25.
                         android.runWithTimeout(
-                                MICRODROID_BOOT_TIMEOUT_MINUTES * 60 * 1000,
+                                MICRODROID_MAX_LIFETIME_MINUTES * 60 * 1000,
                                 "logwrapper",
                                 "tail",
                                 "-f",
@@ -230,13 +233,17 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
             throws DeviceNotAvailableException {
         CommandRunner android = new CommandRunner(androidDevice);
 
-        // Close the connection before shutting the VM down. Otherwise, b/192660485.
-        tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
-        final String serial = androidDevice.getSerialNumber();
-        tryRunOnHost("adb", "-s", serial, "forward", "--remove", "tcp:" + TEST_VM_ADB_PORT);
-
         // Shutdown the VM
         android.run(VIRT_APEX + "bin/vm", "stop", cid);
+
+        // TODO(192660485): Figure out why shutting down the VM disconnects adb on cuttlefish
+        // temporarily. Without this wait, the rest of `runOnAndroid/skipIfFail` fails due to the
+        // connection loss, and results in assumption error exception for the rest of the tests.
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public static void rootMicrodroid() throws DeviceNotAvailableException {

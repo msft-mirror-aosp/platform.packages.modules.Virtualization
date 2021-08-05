@@ -6,7 +6,6 @@
     {
       "name": "ComposHostTestCases"
     }
-
   ],
   "postsubmit": [
     // TODO(jiyong): promote this to presubmit. That currently doesn't work because
