@@ -44,6 +44,11 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         /* debug */ false);
         adbConnectToMicrodroid(getDevice(), cid);
 
+        // Wait until logd-init starts. The service is one of the last services that are started in
+        // the microdroid boot procedure. Therefore, waiting for the service means that we wait for
+        // the boot to complete. TODO: we need a better marker eventually.
+        tryRunOnMicrodroid("watch -e \"getprop init.svc.logd-reinit | grep '^$'\"");
+
         // Test writing to /data partition
         runOnMicrodroid("echo MicrodroidTest > /data/local/tmp/test.txt");
         assertThat(runOnMicrodroid("cat /data/local/tmp/test.txt"), is("MicrodroidTest"));
@@ -72,6 +77,9 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         // Check that keystore was found by the payload. Wait until the property is set.
         tryRunOnMicrodroid("watch -e \"getprop debug.microdroid.test.keystore | grep '^$'\"");
         assertThat(runOnMicrodroid("getprop", "debug.microdroid.test.keystore"), is("PASS"));
+
+        // Check that no denials have happened so far
+        assertThat(runOnMicrodroid("logcat -d -e 'avc:[[:space:]]{1,2}denied'"), is(""));
 
         shutdownMicrodroid(getDevice(), cid);
     }

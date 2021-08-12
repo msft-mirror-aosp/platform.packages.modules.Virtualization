@@ -111,6 +111,7 @@ android_system_image {
             deps: [
                 "apkdmverity",
                 "authfs",
+                "authfs_service",
                 "zipfuse",
 
                 // TODO(b/184872979): Needed by authfs. Remove once the Rust API is created.
@@ -221,7 +222,7 @@ bootimg {
         },
         x86_64: {
             kernel_prebuilt: ":kernel_prebuilts-5.10-x86_64",
-            cmdline: microdroid_boot_cmdline + "pci=noacpi ",
+            cmdline: microdroid_boot_cmdline + "acpi=noirq",
         },
     },
     dtb_prebuilt: "dummy_dtb.img",
