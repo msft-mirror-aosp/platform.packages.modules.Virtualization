@@ -18,6 +18,7 @@
 
 mod bytes_ext;
 mod sigutil;
+mod testing;
 mod v3;
 mod ziputil;
 

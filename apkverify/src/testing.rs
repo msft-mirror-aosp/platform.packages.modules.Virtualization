@@ -14,11 +14,21 @@
  * limitations under the License.
  */
 
-//! `idsig` provides routines for creating the idsig file that is defined for the APK signature
-//! scheme v4 and for parsing the file.
+//! A collection of utilities for testing
 
-mod apksigv4;
-mod hashtree;
-
-pub use crate::apksigv4::*;
-pub use crate::hashtree::*;
+/// Asserts if `haystack.contains(needed)`
+#[macro_export]
+macro_rules! assert_contains {
+    ($haystack:expr,$needle:expr $(,)?) => {
+        match (&$haystack, &$needle) {
+            (haystack_value, needle_value) => {
+                assert!(
+                    haystack_value.contains(needle_value),
+                    "{} is not found in {}",
+                    needle_value,
+                    haystack_value
+                );
+            }
+        }
+    };
+}
