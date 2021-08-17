@@ -20,7 +20,7 @@ pub const RPC_SERVICE_PORT: u32 = 3264;
 
 fn get_local_binder() -> io::Result<VirtFdService> {
     let service_name = "authfs_fd_server";
-    get_interface(&service_name).map_err(|e| {
+    get_interface(service_name).map_err(|e| {
         io::Error::new(
             io::ErrorKind::AddrNotAvailable,
             format!("Cannot reach authfs_fd_server binder service: {}", e),
@@ -35,7 +35,7 @@ fn get_rpc_binder(cid: u32) -> io::Result<VirtFdService> {
         new_spibinder(binder_rpc_unstable_bindgen::RpcClient(cid, RPC_SERVICE_PORT) as *mut AIBinder)
     };
     if let Some(ibinder) = ibinder {
-        Ok(IVirtFdService::try_from(ibinder).map_err(|e| {
+        Ok(<dyn IVirtFdService>::try_from(ibinder).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::AddrNotAvailable,
                 format!("Cannot connect to RPC service: {}", e),

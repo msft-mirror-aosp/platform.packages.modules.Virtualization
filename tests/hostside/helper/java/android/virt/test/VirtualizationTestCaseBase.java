@@ -40,14 +40,15 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
-    private static final String TEST_ROOT = "/data/local/tmp/virt/";
+    protected static final String TEST_ROOT = "/data/local/tmp/virt/";
     private static final String VIRT_APEX = "/apex/com.android.virt/";
     private static final int TEST_VM_ADB_PORT = 8000;
     private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
+    private static final String INSTANCE_IMG = "instance.img";
 
-    // This is really slow on GCE (2m 40s) but fast on localhost or actual Android phones (< 10s)
-    // Set the maximum timeout value big enough.
-    private static final long MICRODROID_BOOT_TIMEOUT_MINUTES = 5;
+    // This is really slow on GCE (2m 40s) but fast on localhost or actual Android phones (< 10s).
+    // Then there is time to run the actual task. Set the maximum timeout value big enough.
+    private static final long MICRODROID_MAX_LIFETIME_MINUTES = 20;
 
     private static final long MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES = 5;
 
@@ -69,6 +70,14 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         // disconnect from microdroid
         tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
 
+        // Make sure we're connected to the host adb again (b/194219111)
+        for (int retry = 0; retry < 3; ++retry) {
+            if (android.tryRun("true") != null) {
+                break;
+            }
+            androidDevice.waitForDeviceOnline(1000);
+        }
+
         // kill stale VMs and directories
         android.tryRun("killall", "crosvm");
         android.tryRun("rm", "-rf", "/data/misc/virtualizationservice/*");
@@ -83,7 +92,7 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         // don't run the test (instead of failing)
         android.assumeSuccess("ls /dev/kvm");
         android.assumeSuccess("ls /dev/vhost-vsock");
-        android.assumeSuccess("ls /apex/com.android.virt/bin/crosvm");
+        android.assumeSuccess("ls /apex/com.android.virt");
     }
 
     // Run an arbitrary command in the host side and returns the result
@@ -175,11 +184,11 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         final String apkIdsigPath = TEST_ROOT + apkName + ".idsig";
         androidDevice.pushFile(idsigOnHost, apkIdsigPath);
 
+        final String instanceImg = TEST_ROOT + INSTANCE_IMG;
         final String logPath = TEST_ROOT + "log.txt";
         final String debugFlag = debug ? "--debug " : "";
 
         // Run the VM
-        android.run("start", "virtualizationservice");
         String ret =
                 android.run(
                         VIRT_APEX + "bin/vm",
@@ -189,6 +198,7 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
                         debugFlag,
                         apkPath,
                         apkIdsigPath,
+                        instanceImg,
                         configPath);
 
         // Redirect log.txt to logd using logwrapper
@@ -196,9 +206,12 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         executor.execute(
                 () -> {
                     try {
-                        // Keep redirecting sufficiently long enough
+                        // Keep redirecting as long as the expecting maximum test time. When an adb
+                        // command times out, it may trigger the device recovery process, which
+                        // disconnect adb, which terminates any live adb commands. See an example at
+                        // b/194974010#comment25.
                         android.runWithTimeout(
-                                MICRODROID_BOOT_TIMEOUT_MINUTES * 60 * 1000,
+                                MICRODROID_MAX_LIFETIME_MINUTES * 60 * 1000,
                                 "logwrapper",
                                 "tail",
                                 "-f",
@@ -220,13 +233,17 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
             throws DeviceNotAvailableException {
         CommandRunner android = new CommandRunner(androidDevice);
 
-        // Close the connection before shutting the VM down. Otherwise, b/192660485.
-        tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
-        final String serial = androidDevice.getSerialNumber();
-        tryRunOnHost("adb", "-s", serial, "forward", "--remove", "tcp:" + TEST_VM_ADB_PORT);
-
         // Shutdown the VM
         android.run(VIRT_APEX + "bin/vm", "stop", cid);
+
+        // TODO(192660485): Figure out why shutting down the VM disconnects adb on cuttlefish
+        // temporarily. Without this wait, the rest of `runOnAndroid/skipIfFail` fails due to the
+        // connection loss, and results in assumption error exception for the rest of the tests.
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public static void rootMicrodroid() throws DeviceNotAvailableException {
@@ -270,7 +287,8 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
             disconnected = ret.equals("failed to connect to " + MICRODROID_SERIAL);
             if (disconnected) {
                 // adb demands us to disconnect if the prior connection was a failure.
-                runOnHost("adb", "disconnect", MICRODROID_SERIAL);
+                // b/194375443: this somtimes fails, thus 'try*'.
+                tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
             }
         }
 

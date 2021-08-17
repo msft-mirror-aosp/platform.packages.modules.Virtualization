@@ -2,6 +2,9 @@
   "presubmit": [
     {
       "name": "MicrodroidHostTestCases"
+    },
+    {
+      "name": "ComposHostTestCases"
     }
   ],
   "postsubmit": [
@@ -15,6 +18,9 @@
   "imports": [
     {
       "path": "packages/modules/Virtualization/apkdmverity"
+    },
+    {
+      "path": "packages/modules/Virtualization/apkverify"
     },
     {
       "path": "packages/modules/Virtualization/authfs"

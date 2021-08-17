@@ -14,29 +14,40 @@
 
 //! Payload disk image
 
-use crate::composite::align_to_partition_size;
-
-use anyhow::{anyhow, bail, Result};
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    DiskImage::DiskImage, Partition::Partition, VirtualMachineAppConfig::VirtualMachineAppConfig,
+    VirtualMachineRawConfig::VirtualMachineRawConfig,
+};
+use android_system_virtualizationservice::binder::ParcelFileDescriptor;
+use anyhow::{anyhow, Context, Result};
 use microdroid_metadata::{ApexPayload, ApkPayload, Metadata};
 use microdroid_payload_config::ApexConfig;
 use once_cell::sync::OnceCell;
-use regex::Regex;
-use std::fs;
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use serde::Deserialize;
+use serde_xml_rs::from_reader;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use vmconfig::{DiskImage, Partition};
+use vmconfig::open_parcel_file;
+
+/// The list of APEXes which microdroid requires.
+// TODO(b/192200378) move this to microdroid.json?
+const MICRODROID_REQUIRED_APEXES: [&str; 3] =
+    ["com.android.adbd", "com.android.i18n", "com.android.os.statsd"];
+
+const APEX_INFO_LIST_PATH: &str = "/apex/apex-info-list.xml";
 
 /// Represents the list of APEXes
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 struct ApexInfoList {
+    #[serde(rename = "apex-info")]
     list: Vec<ApexInfo>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 struct ApexInfo {
+    #[serde(rename = "moduleName")]
     name: String,
+    #[serde(rename = "modulePath")]
     path: PathBuf,
 }
 
@@ -45,34 +56,11 @@ impl ApexInfoList {
     fn load() -> Result<&'static ApexInfoList> {
         static INSTANCE: OnceCell<ApexInfoList> = OnceCell::new();
         INSTANCE.get_or_try_init(|| {
-            // TODO(b/191601801): look up /apex/apex-info-list.xml instead of apexservice
-            // Each APEX prints the line:
-            //   Module: <...> Version: <...> VersionName: <...> Path: <...> IsActive: <...> IsFactory: <...>
-            // We only care about "Module:" and "Path:" tagged values for now.
-            let info_pattern =
-                Regex::new(r"^Module: (?P<name>[^ ]*) .* Path: (?P<path>[^ ]*) .*$")?;
-            let output = Command::new("cmd")
-                .arg("-w")
-                .arg("apexservice")
-                .arg("getActivePackages")
-                .output()
-                .expect("failed to execute apexservice cmd");
-            let list = BufReader::new(output.stdout.as_slice())
-                .lines()
-                .map(|line| -> Result<ApexInfo> {
-                    let line = line?;
-                    let captures = info_pattern
-                        .captures(&line)
-                        .ok_or_else(|| anyhow!("can't parse: {}", line))?;
-                    let name = captures.name("name").unwrap();
-                    let path = captures.name("path").unwrap();
-                    Ok(ApexInfo { name: name.as_str().to_owned(), path: path.as_str().into() })
-                })
-                .collect::<Result<Vec<ApexInfo>>>()?;
-            if list.is_empty() {
-                bail!("failed to load apex info: empty");
-            }
-            Ok(ApexInfoList { list })
+            let apex_info_list = File::open(APEX_INFO_LIST_PATH)
+                .context(format!("Failed to open {}", APEX_INFO_LIST_PATH))?;
+            let apex_info_list: ApexInfoList = from_reader(apex_info_list)
+                .context(format!("Failed to parse {}", APEX_INFO_LIST_PATH))?;
+            Ok(apex_info_list)
         })
     }
 
@@ -87,60 +75,22 @@ impl ApexInfoList {
     }
 }
 
-/// When passing a host APEX file as a block device in a payload disk image,
-/// the size of the original file needs to be stored in the last 4 bytes so that
-/// other programs (e.g. apexd) can read it as a zip.
-/// Returns true always since the filler is created.
-fn make_size_filler(size: u64, filler_path: &Path) -> Result<bool> {
-    let partition_size = align_to_partition_size(size + 4);
-    let mut file = OpenOptions::new().create_new(true).write(true).open(filler_path)?;
-    file.set_len(partition_size - size)?;
-    file.seek(SeekFrom::End(-4))?;
-    file.write_all(&(size as i32).to_be_bytes())?;
-    Ok(true)
-}
-
-/// When passing a host APK file as a block device in a payload disk image and it is
-/// mounted via dm-verity, we need to make the device zero-padded up to 4K boundary.
-/// Otherwise, integrity checks via hashtree will fail.
-/// Returns true if filler is created.
-fn make_zero_filler(size: u64, filler_path: &Path) -> Result<bool> {
-    let partition_size = align_to_partition_size(size);
-    if partition_size <= size {
-        return Ok(false);
-    }
-    let file = OpenOptions::new().create_new(true).write(true).open(filler_path)?;
-    file.set_len(partition_size - size)?;
-    Ok(true)
-}
-
-/// When passing a host idsig file as a block device, we don't need any filler because it is read
-/// in length-prefixed way.
-/// Returns false always because the filler is not created.
-fn make_no_filler(_size: u64, _filler_path: &Path) -> Result<bool> {
-    Ok(false)
-}
-
-/// Creates a DiskImage with partitions:
-///   metadata: metadata
-///   microdroid-apex-0: [apex 0, size filler]
-///   microdroid-apex-1: [apex 1, size filler]
-///   ..
-///   microdroid-apk: [apk, zero filler]
-///   microdroid-apk-idsig: idsig
-pub fn make_payload_disk(
-    apk_file: PathBuf,
-    idsig_file: PathBuf,
+fn make_metadata_file(
     config_path: &str,
     apexes: &[ApexConfig],
     temporary_directory: &Path,
-) -> Result<DiskImage> {
+) -> Result<ParcelFileDescriptor> {
     let metadata_path = temporary_directory.join("metadata");
     let metadata = Metadata {
-        version: 1u32,
+        version: 1,
         apexes: apexes
             .iter()
-            .map(|apex| ApexPayload { name: apex.name.clone(), ..Default::default() })
+            .enumerate()
+            .map(|(i, apex)| ApexPayload {
+                name: apex.name.clone(),
+                partition_name: format!("microdroid-apex-{}", i),
+                ..Default::default()
+            })
             .collect(),
         apk: Some(ApkPayload {
             name: "apk".to_owned(),
@@ -152,60 +102,105 @@ pub fn make_payload_disk(
         payload_config_path: format!("/mnt/apk/{}", config_path),
         ..Default::default()
     };
-    let mut metadata_file =
-        OpenOptions::new().create_new(true).read(true).write(true).open(&metadata_path)?;
+
+    // Write metadata to file.
+    let mut metadata_file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&metadata_path)
+        .with_context(|| format!("Failed to open metadata file {:?}", metadata_path))?;
     microdroid_metadata::write_metadata(&metadata, &mut metadata_file)?;
 
+    // Re-open the metadata file as read-only.
+    open_parcel_file(&metadata_path, false)
+}
+
+/// Creates a DiskImage with partitions:
+///   metadata: metadata
+///   microdroid-apex-0: apex 0
+///   microdroid-apex-1: apex 1
+///   ..
+///   microdroid-apk: apk
+///   microdroid-apk-idsig: idsig
+fn make_payload_disk(
+    apk_file: File,
+    idsig_file: File,
+    config_path: &str,
+    apexes: &[ApexConfig],
+    temporary_directory: &Path,
+) -> Result<DiskImage> {
+    let metadata_file = make_metadata_file(config_path, apexes, temporary_directory)?;
     // put metadata at the first partition
     let mut partitions = vec![Partition {
         label: "payload-metadata".to_owned(),
-        paths: vec![metadata_path],
+        image: Some(metadata_file),
         writable: false,
     }];
 
     let apex_info_list = ApexInfoList::load()?;
-    let mut filler_count = 0;
     for (i, apex) in apexes.iter().enumerate() {
-        partitions.push(make_partition(
-            format!("microdroid-apex-{}", i),
-            apex_info_list.get_path_for(&apex.name)?,
-            temporary_directory,
-            &mut filler_count,
-            &make_size_filler,
-        )?);
+        let apex_path = apex_info_list.get_path_for(&apex.name)?;
+        let apex_file = open_parcel_file(&apex_path, false)?;
+        partitions.push(Partition {
+            label: format!("microdroid-apex-{}", i),
+            image: Some(apex_file),
+            writable: false,
+        });
     }
-    partitions.push(make_partition(
-        "microdroid-apk".to_owned(),
-        apk_file,
-        temporary_directory,
-        &mut filler_count,
-        &make_zero_filler,
-    )?);
-    partitions.push(make_partition(
-        "microdroid-apk-idsig".to_owned(),
-        idsig_file,
-        temporary_directory,
-        &mut filler_count,
-        &make_no_filler,
-    )?);
+    partitions.push(Partition {
+        label: "microdroid-apk".to_owned(),
+        image: Some(ParcelFileDescriptor::new(apk_file)),
+        writable: false,
+    });
+    partitions.push(Partition {
+        label: "microdroid-apk-idsig".to_owned(),
+        image: Some(ParcelFileDescriptor::new(idsig_file)),
+        writable: false,
+    });
 
     Ok(DiskImage { image: None, partitions, writable: false })
 }
 
-fn make_partition(
-    label: String,
-    path: PathBuf,
+pub fn add_microdroid_images(
+    config: &VirtualMachineAppConfig,
     temporary_directory: &Path,
-    filler_count: &mut u32,
-    make_filler: &dyn Fn(u64, &Path) -> Result<bool>,
-) -> Result<Partition> {
-    let filler_path = temporary_directory.join(format!("filler-{}", filler_count));
-    let size = fs::metadata(&path)?.len();
+    apk_file: File,
+    idsig_file: File,
+    instance_file: File,
+    mut apexes: Vec<ApexConfig>,
+    vm_config: &mut VirtualMachineRawConfig,
+) -> Result<()> {
+    apexes.extend(
+        MICRODROID_REQUIRED_APEXES.iter().map(|name| ApexConfig { name: name.to_string() }),
+    );
+    apexes.dedup_by(|a, b| a.name == b.name);
 
-    if make_filler(size, &filler_path)? {
-        *filler_count += 1;
-        Ok(Partition { label, paths: vec![path, filler_path], writable: false })
-    } else {
-        Ok(Partition { label, paths: vec![path], writable: false })
+    vm_config.disks.push(make_payload_disk(
+        apk_file,
+        idsig_file,
+        &config.configPath,
+        &apexes,
+        temporary_directory,
+    )?);
+
+    if config.debug {
+        vm_config.disks[1].partitions.push(Partition {
+            label: "bootconfig".to_owned(),
+            image: Some(open_parcel_file(
+                Path::new("/apex/com.android.virt/etc/microdroid_bootconfig.debug"),
+                false,
+            )?),
+            writable: false,
+        });
     }
+
+    // instance image is at the second partition in the second disk.
+    vm_config.disks[1].partitions.push(Partition {
+        label: "vm-instance".to_owned(),
+        image: Some(ParcelFileDescriptor::new(instance_file)),
+        writable: true,
+    });
+
+    Ok(())
 }

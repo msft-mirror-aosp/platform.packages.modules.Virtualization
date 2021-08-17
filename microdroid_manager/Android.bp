@@ -10,13 +10,14 @@ rust_defaults {
     prefer_rlib: true,
     rustlibs: [
         "libanyhow",
+        "libapkverify",
         "libkernlog",
-        "libkeystore2_system_property-rust",
         "liblibc",
         "liblog_rust",
         "libmicrodroid_metadata",
         "libmicrodroid_payload_config",
         "libprotobuf",
+        "librustutils",
         "libserde",
         "libserde_json",
         "libvsock",
@@ -27,6 +28,7 @@ rust_defaults {
 rust_binary {
     name: "microdroid_manager",
     defaults: ["microdroid_manager_defaults"],
+    bootstrap: true,
 }
 
 rust_test {

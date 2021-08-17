@@ -28,16 +28,22 @@ rust_binary {
 
 rust_binary {
     name: "compsvc",
-    srcs: ["src/compsvc.rs"],
+    srcs: ["src/compsvc_main.rs"],
     rustlibs: [
+        "android.hardware.security.keymint-V1-rust",
+        "android.system.keystore2-V1-rust",
+        "authfs_aidl_interface-rust",
         "compos_aidl_interface-rust",
         "libandroid_logger",
         "libanyhow",
         "libbinder_rpc_unstable_bindgen",
         "libbinder_rs",
         "libclap",
+        "liblibc",
         "liblog_rust",
         "libminijail_rust",
+        "libring",
+        "libscopeguard",
     ],
     prefer_rlib: true,
     shared_libs: [
@@ -46,40 +52,4 @@ rust_binary {
     apex_available: [
         "com.android.compos",
     ],
-}
-
-rust_binary {
-    name: "compsvc_worker",
-    srcs: ["src/compsvc_worker.rs"],
-    rustlibs: [
-        "libandroid_logger",
-        "libanyhow",
-        "libclap",
-        "liblog_rust",
-        "libminijail_rust",
-        "libnix",
-        "libscopeguard",
-    ],
-    prefer_rlib: true,
-    apex_available: [
-        "com.android.compos",
-    ],
-}
-
-rust_binary {
-    name: "compos_key_service",
-    srcs: ["src/compos_key_service.rs"],
-    edition: "2018",
-    rustlibs: [
-        "compos_aidl_interface-rust",
-        "android.system.keystore2-V1-rust",
-        "android.hardware.security.keymint-V1-rust",
-        "libandroid_logger",
-        "libanyhow",
-        "liblog_rust",
-        "libring",
-        "libscopeguard",
-    ],
-    prefer_rlib: true,
-    apex_available: ["com.android.compos"],
 }

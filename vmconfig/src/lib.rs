@@ -93,8 +93,8 @@ impl VmConfig {
             params: self.params.clone(),
             bootloader: maybe_open_parcel_file(&self.bootloader, false)?,
             disks: self.disks.iter().map(DiskImage::to_parcelable).collect::<Result<_, Error>>()?,
-            protected_vm: self.protected,
-            memory_mib,
+            protectedVm: self.protected,
+            memoryMib: memory_mib,
         })
     }
 }
@@ -131,8 +131,7 @@ pub struct Partition {
     /// A label for the partition.
     pub label: String,
     /// The filename of the partition image.
-    #[serde(default)]
-    pub paths: Vec<PathBuf>,
+    pub path: PathBuf,
     /// Whether the partition should be writable.
     #[serde(default)]
     pub writable: bool,
@@ -140,20 +139,16 @@ pub struct Partition {
 
 impl Partition {
     fn to_parcelable(&self) -> Result<AidlPartition> {
-        if self.paths.is_empty() {
-            bail!("Partition {} contains no paths", &self.label);
-        }
-        let images = self
-            .paths
-            .iter()
-            .map(|path| open_parcel_file(&path, self.writable))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(AidlPartition { images, writable: self.writable, label: self.label.to_owned() })
+        Ok(AidlPartition {
+            image: Some(open_parcel_file(&self.path, self.writable)?),
+            writable: self.writable,
+            label: self.label.to_owned(),
+        })
     }
 }
 
 /// Try to open the given file and wrap it in a [`ParcelFileDescriptor`].
-fn open_parcel_file(filename: &Path, writable: bool) -> Result<ParcelFileDescriptor> {
+pub fn open_parcel_file(filename: &Path, writable: bool) -> Result<ParcelFileDescriptor> {
     Ok(ParcelFileDescriptor::new(
         OpenOptions::new()
             .read(true)

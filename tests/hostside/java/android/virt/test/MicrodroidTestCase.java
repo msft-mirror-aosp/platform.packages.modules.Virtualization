@@ -16,7 +16,6 @@
 
 package android.virt.test;
 
-import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.junit.Assert.assertThat;
 
@@ -45,6 +44,11 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         /* debug */ false);
         adbConnectToMicrodroid(getDevice(), cid);
 
+        // Wait until logd-init starts. The service is one of the last services that are started in
+        // the microdroid boot procedure. Therefore, waiting for the service means that we wait for
+        // the boot to complete. TODO: we need a better marker eventually.
+        tryRunOnMicrodroid("watch -e \"getprop init.svc.logd-reinit | grep '^$'\"");
+
         // Test writing to /data partition
         runOnMicrodroid("echo MicrodroidTest > /data/local/tmp/test.txt");
         assertThat(runOnMicrodroid("cat /data/local/tmp/test.txt"), is("MicrodroidTest"));
@@ -54,10 +58,9 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         assertThat(runOnMicrodroid("ls", apkPartition), is(apkPartition));
         final String apkIdsigPartition = "/dev/block/by-name/microdroid-apk-idsig";
         assertThat(runOnMicrodroid("ls", apkIdsigPartition), is(apkIdsigPartition));
-
-        // Check if the APK is mounted using zipfuse
-        final String mountEntry = "zipfuse on /mnt/apk type fuse.zipfuse";
-        assertThat(runOnMicrodroid("mount"), containsString(mountEntry));
+        // Check the vm-instance partition as well
+        final String vmInstancePartition = "/dev/block/by-name/vm-instance";
+        assertThat(runOnMicrodroid("ls", vmInstancePartition), is(vmInstancePartition));
 
         // Check if the native library in the APK is has correct filesystem info
         final String[] abis = runOnMicrodroid("getprop", "ro.product.cpu.abilist").split(",");
@@ -71,14 +74,12 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         assertThat(runOnMicrodroid("getprop", "debug.microdroid.app.run"), is("true"));
         assertThat(runOnMicrodroid("getprop", "debug.microdroid.app.sublib.run"), is("true"));
 
-        // Manually execute the library and check the output
-        final String microdroidLauncher = "system/bin/microdroid_launcher";
-        assertThat(
-                runOnMicrodroid(microdroidLauncher, testLib, "arg1", "arg2"),
-                is("Hello Microdroid " + testLib + " arg1 arg2"));
-
-        // Check that keystore was found by the payload
+        // Check that keystore was found by the payload. Wait until the property is set.
+        tryRunOnMicrodroid("watch -e \"getprop debug.microdroid.test.keystore | grep '^$'\"");
         assertThat(runOnMicrodroid("getprop", "debug.microdroid.test.keystore"), is("PASS"));
+
+        // Check that no denials have happened so far
+        assertThat(runOnMicrodroid("logcat -d -e 'avc:[[:space:]]{1,2}denied'"), is(""));
 
         shutdownMicrodroid(getDevice(), cid);
     }

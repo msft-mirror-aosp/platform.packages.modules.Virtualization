@@ -18,6 +18,7 @@ package android.system.virtualmachine;
 
 import static android.os.ParcelFileDescriptor.MODE_READ_ONLY;
 
+import android.annotation.NonNull;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature; // This actually is certificate!
@@ -50,35 +51,42 @@ public final class VirtualMachineConfig {
     private static final String KEY_IDSIGPATH = "idsigPath";
     private static final String KEY_PAYLOADCONFIGPATH = "payloadConfigPath";
     private static final String KEY_DEBUGMODE = "debugMode";
+    private static final String KEY_MEMORY_MIB = "memoryMib";
 
     // Paths to the APK and its idsig file of this application.
-    private final String mApkPath;
-    private final Signature[] mCerts;
-    private final String mIdsigPath;
+    private final @NonNull String mApkPath;
+    private final @NonNull Signature[] mCerts;
+    private final @NonNull String mIdsigPath;
     private final boolean mDebugMode;
+    /**
+     * The amount of RAM to give the VM, in MiB. If this is 0 or negative the default will be used.
+     */
+    private final int mMemoryMib;
 
     /**
      * Path within the APK to the payload config file that defines software aspects of this config.
      */
-    private final String mPayloadConfigPath;
+    private final @NonNull String mPayloadConfigPath;
 
     // TODO(jiyong): add more items like # of cpu, size of ram, debuggability, etc.
 
     private VirtualMachineConfig(
-            String apkPath,
-            Signature[] certs,
-            String idsigPath,
-            String payloadConfigPath,
-            boolean debugMode) {
+            @NonNull String apkPath,
+            @NonNull Signature[] certs,
+            @NonNull String idsigPath,
+            @NonNull String payloadConfigPath,
+            boolean debugMode,
+            int memoryMib) {
         mApkPath = apkPath;
         mCerts = certs;
         mIdsigPath = idsigPath;
         mPayloadConfigPath = payloadConfigPath;
         mDebugMode = debugMode;
+        mMemoryMib = memoryMib;
     }
 
     /** Loads a config from a stream, for example a file. */
-    /* package */ static VirtualMachineConfig from(InputStream input)
+    /* package */ static @NonNull VirtualMachineConfig from(@NonNull InputStream input)
             throws IOException, VirtualMachineException {
         PersistableBundle b = PersistableBundle.readFromStream(input);
         final int version = b.getInt(KEY_VERSION);
@@ -107,11 +115,13 @@ public final class VirtualMachineConfig {
             throw new VirtualMachineException("No payloadConfigPath");
         }
         final boolean debugMode = b.getBoolean(KEY_DEBUGMODE);
-        return new VirtualMachineConfig(apkPath, certs, idsigPath, payloadConfigPath, debugMode);
+        final int memoryMib = b.getInt(KEY_MEMORY_MIB);
+        return new VirtualMachineConfig(
+                apkPath, certs, idsigPath, payloadConfigPath, debugMode, memoryMib);
     }
 
     /** Persists this config to a stream, for example a file. */
-    /* package */ void serialize(OutputStream output) throws IOException {
+    /* package */ void serialize(@NonNull OutputStream output) throws IOException {
         PersistableBundle b = new PersistableBundle();
         b.putInt(KEY_VERSION, VERSION);
         b.putString(KEY_APKPATH, mApkPath);
@@ -124,11 +134,14 @@ public final class VirtualMachineConfig {
         b.putString(KEY_IDSIGPATH, mIdsigPath);
         b.putString(KEY_PAYLOADCONFIGPATH, mPayloadConfigPath);
         b.putBoolean(KEY_DEBUGMODE, mDebugMode);
+        if (mMemoryMib > 0) {
+            b.putInt(KEY_MEMORY_MIB, mMemoryMib);
+        }
         b.writeToStream(output);
     }
 
     /** Returns the path to the payload config within the owning application. */
-    public String getPayloadConfigPath() {
+    public @NonNull String getPayloadConfigPath() {
         return mPayloadConfigPath;
     }
 
@@ -139,7 +152,7 @@ public final class VirtualMachineConfig {
      * signed by the same signer. All other changes (e.g. using a payload from a different signer,
      * change of the debug mode, etc.) are considered as incompatible.
      */
-    public boolean isCompatibleWith(VirtualMachineConfig other) {
+    public boolean isCompatibleWith(@NonNull VirtualMachineConfig other) {
         if (!Arrays.equals(this.mCerts, other.mCerts)) {
             return false;
         }
@@ -161,6 +174,7 @@ public final class VirtualMachineConfig {
         parcel.idsig = ParcelFileDescriptor.open(new File(mIdsigPath), MODE_READ_ONLY);
         parcel.configPath = mPayloadConfigPath;
         parcel.debug = mDebugMode;
+        parcel.memoryMib = mMemoryMib;
         return parcel;
     }
 
@@ -169,11 +183,12 @@ public final class VirtualMachineConfig {
         private Context mContext;
         private String mPayloadConfigPath;
         private boolean mDebugMode;
+        private int mMemoryMib;
         private String mIdsigPath; // TODO(jiyong): remove this
         // TODO(jiyong): add more items like # of cpu, size of ram, debuggability, etc.
 
         /** Creates a builder for the given context (APK), and the payload config file in APK. */
-        public Builder(Context context, String payloadConfigPath) {
+        public Builder(@NonNull Context context, @NonNull String payloadConfigPath) {
             mContext = context;
             mPayloadConfigPath = payloadConfigPath;
             mDebugMode = false;
@@ -185,16 +200,25 @@ public final class VirtualMachineConfig {
             return this;
         }
 
+        /**
+         * Sets the amount of RAM to give the VM. If this is zero or negative then the default will
+         * be used.
+         */
+        public Builder memoryMib(int memoryMib) {
+            mMemoryMib = memoryMib;
+            return this;
+        }
+
         // TODO(jiyong): remove this. Apps shouldn't need to set the path to the idsig file. It
         // should be automatically found or created on demand.
         /** Set the path to the idsig file for the current application. */
-        public Builder idsigPath(String idsigPath) {
+        public Builder idsigPath(@NonNull String idsigPath) {
             mIdsigPath = idsigPath;
             return this;
         }
 
         /** Builds an immutable {@link VirtualMachineConfig} */
-        public VirtualMachineConfig build() {
+        public @NonNull VirtualMachineConfig build() {
             final String apkPath = mContext.getPackageCodePath();
             final String packageName = mContext.getPackageName();
             Signature[] certs;
@@ -211,7 +235,7 @@ public final class VirtualMachineConfig {
             }
 
             return new VirtualMachineConfig(
-                    apkPath, certs, mIdsigPath, mPayloadConfigPath, mDebugMode);
+                    apkPath, certs, mIdsigPath, mPayloadConfigPath, mDebugMode, mMemoryMib);
         }
     }
 }

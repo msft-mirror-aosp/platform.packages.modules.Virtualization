@@ -7,7 +7,7 @@ intended to host headless & native workloads only.
 
 ## Prerequisites
 
-Any 64-bit target (either x86\_64 or arm64) is supported. 32-bit target is not
+Any 64-bit target (either x86_64 or arm64) is supported. 32-bit target is not
 supported. Note that we currently don't support user builds; only userdebug
 builds are supported.
 
@@ -39,7 +39,7 @@ adb install out/dist/com.android.virt.apex
 adb reboot
 ```
 
-If your target is x86\_64 (e.g. `aosp_cf_x86_64_phone`), replace `aosp_arm64`
+If your target is x86_64 (e.g. `aosp_cf_x86_64_phone`), replace `aosp_arm64`
 with `aosp_x86_64`.
 
 ## Building an app
@@ -69,7 +69,7 @@ multiple configuration files if needed.
 
 ```json
 {
-  "os": {"name": "microdroid"},
+  "os": { "name": "microdroid" },
   "task": {
     "type": "microdroid_launcher",
     "command": "MyMicrodroidApp.so"
@@ -78,8 +78,9 @@ multiple configuration files if needed.
 ```
 
 The value of `task.command` should match with the name of the shared library
-defined above. If your app rquires APEXes to be imported, you can declare the list
-in `apexes` key like following.
+defined above. If your app requires APEXes to be imported, you can declare the
+list in `apexes` key like following.
+
 ```json
 {
   "os": ...,
@@ -102,13 +103,13 @@ android_app {
 }
 
 // The VM configuration file can be embedded by simply placing it at `./assets`
-directory.
+// directory.
 ```
 
 Finally, you build and sign the APK.
 
 ```sh
-TARGET_BUILD_APPS=MyApp m dist
+TARGET_BUILD_APPS=MyApp m apps_only dist
 m apksigner
 apksigner sign --ks path_to_keystore out/dist/MyApp.apk
 ```
@@ -133,6 +134,7 @@ adb install out/dist/MyApp.apk
 
 `ALL_CAP`s below are placeholders. They need to be replaced with correct
 values:
+
 * `VM_CONFIG_FILE`: the name of the VM config file that you embedded in the APK.
   (e.g. `vm_config.json`)
 * `PACKAGE_NAME_OF_YOUR_APP`: package name of your app (e.g. `com.acme.app`).
@@ -147,7 +149,8 @@ Push idsig of the APK to the device.
 
 ```sh
 TEST_ROOT=/data/local/tmp/virt
-adb push out/dist/MyApp.apk.idsig $TEST_ROOT
+adb shell mkdir $TEST_ROOT
+adb push out/dist/MyApp.apk.idsig $TEST_ROOT/
 ```
 
 Execute the following commands to launch a VM. The VM will boot to microdroid
@@ -156,25 +159,28 @@ and then automatically execute your app (the shared library
 
 ```sh
 TEST_ROOT=/data/local/tmp/virt
-adb root
-adb shell setenforce 0
-adb shell /apex/com.android.virt/bin/vm run-app --daemonize --log $TEST_ROOT/log.txt PATH_TO_YOUR_APP $TEST_ROOT/MyApp.apk.idsig assets/VM_CONFIG_FILE
+adb shell /apex/com.android.virt/bin/vm run-app \
+--log $TEST_ROOT/log.txt \
+PATH_TO_YOUR_APP \
+$TEST_ROOT/MyApp.apk.idsig \
+$TEST_ROOT/instance.img \
+assets/VM_CONFIG_FILE
 ```
 
 The last command lets you know the CID assigned to the VM. The console output
-from the VM is stored to `$TEST_ROOT/log.txt` file for debugging purpose.
-
-Note: the disabling of SELinux is a temporary step. The restriction will
-eventually be removed.
+from the VM is stored to `$TEST_ROOT/log.txt` file for debugging purpose. If you
+omit the `--log $TEST_ROOT/log.txt` option, it will be emitted to the current
+console.
 
 Stopping the VM can be done as follows:
 
 ```sh
-adb shell /apex/com.android.virt/bin/vm stop CID
+adb shell /apex/com.android.virt/bin/vm stop $CID
 ```
 
-, where `CID` is the reported CID value. This works only when the `vm` was
-invoked with the `--daemonize` flag.
+, where `$CID` is the reported CID value. This works only when the `vm` was
+invoked with the `--daemonize` flag. If the flag was not used, press Ctrl+C on
+the console where the `vm run-app` command was invoked.
 
 ## ADB
 
@@ -185,10 +191,10 @@ adb forward tcp:8000 vsock:$CID:5555
 adb connect localhost:8000
 ```
 
-`CID` should be the CID that `vm` reported upon execution of the `vm run`
-command in the above. You can also check it with `adb shell
-"/apex/com.android.virt/bin/vm list"`. `5555` must be
-the value. `8000` however can be any port in the development machine.
+`$CID` should be the CID that `vm` reported upon execution of the `vm run`
+command in the above. You can also check it with
+`adb shell "/apex/com.android.virt/bin/vm list"`. `5555` must be the value.
+`8000` however can be any port on the development machine.
 
 Done. Now you can log into microdroid. Have fun!
 

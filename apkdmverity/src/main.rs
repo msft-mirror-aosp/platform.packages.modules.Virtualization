@@ -21,15 +21,13 @@
 //! system managed by the host Android which is assumed to be compromisable, it is important to
 //! keep the integrity of the file "inside" Microdroid.
 
-mod apksigv4;
 mod dm;
 mod loopdevice;
 mod util;
 
-use crate::apksigv4::*;
-
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg};
+use idsig::{HashAlgorithm, V4Signature};
 use std::fmt::Debug;
 use std::fs;
 use std::fs::File;
@@ -98,7 +96,9 @@ fn enable_verity<P: AsRef<Path> + Debug>(apk: P, idsig: P, name: &str) -> Result
     // Parse the idsig file to locate the merkle tree in it, then attach the file to a loop device
     // with the offset so that the start of the merkle tree becomes the beginning of the loop
     // device.
-    let sig = V4Signature::from(File::open(&idsig)?)?;
+    let sig = V4Signature::from(
+        File::open(&idsig).context(format!("Failed to open idsig file {:?}", &idsig))?,
+    )?;
     let offset = sig.merkle_tree_offset;
     let size = sig.merkle_tree_size as u64;
     let hash_device = loopdevice::attach(&idsig, offset, size)?;
@@ -110,7 +110,7 @@ fn enable_verity<P: AsRef<Path> + Debug>(apk: P, idsig: P, name: &str) -> Result
         .hash_device(&hash_device)
         .root_digest(&sig.hashing_info.raw_root_hash)
         .hash_algorithm(match sig.hashing_info.hash_algorithm {
-            apksigv4::HashAlgorithm::SHA256 => dm::DmVerityHashAlgorithm::SHA256,
+            HashAlgorithm::SHA256 => dm::DmVerityHashAlgorithm::SHA256,
         })
         .salt(&sig.hashing_info.salt)
         .build()
@@ -119,7 +119,7 @@ fn enable_verity<P: AsRef<Path> + Debug>(apk: P, idsig: P, name: &str) -> Result
     // Actually create a dm-verity block device using the spec.
     let dm = dm::DeviceMapper::new()?;
     let mapper_device =
-        dm.create_device(&name, &target).context("Failed to create dm-verity device")?;
+        dm.create_device(name, &target).context("Failed to create dm-verity device")?;
 
     Ok(VerityResult { data_device, hash_device, mapper_device })
 }
@@ -135,6 +135,17 @@ mod tests {
         data_backing_file: &'a Path,
         hash_backing_file: &'a Path,
         result: &'a VerityResult,
+    }
+
+    // On Android, skip the test on devices that doesn't have the virt APEX
+    // (b/193612136)
+    #[cfg(target_os = "android")]
+    fn should_skip() -> bool {
+        !Path::new("/apex/com.android.virt").exists()
+    }
+    #[cfg(not(target_os = "android"))]
+    fn should_skip() -> bool {
+        false
     }
 
     fn create_block_aligned_file(path: &Path, data: &[u8]) {
@@ -156,8 +167,11 @@ mod tests {
     }
 
     fn run_test(apk: &[u8], idsig: &[u8], name: &str, check: fn(TestContext)) {
+        if should_skip() {
+            return;
+        }
         let test_dir = tempfile::TempDir::new().unwrap();
-        let (apk_path, idsig_path) = prepare_inputs(&test_dir.path(), apk, idsig);
+        let (apk_path, idsig_path) = prepare_inputs(test_dir.path(), apk, idsig);
 
         // Run the program and register clean-ups.
         let ret = enable_verity(&apk_path, &idsig_path, name).unwrap();
@@ -271,12 +285,16 @@ mod tests {
     // test if both files are already block devices
     #[test]
     fn inputs_are_block_devices() {
+        if should_skip() {
+            return;
+        }
+
         use std::ops::Deref;
         let apk = include_bytes!("../testdata/test.apk");
         let idsig = include_bytes!("../testdata/test.apk.idsig");
 
         let test_dir = tempfile::TempDir::new().unwrap();
-        let (apk_path, idsig_path) = prepare_inputs(&test_dir.path(), apk, idsig);
+        let (apk_path, idsig_path) = prepare_inputs(test_dir.path(), apk, idsig);
 
         // attach the files to loop devices to make them block devices
         let apk_size = fs::metadata(&apk_path).unwrap().len();
@@ -294,7 +312,7 @@ mod tests {
 
         let name = "loop_as_input";
         // Run the program WITH the loop devices, not the regular files.
-        let ret = enable_verity(apk_loop_device.deref(), idsig_loop_device.deref(), &name).unwrap();
+        let ret = enable_verity(apk_loop_device.deref(), idsig_loop_device.deref(), name).unwrap();
         let ret = scopeguard::guard(ret, |ret| {
             loopdevice::detach(ret.data_device).unwrap();
             loopdevice::detach(ret.hash_device).unwrap();

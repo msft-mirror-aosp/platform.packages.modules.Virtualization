@@ -5,6 +5,7 @@ package {
 microdroid_shell_and_utilities = [
     "reboot",
     "sh",
+    "strace",
     "toolbox",
     "toybox",
 ]
@@ -33,6 +34,10 @@ microdroid_symlinks = [
     {
         target: "/system/etc",
         name: "etc",
+    },
+    {
+        target: "/system/bin",
+        name: "bin",
     },
 ]
 
@@ -87,6 +92,12 @@ android_system_image {
         "microdroid_keystore2_key_contexts",
         "microdroid_compatibility_matrix",
         "microdroid_manifest",
+
+        // TODO(b/195425111) these four should be added automatically
+        "android.hardware.security.secureclock-V1-ndk",
+        "android.hardware.security.sharedsecret-V1-ndk",
+        "libcrypto",
+        "liblzma",
     ] + microdroid_shell_and_utilities,
     multilib: {
         common: {
@@ -100,6 +111,7 @@ android_system_image {
             deps: [
                 "apkdmverity",
                 "authfs",
+                "authfs_service",
                 "zipfuse",
 
                 // TODO(b/184872979): Needed by authfs. Remove once the Rust API is created.
@@ -210,7 +222,7 @@ bootimg {
         },
         x86_64: {
             kernel_prebuilt: ":kernel_prebuilts-5.10-x86_64",
-            cmdline: microdroid_boot_cmdline + "pci=noacpi ",
+            cmdline: microdroid_boot_cmdline + "acpi=noirq",
         },
     },
     dtb_prebuilt: "dummy_dtb.img",

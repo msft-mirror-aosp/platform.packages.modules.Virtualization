@@ -23,9 +23,18 @@ parcelable VirtualMachineAppConfig {
     /** idsig for an APK */
     ParcelFileDescriptor idsig;
 
+    /** instance.img that has per-instance data */
+    ParcelFileDescriptor instanceImage;
+
     /** Path to a configuration in an APK. This is the actual configuration for a VM. */
     @utf8InCpp String configPath;
 
     /** Whether to run the VM in debug mode or not */
     boolean debug;
+
+    /**
+     * The amount of RAM to give the VM, in MiB. If this is 0 or negative then it will default to
+     * the value in microdroid.json, if any, or the crosvm default.
+     */
+    int memoryMib;
 }
