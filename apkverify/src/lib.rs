@@ -18,6 +18,8 @@
 
 mod bytes_ext;
 mod sigutil;
+#[allow(dead_code)]
+pub mod testing;
 mod v3;
 mod ziputil;
 
