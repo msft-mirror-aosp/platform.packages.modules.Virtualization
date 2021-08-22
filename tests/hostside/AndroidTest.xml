@@ -14,10 +14,6 @@
      limitations under the License.
 -->
 <configuration description="Tests for microdroid">
-    <target_preparer class="com.android.tradefed.targetprep.RootTargetPreparer">
-        <option name="force-root" value="true" />
-    </target_preparer>
-
     <test class="com.android.compatibility.common.tradefed.testtype.JarHostTest" >
         <option name="jar" value="MicrodroidHostTestCases.jar" />
     </test>

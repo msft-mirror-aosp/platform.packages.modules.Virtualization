@@ -1,0 +1,53 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_defaults {
+    name: "virtualizationservice_defaults",
+    crate_name: "virtualizationservice",
+    srcs: ["src/main.rs"],
+    edition: "2018",
+    // Only build on targets which crosvm builds on.
+    enabled: false,
+    target: {
+        android64: {
+            compile_multilib: "64",
+            enabled: true,
+        },
+        linux_bionic_arm64: {
+            enabled: true,
+        },
+    },
+    prefer_rlib: true,
+    rustlibs: [
+        "android.system.virtualizationservice-rust",
+        "android.os.permissions_aidl-rust",
+        "libandroid_logger",
+        "libanyhow",
+        "libcommand_fds",
+        "libdisk",
+        "liblog_rust",
+        "libmicrodroid_metadata",
+        "libmicrodroid_payload_config",
+        "libonce_cell",
+        "libserde_json",
+        "libserde_xml_rs",
+        "libserde",
+        "libshared_child",
+        "libvmconfig",
+        "libzip",
+        "libvsock",
+    ],
+}
+
+rust_binary {
+    name: "virtualizationservice",
+    defaults: ["virtualizationservice_defaults"],
+    apex_available: ["com.android.virt"],
+}
+
+rust_test {
+    name: "virtualizationservice_device_test",
+    defaults: ["virtualizationservice_defaults"],
+    test_suites: ["general-tests"],
+}

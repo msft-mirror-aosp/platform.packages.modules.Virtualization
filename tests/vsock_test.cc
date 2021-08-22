@@ -14,12 +14,16 @@
  * limitations under the License.
  */
 
+#include <linux/kvm.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 // Needs to be included after sys/socket.h
 #include <linux/vm_sockets.h>
 
+#include <algorithm>
+#include <array>
 #include <iostream>
 #include <optional>
 
@@ -27,7 +31,11 @@
 #include "android-base/logging.h"
 #include "android-base/parseint.h"
 #include "android-base/unique_fd.h"
+#include "android/system/virtualizationservice/VirtualMachineConfig.h"
+#include "android/system/virtualizationservice/VirtualMachineRawConfig.h"
 #include "virt/VirtualizationTest.h"
+
+#define KVM_CAP_ARM_PROTECTED_VM 0xffbadab1
 
 using namespace android::base;
 using namespace android::os;
@@ -35,10 +43,29 @@ using namespace android::os;
 namespace virt {
 
 static constexpr int kGuestPort = 45678;
-static constexpr const char kVmConfigPath[] = "/data/local/tmp/virt-test/vsock_config.json";
+static constexpr const char kVmKernelPath[] = "/data/local/tmp/virt-test/kernel";
+static constexpr const char kVmInitrdPath[] = "/data/local/tmp/virt-test/initramfs";
+static constexpr const char kVmParams[] = "rdinit=/bin/init bin/vsock_client 2 45678 HelloWorld";
 static constexpr const char kTestMessage[] = "HelloWorld";
 
-TEST_F(VirtualizationTest, TestVsock) {
+bool isVmSupported() {
+    const std::array<const char *, 4> needed_files = {
+            "/dev/kvm",
+            "/dev/vhost-vsock",
+            "/apex/com.android.virt/bin/crosvm",
+            "/apex/com.android.virt/bin/virtualizationservice",
+    };
+    return std::all_of(needed_files.begin(), needed_files.end(),
+                       [](const char *file) { return access(file, F_OK) == 0; });
+}
+
+/** Returns true if the kernel supports Protected KVM. */
+bool isPkvmSupported() {
+    unique_fd kvm_fd(open("/dev/kvm", O_NONBLOCK | O_CLOEXEC));
+    return kvm_fd != 0 && ioctl(kvm_fd, KVM_CHECK_EXTENSION, KVM_CAP_ARM_PROTECTED_VM) == 1;
+}
+
+void runTest(sp<IVirtualizationService> virtualization_service, bool protected_vm) {
     binder::Status status;
 
     unique_fd server_fd(TEMP_FAILURE_RETRY(socket(AF_VSOCK, SOCK_STREAM, 0)));
@@ -57,10 +84,15 @@ TEST_F(VirtualizationTest, TestVsock) {
     ret = TEMP_FAILURE_RETRY(listen(server_fd, 1));
     ASSERT_EQ(ret, 0) << strerror(errno);
 
+    VirtualMachineRawConfig raw_config;
+    raw_config.kernel = ParcelFileDescriptor(unique_fd(open(kVmKernelPath, O_RDONLY | O_CLOEXEC)));
+    raw_config.initrd = ParcelFileDescriptor(unique_fd(open(kVmInitrdPath, O_RDONLY | O_CLOEXEC)));
+    raw_config.params = kVmParams;
+    raw_config.protectedVm = protected_vm;
+
+    VirtualMachineConfig config(std::move(raw_config));
     sp<IVirtualMachine> vm;
-    unique_fd vm_config_fd(open(kVmConfigPath, O_RDONLY | O_CLOEXEC));
-    status =
-            mVirtManager->startVm(ParcelFileDescriptor(std::move(vm_config_fd)), std::nullopt, &vm);
+    status = virtualization_service->startVm(config, std::nullopt, &vm);
     ASSERT_TRUE(status.isOk()) << "Error starting VM: " << status;
 
     int32_t cid;
@@ -82,6 +114,24 @@ TEST_F(VirtualizationTest, TestVsock) {
 
     LOG(INFO) << "Received message: " << msg;
     ASSERT_EQ(msg, kTestMessage);
+}
+
+TEST_F(VirtualizationTest, TestVsock) {
+    if (!isVmSupported()) {
+        GTEST_SKIP() << "Device doesn't support KVM.";
+    }
+
+    runTest(mVirtualizationService, false);
+}
+
+TEST_F(VirtualizationTest, TestVsockProtected) {
+    if (!isVmSupported()) {
+        GTEST_SKIP() << "Device doesn't support KVM.";
+    } else if (!isPkvmSupported()) {
+        GTEST_SKIP() << "Skipping as pKVM is not supported on this device.";
+    }
+
+    runTest(mVirtualizationService, true);
 }
 
 } // namespace virt

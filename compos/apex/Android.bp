@@ -31,7 +31,23 @@ apex {
     manifest: "manifest.json",
     file_contexts: ":com.android.compos-file_contexts",
     key: "com.android.compos.key",
+    certificate: ":com.android.compos.certificate",
 
     // TODO(victorhsieh): make it updatable
     updatable: false,
+    platform_apis: true,
+
+    binaries: [
+        "compos_key_cmd",
+        "compsvc",
+        "pvm_exec",
+    ],
+
+    apps: [
+        "CompOSPayloadApp",
+    ],
+
+    prebuilts: [
+        "CompOSPayloadApp.apk.idsig",
+    ],
 }

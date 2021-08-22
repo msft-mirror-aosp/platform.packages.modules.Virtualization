@@ -7,7 +7,10 @@ rust_binary {
     srcs: ["src/pvm_exec.rs"],
     rustlibs: [
         "compos_aidl_interface-rust",
+        "libandroid_logger",
         "libanyhow",
+        "libbinder_rpc_unstable_bindgen",
+        "libbinder_rs",
         "libclap",
         "liblibc",
         "liblog_rust",
@@ -15,31 +18,39 @@ rust_binary {
         "libnix",
         "libscopeguard",
     ],
-}
-
-rust_binary {
-    name: "compsvc",
-    srcs: ["src/compsvc.rs"],
-    rustlibs: [
-        "compos_aidl_interface-rust",
-        "libandroid_logger",
-        "libanyhow",
-        "libclap",
-        "liblog_rust",
-        "libminijail_rust",
+    prefer_rlib: true,
+    shared_libs: [
+        "libbinder_rpc_unstable",
+    ],
+    apex_available: [
+        "com.android.compos",
     ],
 }
 
 rust_binary {
-    name: "compsvc_worker",
-    srcs: ["src/compsvc_worker.rs"],
+    name: "compsvc",
+    srcs: ["src/compsvc_main.rs"],
     rustlibs: [
+        "android.hardware.security.keymint-V1-rust",
+        "android.system.keystore2-V1-rust",
+        "authfs_aidl_interface-rust",
+        "compos_aidl_interface-rust",
         "libandroid_logger",
         "libanyhow",
+        "libbinder_rpc_unstable_bindgen",
+        "libbinder_rs",
         "libclap",
+        "liblibc",
         "liblog_rust",
         "libminijail_rust",
-        "libnix",
+        "libring",
         "libscopeguard",
+    ],
+    prefer_rlib: true,
+    shared_libs: [
+        "libbinder_rpc_unstable",
+    ],
+    apex_available: [
+        "com.android.compos",
     ],
 }

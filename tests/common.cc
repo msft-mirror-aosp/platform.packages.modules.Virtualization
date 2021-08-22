@@ -19,8 +19,9 @@
 namespace virt {
 
 void VirtualizationTest::SetUp() {
-    status_t err = getService<IVirtManager>(String16("android.system.virtmanager"), &mVirtManager);
-    ASSERT_EQ(err, 0);
+    mVirtualizationService = waitForService<IVirtualizationService>(
+            String16("android.system.virtualizationservice"));
+    ASSERT_NE(mVirtualizationService, nullptr);
 }
 
 } // namespace virt

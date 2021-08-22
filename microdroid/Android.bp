@@ -5,6 +5,7 @@ package {
 microdroid_shell_and_utilities = [
     "reboot",
     "sh",
+    "strace",
     "toolbox",
     "toybox",
 ]
@@ -23,7 +24,6 @@ microdroid_rootdirs = [
     "apex",
     "linkerconfig",
     "second_stage_resources",
-    "postinstall",
 ]
 
 microdroid_symlinks = [
@@ -35,6 +35,10 @@ microdroid_symlinks = [
         target: "/system/etc",
         name: "etc",
     },
+    {
+        target: "/system/bin",
+        name: "bin",
+    },
 ]
 
 android_system_image {
@@ -45,10 +49,14 @@ android_system_image {
     partition_name: "system",
     deps: [
         "init_second_stage",
-        "microdroid_init_rc",
         "microdroid_build_prop",
+        "microdroid_init_rc",
+        "microdroid_launcher",
+        "microdroid_manager",
+
         "ueventd.rc",
         "libbinder",
+        "libbinder_ndk",
         "libstdc++",
         "logcat",
         "logd",
@@ -61,9 +69,11 @@ android_system_image {
 
         // "com.android.art" requires
         "heapprofd_client_api",
+        "libartpalette-system",
 
         "apexd",
         "debuggerd",
+        "keystore2",
         "linker",
         "linkerconfig",
         "servicemanager",
@@ -71,19 +81,41 @@ android_system_image {
         "cgroups.json",
         "public.libraries.android.txt",
 
-        "plat_sepolicy_and_mapping.sha256",
+        // TODO(b/185767624): remove hidl after full keymint support
+        "hwservicemanager",
+
+        "microdroid_plat_sepolicy_and_mapping.sha256",
+        "microdroid_file_contexts",
+        "microdroid_hwservice_contexts",
+        "microdroid_property_contexts",
+        "microdroid_service_contexts",
+        "microdroid_keystore2_key_contexts",
+        "microdroid_compatibility_matrix",
+        "microdroid_manifest",
+
+        // TODO(b/195425111) these four should be added automatically
+        "android.hardware.security.secureclock-V1-ndk",
+        "android.hardware.security.sharedsecret-V1-ndk",
+        "libcrypto",
+        "liblzma",
     ] + microdroid_shell_and_utilities,
     multilib: {
         common: {
             deps: [
                 "com.android.runtime",
-                "plat_sepolicy.cil",
-                "plat_mapping_file",
-                "plat_file_contexts",
-                "plat_hwservice_contexts",
-                "plat_property_contexts",
-                "plat_service_contexts",
-                "plat_keystore2_key_contexts",
+                "microdroid_plat_sepolicy.cil",
+                "microdroid_plat_mapping_file",
+            ],
+        },
+        lib64: {
+            deps: [
+                "apkdmverity",
+                "authfs",
+                "authfs_service",
+                "zipfuse",
+
+                // TODO(b/184872979): Needed by authfs. Remove once the Rust API is created.
+                "libbinder_rpc_unstable",
             ],
         },
     },
@@ -91,7 +123,7 @@ android_system_image {
     base_dir: "system",
     dirs: microdroid_rootdirs,
     symlinks: microdroid_symlinks,
-    file_contexts: "microdroid_file_contexts",
+    file_contexts: ":microdroid_file_contexts.gen",
 }
 
 prebuilt_etc {
@@ -106,16 +138,41 @@ prebuilt_root {
     name: "microdroid_build_prop",
     filename: "build.prop",
     src: "build.prop",
+    arch: {
+        x86_64: {
+            src: ":microdroid_build_prop_gen_x86_64",
+        },
+        arm64: {
+            src: ":microdroid_build_prop_gen_arm64",
+        },
+    },
     installable: false,
+}
+
+genrule {
+    name: "microdroid_build_prop_gen_x86_64",
+    srcs: ["build.prop"],
+    out: ["build.prop.out"],
+    cmd: "cp $(in) $(out); echo ro.product.cpu.abilist=x86_64 >> $(out)",
+}
+
+genrule {
+    name: "microdroid_build_prop_gen_arm64",
+    srcs: ["build.prop"],
+    out: ["build.prop.out"],
+    cmd: "cp $(in) $(out); echo ro.product.cpu.abilist=arm64-v8a >> $(out)",
 }
 
 android_filesystem {
     name: "microdroid_vendor",
     use_avb: true,
     deps: [
+        "android.hardware.security.keymint-service.microdroid",
         "microdroid_fstab",
         "microdroid_precompiled_sepolicy",
         "microdroid_precompiled_sepolicy.plat_sepolicy_and_mapping.sha256",
+        "microdroid_vendor_manifest",
+        "microdroid_vendor_compatibility_matrix",
     ],
     multilib: {
         common: {
@@ -128,7 +185,7 @@ android_filesystem {
     },
     avb_private_key: ":avb_testkey_rsa4096",
     avb_algorithm: "SHA256_RSA4096",
-    file_contexts: "microdroid_vendor_file_contexts",
+    file_contexts: ":microdroid_vendor_file_contexts.gen",
 }
 
 logical_partition {
@@ -147,13 +204,10 @@ logical_partition {
     ],
 }
 
-// TODO(jiyong): change the name to init, cause it's confusing
-microdroid_boot_cmdline = "rdinit=/bin/init_vendor " +
-    "panic=-1 " +
+microdroid_boot_cmdline = "panic=-1 " +
+    "bootconfig " +
     // TODO(b/181936135) make the ratelimiting conditional; ratelimiting on prod build
-    "printk.devkmsg=on " +
-    "androidboot.first_stage_console=1 " +
-    "androidboot.hardware=microdroid "
+    "printk.devkmsg=on "
 
 bootimg {
     name: "microdroid_boot-5.10",
@@ -164,16 +218,11 @@ bootimg {
     arch: {
         arm64: {
             kernel_prebuilt: ":kernel_prebuilts-5.10-arm64",
-            cmdline: microdroid_boot_cmdline +
-                "androidboot.boot_devices=10000.pci",
+            cmdline: microdroid_boot_cmdline,
         },
         x86_64: {
             kernel_prebuilt: ":kernel_prebuilts-5.10-x86_64",
-            cmdline: microdroid_boot_cmdline +
-                "pci=noacpi " +
-                "androidboot.boot_devices=pci0000:00/0000:00:01.0," + // os
-                "pci0000:00/0000:00:03.0," + // payload
-                "pci0000:00/0000:00:04.0", // userdata
+            cmdline: microdroid_boot_cmdline + "acpi=noirq",
         },
     },
     dtb_prebuilt: "dummy_dtb.img",
@@ -186,7 +235,7 @@ bootimg {
 android_filesystem {
     name: "microdroid_ramdisk-5.10",
     deps: [
-        "init_first_stage_soong",
+        "init_first_stage",
     ],
     dirs: [
         "dev",
@@ -207,6 +256,14 @@ bootimg {
     dtb_prebuilt: "dummy_dtb.img",
     header_version: "4",
     vendor_boot: true,
+    arch: {
+        arm64: {
+            bootconfig: ":microdroid_bootconfig_arm64_gen",
+        },
+        x86_64: {
+            bootconfig: ":microdroid_bootconfig_x86_64_gen",
+        },
+    },
     partition_name: "vendor_boot",
     use_avb: true,
     avb_private_key: ":avb_testkey_rsa4096",
@@ -229,7 +286,7 @@ android_filesystem {
     type: "compressed_cpio",
     symlinks: [
         {
-            target: "etc/fstab",
+            target: "etc/fstab.microdroid",
             name: "first_stage_ramdisk/fstab.microdroid",
         },
         {
@@ -239,10 +296,36 @@ android_filesystem {
     ],
 }
 
+genrule {
+    name: "microdroid_bootconfig_arm64_gen",
+    srcs: [
+        "bootconfig.common",
+        "bootconfig.arm64",
+    ],
+    out: ["bootconfig"],
+    cmd: "cat $(in) > $(out)",
+}
+
+genrule {
+    name: "microdroid_bootconfig_x86_64_gen",
+    srcs: [
+        "bootconfig.common",
+        "bootconfig.x86_64",
+    ],
+    out: ["bootconfig"],
+    cmd: "cat $(in) > $(out)",
+}
+
+prebuilt_etc {
+    name: "microdroid_bootconfig_debug",
+    src: "bootconfig.debug",
+    filename: "microdroid_bootconfig.debug",
+}
+
 prebuilt_etc {
     name: "microdroid_fstab",
-    src: "fstab",
-    filename: "fstab",
+    src: "fstab.microdroid",
+    filename: "fstab.microdroid",
     installable: false,
 }
 
@@ -316,36 +399,6 @@ genrule {
     cmd: "$(location mkenvimage_host) -s 4096 -o $(out) $(in)",
 }
 
-// sepolicy sha256 for vendor
-prebuilt_etc {
-    name: "microdroid_precompiled_sepolicy.plat_sepolicy_and_mapping.sha256",
-    src: ":plat_sepolicy_and_mapping.sha256_gen",
-    filename: "precompiled_sepolicy.plat_sepolicy_and_mapping.sha256",
-    relative_install_path: "selinux",
-    installable: false,
-}
-
-genrule {
-    name: "microdroid_precompiled_sepolicy_gen",
-    tools: ["secilc"],
-    srcs: [
-        ":plat_sepolicy.cil",
-        ":plat_mapping_file",
-        ":microdroid_plat_pub_versioned.cil",
-        ":microdroid_vendor_sepolicy.cil",
-    ],
-    out: ["precompiled_sepolicy"],
-    cmd: "$(location secilc) -m -M true -G -c 30 $(in) -o $(out) -f /dev/null",
-}
-
-prebuilt_etc {
-    name: "microdroid_precompiled_sepolicy",
-    src: ":microdroid_precompiled_sepolicy_gen",
-    filename: "precompiled_sepolicy",
-    relative_install_path: "selinux",
-    installable: false,
-}
-
 vbmeta {
     name: "microdroid_vbmeta",
     partition_name: "vbmeta",
@@ -378,21 +431,38 @@ vbmeta {
 }
 
 prebuilt_etc {
-    name: "microdroid_cdisk.json",
-    src: "microdroid_cdisk.json",
+    name: "microdroid.json",
+    src: "microdroid.json",
 }
 
 prebuilt_etc {
-    name: "microdroid_cdisk_env.json",
-    src: "microdroid_cdisk_env.json",
+    name: "microdroid_vendor_manifest",
+    src: "microdroid_vendor_manifest.xml",
+    filename: "manifest.xml",
+    relative_install_path: "vintf",
+    installable: false,
 }
 
 prebuilt_etc {
-    name: "microdroid_cdisk_userdata.json",
-    src: "microdroid_cdisk_userdata.json",
+    name: "microdroid_vendor_compatibility_matrix",
+    src: "microdroid_vendor_compatibility_matrix.xml",
+    filename: "compatibility_matrix.xml",
+    relative_install_path: "vintf",
+    installable: false,
 }
 
 prebuilt_etc {
-    name: "microdroid_payload.json",
-    src: "microdroid_payload.json",
+    name: "microdroid_compatibility_matrix",
+    src: "microdroid_compatibility_matrix.xml",
+    filename: "compatibility_matrix.current.xml",
+    relative_install_path: "vintf",
+    installable: false,
+}
+
+prebuilt_etc {
+    name: "microdroid_manifest",
+    src: "microdroid_manifest.xml",
+    filename: "manifest.xml",
+    relative_install_path: "vintf",
+    installable: false,
 }

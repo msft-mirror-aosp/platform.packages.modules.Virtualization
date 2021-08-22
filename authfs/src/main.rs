@@ -32,7 +32,6 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use structopt::StructOpt;
 
 mod auth;
@@ -52,6 +51,14 @@ struct Args {
     /// Mount point of AuthFS.
     #[structopt(parse(from_os_str))]
     mount_point: PathBuf,
+
+    /// CID of the VM where the service runs.
+    #[structopt(long)]
+    cid: Option<u32>,
+
+    /// Extra options to FUSE
+    #[structopt(short = "o")]
+    extra_options: Option<String>,
 
     /// A read-only remote file with integrity check. Can be multiple.
     ///
@@ -86,6 +93,14 @@ struct Args {
     /// Enable debugging features.
     #[structopt(long)]
     debug: bool,
+}
+
+impl Args {
+    fn has_remote_files(&self) -> bool {
+        !self.remote_ro_file.is_empty()
+            || !self.remote_ro_file_unverified.is_empty()
+            || !self.remote_new_rw_file.is_empty()
+    }
 }
 
 struct OptionRemoteRoFile {
@@ -205,27 +220,33 @@ fn parse_local_ro_file_unverified_ro_option(option: &str) -> Result<OptionLocalR
     })
 }
 
-fn new_config_remote_verified_file(remote_id: i32, file_size: u64) -> Result<FileConfig> {
-    let service = file::get_local_binder();
+fn new_config_remote_verified_file(
+    service: file::VirtFdService,
+    remote_id: i32,
+    file_size: u64,
+) -> Result<FileConfig> {
     let signature = service.readFsveritySignature(remote_id).context("Failed to read signature")?;
 
-    let service = Arc::new(Mutex::new(service));
     let authenticator = FakeAuthenticator::always_succeed();
-    Ok(FileConfig::RemoteVerifiedReadonlyFile {
+    Ok(FileConfig::RemoteVerifiedReadonly {
         reader: VerifiedFileReader::new(
             &authenticator,
-            RemoteFileReader::new(Arc::clone(&service), remote_id),
+            RemoteFileReader::new(service.clone(), remote_id),
             file_size,
             signature,
-            RemoteMerkleTreeReader::new(Arc::clone(&service), remote_id),
+            RemoteMerkleTreeReader::new(service.clone(), remote_id),
         )?,
         file_size,
     })
 }
 
-fn new_config_remote_unverified_file(remote_id: i32, file_size: u64) -> Result<FileConfig> {
-    let reader = RemoteFileReader::new(Arc::new(Mutex::new(file::get_local_binder())), remote_id);
-    Ok(FileConfig::RemoteUnverifiedReadonlyFile { reader, file_size })
+fn new_config_remote_unverified_file(
+    service: file::VirtFdService,
+    remote_id: i32,
+    file_size: u64,
+) -> Result<FileConfig> {
+    let reader = RemoteFileReader::new(service, remote_id);
+    Ok(FileConfig::RemoteUnverifiedReadonly { reader, file_size })
 }
 
 fn new_config_local_ro_file(
@@ -242,40 +263,57 @@ fn new_config_local_ro_file(
     let _ = File::open(signature)?.read_to_end(&mut sig)?;
     let reader =
         VerifiedFileReader::new(&authenticator, file_reader, file_size, sig, merkle_tree_reader)?;
-    Ok(FileConfig::LocalVerifiedReadonlyFile { reader, file_size })
+    Ok(FileConfig::LocalVerifiedReadonly { reader, file_size })
 }
 
 fn new_config_local_ro_file_unverified(file_path: &Path) -> Result<FileConfig> {
     let reader = LocalFileReader::new(File::open(file_path)?)?;
     let file_size = reader.len();
-    Ok(FileConfig::LocalUnverifiedReadonlyFile { reader, file_size })
+    Ok(FileConfig::LocalUnverifiedReadonly { reader, file_size })
 }
 
-fn new_config_remote_new_verified_file(remote_id: i32) -> Result<FileConfig> {
-    let remote_file =
-        RemoteFileEditor::new(Arc::new(Mutex::new(file::get_local_binder())), remote_id);
-    Ok(FileConfig::RemoteVerifiedNewFile { editor: VerifiedFileEditor::new(remote_file) })
+fn new_config_remote_new_verified_file(
+    service: file::VirtFdService,
+    remote_id: i32,
+) -> Result<FileConfig> {
+    let remote_file = RemoteFileEditor::new(service, remote_id);
+    Ok(FileConfig::RemoteVerifiedNew { editor: VerifiedFileEditor::new(remote_file) })
 }
 
 fn prepare_file_pool(args: &Args) -> Result<BTreeMap<Inode, FileConfig>> {
     let mut file_pool = BTreeMap::new();
 
-    for config in &args.remote_ro_file {
-        file_pool.insert(
-            config.ino,
-            new_config_remote_verified_file(config.remote_id, config.file_size)?,
-        );
-    }
+    if args.has_remote_files() {
+        let service = file::get_binder_service(args.cid)?;
 
-    for config in &args.remote_ro_file_unverified {
-        file_pool.insert(
-            config.ino,
-            new_config_remote_unverified_file(config.remote_id, config.file_size)?,
-        );
-    }
+        for config in &args.remote_ro_file {
+            file_pool.insert(
+                config.ino,
+                new_config_remote_verified_file(
+                    service.clone(),
+                    config.remote_id,
+                    config.file_size,
+                )?,
+            );
+        }
 
-    for config in &args.remote_new_rw_file {
-        file_pool.insert(config.ino, new_config_remote_new_verified_file(config.remote_id)?);
+        for config in &args.remote_ro_file_unverified {
+            file_pool.insert(
+                config.ino,
+                new_config_remote_unverified_file(
+                    service.clone(),
+                    config.remote_id,
+                    config.file_size,
+                )?,
+            );
+        }
+
+        for config in &args.remote_new_rw_file {
+            file_pool.insert(
+                config.ino,
+                new_config_remote_new_verified_file(service.clone(), config.remote_id)?,
+            );
+        }
     }
 
     for config in &args.local_ro_file {
@@ -305,6 +343,6 @@ fn main() -> Result<()> {
     );
 
     let file_pool = prepare_file_pool(&args)?;
-    fusefs::loop_forever(file_pool, &args.mount_point)?;
+    fusefs::loop_forever(file_pool, &args.mount_point, &args.extra_options)?;
     bail!("Unexpected exit after the handler loop")
 }

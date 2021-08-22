@@ -29,15 +29,15 @@ cc_test {
         "vsock_test.cc",
     ],
     local_include_dirs: ["include"],
+    compile_multilib: "64",
     data: [
         ":virt_test_kernel",
         ":virt_test_initramfs",
-        "vsock_config.json",
     ],
     static_libs: [
         // The existence of the library in the system partition is not guaranteed.
         // Let's have our own copy of it.
-        "android.system.virtmanager-cpp",
+        "android.system.virtualizationservice-cpp",
     ],
     shared_libs: [
         "libbase",

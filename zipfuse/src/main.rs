@@ -39,35 +39,48 @@ use crate::inode::{DirectoryEntry, Inode, InodeData, InodeKind, InodeTable};
 
 fn main() -> Result<()> {
     let matches = App::new("zipfuse")
+        .arg(
+            Arg::with_name("options")
+                .short("o")
+                .takes_value(true)
+                .required(false)
+                .help("Comma separated list of mount options"),
+        )
         .arg(Arg::with_name("ZIPFILE").required(true))
         .arg(Arg::with_name("MOUNTPOINT").required(true))
         .get_matches();
 
     let zip_file = matches.value_of("ZIPFILE").unwrap().as_ref();
     let mount_point = matches.value_of("MOUNTPOINT").unwrap().as_ref();
-    run_fuse(zip_file, mount_point)?;
+    let options = matches.value_of("options");
+    run_fuse(zip_file, mount_point, options)?;
     Ok(())
 }
 
 /// Runs a fuse filesystem by mounting `zip_file` on `mount_point`.
-pub fn run_fuse(zip_file: &Path, mount_point: &Path) -> Result<()> {
+pub fn run_fuse(zip_file: &Path, mount_point: &Path, extra_options: Option<&str>) -> Result<()> {
     const MAX_READ: u32 = 1 << 20; // TODO(jiyong): tune this
     const MAX_WRITE: u32 = 1 << 13; // This is a read-only filesystem
 
     let dev_fuse = OpenOptions::new().read(true).write(true).open("/dev/fuse")?;
 
+    let mut mount_options = vec![
+        MountOption::FD(dev_fuse.as_raw_fd()),
+        MountOption::RootMode(libc::S_IFDIR | libc::S_IXUSR | libc::S_IXGRP | libc::S_IXOTH),
+        MountOption::AllowOther,
+        MountOption::UserId(0),
+        MountOption::GroupId(0),
+        MountOption::MaxRead(MAX_READ),
+    ];
+    if let Some(value) = extra_options {
+        mount_options.push(MountOption::Extra(value));
+    }
+
     fuse::mount(
         mount_point,
         "zipfuse",
         libc::MS_NOSUID | libc::MS_NODEV | libc::MS_RDONLY,
-        &[
-            MountOption::FD(dev_fuse.as_raw_fd()),
-            MountOption::RootMode(libc::S_IFDIR | libc::S_IXUSR | libc::S_IXGRP | libc::S_IXOTH),
-            MountOption::AllowOther,
-            MountOption::UserId(0),
-            MountOption::GroupId(0),
-            MountOption::MaxRead(MAX_READ),
-        ],
+        &mount_options,
     )?;
     Ok(fuse::worker::start_message_loop(dev_fuse, MAX_READ, MAX_WRITE, ZipFuse::new(zip_file)?)?)
 }
@@ -388,7 +401,7 @@ mod tests {
         let zip_path = PathBuf::from(zip_path);
         let mnt_path = PathBuf::from(mnt_path);
         std::thread::spawn(move || {
-            crate::run_fuse(&zip_path, &mnt_path).unwrap();
+            crate::run_fuse(&zip_path, &mnt_path, None).unwrap();
         });
     }
 
@@ -631,5 +644,61 @@ mod tests {
                 );
             },
         );
+    }
+
+    fn run_fuse_and_check_test_zip(test_dir: &Path, zip_path: &Path) {
+        let mnt_path = test_dir.join("mnt");
+        assert!(fs::create_dir(&mnt_path).is_ok());
+
+        start_fuse(zip_path, &mnt_path);
+
+        // Give some time for the fuse to boot up
+        assert!(wait_for_mount(&mnt_path).is_ok());
+
+        check_dir(&mnt_path, "", &[], &["dir"]);
+        check_dir(&mnt_path, "dir", &["file1", "file2"], &[]);
+        check_file(&mnt_path, "dir/file1", include_bytes!("../testdata/dir/file1"));
+        check_file(&mnt_path, "dir/file2", include_bytes!("../testdata/dir/file2"));
+        assert!(nix::mount::umount2(&mnt_path, nix::mount::MntFlags::empty()).is_ok());
+    }
+
+    #[test]
+    fn supports_deflate() {
+        let test_dir = tempfile::TempDir::new().unwrap();
+        let zip_path = test_dir.path().join("test.zip");
+        let mut zip_file = File::create(&zip_path).unwrap();
+        zip_file.write_all(include_bytes!("../testdata/test.zip")).unwrap();
+
+        run_fuse_and_check_test_zip(test_dir.path(), &zip_path);
+    }
+
+    #[cfg(not(target_os = "android"))] // Android doesn't have the loopdev crate
+    #[test]
+    fn supports_zip_on_block_device() {
+        // Write test.zip to the test directory
+        let test_dir = tempfile::TempDir::new().unwrap();
+        let zip_path = test_dir.path().join("test.zip");
+        let mut zip_file = File::create(&zip_path).unwrap();
+        let data = include_bytes!("../testdata/test.zip");
+        zip_file.write_all(data).unwrap();
+
+        // Pad 0 to test.zip so that its size is multiple of 4096.
+        const BLOCK_SIZE: usize = 4096;
+        let size = (data.len() + BLOCK_SIZE) & !BLOCK_SIZE;
+        let pad_size = size - data.len();
+        assert!(pad_size != 0);
+        let pad = vec![0; pad_size];
+        zip_file.write_all(pad.as_slice()).unwrap();
+        drop(zip_file);
+
+        // Attach test.zip to a loop device
+        let lc = loopdev::LoopControl::open().unwrap();
+        let ld = scopeguard::guard(lc.next_free().unwrap(), |ld| {
+            ld.detach().unwrap();
+        });
+        ld.attach_file(&zip_path).unwrap();
+
+        // Start zipfuse over to the loop device (not the zip file)
+        run_fuse_and_check_test_zip(&test_dir.path(), &ld.path().unwrap());
     }
 }
