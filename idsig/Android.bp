@@ -10,6 +10,7 @@ rust_defaults {
     prefer_rlib: true,
     rustlibs: [
         "libanyhow",
+        "libbyteorder",
         "libring",
         "libnum_traits",
     ],
@@ -24,6 +25,7 @@ rust_defaults {
 rust_library {
     name: "libidsig",
     defaults: ["libidsig.defaults"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_test {
