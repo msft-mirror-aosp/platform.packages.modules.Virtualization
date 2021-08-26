@@ -20,8 +20,8 @@ use crate::payload::add_microdroid_images;
 use crate::{Cid, FIRST_GUEST_CID};
 
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::IVirtualizationService;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::DiskImage::DiskImage;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::IVirtualizationService;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualMachine::{
     BnVirtualMachine, IVirtualMachine,
 };
@@ -32,10 +32,15 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     VirtualMachineRawConfig::VirtualMachineRawConfig,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::VirtualMachineDebugInfo::VirtualMachineDebugInfo;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::PartitionType::PartitionType;
 use android_system_virtualizationservice::binder::{
     self, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor, Status, Strong, ThreadState,
 };
+use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
+    BnVirtualMachineService, IVirtualMachineService,
+};
 use anyhow::{bail, Context, Result};
+use ::binder::unstable_api::AsNative;
 use disk::QcowFile;
 use idsig::{V4Signature, HashAlgorithm};
 use log::{debug, error, warn, info};
@@ -43,12 +48,13 @@ use microdroid_payload_config::VmPayloadConfig;
 use std::convert::TryInto;
 use std::ffi::CString;
 use std::fs::{File, OpenOptions, create_dir};
+use std::io::{Error, ErrorKind, Write};
 use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use vmconfig::VmConfig;
-use vsock::{VsockListener, SockAddr, VsockStream};
+use vsock::{SockAddr, VsockListener, VsockStream};
 use zip::ZipArchive;
 
 pub const BINDER_SERVICE_IDENTIFIER: &str = "android.system.virtualizationservice";
@@ -60,12 +66,23 @@ pub const TEMPORARY_DIRECTORY: &str = "/data/misc/virtualizationservice";
 const VMADDR_CID_HOST: u32 = 2;
 
 /// Port number that virtualizationservice listens on connections from the guest VMs for the
-/// payload output
-const PORT_VIRT_SERVICE: u32 = 3000;
+/// payload input and output
+const PORT_VIRT_STREAM_SERVICE: u32 = 3000;
+
+/// Port number that virtualizationservice listens on connections from the guest VMs for the
+/// VirtualMachineService binder service
+/// Sync with microdroid_manager/src/main.rs
+const PORT_VM_BINDER_SERVICE: u32 = 5000;
 
 /// The size of zero.img.
 /// Gaps in composite disk images are filled with a shared zero.img.
 const ZERO_FILLER_SIZE: u64 = 4096;
+
+/// Magic string for the instance image
+const ANDROID_VM_INSTANCE_MAGIC: &str = "Android-VM-instance";
+
+/// Version of the instance image format
+const ANDROID_VM_INSTANCE_VERSION: u16 = 1;
 
 /// Implementation of `IVirtualizationService`, the entry point of the AIDL service.
 #[derive(Debug, Default)]
@@ -190,6 +207,7 @@ impl IVirtualizationService for VirtualizationService {
         &self,
         image_fd: &ParcelFileDescriptor,
         size: i64,
+        partition_type: PartitionType,
     ) -> binder::Result<()> {
         check_manage_access()?;
         let size = size.try_into().map_err(|e| {
@@ -200,10 +218,25 @@ impl IVirtualizationService for VirtualizationService {
         })?;
         let image = clone_file(image_fd)?;
 
-        QcowFile::new(image, size).map_err(|e| {
+        let mut part = QcowFile::new(image, size).map_err(|e| {
             new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
                 format!("Failed to create QCOW2 image: {}", e),
+            )
+        })?;
+
+        match partition_type {
+            PartitionType::RAW => Ok(()),
+            PartitionType::ANDROID_VM_INSTANCE => format_as_android_vm_instance(&mut part),
+            _ => Err(Error::new(
+                ErrorKind::Unsupported,
+                format!("Unsupported partition type {:?}", partition_type),
+            )),
+        }
+        .map_err(|e| {
+            new_binder_exception(
+                ExceptionCode::SERVICE_SPECIFIC,
+                format!("Failed to initialize partition as {:?}: {}", partition_type, e),
             )
         })?;
 
@@ -273,9 +306,33 @@ impl IVirtualizationService for VirtualizationService {
 impl VirtualizationService {
     pub fn init() -> VirtualizationService {
         let service = VirtualizationService::default();
+
+        // server for payload output
         let state = service.state.clone(); // reference to state (not the state itself) is copied
         std::thread::spawn(move || {
-            handle_connection_from_vm(state).unwrap();
+            handle_stream_connection_from_vm(state).unwrap();
+        });
+
+        // binder server for vm
+        let state = service.state.clone(); // reference to state (not the state itself) is copied
+        std::thread::spawn(move || {
+            let mut service = VirtualMachineService::new_binder(state).as_binder();
+            debug!("virtual machine service is starting as an RPC service.");
+            // SAFETY: Service ownership is transferring to the server and won't be valid afterward.
+            // Plus the binder objects are threadsafe.
+            let retval = unsafe {
+                binder_rpc_unstable_bindgen::RunRpcServer(
+                    service.as_native_mut() as *mut binder_rpc_unstable_bindgen::AIBinder,
+                    PORT_VM_BINDER_SERVICE,
+                )
+            };
+            if retval {
+                debug!("RPC server has shut down gracefully");
+            } else {
+                bail!("Premature termination of RPC server");
+            }
+
+            Ok(retval)
         });
         service
     }
@@ -283,8 +340,8 @@ impl VirtualizationService {
 
 /// Waits for incoming connections from VM. If a new connection is made, notify the event to the
 /// client via the callback (if registered).
-fn handle_connection_from_vm(state: Arc<Mutex<State>>) -> Result<()> {
-    let listener = VsockListener::bind_with_cid_port(VMADDR_CID_HOST, PORT_VIRT_SERVICE)?;
+fn handle_stream_connection_from_vm(state: Arc<Mutex<State>>) -> Result<()> {
+    let listener = VsockListener::bind_with_cid_port(VMADDR_CID_HOST, PORT_VIRT_STREAM_SERVICE)?;
     for stream in listener.incoming() {
         let stream = match stream {
             Err(e) => {
@@ -296,13 +353,11 @@ fn handle_connection_from_vm(state: Arc<Mutex<State>>) -> Result<()> {
         if let Ok(SockAddr::Vsock(addr)) = stream.peer_addr() {
             let cid = addr.cid();
             let port = addr.port();
-            info!("connected from cid={}, port={}", cid, port);
-            if cid < FIRST_GUEST_CID {
-                warn!("connection is not from a guest VM");
-                continue;
-            }
+            info!("payload stream connected from cid={}, port={}", cid, port);
             if let Some(vm) = state.lock().unwrap().get_vm(cid) {
-                vm.callbacks.notify_payload_started(cid, stream);
+                vm.stream.lock().unwrap().insert(stream);
+            } else {
+                error!("connection from cid={} is not from a guest VM", cid);
             }
         }
     }
@@ -318,6 +373,12 @@ fn write_zero_filler(zero_filler_path: &Path) -> Result<()> {
         .with_context(|| "Failed to create zero.img")?;
     file.set_len(ZERO_FILLER_SIZE)?;
     Ok(())
+}
+
+fn format_as_android_vm_instance(part: &mut dyn Write) -> std::io::Result<()> {
+    part.write_all(ANDROID_VM_INSTANCE_MAGIC.as_bytes())?;
+    part.write_all(&ANDROID_VM_INSTANCE_VERSION.to_le_bytes())?;
+    part.flush()
 }
 
 /// Given the configuration for a disk image, assembles the `DiskFile` to pass to crosvm.
@@ -569,11 +630,11 @@ pub struct VirtualMachineCallbacks(Mutex<Vec<Strong<dyn IVirtualMachineCallback>
 
 impl VirtualMachineCallbacks {
     /// Call all registered callbacks to notify that the payload has started.
-    pub fn notify_payload_started(&self, cid: Cid, stream: VsockStream) {
+    pub fn notify_payload_started(&self, cid: Cid, stream: Option<VsockStream>) {
         let callbacks = &*self.0.lock().unwrap();
-        let pfd = vsock_stream_to_pfd(stream);
+        let pfd = stream.map(vsock_stream_to_pfd);
         for callback in callbacks {
-            if let Err(e) = callback.onPayloadStarted(cid as i32, &pfd) {
+            if let Err(e) = callback.onPayloadStarted(cid as i32, pfd.as_ref()) {
                 error!("Error notifying payload start event from VM CID {}: {}", cid, e);
             }
         }
@@ -700,5 +761,40 @@ impl<'a, T> AsRef<T> for BorrowedOrOwned<'a, T> {
             Self::Borrowed(b) => b,
             Self::Owned(o) => o,
         }
+    }
+}
+
+/// Implementation of `IVirtualMachineService`, the entry point of the AIDL service.
+#[derive(Debug, Default)]
+struct VirtualMachineService {
+    state: Arc<Mutex<State>>,
+}
+
+impl Interface for VirtualMachineService {}
+
+impl IVirtualMachineService for VirtualMachineService {
+    fn notifyPayloadStarted(&self, cid: i32) -> binder::Result<()> {
+        let cid = cid as Cid;
+        if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
+            info!("VM having CID {} started payload", cid);
+            let stream = vm.stream.lock().unwrap().take();
+            vm.callbacks.notify_payload_started(cid, stream);
+            Ok(())
+        } else {
+            error!("notifyPayloadStarted is called from an unknown cid {}", cid);
+            Err(new_binder_exception(
+                ExceptionCode::SERVICE_SPECIFIC,
+                format!("cannot find a VM with cid {}", cid),
+            ))
+        }
+    }
+}
+
+impl VirtualMachineService {
+    fn new_binder(state: Arc<Mutex<State>>) -> Strong<dyn IVirtualMachineService> {
+        BnVirtualMachineService::new_binder(
+            VirtualMachineService { state },
+            BinderFeatures::default(),
+        )
     }
 }
