@@ -16,6 +16,7 @@
 
 package android.system.virtualmachine;
 
+import static android.os.ParcelFileDescriptor.MODE_READ_ONLY;
 import static android.os.ParcelFileDescriptor.MODE_READ_WRITE;
 
 import android.annotation.NonNull;
@@ -28,6 +29,7 @@ import android.os.ServiceManager;
 import android.system.virtualizationservice.IVirtualMachine;
 import android.system.virtualizationservice.IVirtualMachineCallback;
 import android.system.virtualizationservice.IVirtualizationService;
+import android.system.virtualizationservice.PartitionType;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
 
 import java.io.File;
@@ -55,6 +57,9 @@ public class VirtualMachine {
 
     /** Name of the instance image file for a VM. (Not implemented) */
     private static final String INSTANCE_IMAGE_FILE = "instance.img";
+
+    /** Name of the idsig file for a VM */
+    private static final String IDSIG_FILE = "idsig";
 
     /** Name of the virtualization service. */
     private static final String SERVICE_NAME = "android.system.virtualizationservice";
@@ -86,6 +91,9 @@ public class VirtualMachine {
     /** Path to the instance image file for this VM. */
     private final @NonNull File mInstanceFilePath;
 
+    /** Path to the idsig file for this VM. */
+    private final @NonNull File mIdsigFilePath;
+
     /** Size of the instance image. 10 MB. */
     private static final long INSTANCE_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -111,6 +119,7 @@ public class VirtualMachine {
         final File thisVmDir = new File(vmRoot, mName);
         mConfigFilePath = new File(thisVmDir, CONFIG_FILE);
         mInstanceFilePath = new File(thisVmDir, INSTANCE_IMAGE_FILE);
+        mIdsigFilePath = new File(thisVmDir, IDSIG_FILE);
     }
 
     /**
@@ -157,7 +166,8 @@ public class VirtualMachine {
         try {
             service.initializeWritablePartition(
                     ParcelFileDescriptor.open(vm.mInstanceFilePath, MODE_READ_WRITE),
-                    INSTANCE_FILE_SIZE);
+                    INSTANCE_FILE_SIZE,
+                    PartitionType.ANDROID_VM_INSTANCE);
         } catch (FileNotFoundException e) {
             throw new VirtualMachineException("instance image missing", e);
         } catch (RemoteException e) {
@@ -248,6 +258,14 @@ public class VirtualMachine {
         if (getStatus() != Status.STOPPED) {
             throw new VirtualMachineException(this + " is not in stopped state");
         }
+
+        try {
+            mIdsigFilePath.createNewFile();
+        } catch (IOException e) {
+            // If the file already exists, exception is not thrown.
+            throw new VirtualMachineException("failed to create idsig file", e);
+        }
+
         IVirtualizationService service =
                 IVirtualizationService.Stub.asInterface(
                         ServiceManager.waitForService(SERVICE_NAME));
@@ -260,6 +278,13 @@ public class VirtualMachine {
             }
 
             VirtualMachineAppConfig appConfig = getConfig().toParcel();
+
+            // Fill the idsig file by hashing the apk
+            service.createOrUpdateIdsigFile(
+                    appConfig.apk, ParcelFileDescriptor.open(mIdsigFilePath, MODE_READ_WRITE));
+
+            // Re-open idsig file in read-only mode
+            appConfig.idsig = ParcelFileDescriptor.open(mIdsigFilePath, MODE_READ_ONLY);
             appConfig.instanceImage = ParcelFileDescriptor.open(mInstanceFilePath, MODE_READ_WRITE);
 
             android.system.virtualizationservice.VirtualMachineConfig vmConfigParcel =

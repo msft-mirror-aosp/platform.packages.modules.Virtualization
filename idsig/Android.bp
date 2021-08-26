@@ -25,6 +25,7 @@ rust_defaults {
 rust_library {
     name: "libidsig",
     defaults: ["libidsig.defaults"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_test {
@@ -32,4 +33,7 @@ rust_test {
     defaults: ["libidsig.defaults"],
     test_suites: ["general-tests"],
     compile_multilib: "first",
+    data: [
+        "testdata/input.*",
+    ],
 }

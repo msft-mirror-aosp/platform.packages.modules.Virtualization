@@ -24,6 +24,7 @@ import android.system.virtualmachine.VirtualMachineCallback;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineException;
 import android.system.virtualmachine.VirtualMachineManager;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -50,6 +51,8 @@ import java.util.concurrent.Executors;
  * the virtual machine to the UI.
  */
 public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "MicrodroidDemo";
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -130,7 +133,6 @@ public class MainActivity extends AppCompatActivity {
             try {
                 VirtualMachineConfig.Builder builder =
                         new VirtualMachineConfig.Builder(getApplication(), "assets/vm_config.json")
-                                .idsigPath("/data/local/tmp/virt/MicrodroidDemoApp.apk.idsig")
                                 .debugMode(debug);
                 VirtualMachineConfig config = builder.build();
                 VirtualMachineManager vmm = VirtualMachineManager.getInstance(getApplication());
@@ -140,19 +142,24 @@ public class MainActivity extends AppCompatActivity {
                         new VirtualMachineCallback() {
                             @Override
                             public void onPayloadStarted(
-                                    VirtualMachine vm, ParcelFileDescriptor out) {
+                                    VirtualMachine vm, ParcelFileDescriptor stream) {
+                                if (stream == null) {
+                                    mPayloadOutput.postValue("(no output available)");
+                                    return;
+                                }
                                 try {
                                     BufferedReader reader =
                                             new BufferedReader(
                                                     new InputStreamReader(
                                                             new FileInputStream(
-                                                                    out.getFileDescriptor())));
+                                                                    stream.getFileDescriptor())));
                                     String line;
                                     while ((line = reader.readLine()) != null) {
                                         mPayloadOutput.postValue(line);
                                     }
                                 } catch (IOException e) {
-                                    // Consume
+                                    Log.e(TAG, "IOException while reading payload: "
+                                            + e.getMessage());
                                 }
                             }
 
