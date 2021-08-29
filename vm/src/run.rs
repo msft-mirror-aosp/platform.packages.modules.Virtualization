@@ -22,6 +22,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     BnVirtualMachineCallback, IVirtualMachineCallback,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    PartitionType::PartitionType,
     VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineConfig::VirtualMachineConfig,
 };
@@ -49,16 +50,28 @@ pub fn command_run_app(
     debug: bool,
 ) -> Result<(), Error> {
     let apk_file = File::open(apk).context("Failed to open APK file")?;
+    let idsig_file = File::create(idsig).context("Failed to create idsig file")?;
+
+    let apk_fd = ParcelFileDescriptor::new(apk_file);
+    let idsig_fd = ParcelFileDescriptor::new(idsig_file);
+    service.createOrUpdateIdsigFile(&apk_fd, &idsig_fd)?;
+
     let idsig_file = File::open(idsig).context("Failed to open idsig file")?;
+    let idsig_fd = ParcelFileDescriptor::new(idsig_file);
 
     if !instance.exists() {
         const INSTANCE_FILE_SIZE: u64 = 10 * 1024 * 1024;
-        command_create_partition(service.clone(), instance, INSTANCE_FILE_SIZE)?;
+        command_create_partition(
+            service.clone(),
+            instance,
+            INSTANCE_FILE_SIZE,
+            PartitionType::ANDROID_VM_INSTANCE,
+        )?;
     }
 
     let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
-        apk: ParcelFileDescriptor::new(apk_file).into(),
-        idsig: ParcelFileDescriptor::new(idsig_file).into(),
+        apk: apk_fd.into(),
+        idsig: idsig_fd.into(),
         instanceImage: open_parcel_file(instance, true /* writable */)?.into(),
         configPath: config_path.to_owned(),
         debug,
@@ -156,16 +169,22 @@ struct VirtualMachineCallback {
 impl Interface for VirtualMachineCallback {}
 
 impl IVirtualMachineCallback for VirtualMachineCallback {
-    fn onPayloadStarted(&self, _cid: i32, stdout: &ParcelFileDescriptor) -> BinderResult<()> {
-        // Show the stdout of the payload
-        let mut reader = BufReader::new(stdout.as_ref());
-        loop {
-            let mut s = String::new();
-            match reader.read_line(&mut s) {
-                Ok(0) => break,
-                Ok(_) => print!("{}", s),
-                Err(e) => eprintln!("error reading from virtual machine: {}", e),
-            };
+    fn onPayloadStarted(
+        &self,
+        _cid: i32,
+        stream: Option<&ParcelFileDescriptor>,
+    ) -> BinderResult<()> {
+        // Show the output of the payload
+        if let Some(stream) = stream {
+            let mut reader = BufReader::new(stream.as_ref());
+            loop {
+                let mut s = String::new();
+                match reader.read_line(&mut s) {
+                    Ok(0) => break,
+                    Ok(_) => print!("{}", s),
+                    Err(e) => eprintln!("error reading from virtual machine: {}", e),
+                };
+            }
         }
         Ok(())
     }

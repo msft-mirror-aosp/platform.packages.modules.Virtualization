@@ -17,12 +17,23 @@
 package com.android.compos;
 
 import com.android.compos.CompOsKeyData;
+import com.android.compos.CompilationResult;
 import com.android.compos.Metadata;
 
 /** {@hide} */
 interface ICompOsService {
     /**
-     * Execute a command composed of the args, in a context that may be specified in the Metadata,
+     * Initializes the service with the supplied encrypted private key blob. The key cannot be
+     * changed once initialized, so once initiailzed, a repeated call will fail with
+     * EX_ILLEGAL_STATE.
+     *
+     * @param keyBlob The encrypted blob containing the private key, as returned by
+     *                generateSigningKey().
+     */
+    void initializeSigningKey(in byte[] keyBlob);
+
+    /**
+     * Run dex2oat command with provided args, in a context that may be specified in the Metadata,
      * e.g. with file descriptors pre-opened. The service is responsible to decide what executables
      * it may run.
      *
@@ -30,9 +41,9 @@ interface ICompOsService {
      *             which may not be used by the service. The service may be configured to always use
      *             a fixed executable, or possibly use the 0-th args are the executable lookup hint.
      * @param metadata Additional information of the execution
-     * @return exit code of the program
+     * @return a CompilationResult
      */
-    byte execute(in String[] args, in Metadata metadata);
+    CompilationResult compile(in String[] args, in Metadata metadata);
 
     /**
      * Generate a new public/private key pair suitable for signing CompOs output files.
@@ -53,13 +64,12 @@ interface ICompOsService {
     boolean verifySigningKey(in byte[] keyBlob, in byte[] publicKey);
 
     /**
-     * Use the supplied encrypted private key to sign some data.
+     * Signs some data with the initialized key. The call will fail with EX_ILLEGAL_STATE if not
+     * yet initialized.
      *
-     * @param keyBlob The encrypted blob containing the private key, as returned by
-     *                generateSigningKey().
      * @param data The data to be signed. (Large data sizes may cause failure.)
      * @return the signature.
      */
     // STOPSHIP(b/193241041): We must not expose this from the PVM.
-    byte[] sign(in byte[] keyBlob, in byte[] data);
+    byte[] sign(in byte[] data);
 }
