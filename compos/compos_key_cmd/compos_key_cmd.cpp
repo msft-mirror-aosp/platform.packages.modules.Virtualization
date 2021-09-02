@@ -75,7 +75,7 @@ constexpr const char* kConfigApkIdsigPath =
         "/apex/com.android.compos/etc/CompOSPayloadApp.apk.idsig";
 
 // This is a path inside the APK
-constexpr const char* kConfigFilePath = "assets/key_service_vm_config.json";
+constexpr const char* kConfigFilePath = "assets/vm_config.json";
 
 static bool writeBytesToFile(const std::vector<uint8_t>& bytes, const std::string& path) {
     std::string str(bytes.begin(), bytes.end());
@@ -109,6 +109,16 @@ public:
             mStarted = true;
         }
         mCv.notify_all();
+        return ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus onPayloadReady(int32_t in_cid) override {
+        LOG(INFO) << "Payload is ready! cid = " << in_cid;
+        return ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus onPayloadFinished(int32_t in_cid, int32_t in_exit_code) override {
+        LOG(INFO) << "Payload finished! cid = " << in_cid << ", exit_code = " << in_exit_code;
         return ScopedAStatus::ok();
     }
 
@@ -434,6 +444,28 @@ static Result<void> sign(TargetVm& vm, const std::string& blob_file,
     return {};
 }
 
+static Result<void> initializeKey(TargetVm& vm, const std::string& blob_file) {
+    auto cid = vm.resolveCid();
+    if (!cid.ok()) {
+        return cid.error();
+    }
+    auto service = getService(*cid);
+    if (!service) {
+        return Error() << "No service";
+    }
+
+    auto blob = readBytesFromFile(blob_file);
+    if (!blob.ok()) {
+        return blob.error();
+    }
+
+    auto status = service->initializeSigningKey(blob.value());
+    if (!status.isOk()) {
+        return Error() << "Failed to initialize signing key: " << status.getDescription();
+    }
+    return {};
+}
+
 static Result<void> makeInstanceImage(const std::string& image_path) {
     ndk::SpAIBinder binder(AServiceManager_waitForService("android.system.virtualizationservice"));
     auto service = IVirtualizationService::fromBinder(binder);
@@ -511,6 +543,13 @@ int main(int argc, char** argv) {
         } else {
             std::cerr << result.error() << '\n';
         }
+    } else if (argc == 3 && argv[1] == "init-key"sv) {
+        auto result = initializeKey(vm, argv[2]);
+        if (result.ok()) {
+            return 0;
+        } else {
+            std::cerr << result.error() << '\n';
+        }
     } else if (argc == 3 && argv[1] == "make-instance"sv) {
         auto result = makeInstanceImage(argv[2]);
         if (result.ok()) {
@@ -519,11 +558,12 @@ int main(int argc, char** argv) {
             std::cerr << result.error() << '\n';
         }
     } else {
-        std::cerr << "Usage: compos_key_cmd [OPTIONS] generate|verify|sign|make-instance\n"
+        std::cerr << "Usage: compos_key_cmd [OPTIONS] generate|verify|sign|make-instance|init-key\n"
                   << "  generate <blob file> <public key file> Generate new key pair and write\n"
                   << "    the private key blob and public key to the specified files.\n "
                   << "  verify <blob file> <public key file> Verify that the content of the\n"
                   << "    specified private key blob and public key files are valid.\n "
+                  << "  init-key <blob file> Initialize the service key.\n"
                   << "  sign <blob file> <files to be signed> Generate signatures for one or\n"
                   << "    more files using the supplied private key blob. Signature is stored in\n"
                   << "    <filename>.signature\n"
