@@ -189,6 +189,16 @@ impl IVirtualMachineCallback for VirtualMachineCallback {
         Ok(())
     }
 
+    fn onPayloadReady(&self, _cid: i32) -> BinderResult<()> {
+        eprintln!("payload is ready");
+        Ok(())
+    }
+
+    fn onPayloadFinished(&self, _cid: i32, exit_code: i32) -> BinderResult<()> {
+        eprintln!("payload finished with exit code {}", exit_code);
+        Ok(())
+    }
+
     fn onDied(&self, _cid: i32) -> BinderResult<()> {
         // No need to explicitly report the event to the user (e.g. via println!) because this
         // callback is registered only when the vm tool is invoked as interactive mode (e.g. not
