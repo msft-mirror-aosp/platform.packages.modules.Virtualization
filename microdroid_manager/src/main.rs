@@ -14,14 +14,17 @@
 
 //! Microdroid Manager
 
+mod instance;
 mod ioutil;
 mod metadata;
 
+use crate::instance::InstanceDisk;
 use anyhow::{anyhow, bail, Context, Result};
 use apkverify::verify;
 use binder::unstable_api::{new_spibinder, AIBinder};
 use binder::{FromIBinder, Strong};
-use log::{error, info, warn};
+use idsig::V4Signature;
+use log::{debug, error, info, warn};
 use microdroid_payload_config::{Task, TaskType, VmPayloadConfig};
 use nix::ioctl_read_bad;
 use rustutils::system_properties::PropertyWatcher;
@@ -33,7 +36,9 @@ use std::str;
 use std::time::Duration;
 use vsock::VsockStream;
 
-use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
+use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
+    VM_BINDER_SERVICE_PORT, VM_STREAM_SERVICE_PORT, IVirtualMachineService,
+};
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
@@ -41,18 +46,13 @@ const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
 /// The CID representing the host VM
 const VMADDR_CID_HOST: u32 = 2;
 
-/// Port number that virtualizationservice listens on connections from the guest VMs for the
-/// VirtualMachineService binder service
-/// Sync with virtualizationservice/src/aidl.rs
-const PORT_VM_BINDER_SERVICE: u32 = 5000;
-
 fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
     // SAFETY: AIBinder returned by RpcClient has correct reference count, and the ownership can be
     // safely taken by new_spibinder.
     let ibinder = unsafe {
         new_spibinder(binder_rpc_unstable_bindgen::RpcClient(
             VMADDR_CID_HOST,
-            PORT_VM_BINDER_SERVICE,
+            VM_BINDER_SERVICE_PORT as u32,
         ) as *mut AIBinder)
     };
     if let Some(ibinder) = ibinder {
@@ -94,6 +94,18 @@ fn main() -> Result<()> {
         return Err(err);
     }
 
+    let mut instance = InstanceDisk::new()?;
+    // TODO(jiyong): the data should have an internal structure
+    if let Some(data) = instance.read_microdroid_data().context("Failed to read identity data")? {
+        debug!("read apk root hash: {}", to_hex_string(&data));
+        //TODO(jiyong) apkdmverity should use this root hash instead of the one read from the idsig
+        //file, if the root hash is found in the instance image.
+    } else {
+        let data = get_apk_roothash()?;
+        debug!("write apk root hash: {}", to_hex_string(&data));
+        instance.write_microdroid_data(data.as_ref()).context("Failed to write identity data")?;
+    }
+
     let service = get_vms_rpc_binder().expect("cannot connect to VirtualMachineService");
 
     if !metadata.payload_config_path.is_empty() {
@@ -129,6 +141,12 @@ fn verify_payloads() -> Result<()> {
     Ok(())
 }
 
+fn get_apk_roothash() -> Result<Box<[u8]>> {
+    let mut idsig = File::open("/dev/block/by-name/microdroid-apk-idsig")?;
+    let idsig = V4Signature::from(&mut idsig)?;
+    Ok(idsig.hashing_info.raw_root_hash)
+}
+
 fn load_config(path: &Path) -> Result<VmPayloadConfig> {
     info!("loading config from {:?}...", path);
     let file = ioutil::wait_for_file(path, WAIT_TIMEOUT)?;
@@ -141,22 +159,27 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
     info!("executing main task {:?}...", task);
     let mut child = build_command(task)?.spawn()?;
 
+    let local_cid = get_local_cid()?;
     info!("notifying payload started");
-    service.notifyPayloadStarted(get_local_cid()? as i32)?;
+    service.notifyPayloadStarted(local_cid as i32)?;
 
-    match child.wait()?.code() {
-        Some(0) => {
+    if let Some(code) = child.wait()?.code() {
+        info!("notifying payload finished");
+        service.notifyPayloadFinished(local_cid as i32, code)?;
+
+        if code == 0 {
             info!("task successfully finished");
-            Ok(())
+        } else {
+            error!("task exited with exit code: {}", code);
         }
-        Some(code) => bail!("task exited with exit code: {}", code),
-        None => bail!("task terminated by signal"),
+    } else {
+        error!("task terminated by signal");
     }
+    Ok(())
 }
 
 fn build_command(task: &Task) -> Result<Command> {
     const VMADDR_CID_HOST: u32 = 2;
-    const PORT_VIRT_SVC: u32 = 3000;
 
     let mut command = match task.type_ {
         TaskType::Executable => {
@@ -171,7 +194,7 @@ fn build_command(task: &Task) -> Result<Command> {
         }
     };
 
-    match VsockStream::connect_with_cid_port(VMADDR_CID_HOST, PORT_VIRT_SVC) {
+    match VsockStream::connect_with_cid_port(VMADDR_CID_HOST, VM_STREAM_SERVICE_PORT as u32) {
         Ok(stream) => {
             // SAFETY: the ownership of the underlying file descriptor is transferred from stream
             // to the file object, and then into the Command object. When the command is finished,
@@ -207,4 +230,8 @@ fn find_library_path(name: &str) -> Result<String> {
     }
 
     Ok(path)
+}
+
+fn to_hex_string(buf: &[u8]) -> String {
+    buf.iter().map(|b| format!("{:02X}", b)).collect()
 }
