@@ -14,9 +14,19 @@
  * limitations under the License.
  */
 
-/// Port to listen. This should be out of future port range (if happens) that microdroid may
-/// reserve for system components.
-pub const VSOCK_PORT: u32 = 6432;
+package com.android.compos;
 
-/// Service name of local binder. Used only for debugging purpose.
-pub const SERVICE_NAME: &str = "compsvc";
+/** {@hide} */
+parcelable FdAnnotation {
+    /**
+     * Input file descriptor numbers to be passed to the program.  This is currently assumed to be
+     * same as the file descriptor number used in the backend server.
+     */
+    int[] input_fds;
+
+    /**
+     * Output file descriptor numbers to be passed to the program.  This is currently assumed to be
+     * same as the file descriptor number used in the backend server.
+     */
+    int[] output_fds;
+}

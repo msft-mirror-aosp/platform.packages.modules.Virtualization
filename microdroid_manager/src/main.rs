@@ -18,22 +18,23 @@ mod instance;
 mod ioutil;
 mod metadata;
 
-use crate::instance::InstanceDisk;
+use crate::instance::{ApkData, InstanceDisk, MicrodroidData, RootHash};
 use anyhow::{anyhow, bail, Context, Result};
 use apkverify::verify;
 use binder::unstable_api::{new_spibinder, AIBinder};
 use binder::{FromIBinder, Strong};
 use idsig::V4Signature;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use microdroid_payload_config::{Task, TaskType, VmPayloadConfig};
 use nix::ioctl_read_bad;
+use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use vsock::VsockStream;
 
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
@@ -45,6 +46,8 @@ const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
 
 /// The CID representing the host VM
 const VMADDR_CID_HOST: u32 = 2;
+
+const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
 
 fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
     // SAFETY: AIBinder returned by RpcClient has correct reference count, and the ownership can be
@@ -89,26 +92,33 @@ fn main() -> Result<()> {
 
     let metadata = metadata::load()?;
 
-    if let Err(err) = verify_payloads() {
-        error!("failed to verify payload: {:#?}", err);
-        return Err(err);
+    let mut instance = InstanceDisk::new()?;
+    let data = instance.read_microdroid_data().context("Failed to read identity data")?;
+    let saved_root_hash: Option<&[u8]> =
+        if let Some(data) = data.as_ref() { Some(&data.apk_data.root_hash) } else { None };
+
+    // Verify the payload before using it.
+    let verified_root_hash =
+        verify_payload(saved_root_hash).context("Payload verification failed")?;
+    if let Some(saved_root_hash) = saved_root_hash {
+        if saved_root_hash == verified_root_hash.as_ref() {
+            info!("Saved root_hash is verified.");
+        } else {
+            bail!("Detected an update of the APK which isn't supported yet.");
+        }
+    } else {
+        info!("Saving APK root_hash: {}", to_hex_string(verified_root_hash.as_ref()));
+        let data = MicrodroidData { apk_data: ApkData { root_hash: verified_root_hash } };
+        instance.write_microdroid_data(&data).context("Failed to write identity data")?;
     }
 
-    let mut instance = InstanceDisk::new()?;
-    // TODO(jiyong): the data should have an internal structure
-    if let Some(data) = instance.read_microdroid_data().context("Failed to read identity data")? {
-        debug!("read apk root hash: {}", to_hex_string(&data));
-        //TODO(jiyong) apkdmverity should use this root hash instead of the one read from the idsig
-        //file, if the root hash is found in the instance image.
-    } else {
-        let data = get_apk_roothash()?;
-        debug!("write apk root hash: {}", to_hex_string(&data));
-        instance.write_microdroid_data(data.as_ref()).context("Failed to write identity data")?;
-    }
+    wait_for_apex_config_done()?;
 
     let service = get_vms_rpc_binder().expect("cannot connect to VirtualMachineService");
-
     if !metadata.payload_config_path.is_empty() {
+        // Before reading a file from the APK, start zipfuse
+        system_properties::write("ctl.start", "zipfuse")?;
+
         let config = load_config(Path::new(&metadata.payload_config_path))?;
 
         let fake_secret = "This is a placeholder for a value that is derived from the images that are loaded in the VM.";
@@ -128,20 +138,56 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// TODO(jooyung): v2/v3 full verification can be slow. Consider multithreading.
-fn verify_payloads() -> Result<()> {
-    // We don't verify APEXes since apexd does.
+// Verify payload before executing it. Full verification (which is slow) is done when the root_hash
+// values from the idsig file and the instance disk are different. This function returns the
+// verified root hash that can be saved to the instance disk.
+fn verify_payload(root_hash: Option<&RootHash>) -> Result<Box<RootHash>> {
+    let start_time = SystemTime::now();
 
-    // should wait APK to be dm-verity mounted by apkdmverity
+    let root_hash_from_idsig = get_apk_root_hash_from_idsig()?;
+    let root_hash_trustful = root_hash == Some(&root_hash_from_idsig);
+
+    // If root_hash can be trusted, pass it to apkdmverity so that it uses the passed root_hash
+    // instead of the value read from the idsig file.
+    if root_hash_trustful {
+        let root_hash = to_hex_string(root_hash.unwrap());
+        system_properties::write("microdroid_manager.apk_root_hash", &root_hash)?;
+    }
+
+    // Start apkdmverity and wait for the dm-verify block
+    system_properties::write("ctl.start", "apkdmverity")?;
     ioutil::wait_for_file(DM_MOUNTED_APK_PATH, WAIT_TIMEOUT)?;
-    verify(DM_MOUNTED_APK_PATH).context(format!("failed to verify {}", DM_MOUNTED_APK_PATH))?;
 
-    info!("payload verification succeeded.");
-    // TODO(jooyung): collect public keys and store them in instance.img
+    // Do the full verification if the root_hash is un-trustful. This requires the full scanning of
+    // the APK file and therefore can be very slow if the APK is large. Note that this step is
+    // taken only when the root_hash is un-trustful which can be either when this is the first boot
+    // of the VM or APK was updated in the host.
+    // TODO(jooyung): consider multithreading to make this faster
+    if !root_hash_trustful {
+        verify(DM_MOUNTED_APK_PATH).context(format!("failed to verify {}", DM_MOUNTED_APK_PATH))?;
+    }
+
+    info!("payload verification successful. took {:#?}", start_time.elapsed().unwrap());
+
+    // At this point, we can ensure that the root_hash from the idsig file is trusted, either by
+    // fully verifying the APK or by comparing it with the saved root_hash.
+    Ok(root_hash_from_idsig)
+}
+
+// Waits until linker config is generated
+fn wait_for_apex_config_done() -> Result<()> {
+    let mut prop = PropertyWatcher::new(APEX_CONFIG_DONE_PROP)?;
+    loop {
+        prop.wait()?;
+        let val = system_properties::read(APEX_CONFIG_DONE_PROP)?;
+        if val == "true" {
+            break;
+        }
+    }
     Ok(())
 }
 
-fn get_apk_roothash() -> Result<Box<[u8]>> {
+fn get_apk_root_hash_from_idsig() -> Result<Box<RootHash>> {
     let mut idsig = File::open("/dev/block/by-name/microdroid-apk-idsig")?;
     let idsig = V4Signature::from(&mut idsig)?;
     Ok(idsig.hashing_info.raw_root_hash)
