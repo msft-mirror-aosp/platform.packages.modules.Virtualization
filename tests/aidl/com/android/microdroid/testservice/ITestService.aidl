@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 The Android Open Source Project
+ * Copyright 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,14 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-package com.android.compos;
+package com.android.microdroid.testservice;
 
 /** {@hide} */
-parcelable OutputFdAnnotation {
-    /**
-     * File descriptor number to be passed to the program.  This is currently assumed to be same as
-     * the file descriptor number used in the backend server.
-     */
-    int fd;
+interface ITestService {
+    const int SERVICE_PORT = 5678;
+
+    /* add two integers. */
+    int addInteger(int a, int b);
 }

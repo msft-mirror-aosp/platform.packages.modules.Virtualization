@@ -27,10 +27,12 @@ rust_defaults {
         "libring",
         "librustutils",
         "libserde",
+        "libserde_cbor",
         "libserde_json",
         "libuuid",
         "libvsock",
         "librand",
+        "libzip",
     ],
     shared_libs: [
         "libbinder_rpc_unstable",
