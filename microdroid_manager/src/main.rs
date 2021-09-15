@@ -88,13 +88,20 @@ fn get_local_cid() -> Result<u32> {
     Ok(ret)
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = try_main() {
+        error!("failed with {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn try_main() -> Result<()> {
     kernlog::init()?;
     info!("started.");
 
-    let metadata = load_metadata()?;
+    let metadata = load_metadata().context("Failed to load payload metadata")?;
 
-    let mut instance = InstanceDisk::new()?;
+    let mut instance = InstanceDisk::new().context("Failed to load instance.img")?;
     let saved_data = instance.read_microdroid_data().context("Failed to read identity data")?;
 
     // Verify the payload before using it.
@@ -162,14 +169,15 @@ fn verify_payload(
     // Start apkdmverity and wait for the dm-verify block
     system_properties::write("ctl.start", "apkdmverity")?;
 
-    // While waiting for apkdmverity to mount APK, gathers APEX pubkeys from payload.
+    // While waiting for apkdmverity to mount APK, gathers public keys and root digests from
+    // APEX payload.
     let apex_data_from_payload = get_apex_data_from_payload(metadata)?;
     if let Some(saved_data) = saved_data.map(|d| &d.apex_data) {
-        // For APEX payload, we don't support updating their pubkeys
+        // We don't support APEX updates. (assuming that update will change root digest)
         ensure!(saved_data == &apex_data_from_payload, "APEX payloads has changed.");
         let apex_metadata = to_metadata(&apex_data_from_payload);
-        // Pass metadata(with pubkeys) to apexd so that it uses the passed metadata
-        // instead of the default one (/dev/block/by-name/payload-metadata)
+        // Pass metadata(with public keys and root digests) to apexd so that it uses the passed
+        // metadata instead of the default one (/dev/block/by-name/payload-metadata)
         OpenOptions::new()
             .create_new(true)
             .write(true)
