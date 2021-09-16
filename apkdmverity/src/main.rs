@@ -240,8 +240,7 @@ mod tests {
         }
 
         run_test(modified_apk.as_slice(), idsig.as_ref(), "incorrect_apk", |ctx| {
-            let ret = fs::read(&ctx.result.mapper_device).map_err(|e| e.kind());
-            assert_eq!(ret, Err(std::io::ErrorKind::Other));
+            fs::read(&ctx.result.mapper_device).expect_err("Should fail");
         });
     }
 
@@ -261,8 +260,7 @@ mod tests {
         }
 
         run_test(apk.as_ref(), modified_idsig.as_slice(), "incorrect_merkle_tree", |ctx| {
-            let ret = fs::read(&ctx.result.mapper_device).map_err(|e| e.kind());
-            assert_eq!(ret, Err(std::io::ErrorKind::Other));
+            fs::read(&ctx.result.mapper_device).expect_err("Should fail");
         });
     }
 
@@ -284,9 +282,7 @@ mod tests {
             // Read around the modified location causes an error
             let f = File::open(&ctx.result.mapper_device).unwrap();
             let mut buf = vec![0; 10]; // just read 10 bytes
-            let ret = f.read_at(&mut buf, MODIFIED_OFFSET).map_err(|e| e.kind());
-            assert!(ret.is_err());
-            assert_eq!(ret, Err(std::io::ErrorKind::Other));
+            f.read_at(&mut buf, MODIFIED_OFFSET).expect_err("Should fail");
         });
     }
 
@@ -359,11 +355,17 @@ mod tests {
         let apk = include_bytes!("../testdata/test.apk");
         let idsig = include_bytes!("../testdata/test.apk.idsig");
         let roothash = V4Signature::from(Cursor::new(&idsig)).unwrap().hashing_info.raw_root_hash;
-        run_test_with_hash(apk.as_ref(), idsig.as_ref(), "correct", Some(&roothash), |ctx| {
-            let verity = fs::read(&ctx.result.mapper_device).unwrap();
-            let original = fs::read(&ctx.result.data_device).unwrap();
-            assert_eq!(verity.len(), original.len()); // fail fast
-            assert_eq!(verity.as_slice(), original.as_slice());
-        });
+        run_test_with_hash(
+            apk.as_ref(),
+            idsig.as_ref(),
+            "correct_custom_roothash",
+            Some(&roothash),
+            |ctx| {
+                let verity = fs::read(&ctx.result.mapper_device).unwrap();
+                let original = fs::read(&ctx.result.data_device).unwrap();
+                assert_eq!(verity.len(), original.len()); // fail fast
+                assert_eq!(verity.as_slice(), original.as_slice());
+            },
+        );
     }
 }

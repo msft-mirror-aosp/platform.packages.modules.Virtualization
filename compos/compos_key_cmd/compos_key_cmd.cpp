@@ -33,6 +33,7 @@
 #include <openssl/x509.h>
 #include <unistd.h>
 
+#include <binder_rpc_unstable.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -42,11 +43,6 @@
 #include <string_view>
 
 #include "compos_signature.pb.h"
-
-// From frameworks/native/libs/binder/rust/src/binder_rpc_unstable.hpp
-extern "C" {
-AIBinder* RpcClient(unsigned int cid, unsigned int port);
-}
 
 using namespace std::literals;
 
@@ -213,7 +209,7 @@ public:
         appConfig.memoryMib = 0; // Use default
 
         LOG(INFO) << "Starting VM";
-        auto status = service->startVm(config, logFd, &mVm);
+        auto status = service->createVm(config, logFd, &mVm);
         if (!status.isOk()) {
             return Error() << status.getDescription();
         }
@@ -224,7 +220,7 @@ public:
             return Error() << status.getDescription();
         }
 
-        LOG(INFO) << "Started VM with cid = " << cid;
+        LOG(INFO) << "Created VM with CID = " << cid;
 
         // We need to use this rather than std::make_shared to make sure the
         // embedded weak_ptr is initialised.
@@ -234,6 +230,12 @@ public:
         if (!status.isOk()) {
             return Error() << status.getDescription();
         }
+
+        status = mVm->start();
+        if (!status.isOk()) {
+            return Error() << status.getDescription();
+        }
+        LOG(INFO) << "Started VM";
 
         if (!mCallback->waitForStarted()) {
             return Error() << "VM Payload failed to start";

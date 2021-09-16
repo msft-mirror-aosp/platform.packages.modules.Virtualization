@@ -13,6 +13,7 @@ rust_defaults {
         "android.system.virtualmachineservice-rust",
         "libanyhow",
         "libapkverify",
+        "libavb_bindgen",
         "libbinder_rpc_unstable_bindgen",
         "libbinder_rs",
         "libbyteorder",
@@ -32,6 +33,7 @@ rust_defaults {
         "libuuid",
         "libvsock",
         "librand",
+        "libzip",
     ],
     shared_libs: [
         "libbinder_rpc_unstable",
@@ -62,4 +64,5 @@ rust_test {
             enabled: false,
         },
     },
+    data: ["tests/data/*"],
 }

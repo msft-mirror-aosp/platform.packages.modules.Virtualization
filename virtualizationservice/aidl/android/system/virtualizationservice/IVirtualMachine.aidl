@@ -16,13 +16,14 @@
 package android.system.virtualizationservice;
 
 import android.system.virtualizationservice.IVirtualMachineCallback;
+import android.system.virtualizationservice.VirtualMachineState;
 
 interface IVirtualMachine {
     /** Get the CID allocated to the VM. */
     int getCid();
 
-    /** Returns true if the VM is still running, or false if it has exited for any reason. */
-    boolean isRunning();
+    /** Returns the current lifecycle state of the VM. */
+    VirtualMachineState getState();
 
     /**
      * Register a Binder object to get callbacks when the state of the VM changes, such as if it
@@ -32,6 +33,9 @@ interface IVirtualMachine {
      * we might miss some events that happen before the registration is done.
      */
     void registerCallback(IVirtualMachineCallback callback);
+
+    /** Starts running the VM. */
+    void start();
 
     /** Open a vsock connection to the CID of the VM on the given port. */
     ParcelFileDescriptor connectVsock(int port);

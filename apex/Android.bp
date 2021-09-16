@@ -50,6 +50,9 @@ apex {
     java_libs: [
         "android.system.virtualmachine",
     ],
+    jni_libs: [
+        "libvirtualmachine_jni",
+    ],
     apps: [
         "android.system.virtualmachine.res",
     ],
@@ -78,4 +81,5 @@ prebuilt_etc {
     name: "com.android.virt.init.rc",
     src: "virtualizationservice.rc",
     filename: "init.rc",
+    installable: false,
 }
