@@ -17,7 +17,7 @@
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmInstance, VmState};
 use crate::payload::add_microdroid_images;
-use crate::{Cid, FIRST_GUEST_CID};
+use crate::{Cid, FIRST_GUEST_CID, SYSPROP_LAST_CID};
 
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualMachine::{
@@ -35,17 +35,18 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     VirtualMachineState::VirtualMachineState,
 };
 use android_system_virtualizationservice::binder::{
-    self, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor, Status, Strong, ThreadState,
+    self, force_lazy_services_persist, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor, Status, Strong, ThreadState,
 };
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
     VM_BINDER_SERVICE_PORT, VM_STREAM_SERVICE_PORT, BnVirtualMachineService, IVirtualMachineService,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use ::binder::unstable_api::AsNative;
 use disk::QcowFile;
 use idsig::{V4Signature, HashAlgorithm};
 use log::{debug, error, warn, info};
 use microdroid_payload_config::VmPayloadConfig;
+use rustutils::system_properties;
 use std::convert::TryInto;
 use std::ffi::CString;
 use std::fs::{File, OpenOptions, create_dir};
@@ -100,7 +101,7 @@ impl IVirtualizationService for VirtualizationService {
         let requester_uid = ThreadState::get_calling_uid();
         let requester_sid = get_calling_sid()?;
         let requester_debug_pid = ThreadState::get_calling_pid();
-        let cid = state.allocate_cid()?;
+        let cid = next_cid().or(Err(ExceptionCode::ILLEGAL_STATE))?;
 
         // Counter to generate unique IDs for temporary image files.
         let mut next_temporary_image_id = 0;
@@ -678,9 +679,6 @@ impl VirtualMachineCallbacks {
 /// struct.
 #[derive(Debug)]
 struct State {
-    /// The next available unused CID.
-    next_cid: Cid,
-
     /// The VMs which have been started. When VMs are started a weak reference is added to this list
     /// while a strong reference is returned to the caller over Binder. Once all copies of the
     /// Binder client are dropped the weak reference here will become invalid, and will be removed
@@ -716,27 +714,48 @@ impl State {
     /// Store a strong VM reference.
     fn debug_hold_vm(&mut self, vm: Strong<dyn IVirtualMachine>) {
         self.debug_held_vms.push(vm);
+        // Make sure our process is not shut down while we hold the VM reference
+        // on behalf of the caller.
+        force_lazy_services_persist(true);
     }
 
     /// Retrieve and remove a strong VM reference.
     fn debug_drop_vm(&mut self, cid: i32) -> Option<Strong<dyn IVirtualMachine>> {
         let pos = self.debug_held_vms.iter().position(|vm| vm.getCid() == Ok(cid))?;
-        Some(self.debug_held_vms.swap_remove(pos))
-    }
-
-    /// Get the next available CID, or an error if we have run out.
-    fn allocate_cid(&mut self) -> binder::Result<Cid> {
-        // TODO(qwandor): keep track of which CIDs are currently in use so that we can reuse them.
-        let cid = self.next_cid;
-        self.next_cid = self.next_cid.checked_add(1).ok_or(ExceptionCode::ILLEGAL_STATE)?;
-        Ok(cid)
+        let vm = self.debug_held_vms.swap_remove(pos);
+        if self.debug_held_vms.is_empty() {
+            // Once we no longer hold any VM references it is ok for our process to be shut down.
+            force_lazy_services_persist(false);
+        }
+        Some(vm)
     }
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { next_cid: FIRST_GUEST_CID, vms: vec![], debug_held_vms: vec![] }
+        State { vms: vec![], debug_held_vms: vec![] }
     }
+}
+
+/// Get the next available CID, or an error if we have run out. The last CID used is stored in
+/// a system property so that restart of virtualizationservice doesn't reuse CID while the host
+/// Android is up.
+fn next_cid() -> Result<Cid> {
+    let next = if let Ok(val) = system_properties::read(SYSPROP_LAST_CID) {
+        if let Ok(num) = val.parse::<u32>() {
+            num.checked_add(1).ok_or_else(|| anyhow!("run out of CID"))?
+        } else {
+            error!("Invalid last CID {}. Using {}", &val, FIRST_GUEST_CID);
+            FIRST_GUEST_CID
+        }
+    } else {
+        // First VM since the boot
+        FIRST_GUEST_CID
+    };
+    // Persist the last value for next use
+    let str_val = format!("{}", next);
+    system_properties::write(SYSPROP_LAST_CID, &str_val)?;
+    Ok(next)
 }
 
 /// Gets the `VirtualMachineState` of the given `VmInstance`.

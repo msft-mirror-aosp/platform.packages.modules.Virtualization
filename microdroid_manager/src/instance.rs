@@ -320,7 +320,7 @@ pub struct MicrodroidData {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ApkData {
     pub root_hash: Box<RootHash>,
-    // TODO(b/199143508) add cert
+    pub pubkey: Box<[u8]>,
 }
 
 pub type RootHash = [u8];
@@ -328,5 +328,6 @@ pub type RootHash = [u8];
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ApexData {
     pub name: String,
-    pub pubkey: Vec<u8>,
+    pub public_key: Vec<u8>,
+    pub root_digest: Vec<u8>,
 }

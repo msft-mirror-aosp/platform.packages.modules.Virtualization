@@ -14,38 +14,23 @@
  * limitations under the License.
  */
 
-syntax = "proto3";
+//! Simple command-line tool to drive composd for testing and debugging.
 
-package android.microdroid;
+use android_system_composd::{
+    aidl::android::system::composd::IIsolatedCompilationService::IIsolatedCompilationService,
+    binder::{wait_for_interface, ProcessState},
+};
+use anyhow::{Context, Result};
 
-// Metadata is the body of the "metadata" partition
-message Metadata {
-  uint32 version = 1;
+fn main() -> Result<()> {
+    ProcessState::start_thread_pool();
 
-  repeated ApexPayload apexes = 2;
+    let service = wait_for_interface::<dyn IIsolatedCompilationService>("android.system.composd")
+        .context("Failed to connect to composd service")?;
 
-  ApkPayload apk = 3;
+    service.runForcedCompile().context("Compilation failed")?;
 
-  string payload_config_path = 4;
-}
+    println!("All Ok!");
 
-message ApexPayload {
-  // Required.
-  string name = 1;
-  string partition_name = 2;
-
-  // Optional.
-  // When specified, apex payload should be verified with the public key and root digest.
-  bytes public_key = 3;
-  bytes root_digest = 4;
-}
-
-message ApkPayload {
-  // Required.
-  // The name of APK.
-  string name = 1;
-
-  string payload_partition_name = 2;
-
-  string idsig_partition_name = 3;
+    Ok(())
 }
