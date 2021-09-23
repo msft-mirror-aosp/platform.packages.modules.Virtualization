@@ -21,9 +21,12 @@ rust_defaults {
     prefer_rlib: true,
     rustlibs: [
         "android.system.virtualizationservice-rust",
+        "android.system.virtualmachineservice-rust",
         "android.os.permissions_aidl-rust",
         "libandroid_logger",
         "libanyhow",
+        "libbinder_rpc_unstable_bindgen",
+        "libbinder_rs",
         "libcommand_fds",
         "libdisk",
         "libidsig",
@@ -31,6 +34,7 @@ rust_defaults {
         "libmicrodroid_metadata",
         "libmicrodroid_payload_config",
         "libonce_cell",
+        "librustutils",
         "libserde_json",
         "libserde_xml_rs",
         "libserde",
@@ -38,6 +42,9 @@ rust_defaults {
         "libvmconfig",
         "libzip",
         "libvsock",
+    ],
+    shared_libs: [
+        "libbinder_rpc_unstable",
     ],
 }
 

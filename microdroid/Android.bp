@@ -52,7 +52,6 @@ android_system_image {
         "microdroid_build_prop",
         "microdroid_init_rc",
         "microdroid_launcher",
-        "microdroid_manager",
 
         "ueventd.rc",
         "libbinder",
@@ -102,7 +101,10 @@ android_system_image {
     multilib: {
         common: {
             deps: [
+                // non-updatable & mandatory apexes
+                "com.android.i18n",
                 "com.android.runtime",
+
                 "microdroid_plat_sepolicy.cil",
                 "microdroid_plat_mapping_file",
             ],
@@ -112,6 +114,7 @@ android_system_image {
                 "apkdmverity",
                 "authfs",
                 "authfs_service",
+                "microdroid_manager",
                 "zipfuse",
 
                 // TODO(b/184872979): Needed by authfs. Remove once the Rust API is created.
@@ -165,6 +168,7 @@ genrule {
 
 android_filesystem {
     name: "microdroid_vendor",
+    partition_name: "vendor",
     use_avb: true,
     deps: [
         "android.hardware.security.keymint-service.microdroid",
@@ -194,20 +198,20 @@ logical_partition {
     size: "auto",
     default_group: [
         {
-            name: "system",
+            name: "system_a",
             filesystem: ":microdroid",
         },
         {
-            name: "vendor",
+            name: "vendor_a",
             filesystem: ":microdroid_vendor",
         },
     ],
 }
 
-microdroid_boot_cmdline = "panic=-1 " +
-    "bootconfig " +
-    // TODO(b/181936135) make the ratelimiting conditional; ratelimiting on prod build
-    "printk.devkmsg=on "
+microdroid_boot_cmdline = [
+    "panic=-1",
+    "bootconfig",
+]
 
 bootimg {
     name: "microdroid_boot-5.10",
@@ -222,9 +226,15 @@ bootimg {
         },
         x86_64: {
             kernel_prebuilt: ":kernel_prebuilts-5.10-x86_64",
-            cmdline: microdroid_boot_cmdline + "acpi=noirq",
+            cmdline: microdroid_boot_cmdline + ["acpi=noirq"],
         },
     },
+    product_variables: {
+        debuggable: {
+            cmdline: ["printk.devkmsg=on"],
+        },
+    },
+
     dtb_prebuilt: "dummy_dtb.img",
     header_version: "4",
     partition_name: "boot",
@@ -413,11 +423,6 @@ vbmeta {
             rollback_index_location: 1,
             private_key: ":avb_testkey_rsa4096",
         },
-        {
-            name: "boot",
-            rollback_index_location: 2,
-            private_key: ":avb_testkey_rsa4096",
-        },
     ],
 }
 
@@ -427,6 +432,7 @@ vbmeta {
     private_key: ":avb_testkey_rsa4096",
     partitions: [
         "microdroid",
+        "microdroid_boot-5.10",
     ],
 }
 

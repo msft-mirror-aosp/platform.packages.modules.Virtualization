@@ -9,20 +9,41 @@ rust_defaults {
     edition: "2018",
     prefer_rlib: true,
     rustlibs: [
+        "android.system.virtualizationservice-rust",
+        "android.system.virtualmachineservice-rust",
         "libanyhow",
         "libapkverify",
+        "libavb_bindgen",
+        "libbinder_rpc_unstable_bindgen",
+        "libbinder_rs",
+        "libbyteorder",
+        "libidsig",
         "libkernlog",
         "liblibc",
         "liblog_rust",
         "libmicrodroid_metadata",
         "libmicrodroid_payload_config",
+        "libnix",
         "libprotobuf",
+        "libring",
         "librustutils",
         "libserde",
+        "libserde_cbor",
         "libserde_json",
+        "libuuid",
         "libvsock",
+        "librand",
+        "libzip",
+    ],
+    shared_libs: [
+        "libbinder_rpc_unstable",
     ],
     init_rc: ["microdroid_manager.rc"],
+    multilib: {
+        lib32: {
+            enabled: false,
+        },
+    },
 }
 
 rust_binary {
@@ -43,4 +64,5 @@ rust_test {
             enabled: false,
         },
     },
+    data: ["tests/data/*"],
 }

@@ -29,7 +29,9 @@ import android.os.ServiceManager;
 import android.system.virtualizationservice.IVirtualMachine;
 import android.system.virtualizationservice.IVirtualMachineCallback;
 import android.system.virtualizationservice.IVirtualizationService;
+import android.system.virtualizationservice.PartitionType;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
+import android.system.virtualizationservice.VirtualMachineState;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -40,6 +42,9 @@ import java.io.InputStream;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * A handle to the virtual machine. The virtual machine is local to the app which created the
@@ -108,6 +113,12 @@ public class VirtualMachine {
     private @Nullable ParcelFileDescriptor mConsoleReader;
     private @Nullable ParcelFileDescriptor mConsoleWriter;
 
+    private final ExecutorService mExecutorService = Executors.newCachedThreadPool();
+
+    static {
+        System.loadLibrary("virtualmachine_jni");
+    }
+
     private VirtualMachine(
             @NonNull Context context, @NonNull String name, @NonNull VirtualMachineConfig config) {
         mPackageName = context.getPackageName();
@@ -165,7 +176,8 @@ public class VirtualMachine {
         try {
             service.initializeWritablePartition(
                     ParcelFileDescriptor.open(vm.mInstanceFilePath, MODE_READ_WRITE),
-                    INSTANCE_FILE_SIZE);
+                    INSTANCE_FILE_SIZE,
+                    PartitionType.ANDROID_VM_INSTANCE);
         } catch (FileNotFoundException e) {
             throw new VirtualMachineException("instance image missing", e);
         } catch (RemoteException e) {
@@ -222,8 +234,18 @@ public class VirtualMachine {
     /** Returns the current status of this virtual machine. */
     public @NonNull Status getStatus() throws VirtualMachineException {
         try {
-            if (mVirtualMachine != null && mVirtualMachine.isRunning()) {
-                return Status.RUNNING;
+            if (mVirtualMachine != null) {
+                switch (mVirtualMachine.getState()) {
+                    case VirtualMachineState.NOT_STARTED:
+                        return Status.STOPPED;
+                    case VirtualMachineState.STARTING:
+                    case VirtualMachineState.STARTED:
+                    case VirtualMachineState.READY:
+                    case VirtualMachineState.FINISHED:
+                        return Status.RUNNING;
+                    case VirtualMachineState.DEAD:
+                        return Status.STOPPED;
+                }
             }
         } catch (RemoteException e) {
             throw new VirtualMachineException(e);
@@ -288,8 +310,7 @@ public class VirtualMachine {
             android.system.virtualizationservice.VirtualMachineConfig vmConfigParcel =
                     android.system.virtualizationservice.VirtualMachineConfig.appConfig(appConfig);
 
-
-            mVirtualMachine = service.startVm(vmConfigParcel, mConsoleWriter);
+            mVirtualMachine = service.createVm(vmConfigParcel, mConsoleWriter);
             mVirtualMachine.registerCallback(
                     new IVirtualMachineCallback.Stub() {
                         @Override
@@ -299,6 +320,24 @@ public class VirtualMachine {
                                 return;
                             }
                             cb.onPayloadStarted(VirtualMachine.this, stream);
+                        }
+
+                        @Override
+                        public void onPayloadReady(int cid) {
+                            final VirtualMachineCallback cb = mCallback;
+                            if (cb == null) {
+                                return;
+                            }
+                            cb.onPayloadReady(VirtualMachine.this);
+                        }
+
+                        @Override
+                        public void onPayloadFinished(int cid, int exitCode) {
+                            final VirtualMachineCallback cb = mCallback;
+                            if (cb == null) {
+                                return;
+                            }
+                            cb.onPayloadFinished(VirtualMachine.this, exitCode);
                         }
 
                         @Override
@@ -322,7 +361,7 @@ public class VirtualMachine {
                                 }
                             },
                             0);
-
+            mVirtualMachine.start();
         } catch (IOException e) {
             throw new VirtualMachineException(e);
         } catch (RemoteException e) {
@@ -409,6 +448,25 @@ public class VirtualMachine {
         mConfig = newConfig;
 
         return oldConfig;
+    }
+
+    private static native IBinder nativeConnectToVsockServer(IBinder vmBinder, int port);
+
+    /**
+     * Connects to a VM's RPC server via vsock, and returns a root IBinder object. Guest VMs are
+     * expected to set up vsock servers in their payload. After the host app receives onPayloadReady
+     * callback, the host app can use this method to establish an RPC session to the guest VMs.
+     *
+     * <p>If the connection succeeds, the root IBinder object will be returned via {@link
+     * VirtualMachineCallback.onVsockServerReady()}. If the connection fails, {@link
+     * VirtualMachineCallback.onVsockServerConnectionFailed()} will be called.
+     */
+    public Future<IBinder> connectToVsockServer(int port) throws VirtualMachineException {
+        if (getStatus() != Status.RUNNING) {
+            throw new VirtualMachineException("VM is not running");
+        }
+        return mExecutorService.submit(
+                () -> nativeConnectToVsockServer(mVirtualMachine.asBinder(), port));
     }
 
     @Override

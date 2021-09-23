@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-/// Port to listen. This should be out of future port range (if happens) that microdroid may
-/// reserve for system components.
-pub const VSOCK_PORT: u32 = 6432;
+#pragma once
 
-/// Service name of local binder. Used only for debugging purpose.
-pub const SERVICE_NAME: &str = "compsvc";
+#include <libavb/libavb.h>

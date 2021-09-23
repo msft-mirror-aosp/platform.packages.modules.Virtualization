@@ -14,47 +14,53 @@
  * limitations under the License.
  */
 
-//! pvm_exec is a proxy/wrapper command to run a command remotely. It does not transport the
-//! program and just pass the command line arguments to compsvc to execute. The most important task
+//! pvm_exec is a proxy/wrapper command to run compilation task remotely. The most important task
 //! for this program is to run a `fd_server` that serves remote file read/write requests.
 //!
-//! Example:
-//! $ adb shell exec 3</dev/zero 4<>/dev/null pvm_exec --in-fd 3 --out-fd 4 -- sleep 10
+//! It currently works as a command line wrapper to make it easy to schedule an existing dex2oat
+//! task to run in the VM.
 //!
-//! Note the immediate argument right after "--" (e.g. "sleep" in the example above) is not really
-//! used. It is only for ergonomics.
+//! Example:
+//! $ adb shell exec 3</input/dex 4<>/output/oat ... pvm_exec --in-fd 3 --out-fd 4 -- dex2oat64 ...
+//!
+//! Note the immediate argument "dex2oat64" right after "--" is not really used. It is only for
+//! ergonomics.
 
 use anyhow::{bail, Context, Result};
 use binder::unstable_api::{new_spibinder, AIBinder};
 use binder::FromIBinder;
-use log::{error, warn};
+use clap::{value_t, App, Arg};
+use log::{debug, error, warn};
 use minijail::Minijail;
 use nix::fcntl::{fcntl, FcntlArg::F_GETFD};
-use nix::sys::stat::fstat;
 use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::process::exit;
 
+use android_system_composd::{
+    aidl::android::system::composd::IIsolatedCompilationService::IIsolatedCompilationService,
+    binder::wait_for_interface,
+};
 use compos_aidl_interface::aidl::com::android::compos::{
-    ICompOsService::ICompOsService, InputFdAnnotation::InputFdAnnotation, Metadata::Metadata,
-    OutputFdAnnotation::OutputFdAnnotation,
+    FdAnnotation::FdAnnotation, ICompOsService::ICompOsService,
 };
 use compos_aidl_interface::binder::Strong;
-
-mod common;
-use common::{SERVICE_NAME, VSOCK_PORT};
+use compos_common::{COMPOS_VSOCK_PORT, VMADDR_CID_ANY};
 
 const FD_SERVER_BIN: &str = "/apex/com.android.virt/bin/fd_server";
 
-fn get_local_service() -> Result<Strong<dyn ICompOsService>> {
-    compos_aidl_interface::binder::get_interface(SERVICE_NAME).context("get local binder")
+fn get_composd() -> Result<Strong<dyn IIsolatedCompilationService>> {
+    wait_for_interface::<dyn IIsolatedCompilationService>("android.system.composd")
+        .context("Failed to find IIsolatedCompilationService")
 }
 
 fn get_rpc_binder(cid: u32) -> Result<Strong<dyn ICompOsService>> {
     // SAFETY: AIBinder returned by RpcClient has correct reference count, and the ownership can be
     // safely taken by new_spibinder.
     let ibinder = unsafe {
-        new_spibinder(binder_rpc_unstable_bindgen::RpcClient(cid, VSOCK_PORT) as *mut AIBinder)
+        new_spibinder(
+            binder_rpc_unstable_bindgen::RpcClient(cid, COMPOS_VSOCK_PORT) as *mut AIBinder
+        )
     };
     if let Some(ibinder) = ibinder {
         <dyn ICompOsService>::try_from(ibinder).context("Cannot connect to RPC service")
@@ -63,23 +69,23 @@ fn get_rpc_binder(cid: u32) -> Result<Strong<dyn ICompOsService>> {
     }
 }
 
-fn spawn_fd_server(metadata: &Metadata, debuggable: bool) -> Result<Minijail> {
+fn spawn_fd_server(fd_annotation: &FdAnnotation, debuggable: bool) -> Result<Minijail> {
     let mut inheritable_fds = if debuggable {
         vec![1, 2] // inherit/redirect stdout/stderr for debugging
     } else {
         vec![]
     };
 
-    let mut args = vec![FD_SERVER_BIN.to_string(), "--rpc-binder".to_string()];
-    for metadata in &metadata.input_fd_annotations {
+    let mut args = vec![FD_SERVER_BIN.to_string()];
+    for fd in &fd_annotation.input_fds {
         args.push("--ro-fds".to_string());
-        args.push(metadata.fd.to_string());
-        inheritable_fds.push(metadata.fd);
+        args.push(fd.to_string());
+        inheritable_fds.push(*fd);
     }
-    for metadata in &metadata.output_fd_annotations {
+    for fd in &fd_annotation.output_fds {
         args.push("--rw-fds".to_string());
-        args.push(metadata.fd.to_string());
-        inheritable_fds.push(metadata.fd);
+        args.push(fd.to_string());
+        inheritable_fds.push(*fd);
     }
 
     let jail = Minijail::new()?;
@@ -102,81 +108,57 @@ fn parse_arg_fd(arg: &str) -> Result<RawFd> {
 
 struct Config {
     args: Vec<String>,
-    metadata: Metadata,
-    cid: Option<u32>,
+    fd_annotation: FdAnnotation,
+    cid: u32,
     debuggable: bool,
 }
 
 fn parse_args() -> Result<Config> {
     #[rustfmt::skip]
-    let matches = clap::App::new("pvm_exec")
-        .arg(clap::Arg::with_name("in-fd")
+    let matches = App::new("pvm_exec")
+        .arg(Arg::with_name("in-fd")
              .long("in-fd")
              .takes_value(true)
              .multiple(true)
              .use_delimiter(true))
-        .arg(clap::Arg::with_name("out-fd")
+        .arg(Arg::with_name("out-fd")
              .long("out-fd")
              .takes_value(true)
              .multiple(true)
              .use_delimiter(true))
-        .arg(clap::Arg::with_name("cid")
+        .arg(Arg::with_name("cid")
              .takes_value(true)
+             .required(true)
              .long("cid"))
-        .arg(clap::Arg::with_name("debug")
+        .arg(Arg::with_name("debug")
              .long("debug"))
-        .arg(clap::Arg::with_name("args")
+        .arg(Arg::with_name("args")
              .last(true)
              .required(true)
              .multiple(true))
         .get_matches();
 
-    let results: Result<Vec<_>> = matches
-        .values_of("in-fd")
-        .unwrap_or_default()
-        .map(|arg| {
-            let fd = parse_arg_fd(arg)?;
-            let file_size = fstat(fd)?.st_size;
-            Ok(InputFdAnnotation { fd, file_size })
-        })
-        .collect();
-    let input_fd_annotations = results?;
+    let results: Result<Vec<_>> =
+        matches.values_of("in-fd").unwrap_or_default().map(parse_arg_fd).collect();
+    let input_fds = results?;
 
-    let results: Result<Vec<_>> = matches
-        .values_of("out-fd")
-        .unwrap_or_default()
-        .map(|arg| {
-            let fd = parse_arg_fd(arg)?;
-            Ok(OutputFdAnnotation { fd })
-        })
-        .collect();
-    let output_fd_annotations = results?;
+    let results: Result<Vec<_>> =
+        matches.values_of("out-fd").unwrap_or_default().map(parse_arg_fd).collect();
+    let output_fds = results?;
 
     let args: Vec<_> = matches.values_of("args").unwrap().map(|s| s.to_string()).collect();
-    let cid =
-        if let Some(arg) = matches.value_of("cid") { Some(arg.parse::<u32>()?) } else { None };
+    let cid = value_t!(matches, "cid", u32)?;
     let debuggable = matches.is_present("debug");
 
-    Ok(Config {
-        args,
-        metadata: Metadata { input_fd_annotations, output_fd_annotations },
-        cid,
-        debuggable,
-    })
+    Ok(Config { args, fd_annotation: FdAnnotation { input_fds, output_fds }, cid, debuggable })
 }
 
-fn main() -> Result<()> {
-    let debuggable = env!("TARGET_BUILD_VARIANT") != "user";
-    let log_level = if debuggable { log::Level::Trace } else { log::Level::Info };
-    android_logger::init_once(
-        android_logger::Config::default().with_tag("pvm_exec").with_min_level(log_level),
-    );
-
+fn try_main() -> Result<()> {
     // 1. Parse the command line arguments for collect execution data.
-    let Config { args, metadata, cid, debuggable } = parse_args()?;
+    let Config { args, fd_annotation, cid, debuggable } = parse_args()?;
 
     // 2. Spawn and configure a fd_server to serve remote read/write requests.
-    let fd_server_jail = spawn_fd_server(&metadata, debuggable)?;
+    let fd_server_jail = spawn_fd_server(&fd_annotation, debuggable)?;
     let fd_server_lifetime = scopeguard::guard(fd_server_jail, |fd_server_jail| {
         if let Err(e) = fd_server_jail.kill() {
             if !matches!(e, minijail::Error::Killed(_)) {
@@ -186,15 +168,46 @@ fn main() -> Result<()> {
     });
 
     // 3. Send the command line args to the remote to execute.
-    let service = if let Some(cid) = cid { get_rpc_binder(cid) } else { get_local_service() }?;
-    let exit_code = service.execute(&args, &metadata).context("Binder call failed")?;
+    let result = if cid == VMADDR_CID_ANY {
+        // Sentinel value that indicates we should use composd
+        let composd = get_composd()?;
+        composd.compile(&args, &fd_annotation)
+    } else {
+        // Call directly into the VM
+        let compos_vm = get_rpc_binder(cid)?;
+        compos_vm.compile(&args, &fd_annotation)
+    };
+    let result = result.context("Binder call failed")?;
+
+    // TODO: store/use the signature
+    debug!(
+        "Signature length: oat {}, vdex {}, image {}",
+        result.oatSignature.len(),
+        result.vdexSignature.len(),
+        result.imageSignature.len()
+    );
 
     // Be explicit about the lifetime, which should last at least until the task is finished.
     drop(fd_server_lifetime);
 
-    if exit_code > 0 {
-        error!("remote execution failed with exit code {}", exit_code);
-        exit(exit_code as i32);
+    if result.exitCode > 0 {
+        error!("remote execution failed with exit code {}", result.exitCode);
+        exit(result.exitCode as i32);
     }
     Ok(())
+}
+
+fn main() {
+    let debuggable = env!("TARGET_BUILD_VARIANT") != "user";
+    let log_level = if debuggable { log::Level::Trace } else { log::Level::Info };
+    android_logger::init_once(
+        android_logger::Config::default().with_tag("pvm_exec").with_min_level(log_level),
+    );
+
+    // Make sure we log and indicate failure if we were unable to run the command and get its exit
+    // code.
+    if let Err(e) = try_main() {
+        error!("{}", e);
+        std::process::exit(-1)
+    }
 }

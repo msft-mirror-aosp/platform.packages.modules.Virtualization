@@ -31,8 +31,10 @@
 #include <openssl/mem.h>
 #include <openssl/sha.h>
 #include <openssl/x509.h>
+#include <stdio.h>
 #include <unistd.h>
 
+#include <binder_rpc_unstable.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -40,13 +42,9 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "compos_signature.pb.h"
-
-// From frameworks/native/libs/binder/rust/src/binder_rpc_unstable.hpp
-extern "C" {
-AIBinder* RpcClient(unsigned int cid, unsigned int port);
-}
 
 using namespace std::literals;
 
@@ -54,11 +52,13 @@ using aidl::android::system::virtualizationservice::BnVirtualMachineCallback;
 using aidl::android::system::virtualizationservice::IVirtualizationService;
 using aidl::android::system::virtualizationservice::IVirtualMachine;
 using aidl::android::system::virtualizationservice::IVirtualMachineCallback;
+using aidl::android::system::virtualizationservice::PartitionType;
 using aidl::android::system::virtualizationservice::VirtualMachineConfig;
 using aidl::com::android::compos::CompOsKeyData;
 using aidl::com::android::compos::ICompOsService;
 using android::base::ErrnoError;
 using android::base::Error;
+using android::base::Fdopen;
 using android::base::Result;
 using android::base::unique_fd;
 using compos::proto::Signature;
@@ -74,7 +74,7 @@ constexpr const char* kConfigApkIdsigPath =
         "/apex/com.android.compos/etc/CompOSPayloadApp.apk.idsig";
 
 // This is a path inside the APK
-constexpr const char* kConfigFilePath = "assets/key_service_vm_config.json";
+constexpr const char* kConfigFilePath = "assets/vm_config.json";
 
 static bool writeBytesToFile(const std::vector<uint8_t>& bytes, const std::string& path) {
     std::string str(bytes.begin(), bytes.end());
@@ -97,17 +97,50 @@ static std::shared_ptr<ICompOsService> getService(int cid) {
 }
 
 namespace {
+
+void copyToLog(unique_fd&& fd) {
+    FILE* source = Fdopen(std::move(fd), "r");
+    size_t size = 0;
+    char* line = nullptr;
+
+    LOG(INFO) << "Started logging VM output";
+
+    for (;;) {
+        ssize_t len = getline(&line, &size, source);
+        if (len < 0) {
+            LOG(INFO) << "VM logging ended: " << ErrnoError().str();
+            break;
+        }
+        LOG(DEBUG) << "VM: " << std::string_view(line, len);
+    }
+    free(line);
+}
+
 class Callback : public BnVirtualMachineCallback {
 public:
-    ::ndk::ScopedAStatus onPayloadStarted(
-            int32_t in_cid, const ::ndk::ScopedFileDescriptor& /*in_stdout*/) override {
-        // TODO: Consider copying stdout somewhere useful?
+    ::ndk::ScopedAStatus onPayloadStarted(int32_t in_cid,
+                                          const ::ndk::ScopedFileDescriptor& stream) override {
         LOG(INFO) << "Payload started! cid = " << in_cid;
+
+        unique_fd stream_fd(dup(stream.get()));
+        std::thread logger([fd = std::move(stream_fd)]() mutable { copyToLog(std::move(fd)); });
+        logger.detach();
+
+        return ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus onPayloadReady(int32_t in_cid) override {
+        LOG(INFO) << "Payload is ready! cid = " << in_cid;
         {
             std::unique_lock lock(mMutex);
-            mStarted = true;
+            mReady = true;
         }
         mCv.notify_all();
+        return ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus onPayloadFinished(int32_t in_cid, int32_t in_exit_code) override {
+        LOG(INFO) << "Payload finished! cid = " << in_cid << ", exit_code = " << in_exit_code;
         return ScopedAStatus::ok();
     }
 
@@ -121,16 +154,16 @@ public:
         return ScopedAStatus::ok();
     }
 
-    bool waitForStarted() {
+    bool waitUntilReady() {
         std::unique_lock lock(mMutex);
-        return mCv.wait_for(lock, std::chrono::seconds(10), [this] { return mStarted || mDied; }) &&
+        return mCv.wait_for(lock, std::chrono::seconds(20), [this] { return mReady || mDied; }) &&
                 !mDied;
     }
 
 private:
     std::mutex mMutex;
     std::condition_variable mCv;
-    bool mStarted;
+    bool mReady;
     bool mDied;
 };
 
@@ -202,7 +235,7 @@ public:
         appConfig.memoryMib = 0; // Use default
 
         LOG(INFO) << "Starting VM";
-        auto status = service->startVm(config, logFd, &mVm);
+        auto status = service->createVm(config, logFd, &mVm);
         if (!status.isOk()) {
             return Error() << status.getDescription();
         }
@@ -213,7 +246,7 @@ public:
             return Error() << status.getDescription();
         }
 
-        LOG(INFO) << "Started VM with cid = " << cid;
+        LOG(INFO) << "Created VM with CID = " << cid;
 
         // We need to use this rather than std::make_shared to make sure the
         // embedded weak_ptr is initialised.
@@ -224,13 +257,15 @@ public:
             return Error() << status.getDescription();
         }
 
-        if (!mCallback->waitForStarted()) {
+        status = mVm->start();
+        if (!status.isOk()) {
+            return Error() << status.getDescription();
+        }
+        LOG(INFO) << "Started VM";
+
+        if (!mCallback->waitUntilReady()) {
             return Error() << "VM Payload failed to start";
         }
-
-        // TODO(b/194677789): Implement a polling loop or find a more reliable
-        // way to detect when the service is listening.
-        sleep(3);
 
         return cid;
     }
@@ -242,6 +277,7 @@ private:
     std::shared_ptr<Callback> mCallback;
     std::shared_ptr<IVirtualMachine> mVm;
 };
+
 } // namespace
 
 static Result<std::vector<uint8_t>> extractRsaPublicKey(
@@ -337,8 +373,7 @@ static Result<bool> verify(TargetVm& vm, const std::string& blob_file,
     return result;
 }
 
-static Result<void> signFile(ICompOsService* service, const std::vector<uint8_t>& key_blob,
-                             const std::string& file) {
+static Result<void> signFile(ICompOsService* service, const std::string& file) {
     unique_fd fd(TEMP_FAILURE_RETRY(open(file.c_str(), O_RDONLY | O_CLOEXEC)));
     if (!fd.ok()) {
         return ErrnoError() << "Failed to open";
@@ -386,7 +421,7 @@ static Result<void> signFile(ICompOsService* service, const std::vector<uint8_t>
     memcpy(to_be_signed->digest, digest->digest, digest->digest_size);
 
     std::vector<uint8_t> signature;
-    auto status = service->sign(key_blob, buffer, &signature);
+    auto status = service->sign(buffer, &signature);
     if (!status.isOk()) {
         return Error() << "Failed to sign: " << status.getDescription();
     }
@@ -420,11 +455,38 @@ static Result<void> sign(TargetVm& vm, const std::string& blob_file,
         return blob.error();
     }
 
+    auto status = service->initializeSigningKey(blob.value());
+    if (!status.isOk()) {
+        return Error() << "Failed to initialize signing key: " << status.getDescription();
+    }
+
     for (auto& file : files) {
-        auto result = signFile(service.get(), blob.value(), file);
+        auto result = signFile(service.get(), file);
         if (!result.ok()) {
             return Error() << result.error() << ": " << file;
         }
+    }
+    return {};
+}
+
+static Result<void> initializeKey(TargetVm& vm, const std::string& blob_file) {
+    auto cid = vm.resolveCid();
+    if (!cid.ok()) {
+        return cid.error();
+    }
+    auto service = getService(*cid);
+    if (!service) {
+        return Error() << "No service";
+    }
+
+    auto blob = readBytesFromFile(blob_file);
+    if (!blob.ok()) {
+        return blob.error();
+    }
+
+    auto status = service->initializeSigningKey(blob.value());
+    if (!status.isOk()) {
+        return Error() << "Failed to initialize signing key: " << status.getDescription();
     }
     return {};
 }
@@ -442,7 +504,8 @@ static Result<void> makeInstanceImage(const std::string& image_path) {
         return ErrnoError() << "Failed to create image file";
     }
 
-    auto status = service->initializeWritablePartition(fd, 10 * 1024 * 1024);
+    auto status = service->initializeWritablePartition(fd, 10 * 1024 * 1024,
+                                                       PartitionType::ANDROID_VM_INSTANCE);
     if (!status.isOk()) {
         return Error() << "Failed to initialize partition: " << status.getDescription();
     }
@@ -505,6 +568,13 @@ int main(int argc, char** argv) {
         } else {
             std::cerr << result.error() << '\n';
         }
+    } else if (argc == 3 && argv[1] == "init-key"sv) {
+        auto result = initializeKey(vm, argv[2]);
+        if (result.ok()) {
+            return 0;
+        } else {
+            std::cerr << result.error() << '\n';
+        }
     } else if (argc == 3 && argv[1] == "make-instance"sv) {
         auto result = makeInstanceImage(argv[2]);
         if (result.ok()) {
@@ -513,13 +583,15 @@ int main(int argc, char** argv) {
             std::cerr << result.error() << '\n';
         }
     } else {
-        std::cerr << "Usage: compos_key_cmd [OPTIONS] generate|verify|sign|make-instance\n"
+        std::cerr << "Usage: compos_key_cmd [OPTIONS] generate|verify|sign|make-instance|init-key\n"
                   << "  generate <blob file> <public key file> Generate new key pair and write\n"
                   << "    the private key blob and public key to the specified files.\n "
                   << "  verify <blob file> <public key file> Verify that the content of the\n"
                   << "    specified private key blob and public key files are valid.\n "
+                  << "  init-key <blob file> Initialize the service key.\n"
                   << "  sign <blob file> <files to be signed> Generate signatures for one or\n"
-                  << "    more files using the supplied private key blob.\n"
+                  << "    more files using the supplied private key blob. Signature is stored in\n"
+                  << "    <filename>.signature\n"
                   << "  make-instance <image file> Create an empty instance image file for a VM.\n"
                   << "\n"
                   << "OPTIONS: --log <log file> (--cid <cid> | --start <image file>)\n"

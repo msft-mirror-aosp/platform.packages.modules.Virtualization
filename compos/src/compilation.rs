@@ -15,32 +15,31 @@
  */
 
 use anyhow::{anyhow, bail, Context, Result};
-use libc::getxattr;
 use log::error;
 use minijail::{self, Minijail};
-use std::ffi::CString;
 use std::fs::File;
-use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 
+use crate::fsverity;
 use authfs_aidl_interface::aidl::com::android::virt::fs::{
     AuthFsConfig::AuthFsConfig, IAuthFs::IAuthFs, IAuthFsService::IAuthFsService,
     InputFdAnnotation::InputFdAnnotation, OutputFdAnnotation::OutputFdAnnotation,
 };
 use authfs_aidl_interface::binder::{ParcelFileDescriptor, Strong};
-use compos_aidl_interface::aidl::com::android::compos::Metadata::Metadata;
+use compos_aidl_interface::aidl::com::android::compos::FdAnnotation::FdAnnotation;
 
 /// The number that represents the file descriptor number expecting by the task. The number may be
 /// meaningless in the current process.
 pub type PseudoRawFd = i32;
 
-const SHA256_HASH_SIZE: usize = 32;
-type Sha256Hash = [u8; SHA256_HASH_SIZE];
-
 pub enum CompilerOutput {
     /// Fs-verity digests of output files, if the compiler finishes successfully.
-    Digests { oat: Sha256Hash, vdex: Sha256Hash, image: Sha256Hash },
+    Digests {
+        oat: fsverity::Sha256Digest,
+        vdex: fsverity::Sha256Digest,
+        image: fsverity::Sha256Digest,
+    },
     /// Exit code returned by the compiler, if not 0.
     ExitCode(i8),
 }
@@ -51,17 +50,17 @@ struct CompilerOutputParcelFds {
     image: ParcelFileDescriptor,
 }
 
-/// Runs the compiler with given flags with file descriptors described in `metadata` retrieved via
-/// `authfs_service`. Returns exit code of the compiler process.
+/// Runs the compiler with given flags with file descriptors described in `fd_annotation` retrieved
+/// via `authfs_service`. Returns exit code of the compiler process.
 pub fn compile(
     compiler_path: &Path,
     compiler_args: &[String],
     authfs_service: Strong<dyn IAuthFsService>,
-    metadata: &Metadata,
+    fd_annotation: &FdAnnotation,
 ) -> Result<CompilerOutput> {
     // Mount authfs (via authfs_service). The authfs instance unmounts once the `authfs` variable
     // is out of scope.
-    let authfs_config = build_authfs_config(metadata);
+    let authfs_config = build_authfs_config(fd_annotation);
     let authfs = authfs_service.mount(&authfs_config)?;
 
     // The task expects to receive FD numbers that match its flags (e.g. --zip-fd=42) prepared
@@ -82,9 +81,9 @@ pub fn compile(
 
     match jail_result {
         Ok(()) => Ok(CompilerOutput::Digests {
-            oat: fsverity_measure(oat_file.as_raw_fd())?,
-            vdex: fsverity_measure(vdex_file.as_raw_fd())?,
-            image: fsverity_measure(image_file.as_raw_fd())?,
+            oat: fsverity::measure(oat_file.as_raw_fd())?,
+            vdex: fsverity::measure(vdex_file.as_raw_fd())?,
+            image: fsverity::measure(image_file.as_raw_fd())?,
         }),
         Err(minijail::Error::ReturnCode(exit_code)) => {
             error!("dex2oat failed with exit code {}", exit_code);
@@ -136,18 +135,18 @@ fn parse_compiler_args(
     })
 }
 
-fn build_authfs_config(metadata: &Metadata) -> AuthFsConfig {
+fn build_authfs_config(fd_annotation: &FdAnnotation) -> AuthFsConfig {
     AuthFsConfig {
         port: 3264, // TODO: support dynamic port
-        inputFdAnnotations: metadata
-            .input_fd_annotations
+        inputFdAnnotations: fd_annotation
+            .input_fds
             .iter()
-            .map(|x| InputFdAnnotation { fd: x.fd, fileSize: x.file_size })
+            .map(|fd| InputFdAnnotation { fd: *fd })
             .collect(),
-        outputFdAnnotations: metadata
-            .output_fd_annotations
+        outputFdAnnotations: fd_annotation
+            .output_fds
             .iter()
-            .map(|x| OutputFdAnnotation { fd: x.fd })
+            .map(|fd| OutputFdAnnotation { fd: *fd })
             .collect(),
     }
 }
@@ -185,23 +184,4 @@ fn spawn_jailed_task(
     let preserve_fds: Vec<_> = fd_mapping.iter().map(|(f, id)| (f.as_raw_fd(), *id)).collect();
     let _pid = jail.run_remap(executable, preserve_fds.as_slice(), args)?;
     Ok(jail)
-}
-
-fn fsverity_measure(fd: RawFd) -> Result<Sha256Hash> {
-    // TODO(b/196635431): Unfortunately, the FUSE API doesn't allow authfs to implement the standard
-    // fs-verity ioctls. Until the kernel allows, use the alternative xattr that authfs provides.
-    let path = CString::new(format!("/proc/self/fd/{}", fd).as_str()).unwrap();
-    let name = CString::new("authfs.fsverity.digest").unwrap();
-    let mut buf = [0u8; SHA256_HASH_SIZE];
-    // SAFETY: getxattr should not write beyond the given buffer size.
-    let size = unsafe {
-        getxattr(path.as_ptr(), name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-    };
-    if size < 0 {
-        bail!("Failed to getxattr: {}", io::Error::last_os_error());
-    } else if size != SHA256_HASH_SIZE as isize {
-        bail!("Unexpected hash size: {}", size);
-    } else {
-        Ok(buf)
-    }
 }

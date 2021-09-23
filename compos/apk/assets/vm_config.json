@@ -7,7 +7,7 @@
     "type": "executable",
     "command": "/apex/com.android.compos/bin/compsvc",
     "args": [
-      "--rpc-binder"
+      "--log_to_stderr"
     ]
   },
   "apexes": [

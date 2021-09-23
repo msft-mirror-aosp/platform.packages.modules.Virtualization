@@ -17,10 +17,16 @@
 package com.android.compos;
 
 /** {@hide} */
-parcelable OutputFdAnnotation {
+parcelable FdAnnotation {
     /**
-     * File descriptor number to be passed to the program.  This is currently assumed to be same as
-     * the file descriptor number used in the backend server.
+     * Input file descriptor numbers to be passed to the program.  This is currently assumed to be
+     * same as the file descriptor number used in the backend server.
      */
-    int fd;
+    int[] input_fds;
+
+    /**
+     * Output file descriptor numbers to be passed to the program.  This is currently assumed to be
+     * same as the file descriptor number used in the backend server.
+     */
+    int[] output_fds;
 }

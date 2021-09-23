@@ -19,17 +19,21 @@
 //! actual compiler.
 
 use anyhow::Result;
-use log::{debug, warn};
+use log::warn;
+use std::default::Default;
 use std::ffi::CString;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use crate::compilation::{compile, CompilerOutput};
 use crate::compos_key_service::CompOsKeyService;
+use crate::fsverity;
 use authfs_aidl_interface::aidl::com::android::virt::fs::IAuthFsService::IAuthFsService;
 use compos_aidl_interface::aidl::com::android::compos::{
     CompOsKeyData::CompOsKeyData,
+    CompilationResult::CompilationResult,
+    FdAnnotation::FdAnnotation,
     ICompOsService::{BnCompOsService, ICompOsService},
-    Metadata::Metadata,
 };
 use compos_aidl_interface::binder::{
     BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Status, Strong,
@@ -39,10 +43,11 @@ const AUTHFS_SERVICE_NAME: &str = "authfs_service";
 const DEX2OAT_PATH: &str = "/apex/com.android.art/bin/dex2oat64";
 
 /// Constructs a binder object that implements ICompOsService.
-pub fn new_binder(rpc_binder: bool) -> Result<Strong<dyn ICompOsService>> {
+pub fn new_binder() -> Result<Strong<dyn ICompOsService>> {
     let service = CompOsService {
         dex2oat_path: PathBuf::from(DEX2OAT_PATH),
-        key_service: CompOsKeyService::new(rpc_binder)?,
+        key_service: CompOsKeyService::new()?,
+        key_blob: Arc::new(RwLock::new(Vec::new())),
     };
     Ok(BnCompOsService::new_binder(service, BinderFeatures::default()))
 }
@@ -50,28 +55,72 @@ pub fn new_binder(rpc_binder: bool) -> Result<Strong<dyn ICompOsService>> {
 struct CompOsService {
     dex2oat_path: PathBuf,
     key_service: CompOsKeyService,
+    key_blob: Arc<RwLock<Vec<u8>>>,
+}
+
+impl CompOsService {
+    fn generate_raw_fsverity_signature(
+        &self,
+        key_blob: &[u8],
+        fsverity_digest: &fsverity::Sha256Digest,
+    ) -> Vec<u8> {
+        let formatted_digest = fsverity::to_formatted_digest(fsverity_digest);
+        self.key_service.do_sign(key_blob, &formatted_digest[..]).unwrap_or_else(|e| {
+            warn!("Failed to sign the fsverity digest, returning empty signature.  Error: {}", e);
+            Vec::new()
+        })
+    }
 }
 
 impl Interface for CompOsService {}
 
 impl ICompOsService for CompOsService {
-    fn execute(&self, args: &[String], metadata: &Metadata) -> BinderResult<i8> {
+    fn initializeSigningKey(&self, key_blob: &[u8]) -> BinderResult<()> {
+        let mut w = self.key_blob.write().unwrap();
+        if w.is_empty() {
+            *w = Vec::from(key_blob);
+            Ok(())
+        } else {
+            Err(new_binder_exception(ExceptionCode::ILLEGAL_STATE, "Cannot re-initialize the key"))
+        }
+    }
+
+    fn compile(
+        &self,
+        args: &[String],
+        fd_annotation: &FdAnnotation,
+    ) -> BinderResult<CompilationResult> {
         let authfs_service = get_authfs_service()?;
-        let output = compile(&self.dex2oat_path, args, authfs_service, metadata).map_err(|e| {
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("Compilation failed: {}", e),
-            )
-        })?;
+        let output =
+            compile(&self.dex2oat_path, args, authfs_service, fd_annotation).map_err(|e| {
+                new_binder_exception(
+                    ExceptionCode::SERVICE_SPECIFIC,
+                    format!("Compilation failed: {}", e),
+                )
+            })?;
         match output {
             CompilerOutput::Digests { oat, vdex, image } => {
-                // TODO(b/161471326): Sign the output on succeed.
-                debug!("oat fs-verity digest: {:02x?}", oat);
-                debug!("vdex fs-verity digest: {:02x?}", vdex);
-                debug!("image fs-verity digest: {:02x?}", image);
-                Ok(0)
+                let key = &*self.key_blob.read().unwrap();
+                if key.is_empty() {
+                    Err(new_binder_exception(
+                        ExceptionCode::ILLEGAL_STATE,
+                        "Key is not initialized",
+                    ))
+                } else {
+                    let oat_signature = self.generate_raw_fsverity_signature(key, &oat);
+                    let vdex_signature = self.generate_raw_fsverity_signature(key, &vdex);
+                    let image_signature = self.generate_raw_fsverity_signature(key, &image);
+                    Ok(CompilationResult {
+                        exitCode: 0,
+                        oatSignature: oat_signature,
+                        vdexSignature: vdex_signature,
+                        imageSignature: image_signature,
+                    })
+                }
             }
-            CompilerOutput::ExitCode(exit_code) => Ok(exit_code),
+            CompilerOutput::ExitCode(exit_code) => {
+                Ok(CompilationResult { exitCode: exit_code, ..Default::default() })
+            }
         }
     }
 
@@ -90,10 +139,15 @@ impl ICompOsService for CompOsService {
         })
     }
 
-    fn sign(&self, key_blob: &[u8], data: &[u8]) -> BinderResult<Vec<u8>> {
-        self.key_service
-            .do_sign(key_blob, data)
-            .map_err(|e| new_binder_exception(ExceptionCode::ILLEGAL_STATE, e.to_string()))
+    fn sign(&self, data: &[u8]) -> BinderResult<Vec<u8>> {
+        let key = &*self.key_blob.read().unwrap();
+        if key.is_empty() {
+            Err(new_binder_exception(ExceptionCode::ILLEGAL_STATE, "Key is not initialized"))
+        } else {
+            self.key_service
+                .do_sign(key, data)
+                .map_err(|e| new_binder_exception(ExceptionCode::ILLEGAL_STATE, e.to_string()))
+        }
     }
 }
 

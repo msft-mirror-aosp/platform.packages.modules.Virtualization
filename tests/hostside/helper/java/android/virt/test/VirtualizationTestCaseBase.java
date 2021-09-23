@@ -61,6 +61,9 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
 
         // disconnect from microdroid
         tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
+
+        // remove any leftover files under test root
+        android.tryRun("rm", "-rf", TEST_ROOT + "*");
     }
 
     public static void cleanUpVirtualizationTestSetup(ITestDevice androidDevice)
@@ -179,10 +182,10 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         assertTrue(apkPath.startsWith("package:"));
         apkPath = apkPath.substring("package:".length());
 
-        // Push the idsig file to the device
-        File idsigOnHost = findTestFile(buildInfo, apkName + ".idsig");
-        final String apkIdsigPath = TEST_ROOT + apkName + ".idsig";
-        androidDevice.pushFile(idsigOnHost, apkIdsigPath);
+        android.run("mkdir", "-p", TEST_ROOT);
+
+        // This file is not what we provide. It will be created by the vm tool.
+        final String outApkIdsigPath = TEST_ROOT + apkName + ".idsig";
 
         final String instanceImg = TEST_ROOT + INSTANCE_IMG;
         final String logPath = TEST_ROOT + "log.txt";
@@ -197,7 +200,7 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
                         "--log " + logPath,
                         debugFlag,
                         apkPath,
-                        apkIdsigPath,
+                        outApkIdsigPath,
                         instanceImg,
                         configPath);
 

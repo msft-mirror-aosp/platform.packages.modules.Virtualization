@@ -18,12 +18,15 @@ package com.android.microdroid.demo;
 
 import android.app.Application;
 import android.os.Bundle;
+import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
+import android.os.RemoteException;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineCallback;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineException;
 import android.system.virtualmachine.VirtualMachineManager;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -37,12 +40,16 @@ import androidx.lifecycle.MutableLiveData;
 import androidx.lifecycle.Observer;
 import androidx.lifecycle.ViewModelProvider;
 
+import com.android.microdroid.testservice.ITestService;
+
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * This app is to demonstrate the use of APIs in the android.system.virtualmachine library.
@@ -50,6 +57,8 @@ import java.util.concurrent.Executors;
  * the virtual machine to the UI.
  */
 public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "MicrodroidDemo";
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -117,16 +126,131 @@ public class MainActivity extends AppCompatActivity {
         private final MutableLiveData<String> mConsoleOutput = new MutableLiveData<>();
         private final MutableLiveData<String> mPayloadOutput = new MutableLiveData<>();
         private final MutableLiveData<VirtualMachine.Status> mStatus = new MutableLiveData<>();
+        private ExecutorService mExecutorService;
 
         public VirtualMachineModel(Application app) {
             super(app);
             mStatus.setValue(VirtualMachine.Status.DELETED);
         }
 
+        private static void postOutput(MutableLiveData<String> output, InputStream stream)
+                throws IOException {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(stream));
+            String line;
+            while ((line = reader.readLine()) != null && !Thread.interrupted()) {
+                output.postValue(line);
+            }
+        }
+
         /** Runs a VM */
         public void run(boolean debug) {
             // Create a VM and run it.
             // TODO(jiyong): remove the call to idsigPath
+            mExecutorService = Executors.newFixedThreadPool(3);
+
+            VirtualMachineCallback callback =
+                    new VirtualMachineCallback() {
+                        // store reference to ExecutorService to avoid race condition
+                        private final ExecutorService mService = mExecutorService;
+
+                        @Override
+                        public void onPayloadStarted(
+                                VirtualMachine vm, ParcelFileDescriptor stream) {
+                            if (stream == null) {
+                                mPayloadOutput.postValue("(no output available)");
+                                return;
+                            }
+
+                            mService.execute(
+                                    new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            try {
+                                                postOutput(
+                                                        mPayloadOutput,
+                                                        new FileInputStream(
+                                                                stream.getFileDescriptor()));
+                                            } catch (IOException e) {
+                                                Log.e(
+                                                        TAG,
+                                                        "IOException while reading payload: "
+                                                                + e.getMessage());
+                                            }
+                                        }
+                                    });
+                        }
+
+                        @Override
+                        public void onPayloadReady(VirtualMachine vm) {
+                            // This check doesn't 100% prevent race condition or UI hang.
+                            // However, it's fine for demo.
+                            if (mService.isShutdown()) {
+                                return;
+                            }
+                            mPayloadOutput.postValue("(Payload is ready. Testing VM service...)");
+
+                            Future<IBinder> service;
+                            try {
+                                service = vm.connectToVsockServer(ITestService.SERVICE_PORT);
+                            } catch (VirtualMachineException e) {
+                                mPayloadOutput.postValue(
+                                        String.format(
+                                                "(Exception while connecting VM's binder"
+                                                        + " service: %s)",
+                                                e.getMessage()));
+                                return;
+                            }
+
+                            mService.execute(() -> testVMService(service));
+                        }
+
+                        private void testVMService(Future<IBinder> service) {
+                            IBinder binder;
+                            try {
+                                binder = service.get();
+                            } catch (Exception e) {
+                                if (!Thread.interrupted()) {
+                                    mPayloadOutput.postValue(
+                                            String.format(
+                                                    "(VM service connection failed: %s)",
+                                                    e.getMessage()));
+                                }
+                                return;
+                            }
+
+                            try {
+                                ITestService testService = ITestService.Stub.asInterface(binder);
+                                int ret = testService.addInteger(123, 456);
+                                mPayloadOutput.postValue(
+                                        String.format(
+                                                "(VM payload service: %d + %d = %d)",
+                                                123, 456, ret));
+                            } catch (RemoteException e) {
+                                mPayloadOutput.postValue(
+                                        String.format(
+                                                "(Exception while testing VM's binder service:"
+                                                        + " %s)",
+                                                e.getMessage()));
+                            }
+                        }
+
+                        @Override
+                        public void onPayloadFinished(VirtualMachine vm, int exitCode) {
+                            // This check doesn't 100% prevent race condition, but is fine for demo.
+                            if (!mService.isShutdown()) {
+                                mPayloadOutput.postValue(
+                                        String.format(
+                                                "(Payload finished. exit code: %d)", exitCode));
+                            }
+                        }
+
+                        @Override
+                        public void onDied(VirtualMachine vm) {
+                            mService.shutdownNow();
+                            mStatus.postValue(VirtualMachine.Status.STOPPED);
+                        }
+                    };
+
             try {
                 VirtualMachineConfig.Builder builder =
                         new VirtualMachineConfig.Builder(getApplication(), "assets/vm_config.json")
@@ -135,53 +259,25 @@ public class MainActivity extends AppCompatActivity {
                 VirtualMachineManager vmm = VirtualMachineManager.getInstance(getApplication());
                 mVirtualMachine = vmm.getOrCreate("demo_vm", config);
                 mVirtualMachine.run();
-                mVirtualMachine.setCallback(
-                        new VirtualMachineCallback() {
-                            @Override
-                            public void onPayloadStarted(
-                                    VirtualMachine vm, ParcelFileDescriptor out) {
-                                try {
-                                    BufferedReader reader =
-                                            new BufferedReader(
-                                                    new InputStreamReader(
-                                                            new FileInputStream(
-                                                                    out.getFileDescriptor())));
-                                    String line;
-                                    while ((line = reader.readLine()) != null) {
-                                        mPayloadOutput.postValue(line);
-                                    }
-                                } catch (IOException e) {
-                                    // Consume
-                                }
-                            }
-
-                            @Override
-                            public void onDied(VirtualMachine vm) {
-                                mStatus.postValue(VirtualMachine.Status.STOPPED);
-                            }
-                        });
+                mVirtualMachine.setCallback(callback);
                 mStatus.postValue(mVirtualMachine.getStatus());
             } catch (VirtualMachineException e) {
                 throw new RuntimeException(e);
             }
 
             // Read console output from the VM in the background
-            ExecutorService executorService = Executors.newFixedThreadPool(1);
-            executorService.execute(
+            mExecutorService.execute(
                     new Runnable() {
                         @Override
                         public void run() {
                             try {
-                                BufferedReader reader =
-                                        new BufferedReader(
-                                                new InputStreamReader(
-                                                        mVirtualMachine.getConsoleOutputStream()));
-                                while (true) {
-                                    String line = reader.readLine();
-                                    mConsoleOutput.postValue(line);
-                                }
+                                postOutput(
+                                        mConsoleOutput, mVirtualMachine.getConsoleOutputStream());
                             } catch (IOException | VirtualMachineException e) {
-                                // Consume
+                                Log.e(
+                                        TAG,
+                                        "Exception while posting console output: "
+                                                + e.getMessage());
                             }
                         }
                     });
@@ -195,6 +291,7 @@ public class MainActivity extends AppCompatActivity {
                 // Consume
             }
             mVirtualMachine = null;
+            mExecutorService.shutdownNow();
             mStatus.postValue(VirtualMachine.Status.STOPPED);
         }
 

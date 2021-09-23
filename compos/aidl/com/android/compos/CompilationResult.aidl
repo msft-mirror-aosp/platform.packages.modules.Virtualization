@@ -17,13 +17,16 @@
 package com.android.compos;
 
 /** {@hide} */
-parcelable InputFdAnnotation {
-    /**
-     * File descriptor number to be passed to the program.  This is also the same file descriptor
-     * number used in the backend server.
-     */
-    int fd;
+parcelable CompilationResult {
+    /** Exit code of dex2oat */
+    byte exitCode;
 
-    /** The actual file size in bytes of the backing file to be read. */
-    long file_size;
+    /** raw signature of the output oat's fs-verity digest, may be empty */
+    byte[] oatSignature;
+
+    /** raw signature of the output vdex's fs-verity digest, may be empty */
+    byte[] vdexSignature;
+
+    /** raw signature of the output image's fs-verity digest, may be empty */
+    byte[] imageSignature;
 }

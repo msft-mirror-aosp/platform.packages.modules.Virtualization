@@ -16,14 +16,16 @@
 
 use crate::create_partition::command_create_partition;
 use crate::sync::AtomicFlag;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::IVirtualizationService;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualMachine::IVirtualMachine;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualMachineCallback::{
     BnVirtualMachineCallback, IVirtualMachineCallback,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    IVirtualMachine::IVirtualMachine,
+    IVirtualizationService::IVirtualizationService,
+    PartitionType::PartitionType,
     VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineConfig::VirtualMachineConfig,
+    VirtualMachineState::VirtualMachineState,
 };
 use android_system_virtualizationservice::binder::{
     BinderFeatures, DeathRecipient, IBinder, ParcelFileDescriptor, Strong,
@@ -60,7 +62,12 @@ pub fn command_run_app(
 
     if !instance.exists() {
         const INSTANCE_FILE_SIZE: u64 = 10 * 1024 * 1024;
-        command_create_partition(service.clone(), instance, INSTANCE_FILE_SIZE)?;
+        command_create_partition(
+            service.clone(),
+            instance,
+            INSTANCE_FILE_SIZE,
+            PartitionType::ANDROID_VM_INSTANCE,
+        )?;
     }
 
     let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
@@ -94,6 +101,18 @@ pub fn command_run(
     )
 }
 
+fn state_to_str(vm_state: VirtualMachineState) -> &'static str {
+    match vm_state {
+        VirtualMachineState::NOT_STARTED => "NOT_STARTED",
+        VirtualMachineState::STARTING => "STARTING",
+        VirtualMachineState::STARTED => "STARTED",
+        VirtualMachineState::READY => "READY",
+        VirtualMachineState::FINISHED => "FINISHED",
+        VirtualMachineState::DEAD => "DEAD",
+        _ => "(invalid state)",
+    }
+}
+
 fn run(
     service: Strong<dyn IVirtualizationService>,
     config: &VirtualMachineConfig,
@@ -111,10 +130,17 @@ fn run(
     } else {
         Some(ParcelFileDescriptor::new(duplicate_stdout()?))
     };
-    let vm = service.startVm(config, stdout.as_ref()).context("Failed to start VM")?;
+    let vm = service.createVm(config, stdout.as_ref()).context("Failed to create VM")?;
 
     let cid = vm.getCid().context("Failed to get CID")?;
-    println!("Started VM from {} with CID {}.", config_path, cid);
+    println!(
+        "Created VM from {} with CID {}, state is {}.",
+        config_path,
+        cid,
+        state_to_str(vm.getState()?)
+    );
+    vm.start()?;
+    println!("Started VM, state now {}.", state_to_str(vm.getState()?));
 
     if daemonize {
         // Pass the VM reference back to VirtualizationService and have it hold it in the
@@ -163,17 +189,33 @@ struct VirtualMachineCallback {
 impl Interface for VirtualMachineCallback {}
 
 impl IVirtualMachineCallback for VirtualMachineCallback {
-    fn onPayloadStarted(&self, _cid: i32, stdout: &ParcelFileDescriptor) -> BinderResult<()> {
-        // Show the stdout of the payload
-        let mut reader = BufReader::new(stdout.as_ref());
-        loop {
-            let mut s = String::new();
-            match reader.read_line(&mut s) {
-                Ok(0) => break,
-                Ok(_) => print!("{}", s),
-                Err(e) => eprintln!("error reading from virtual machine: {}", e),
-            };
+    fn onPayloadStarted(
+        &self,
+        _cid: i32,
+        stream: Option<&ParcelFileDescriptor>,
+    ) -> BinderResult<()> {
+        // Show the output of the payload
+        if let Some(stream) = stream {
+            let mut reader = BufReader::new(stream.as_ref());
+            loop {
+                let mut s = String::new();
+                match reader.read_line(&mut s) {
+                    Ok(0) => break,
+                    Ok(_) => print!("{}", s),
+                    Err(e) => eprintln!("error reading from virtual machine: {}", e),
+                };
+            }
         }
+        Ok(())
+    }
+
+    fn onPayloadReady(&self, _cid: i32) -> BinderResult<()> {
+        eprintln!("payload is ready");
+        Ok(())
+    }
+
+    fn onPayloadFinished(&self, _cid: i32, exit_code: i32) -> BinderResult<()> {
+        eprintln!("payload finished with exit code {}", exit_code);
         Ok(())
     }
 
