@@ -31,6 +31,7 @@
 #include <openssl/mem.h>
 #include <openssl/sha.h>
 #include <openssl/x509.h>
+#include <stdio.h>
 #include <unistd.h>
 
 #include <binder_rpc_unstable.hpp>
@@ -41,6 +42,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "compos_signature.pb.h"
 
@@ -56,6 +58,7 @@ using aidl::com::android::compos::CompOsKeyData;
 using aidl::com::android::compos::ICompOsService;
 using android::base::ErrnoError;
 using android::base::Error;
+using android::base::Fdopen;
 using android::base::Result;
 using android::base::unique_fd;
 using compos::proto::Signature;
@@ -94,22 +97,45 @@ static std::shared_ptr<ICompOsService> getService(int cid) {
 }
 
 namespace {
+
+void copyToLog(unique_fd&& fd) {
+    FILE* source = Fdopen(std::move(fd), "r");
+    size_t size = 0;
+    char* line = nullptr;
+
+    LOG(INFO) << "Started logging VM output";
+
+    for (;;) {
+        ssize_t len = getline(&line, &size, source);
+        if (len < 0) {
+            LOG(INFO) << "VM logging ended: " << ErrnoError().str();
+            break;
+        }
+        LOG(DEBUG) << "VM: " << std::string_view(line, len);
+    }
+    free(line);
+}
+
 class Callback : public BnVirtualMachineCallback {
 public:
-    ::ndk::ScopedAStatus onPayloadStarted(
-            int32_t in_cid, const ::ndk::ScopedFileDescriptor& /*in_stream*/) override {
-        // TODO: Consider copying stdout somewhere useful?
+    ::ndk::ScopedAStatus onPayloadStarted(int32_t in_cid,
+                                          const ::ndk::ScopedFileDescriptor& stream) override {
         LOG(INFO) << "Payload started! cid = " << in_cid;
-        {
-            std::unique_lock lock(mMutex);
-            mStarted = true;
-        }
-        mCv.notify_all();
+
+        unique_fd stream_fd(dup(stream.get()));
+        std::thread logger([fd = std::move(stream_fd)]() mutable { copyToLog(std::move(fd)); });
+        logger.detach();
+
         return ScopedAStatus::ok();
     }
 
     ::ndk::ScopedAStatus onPayloadReady(int32_t in_cid) override {
         LOG(INFO) << "Payload is ready! cid = " << in_cid;
+        {
+            std::unique_lock lock(mMutex);
+            mReady = true;
+        }
+        mCv.notify_all();
         return ScopedAStatus::ok();
     }
 
@@ -128,16 +154,16 @@ public:
         return ScopedAStatus::ok();
     }
 
-    bool waitForStarted() {
+    bool waitUntilReady() {
         std::unique_lock lock(mMutex);
-        return mCv.wait_for(lock, std::chrono::seconds(10), [this] { return mStarted || mDied; }) &&
+        return mCv.wait_for(lock, std::chrono::seconds(20), [this] { return mReady || mDied; }) &&
                 !mDied;
     }
 
 private:
     std::mutex mMutex;
     std::condition_variable mCv;
-    bool mStarted;
+    bool mReady;
     bool mDied;
 };
 
@@ -237,13 +263,9 @@ public:
         }
         LOG(INFO) << "Started VM";
 
-        if (!mCallback->waitForStarted()) {
+        if (!mCallback->waitUntilReady()) {
             return Error() << "VM Payload failed to start";
         }
-
-        // TODO(b/194677789): Implement a polling loop or find a more reliable
-        // way to detect when the service is listening.
-        sleep(3);
 
         return cid;
     }
@@ -255,6 +277,7 @@ private:
     std::shared_ptr<Callback> mCallback;
     std::shared_ptr<IVirtualMachine> mVm;
 };
+
 } // namespace
 
 static Result<std::vector<uint8_t>> extractRsaPublicKey(
