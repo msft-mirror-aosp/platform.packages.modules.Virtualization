@@ -50,10 +50,18 @@ pub struct VmInstance {
     service: Strong<dyn IVirtualizationService>,
     #[allow(dead_code)] // Keeps the VM alive even if we don`t touch it
     vm: Strong<dyn IVirtualMachine>,
+    #[allow(dead_code)] // TODO: Do we need this?
     cid: i32,
 }
 
 impl VmInstance {
+    /// Return a new connection to the Virtualization Service binder interface. This will start the
+    /// service if necessary.
+    pub fn connect_to_virtualization_service() -> Result<Strong<dyn IVirtualizationService>> {
+        wait_for_interface::<dyn IVirtualizationService>("android.system.virtualizationservice")
+            .context("Failed to find VirtualizationService")
+    }
+
     /// Start a new CompOS VM instance using the specified instance image file.
     pub fn start(instance_image: &Path) -> Result<VmInstance> {
         let instance_image =
@@ -83,10 +91,7 @@ impl VmInstance {
             ..Default::default()
         });
 
-        let service = wait_for_interface::<dyn IVirtualizationService>(
-            "android.system.virtualizationservice",
-        )
-        .context("Failed to find VirtualizationService")?;
+        let service = Self::connect_to_virtualization_service()?;
 
         let vm = service.createVm(&config, Some(&log_fd)).context("Failed to create VM")?;
         let vm_state = Arc::new(VmStateMonitor::default());
@@ -106,10 +111,7 @@ impl VmInstance {
 
         vm.start()?;
 
-        let cid = vm_state.wait_for_start()?;
-
-        // TODO: Use onPayloadReady to avoid this
-        thread::sleep(Duration::from_secs(3));
+        let cid = vm_state.wait_until_ready()?;
 
         Ok(VmInstance { service, vm, cid })
     }
@@ -214,7 +216,7 @@ impl VmStateMonitor {
         self.state_ready.notify_all();
     }
 
-    fn set_started(&self, cid: i32) {
+    fn set_ready(&self, cid: i32) {
         let mut state = self.mutex.lock().unwrap();
         if state.has_died {
             return;
@@ -224,10 +226,10 @@ impl VmStateMonitor {
         self.state_ready.notify_all();
     }
 
-    fn wait_for_start(&self) -> Result<i32> {
+    fn wait_until_ready(&self) -> Result<i32> {
         let (state, result) = self
             .state_ready
-            .wait_timeout_while(self.mutex.lock().unwrap(), Duration::from_secs(10), |state| {
+            .wait_timeout_while(self.mutex.lock().unwrap(), Duration::from_secs(20), |state| {
                 state.cid.is_none() && !state.has_died
             })
             .unwrap();
@@ -255,7 +257,6 @@ impl IVirtualMachineCallback for VmCallback {
         cid: i32,
         stream: Option<&ParcelFileDescriptor>,
     ) -> BinderResult<()> {
-        self.0.set_started(cid);
         if let Some(pfd) = stream {
             if let Err(e) = start_logging(pfd) {
                 warn!("Can't log vm output: {}", e);
@@ -266,7 +267,7 @@ impl IVirtualMachineCallback for VmCallback {
     }
 
     fn onPayloadReady(&self, cid: i32) -> BinderResult<()> {
-        // TODO: Use this to trigger vsock connection
+        self.0.set_ready(cid);
         log::info!("VM payload ready, cid = {}", cid);
         Ok(())
     }
