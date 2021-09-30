@@ -14,43 +14,43 @@
  * limitations under the License.
  */
 
-//! Starts and manages instances of the CompOS VM. At most one instance should be running at
-//! a time.
+//! Manages running instances of the CompOS VM. At most one instance should be running at
+//! a time, started on demand.
 
+use crate::instance_starter::{CompOsInstance, InstanceStarter};
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice;
 use anyhow::{bail, Context, Result};
 use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsService;
 use compos_aidl_interface::binder::Strong;
-use compos_common::compos_client::VmInstance;
-use compos_common::{COMPOS_DATA_ROOT, CURRENT_DIR, INSTANCE_IMAGE_FILE, PRIVATE_KEY_BLOB_FILE};
-use std::fs;
-use std::path::PathBuf;
+use compos_common::CURRENT_DIR;
 use std::sync::{Arc, Mutex, Weak};
+use virtualizationservice::IVirtualizationService::IVirtualizationService;
 
-pub struct CompOsInstance {
-    #[allow(dead_code)] // Keeps VirtualizationService & the VM alive
-    vm_instance: VmInstance,
-    service: Strong<dyn ICompOsService>,
+pub struct InstanceManager {
+    service: Strong<dyn IVirtualizationService>,
+    state: Mutex<State>,
 }
 
-#[derive(Default)]
-pub struct InstanceManager(Mutex<State>);
-
 impl InstanceManager {
+    pub fn new(service: Strong<dyn IVirtualizationService>) -> Self {
+        Self { service, state: Default::default() }
+    }
+
     pub fn get_running_service(&self) -> Result<Strong<dyn ICompOsService>> {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         let instance = state.get_running_instance().context("No running instance")?;
-        Ok(instance.service.clone())
+        Ok(instance.get_service())
     }
 
     pub fn start_current_instance(&self) -> Result<Arc<CompOsInstance>> {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         state.mark_starting()?;
         // Don't hold the lock while we start the instance to avoid blocking other callers.
         drop(state);
 
         let instance = self.try_start_current_instance();
 
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if let Ok(ref instance) = instance {
             state.mark_started(instance)?;
         } else {
@@ -60,20 +60,10 @@ impl InstanceManager {
     }
 
     fn try_start_current_instance(&self) -> Result<Arc<CompOsInstance>> {
-        // TODO: Create instance_image & keys if needed
-        // TODO: Hold on to an IVirtualizationService
-        let instance_image: PathBuf =
-            [COMPOS_DATA_ROOT, CURRENT_DIR, INSTANCE_IMAGE_FILE].iter().collect();
+        let instance_starter = InstanceStarter::new(CURRENT_DIR);
+        let compos_instance = instance_starter.create_or_start_instance(&*self.service)?;
 
-        let vm_instance = VmInstance::start(&instance_image).context("Starting VM")?;
-        let service = vm_instance.get_service().context("Connecting to CompOS")?;
-
-        let key_blob: PathBuf =
-            [COMPOS_DATA_ROOT, CURRENT_DIR, PRIVATE_KEY_BLOB_FILE].iter().collect();
-        let key_blob = fs::read(key_blob).context("Reading private key")?;
-        service.initializeSigningKey(&key_blob).context("Loading key")?;
-
-        Ok(Arc::new(CompOsInstance { vm_instance, service }))
+        Ok(Arc::new(compos_instance))
     }
 }
 
@@ -82,6 +72,8 @@ impl InstanceManager {
 // Starting: is_starting is true, running_instance is None.
 // Started: is_starting is false, running_instance is Some(x) and there is a strong ref to x.
 // Stopped: is_starting is false and running_instance is None or a weak ref to a dropped instance.
+// The panic calls here should never happen, unless the code above in InstanceManager is buggy.
+// In particular nothing the client does should be able to trigger them.
 #[derive(Default)]
 struct State {
     running_instance: Option<Weak<CompOsInstance>>,
