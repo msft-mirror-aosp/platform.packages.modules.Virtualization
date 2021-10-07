@@ -26,7 +26,6 @@ use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use crate::common::new_binder_exception;
 use authfs_aidl_interface::aidl::com::android::virt::fs::IAuthFs::{BnAuthFs, IAuthFs};
 use authfs_aidl_interface::aidl::com::android::virt::fs::{
     AuthFsConfig::AuthFsConfig, InputFdAnnotation::InputFdAnnotation,
@@ -35,6 +34,7 @@ use authfs_aidl_interface::aidl::com::android::virt::fs::{
 use authfs_aidl_interface::binder::{
     self, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor, Strong,
 };
+use binder_common::new_binder_exception;
 
 const AUTHFS_BIN: &str = "/system/bin/authfs";
 const AUTHFS_SETUP_POLL_INTERVAL_MS: Duration = Duration::from_millis(50);
@@ -82,8 +82,11 @@ impl AuthFs {
             &config.outputFdAnnotations,
             debuggable,
         )?;
-        wait_until_authfs_ready(&mountpoint).map_err(|e| {
-            debug!("Wait for authfs: {:?}", child.wait());
+        wait_until_authfs_ready(&child, &mountpoint).map_err(|e| {
+            match child.wait() {
+                Ok(status) => debug!("Wait for authfs: {}", status),
+                Err(e) => warn!("Failed to wait for child: {}", e),
+            }
             e
         })?;
 
@@ -144,13 +147,18 @@ fn run_authfs(
     SharedChild::spawn(&mut command).context("Spawn authfs")
 }
 
-fn wait_until_authfs_ready(mountpoint: &OsStr) -> Result<()> {
+fn wait_until_authfs_ready(child: &SharedChild, mountpoint: &OsStr) -> Result<()> {
     let start_time = Instant::now();
     loop {
         if is_fuse(mountpoint)? {
             break;
         }
+        if let Some(exit_status) = child.try_wait()? {
+            // If the child has exited, we will never become ready.
+            bail!("Child has exited: {}", exit_status);
+        }
         if start_time.elapsed() > AUTHFS_SETUP_TIMEOUT_SEC {
+            let _ = child.kill();
             bail!("Time out mounting authfs");
         }
         sleep(AUTHFS_SETUP_POLL_INTERVAL_MS);

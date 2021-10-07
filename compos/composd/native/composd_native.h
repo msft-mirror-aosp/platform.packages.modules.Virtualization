@@ -14,11 +14,8 @@
  * limitations under the License.
  */
 
-use std::ffi::CString;
+#pragma once
 
-use authfs_aidl_interface::binder::{ExceptionCode, Status};
+#include "lib.rs.h"
 
-/// Helper function to create a binder exception.
-pub fn new_binder_exception<T: AsRef<str>>(exception: ExceptionCode, message: T) -> Status {
-    Status::new_exception(exception, CString::new(message.as_ref()).as_deref().ok())
-}
+KeyResult extract_rsa_public_key(rust::Slice<const uint8_t> der_certificate);

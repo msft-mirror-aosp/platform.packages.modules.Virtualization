@@ -74,7 +74,7 @@ impl InstanceStarter {
         let compos_instance = self.start_existing_instance();
         match compos_instance {
             Ok(_) => return compos_instance,
-            Err(e) => warn!("Failed to start {}: {}", self.instance_name, e),
+            Err(e) => warn!("Failed to start: {}", e),
         }
 
         self.start_new_instance(service)
@@ -84,11 +84,13 @@ impl InstanceStarter {
         // No point even trying if the files we need aren't there.
         self.check_files_exist()?;
 
+        info!("Starting {} CompOs instance", self.instance_name);
+
         let key_blob = fs::read(&self.key_blob).context("Reading private key blob")?;
         let public_key = fs::read(&self.public_key).context("Reading public key")?;
 
-        let vm_instance = VmInstance::start(&self.instance_image).context("Starting VM")?;
-        let service = vm_instance.get_service().context("Connecting to CompOS")?;
+        let compos_instance = self.start_vm()?;
+        let service = &compos_instance.service;
 
         if !service.verifySigningKey(&key_blob, &public_key).context("Verifying key pair")? {
             bail!("Key pair invalid");
@@ -100,7 +102,7 @@ impl InstanceStarter {
 
         service.initializeSigningKey(&key_blob).context("Loading signing key")?;
 
-        Ok(CompOsInstance { vm_instance, service })
+        Ok(compos_instance)
     }
 
     fn start_new_instance(
@@ -114,18 +116,34 @@ impl InstanceStarter {
 
         self.create_instance_image(virtualization_service)?;
 
-        let vm_instance = VmInstance::start(&self.instance_image).context("Starting VM")?;
-        let service = vm_instance.get_service().context("Connecting to CompOS")?;
+        let compos_instance = self.start_vm()?;
+        let service = &compos_instance.service;
 
         let key_data = service.generateSigningKey().context("Generating signing key")?;
         fs::write(&self.key_blob, &key_data.keyBlob).context("Writing key blob")?;
-        // TODO: Extract public key from cert
-        fs::write(&self.public_key, &key_data.certificate).context("Writing public key")?;
+
+        let key_result = composd_native::extract_rsa_public_key(&key_data.certificate);
+        let rsa_public_key = key_result.key;
+        if rsa_public_key.is_empty() {
+            bail!("Failed to extract public key from certificate: {}", key_result.error);
+        }
+        fs::write(&self.public_key, &rsa_public_key).context("Writing public key")?;
 
         // We don't need to verify the key, since we just generated it and have it in memory.
 
         service.initializeSigningKey(&key_data.keyBlob).context("Loading signing key")?;
 
+        Ok(compos_instance)
+    }
+
+    fn start_vm(&self) -> Result<CompOsInstance> {
+        let instance_image = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.instance_image)
+            .context("Failed to open instance image")?;
+        let vm_instance = VmInstance::start(instance_image).context("Starting VM")?;
+        let service = vm_instance.get_service().context("Connecting to CompOS")?;
         Ok(CompOsInstance { vm_instance, service })
     }
 
