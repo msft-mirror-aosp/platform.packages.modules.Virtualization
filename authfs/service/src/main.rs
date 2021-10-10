@@ -21,7 +21,6 @@
 //! is able to retrieve "remote file descriptors".
 
 mod authfs;
-mod common;
 
 use anyhow::{bail, Context, Result};
 use log::*;
@@ -29,7 +28,6 @@ use std::ffi::OsString;
 use std::fs::{create_dir, read_dir, remove_dir_all, remove_file};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::common::new_binder_exception;
 use authfs_aidl_interface::aidl::com::android::virt::fs::AuthFsConfig::AuthFsConfig;
 use authfs_aidl_interface::aidl::com::android::virt::fs::IAuthFs::IAuthFs;
 use authfs_aidl_interface::aidl::com::android::virt::fs::IAuthFsService::{
@@ -38,6 +36,7 @@ use authfs_aidl_interface::aidl::com::android::virt::fs::IAuthFsService::{
 use authfs_aidl_interface::binder::{
     self, add_service, BinderFeatures, ExceptionCode, Interface, ProcessState, Strong,
 };
+use binder_common::new_binder_exception;
 
 const SERVICE_NAME: &str = "authfs_service";
 const SERVICE_ROOT: &str = "/data/misc/authfs";
@@ -60,7 +59,7 @@ impl IAuthFsService for AuthFsService {
         create_dir(&mountpoint).map_err(|e| {
             new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
-                format!("Cannot create mount directory {:?}: {}", &mountpoint, e),
+                format!("Cannot create mount directory {:?}: {:?}", &mountpoint, e),
             )
         })?;
 
@@ -110,7 +109,7 @@ fn clean_up_working_directory() -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn try_main() -> Result<()> {
     let debuggable = env!("TARGET_BUILD_VARIANT") != "user";
     let log_level = if debuggable { log::Level::Trace } else { log::Level::Info };
     android_logger::init_once(
@@ -128,4 +127,11 @@ fn main() -> Result<()> {
 
     ProcessState::join_thread_pool();
     bail!("Unexpected exit after join_thread_pool")
+}
+
+fn main() {
+    if let Err(e) = try_main() {
+        error!("failed with {:?}", e);
+        std::process::exit(1);
+    }
 }

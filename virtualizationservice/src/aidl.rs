@@ -19,12 +19,11 @@ use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmInstance, VmState};
 use crate::payload::add_microdroid_images;
 use crate::{Cid, FIRST_GUEST_CID, SYSPROP_LAST_CID};
 
+use ::binder::unstable_api::AsNative;
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualMachine::{
-    BnVirtualMachine, IVirtualMachine,
-};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     DiskImage::DiskImage,
+    IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService,
     PartitionType::PartitionType,
@@ -35,21 +34,24 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     VirtualMachineState::VirtualMachineState,
 };
 use android_system_virtualizationservice::binder::{
-    self, force_lazy_services_persist, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor, Status, Strong, ThreadState,
+    self, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor, Status, Strong,
+    ThreadState,
 };
-use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
-    VM_BINDER_SERVICE_PORT, VM_STREAM_SERVICE_PORT, BnVirtualMachineService, IVirtualMachineService,
+use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::{
+    IVirtualMachineService::{
+        BnVirtualMachineService, IVirtualMachineService, VM_BINDER_SERVICE_PORT,
+        VM_STREAM_SERVICE_PORT,
+    },
 };
 use anyhow::{anyhow, bail, Context, Result};
-use ::binder::unstable_api::AsNative;
+use binder_common::{lazy_service::LazyServiceGuard, new_binder_exception};
 use disk::QcowFile;
-use idsig::{V4Signature, HashAlgorithm};
-use log::{debug, error, warn, info};
+use idsig::{HashAlgorithm, V4Signature};
+use log::{debug, error, info, warn};
 use microdroid_payload_config::VmPayloadConfig;
 use rustutils::system_properties;
 use std::convert::TryInto;
-use std::ffi::CString;
-use std::fs::{File, OpenOptions, create_dir};
+use std::fs::{create_dir, File, OpenOptions};
 use std::io::{Error, ErrorKind, Write};
 use std::num::NonZeroU32;
 use std::os::unix::io::{FromRawFd, IntoRawFd};
@@ -462,14 +464,13 @@ fn load_app_config(
 
     // Microdroid requires an additional payload disk image and the bootconfig partition.
     if os_name == "microdroid" {
-        let apexes = vm_payload_config.apexes.clone();
         add_microdroid_images(
             config,
             temporary_directory,
             apk_file,
             idsig_file,
             instance_file,
-            apexes,
+            &vm_payload_config,
             &mut vm_config,
         )?;
     }
@@ -557,11 +558,13 @@ fn check_manage_access() -> binder::Result<()> {
 #[derive(Debug)]
 struct VirtualMachine {
     instance: Arc<VmInstance>,
+    /// Keeps our service process running as long as this VM instance exists.
+    lazy_service_guard: LazyServiceGuard,
 }
 
 impl VirtualMachine {
     fn create(instance: Arc<VmInstance>) -> Strong<dyn IVirtualMachine> {
-        let binder = VirtualMachine { instance };
+        let binder = VirtualMachine { instance, lazy_service_guard: Default::default() };
         BnVirtualMachine::new_binder(binder, BinderFeatures::default())
     }
 }
@@ -714,19 +717,12 @@ impl State {
     /// Store a strong VM reference.
     fn debug_hold_vm(&mut self, vm: Strong<dyn IVirtualMachine>) {
         self.debug_held_vms.push(vm);
-        // Make sure our process is not shut down while we hold the VM reference
-        // on behalf of the caller.
-        force_lazy_services_persist(true);
     }
 
     /// Retrieve and remove a strong VM reference.
     fn debug_drop_vm(&mut self, cid: i32) -> Option<Strong<dyn IVirtualMachine>> {
         let pos = self.debug_held_vms.iter().position(|vm| vm.getCid() == Ok(cid))?;
         let vm = self.debug_held_vms.swap_remove(pos);
-        if self.debug_held_vms.is_empty() {
-            // Once we no longer hold any VM references it is ok for our process to be shut down.
-            force_lazy_services_persist(false);
-        }
         Some(vm)
     }
 }
@@ -793,11 +789,6 @@ fn vsock_stream_to_pfd(stream: VsockStream) -> ParcelFileDescriptor {
     // SAFETY: ownership is transferred from stream to f
     let f = unsafe { File::from_raw_fd(stream.into_raw_fd()) };
     ParcelFileDescriptor::new(f)
-}
-
-/// Constructs a new Binder error `Status` with the given `ExceptionCode` and message.
-fn new_binder_exception<T: AsRef<str>>(exception: ExceptionCode, message: T) -> Status {
-    Status::new_exception(exception, CString::new(message.as_ref()).ok().as_deref())
 }
 
 /// Simple utility for referencing Borrowed or Owned. Similar to std::borrow::Cow, but

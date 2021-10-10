@@ -22,13 +22,13 @@ use crate::odrefresh;
 use android_system_composd::aidl::android::system::composd::IIsolatedCompilationService::{
     BnIsolatedCompilationService, IIsolatedCompilationService,
 };
-use android_system_composd::binder::{self, BinderFeatures, Interface, Status, Strong};
+use android_system_composd::binder::{self, BinderFeatures, Interface, Strong};
 use anyhow::{bail, Context, Result};
+use binder_common::new_binder_service_specific_error;
 use compos_aidl_interface::aidl::com::android::compos::{
     CompilationResult::CompilationResult, FdAnnotation::FdAnnotation,
 };
 use log::{error, info};
-use std::ffi::CString;
 
 pub struct IsolatedCompilationService {
     instance_manager: InstanceManager,
@@ -47,7 +47,7 @@ impl IIsolatedCompilationService for IsolatedCompilationService {
         to_binder_result(self.do_run_forced_compile())
     }
 
-    fn compile(
+    fn compile_cmd(
         &self,
         args: &[String],
         fd_annotation: &FdAnnotation,
@@ -55,12 +55,17 @@ impl IIsolatedCompilationService for IsolatedCompilationService {
         // TODO - check caller is odrefresh
         to_binder_result(self.do_compile(args, fd_annotation))
     }
+
+    fn compile(&self, _marshaled: &[u8], _fd_annotation: &FdAnnotation) -> binder::Result<i8> {
+        Err(new_binder_service_specific_error(-1, "Not yet implemented"))
+    }
 }
 
 fn to_binder_result<T>(result: Result<T>) -> binder::Result<T> {
     result.map_err(|e| {
-        error!("Returning binder error: {:#}", e);
-        Status::new_service_specific_error(-1, CString::new(format!("{:#}", e)).ok().as_deref())
+        let message = format!("{:?}", e);
+        error!("Returning binder error: {}", &message);
+        new_binder_service_specific_error(-1, message)
     })
 }
 
@@ -88,6 +93,6 @@ impl IsolatedCompilationService {
         fd_annotation: &FdAnnotation,
     ) -> Result<CompilationResult> {
         let compos = self.instance_manager.get_running_service()?;
-        compos.compile(args, fd_annotation).context("Compiling")
+        compos.compile_cmd(args, fd_annotation).context("Compiling")
     }
 }
