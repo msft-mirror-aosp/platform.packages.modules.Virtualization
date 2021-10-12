@@ -25,12 +25,11 @@
 mod fsverity;
 
 use anyhow::{bail, Result};
-use binder::unstable_api::AsNative;
+use binder_common::rpc_server::run_rpc_server;
 use log::{debug, error};
 use std::cmp::min;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
-use std::ffi::CString;
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
@@ -43,12 +42,9 @@ use authfs_aidl_interface::aidl::com::android::virt::fs::IVirtFdService::{
 use authfs_aidl_interface::binder::{
     BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Status, StatusCode, Strong,
 };
+use binder_common::new_binder_exception;
 
 const RPC_SERVICE_PORT: u32 = 3264; // TODO: support dynamic port for multiple fd_server instances
-
-fn new_binder_exception<T: AsRef<str>>(exception: ExceptionCode, message: T) -> Status {
-    Status::new_exception(exception, CString::new(message.as_ref()).as_deref().ok())
-}
 
 fn validate_and_cast_offset(offset: i64) -> Result<u64, Status> {
     offset.try_into().map_err(|_| {
@@ -296,7 +292,12 @@ fn parse_arg_rw_fds(arg: &str) -> Result<(i32, FdConfig)> {
     Ok((fd, FdConfig::ReadWrite(file)))
 }
 
-fn parse_args() -> Result<BTreeMap<i32, FdConfig>> {
+struct Args {
+    fd_pool: BTreeMap<i32, FdConfig>,
+    ready_fd: Option<File>,
+}
+
+fn parse_args() -> Result<Args> {
     #[rustfmt::skip]
     let matches = clap::App::new("fd_server")
         .arg(clap::Arg::with_name("ro-fds")
@@ -307,6 +308,9 @@ fn parse_args() -> Result<BTreeMap<i32, FdConfig>> {
              .long("rw-fds")
              .multiple(true)
              .number_of_values(1))
+        .arg(clap::Arg::with_name("ready-fd")
+            .long("ready-fd")
+            .takes_value(true))
         .get_matches();
 
     let mut fd_pool = BTreeMap::new();
@@ -322,8 +326,13 @@ fn parse_args() -> Result<BTreeMap<i32, FdConfig>> {
             fd_pool.insert(fd, config);
         }
     }
-
-    Ok(fd_pool)
+    let ready_fd = if let Some(arg) = matches.value_of("ready-fd") {
+        let fd = arg.parse::<i32>()?;
+        Some(fd_to_file(fd)?)
+    } else {
+        None
+    };
+    Ok(Args { fd_pool, ready_fd })
 }
 
 fn main() -> Result<()> {
@@ -331,18 +340,18 @@ fn main() -> Result<()> {
         android_logger::Config::default().with_tag("fd_server").with_min_level(log::Level::Debug),
     );
 
-    let fd_pool = parse_args()?;
+    let args = parse_args()?;
+    let service = FdService::new_binder(args.fd_pool).as_binder();
 
-    let mut service = FdService::new_binder(fd_pool).as_binder();
     debug!("fd_server is starting as a rpc service.");
-    // SAFETY: Service ownership is transferring to the server and won't be valid afterward.
-    // Plus the binder objects are threadsafe.
-    let retval = unsafe {
-        binder_rpc_unstable_bindgen::RunRpcServer(
-            service.as_native_mut() as *mut binder_rpc_unstable_bindgen::AIBinder,
-            RPC_SERVICE_PORT,
-        )
-    };
+
+    let mut ready_fd = args.ready_fd;
+    let retval = run_rpc_server(service, RPC_SERVICE_PORT, || {
+        debug!("fd_server is ready");
+        // Close the ready-fd if we were given one to signal our readiness.
+        drop(ready_fd.take());
+    });
+
     if retval {
         debug!("RPC server has shut down gracefully");
         Ok(())

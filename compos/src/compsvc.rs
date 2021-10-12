@@ -19,13 +19,13 @@
 //! actual compiler.
 
 use anyhow::Result;
+use binder_common::new_binder_exception;
 use log::warn;
 use std::default::Default;
-use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use crate::compilation::{compile, CompilerOutput};
+use crate::compilation::{compile_cmd, CompilerOutput};
 use crate::compos_key_service::CompOsKeyService;
 use crate::fsverity;
 use authfs_aidl_interface::aidl::com::android::virt::fs::IAuthFsService::IAuthFsService;
@@ -36,7 +36,7 @@ use compos_aidl_interface::aidl::com::android::compos::{
     ICompOsService::{BnCompOsService, ICompOsService},
 };
 use compos_aidl_interface::binder::{
-    BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Status, Strong,
+    BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Strong,
 };
 
 const AUTHFS_SERVICE_NAME: &str = "authfs_service";
@@ -85,14 +85,14 @@ impl ICompOsService for CompOsService {
         }
     }
 
-    fn compile(
+    fn compile_cmd(
         &self,
         args: &[String],
         fd_annotation: &FdAnnotation,
     ) -> BinderResult<CompilationResult> {
         let authfs_service = get_authfs_service()?;
         let output =
-            compile(&self.dex2oat_path, args, authfs_service, fd_annotation).map_err(|e| {
+            compile_cmd(&self.dex2oat_path, args, authfs_service, fd_annotation).map_err(|e| {
                 new_binder_exception(
                     ExceptionCode::SERVICE_SPECIFIC,
                     format!("Compilation failed: {}", e),
@@ -124,6 +124,10 @@ impl ICompOsService for CompOsService {
         }
     }
 
+    fn compile(&self, _marshaled: &[u8], _fd_annotation: &FdAnnotation) -> BinderResult<i8> {
+        Err(new_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION, "Not yet implemented"))
+    }
+
     fn generateSigningKey(&self) -> BinderResult<CompOsKeyData> {
         self.key_service
             .do_generate()
@@ -153,8 +157,4 @@ impl ICompOsService for CompOsService {
 
 fn get_authfs_service() -> BinderResult<Strong<dyn IAuthFsService>> {
     Ok(authfs_aidl_interface::binder::get_interface(AUTHFS_SERVICE_NAME)?)
-}
-
-fn new_binder_exception<T: AsRef<str>>(exception: ExceptionCode, message: T) -> Status {
-    Status::new_exception(exception, CString::new(message.as_ref()).as_deref().ok())
 }
