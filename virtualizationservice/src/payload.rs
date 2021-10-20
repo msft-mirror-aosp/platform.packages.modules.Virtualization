@@ -15,12 +15,13 @@
 //! Payload disk image
 
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    DiskImage::DiskImage, Partition::Partition, VirtualMachineAppConfig::VirtualMachineAppConfig,
+    DiskImage::DiskImage, Partition::Partition, VirtualMachineAppConfig::DebugLevel::DebugLevel,
+    VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineRawConfig::VirtualMachineRawConfig,
 };
 use android_system_virtualizationservice::binder::ParcelFileDescriptor;
 use anyhow::{anyhow, Context, Result};
-use binder::{wait_for_interface, Strong};
+use binder::wait_for_interface;
 use log::{error, info};
 use microdroid_metadata::{ApexPayload, ApkPayload, Metadata};
 use microdroid_payload_config::{ApexConfig, VmPayloadConfig};
@@ -42,18 +43,25 @@ const APEX_INFO_LIST_PATH: &str = "/apex/apex-info-list.xml";
 const PACKAGE_MANAGER_NATIVE_SERVICE: &str = "package_native";
 
 /// Represents the list of APEXes
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ApexInfoList {
     #[serde(rename = "apex-info")]
     list: Vec<ApexInfo>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ApexInfo {
     #[serde(rename = "moduleName")]
     name: String,
     #[serde(rename = "modulePath")]
     path: PathBuf,
+
+    #[serde(default)]
+    boot_classpath: bool,
+    #[serde(default)]
+    systemserver_classpath: bool,
+    #[serde(default)]
+    dex2oatboot_classpath: bool,
 }
 
 impl ApexInfoList {
@@ -63,10 +71,29 @@ impl ApexInfoList {
         INSTANCE.get_or_try_init(|| {
             let apex_info_list = File::open(APEX_INFO_LIST_PATH)
                 .context(format!("Failed to open {}", APEX_INFO_LIST_PATH))?;
-            let apex_info_list: ApexInfoList = from_reader(apex_info_list)
+            let mut apex_info_list: ApexInfoList = from_reader(apex_info_list)
                 .context(format!("Failed to parse {}", APEX_INFO_LIST_PATH))?;
+
+            // For active APEXes, we refer env variables to see if it contributes to classpath
+            let boot_classpath_apexes = find_apex_names_in_classpath_env("BOOTCLASSPATH");
+            let systemserver_classpath_apexes =
+                find_apex_names_in_classpath_env("SYSTEMSERVERCLASSPATH");
+            let dex2oatboot_classpath_apexes =
+                find_apex_names_in_classpath_env("DEX2OATBOOTCLASSPATH");
+            for apex_info in apex_info_list.list.iter_mut() {
+                apex_info.boot_classpath = boot_classpath_apexes.contains(&apex_info.name);
+                apex_info.systemserver_classpath =
+                    systemserver_classpath_apexes.contains(&apex_info.name);
+                apex_info.dex2oatboot_classpath =
+                    dex2oatboot_classpath_apexes.contains(&apex_info.name);
+            }
             Ok(apex_info_list)
         })
+    }
+
+    /// Returns the list of apex names matching with the predicate
+    fn get_matching(&self, predicate: fn(&ApexInfo) -> bool) -> Vec<String> {
+        self.list.iter().filter(|info| predicate(info)).map(|info| info.name.clone()).collect()
     }
 
     fn get_path_for(&self, apex_name: &str) -> Result<PathBuf> {
@@ -81,28 +108,36 @@ impl ApexInfoList {
 }
 
 struct PackageManager {
-    service: Strong<dyn IPackageManagerNative>,
     // TODO(b/199146189) use IPackageManagerNative
     apex_info_list: &'static ApexInfoList,
 }
 
 impl PackageManager {
     fn new() -> Result<Self> {
-        let service = wait_for_interface(PACKAGE_MANAGER_NATIVE_SERVICE)
-            .context("Failed to find PackageManager")?;
         let apex_info_list = ApexInfoList::load()?;
-        Ok(Self { service, apex_info_list })
+        Ok(Self { apex_info_list })
     }
 
-    fn get_apex_path(&self, name: &str, prefer_staged: bool) -> Result<PathBuf> {
+    fn get_apex_list(&self, prefer_staged: bool) -> Result<ApexInfoList> {
+        // get the list of active apexes
+        let mut list = self.apex_info_list.clone();
+        // When prefer_staged, we override ApexInfo by consulting "package_native"
         if prefer_staged {
-            let apex_info = self.service.getStagedApexInfo(name)?;
-            if let Some(apex_info) = apex_info {
-                info!("prefer_staged: use {} for {}", apex_info.diskImagePath, name);
-                return Ok(PathBuf::from(apex_info.diskImagePath));
+            let pm =
+                wait_for_interface::<dyn IPackageManagerNative>(PACKAGE_MANAGER_NATIVE_SERVICE)
+                    .context("Failed to get service when prefer_staged is set.")?;
+            let staged = pm.getStagedApexModuleNames()?;
+            for apex_info in list.list.iter_mut() {
+                if staged.contains(&apex_info.name) {
+                    let staged_apex_info = pm.getStagedApexInfo(&apex_info.name)?;
+                    if let Some(staged_apex_info) = staged_apex_info {
+                        apex_info.path = PathBuf::from(staged_apex_info.diskImagePath);
+                        // TODO(b/201788989) copy bootclasspath/systemserverclasspath
+                    }
+                }
             }
         }
-        self.apex_info_list.get_path_for(name)
+        Ok(list)
     }
 }
 
@@ -158,11 +193,17 @@ fn make_payload_disk(
     apk_file: File,
     idsig_file: File,
     config_path: &str,
-    apexes: &[String],
-    prefer_staged: bool,
+    vm_payload_config: &VmPayloadConfig,
     temporary_directory: &Path,
 ) -> Result<DiskImage> {
-    let metadata_file = make_metadata_file(config_path, apexes, temporary_directory)?;
+    let pm = PackageManager::new()?;
+    let apex_list = pm.get_apex_list(vm_payload_config.prefer_staged)?;
+
+    // collect APEX names from config
+    let apexes = collect_apex_names(&apex_list, &vm_payload_config.apexes);
+    info!("Microdroid payload APEXes: {:?}", apexes);
+
+    let metadata_file = make_metadata_file(config_path, &apexes, temporary_directory)?;
     // put metadata at the first partition
     let mut partitions = vec![Partition {
         label: "payload-metadata".to_owned(),
@@ -170,9 +211,8 @@ fn make_payload_disk(
         writable: false,
     }];
 
-    let pm = PackageManager::new()?;
     for (i, apex) in apexes.iter().enumerate() {
-        let apex_path = pm.get_apex_path(apex, prefer_staged)?;
+        let apex_path = apex_list.get_path_for(apex)?;
         let apex_file = open_parcel_file(&apex_path, false)?;
         partitions.push(Partition {
             label: format!("microdroid-apex-{}", i),
@@ -213,7 +253,7 @@ fn find_apex_names_in_classpath_env(classpath_env_var: &str) -> Vec<String> {
 }
 
 // Collect APEX names from config
-fn collect_apex_names(apexes: &[ApexConfig]) -> Vec<String> {
+fn collect_apex_names(apex_list: &ApexInfoList, apexes: &[ApexConfig]) -> Vec<String> {
     // Process pseudo names like "{BOOTCLASSPATH}".
     // For now we have following pseudo APEX names:
     // - {BOOTCLASSPATH}: represents APEXes contributing "BOOTCLASSPATH" environment variable
@@ -222,9 +262,9 @@ fn collect_apex_names(apexes: &[ApexConfig]) -> Vec<String> {
     let mut apex_names: Vec<String> = apexes
         .iter()
         .flat_map(|apex| match apex.name.as_str() {
-            "{BOOTCLASSPATH}" => find_apex_names_in_classpath_env("BOOTCLASSPATH"),
-            "{DEX2OATBOOTCLASSPATH}" => find_apex_names_in_classpath_env("DEX2OATBOOTCLASSPATH"),
-            "{SYSTEMSERVERCLASSPATH}" => find_apex_names_in_classpath_env("SYSTEMSERVERCLASSPATH"),
+            "{BOOTCLASSPATH}" => apex_list.get_matching(|apex| apex.boot_classpath),
+            "{DEX2OATBOOTCLASSPATH}" => apex_list.get_matching(|apex| apex.dex2oatboot_classpath),
+            "{SYSTEMSERVERCLASSPATH}" => apex_list.get_matching(|apex| apex.systemserver_classpath),
             _ => vec![apex.name.clone()],
         })
         .collect();
@@ -244,28 +284,26 @@ pub fn add_microdroid_images(
     vm_payload_config: &VmPayloadConfig,
     vm_config: &mut VirtualMachineRawConfig,
 ) -> Result<()> {
-    // collect APEX names from config
-    let apexes = collect_apex_names(&vm_payload_config.apexes);
-    info!("Microdroid payload APEXes: {:?}", apexes);
     vm_config.disks.push(make_payload_disk(
         apk_file,
         idsig_file,
         &config.configPath,
-        &apexes,
-        vm_payload_config.prefer_staged,
+        vm_payload_config,
         temporary_directory,
     )?);
 
-    if config.debug {
-        vm_config.disks[1].partitions.push(Partition {
-            label: "bootconfig".to_owned(),
-            image: Some(open_parcel_file(
-                Path::new("/apex/com.android.virt/etc/microdroid_bootconfig.debug"),
-                false,
-            )?),
-            writable: false,
-        });
-    }
+    let bootconfig_image = "/apex/com.android.virt/etc/microdroid_bootconfig.".to_owned()
+        + match config.debugLevel {
+            DebugLevel::NONE => "normal",
+            DebugLevel::APP_ONLY => "app_debuggable",
+            DebugLevel::FULL => "full_debuggable",
+            _ => return Err(anyhow!("unsupported debug level: {:?}", config.debugLevel)),
+        };
+    vm_config.disks[1].partitions.push(Partition {
+        label: "bootconfig".to_owned(),
+        image: Some(open_parcel_file(Path::new(&bootconfig_image), false)?),
+        writable: false,
+    });
 
     // instance image is at the second partition in the second disk.
     vm_config.disks[1].partitions.push(Partition {
