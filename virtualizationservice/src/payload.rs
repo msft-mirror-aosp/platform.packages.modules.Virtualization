@@ -15,12 +15,13 @@
 //! Payload disk image
 
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    DiskImage::DiskImage, Partition::Partition, VirtualMachineAppConfig::VirtualMachineAppConfig,
+    DiskImage::DiskImage, Partition::Partition, VirtualMachineAppConfig::DebugLevel::DebugLevel,
+    VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineRawConfig::VirtualMachineRawConfig,
 };
 use android_system_virtualizationservice::binder::ParcelFileDescriptor;
 use anyhow::{anyhow, Context, Result};
-use binder::{wait_for_interface, Strong};
+use binder::wait_for_interface;
 use log::{error, info};
 use microdroid_metadata::{ApexPayload, ApkPayload, Metadata};
 use microdroid_payload_config::{ApexConfig, VmPayloadConfig};
@@ -107,27 +108,28 @@ impl ApexInfoList {
 }
 
 struct PackageManager {
-    service: Strong<dyn IPackageManagerNative>,
     // TODO(b/199146189) use IPackageManagerNative
     apex_info_list: &'static ApexInfoList,
 }
 
 impl PackageManager {
     fn new() -> Result<Self> {
-        let service = wait_for_interface(PACKAGE_MANAGER_NATIVE_SERVICE)
-            .context("Failed to find PackageManager")?;
         let apex_info_list = ApexInfoList::load()?;
-        Ok(Self { service, apex_info_list })
+        Ok(Self { apex_info_list })
     }
 
     fn get_apex_list(&self, prefer_staged: bool) -> Result<ApexInfoList> {
+        // get the list of active apexes
         let mut list = self.apex_info_list.clone();
+        // When prefer_staged, we override ApexInfo by consulting "package_native"
         if prefer_staged {
-            // When prefer_staged, we override ApexInfo by consulting "package_native"
-            let staged = self.service.getStagedApexModuleNames()?;
+            let pm =
+                wait_for_interface::<dyn IPackageManagerNative>(PACKAGE_MANAGER_NATIVE_SERVICE)
+                    .context("Failed to get service when prefer_staged is set.")?;
+            let staged = pm.getStagedApexModuleNames()?;
             for apex_info in list.list.iter_mut() {
                 if staged.contains(&apex_info.name) {
-                    let staged_apex_info = self.service.getStagedApexInfo(&apex_info.name)?;
+                    let staged_apex_info = pm.getStagedApexInfo(&apex_info.name)?;
                     if let Some(staged_apex_info) = staged_apex_info {
                         apex_info.path = PathBuf::from(staged_apex_info.diskImagePath);
                         // TODO(b/201788989) copy bootclasspath/systemserverclasspath
@@ -290,16 +292,18 @@ pub fn add_microdroid_images(
         temporary_directory,
     )?);
 
-    if config.debug {
-        vm_config.disks[1].partitions.push(Partition {
-            label: "bootconfig".to_owned(),
-            image: Some(open_parcel_file(
-                Path::new("/apex/com.android.virt/etc/microdroid_bootconfig.debug"),
-                false,
-            )?),
-            writable: false,
-        });
-    }
+    let bootconfig_image = "/apex/com.android.virt/etc/microdroid_bootconfig.".to_owned()
+        + match config.debugLevel {
+            DebugLevel::NONE => "normal",
+            DebugLevel::APP_ONLY => "app_debuggable",
+            DebugLevel::FULL => "full_debuggable",
+            _ => return Err(anyhow!("unsupported debug level: {:?}", config.debugLevel)),
+        };
+    vm_config.disks[1].partitions.push(Partition {
+        label: "bootconfig".to_owned(),
+        image: Some(open_parcel_file(Path::new(&bootconfig_image), false)?),
+        writable: false,
+    });
 
     // instance image is at the second partition in the second disk.
     vm_config.disks[1].partitions.push(Partition {

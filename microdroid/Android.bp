@@ -51,9 +51,9 @@ android_system_image {
         "init_second_stage",
         "microdroid_build_prop",
         "microdroid_init_rc",
+        "microdroid_ueventd_rc",
         "microdroid_launcher",
 
-        "ueventd.rc",
         "libbinder",
         "libbinder_ndk",
         "libstdc++",
@@ -134,6 +134,13 @@ prebuilt_etc {
     src: "init.rc",
     relative_install_path: "init/hw",
     installable: false, // avoid collision with system partition's init.rc
+}
+
+prebuilt_etc {
+    name: "microdroid_ueventd_rc",
+    filename: "ueventd.rc",
+    src: "ueventd.rc",
+    installable: false, // avoid collision with system partition's ueventd.rc
 }
 
 prebuilt_root {
@@ -225,12 +232,15 @@ bootimg {
         },
         x86_64: {
             kernel_prebuilt: ":kernel_prebuilts-5.10-x86_64",
-            cmdline: microdroid_boot_cmdline + ["acpi=noirq"],
-        },
-    },
-    product_variables: {
-        debuggable: {
-            cmdline: ["printk.devkmsg=on"],
+            cmdline: microdroid_boot_cmdline + [
+                // console=none is to work around the x86 specific u-boot behavior which when
+                // console= option is not found in the kernel commandline console=ttyS0 is
+                // automatically added. By adding console=none, we can prevent u-boot from doing
+                // that. Note that console is set to hvc0 by bootconfig if the VM is configured as
+                // debuggable.
+                "console=none",
+                "acpi=noirq",
+            ],
         },
     },
 
@@ -325,10 +335,23 @@ genrule {
     cmd: "cat $(in) > $(out)",
 }
 
+// TODO(b/203031847) sign these bootconfig images using avb
 prebuilt_etc {
-    name: "microdroid_bootconfig_debug",
-    src: "bootconfig.debug",
-    filename: "microdroid_bootconfig.debug",
+    name: "microdroid_bootconfig_normal",
+    src: "bootconfig.normal",
+    filename: "microdroid_bootconfig.normal",
+}
+
+prebuilt_etc {
+    name: "microdroid_bootconfig_app_debuggable",
+    src: "bootconfig.app_debuggable",
+    filename: "microdroid_bootconfig.app_debuggable",
+}
+
+prebuilt_etc {
+    name: "microdroid_bootconfig_full_debuggable",
+    src: "bootconfig.full_debuggable",
+    filename: "microdroid_bootconfig.full_debuggable",
 }
 
 prebuilt_etc {
@@ -346,7 +369,7 @@ prebuilt_etc {
             // For unknown reason, the signed bootloader doesn't work on x86_64. Until the problem
             // is fixed, let's use the unsigned bootloader for the architecture.
             // TODO(b/185115783): remove this
-            src: ":cuttlefish_crosvm_bootloader",
+            src: ":microdroid_crosvm_bootloader",
         },
     },
     filename: "microdroid_bootloader",
@@ -360,7 +383,7 @@ genrule {
     name: "microdroid_bootloader_gen",
     tools: ["avbtool"],
     srcs: [
-        ":cuttlefish_crosvm_bootloader",
+        ":microdroid_crosvm_bootloader",
         ":avb_testkey_rsa4096",
     ],
     out: ["bootloader-signed"],
@@ -370,7 +393,7 @@ genrule {
     // bootloader file whose size is 1. It can't pass avbtool.
     // 3. Add the hash footer. The partition size is set to (image size + 68KB)
     // rounded up to 4KB boundary.
-    cmd: "cp $(location :cuttlefish_crosvm_bootloader) $(out) && " +
+    cmd: "cp $(location :microdroid_crosvm_bootloader) $(out) && " +
         "if [ $$(stat --format=%s $(out)) -gt 4096 ]; then " +
         "$(location avbtool) add_hash_footer " +
         "--algorithm SHA256_RSA4096 " +
