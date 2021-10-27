@@ -26,7 +26,6 @@ apex {
                 "microdroid_boot-5.10",
                 "microdroid_vendor_boot-5.10",
                 "microdroid_vbmeta",
-                "microdroid_vbmeta_system",
             ],
         },
         x86_64: {
@@ -39,7 +38,6 @@ apex {
                 "microdroid_boot-5.10",
                 "microdroid_vendor_boot-5.10",
                 "microdroid_vbmeta",
-                "microdroid_vbmeta_system",
             ],
         },
     },
@@ -84,4 +82,21 @@ prebuilt_etc {
     src: "virtualizationservice.rc",
     filename: "init.rc",
     installable: false,
+}
+
+// Virt apex needs a custom signer for its payload
+python_binary_host {
+    name: "sign_virt_apex",
+    srcs: [
+        "sign_virt_apex.py",
+    ],
+    version: {
+        py2: {
+            enabled: false,
+        },
+        py3: {
+            enabled: true,
+            embedded_launcher: true,
+        },
+    },
 }
