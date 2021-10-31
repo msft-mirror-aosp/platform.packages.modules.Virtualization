@@ -13,6 +13,7 @@ apex {
 
     key: "com.android.virt.key",
     certificate: ":com.android.virt.certificate",
+    custom_sign_tool: "sign_virt_apex",
 
     // crosvm and virtualizationservice are only enabled for 64-bit targets on device
     arch: {
@@ -26,7 +27,6 @@ apex {
                 "microdroid_boot-5.10",
                 "microdroid_vendor_boot-5.10",
                 "microdroid_vbmeta",
-                "microdroid_vbmeta_system",
             ],
         },
         x86_64: {
@@ -39,7 +39,6 @@ apex {
                 "microdroid_boot-5.10",
                 "microdroid_vendor_boot-5.10",
                 "microdroid_vbmeta",
-                "microdroid_vbmeta_system",
             ],
         },
     },
@@ -61,6 +60,7 @@ apex {
         "microdroid.json",
         "microdroid_uboot_env",
         "microdroid_bootloader",
+        "microdroid_bootloader.avbpubkey",
         "microdroid_bootconfig_normal",
         "microdroid_bootconfig_app_debuggable",
         "microdroid_bootconfig_full_debuggable",
@@ -84,4 +84,27 @@ prebuilt_etc {
     src: "virtualizationservice.rc",
     filename: "init.rc",
     installable: false,
+}
+
+// Virt apex needs a custom signer for its payload
+python_binary_host {
+    name: "sign_virt_apex",
+    srcs: [
+        "sign_virt_apex.py",
+    ],
+    version: {
+        py2: {
+            enabled: false,
+        },
+        py3: {
+            enabled: true,
+            embedded_launcher: true,
+        },
+    },
+    required: [
+        "img2simg",
+        "lpmake",
+        "lpunpack",
+        "simg2img",
+    ],
 }

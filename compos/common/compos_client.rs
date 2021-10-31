@@ -16,12 +16,13 @@
 
 //! Support for starting CompOS in a VM and connecting to the service
 
+use crate::timeouts::timeouts;
 use crate::{COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     IVirtualMachine::IVirtualMachine,
     IVirtualMachineCallback::{BnVirtualMachineCallback, IVirtualMachineCallback},
     IVirtualizationService::IVirtualizationService,
-    VirtualMachineAppConfig::VirtualMachineAppConfig,
+    VirtualMachineAppConfig::{DebugLevel::DebugLevel, VirtualMachineAppConfig},
     VirtualMachineConfig::VirtualMachineConfig,
 };
 use android_system_virtualizationservice::binder::{
@@ -42,13 +43,19 @@ use std::os::unix::io::IntoRawFd;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
 
 /// This owns an instance of the CompOS VM.
 pub struct VmInstance {
     #[allow(dead_code)] // Keeps the VM alive even if we don`t touch it
     vm: Strong<dyn IVirtualMachine>,
     cid: i32,
+}
+
+/// Parameters to be used when creating a virtual machine instance.
+#[derive(Default, Debug, Clone)]
+pub struct VmParameters {
+    /// Whether the VM should be debuggable.
+    pub debug_mode: bool,
 }
 
 impl VmInstance {
@@ -59,8 +66,12 @@ impl VmInstance {
             .context("Failed to find VirtualizationService")
     }
 
-    /// Start a new CompOS VM instance using the specified instance image file.
-    pub fn start(instance_image: File) -> Result<VmInstance> {
+    /// Start a new CompOS VM instance using the specified instance image file and parameters.
+    pub fn start(
+        service: &dyn IVirtualizationService,
+        instance_image: File,
+        parameters: &VmParameters,
+    ) -> Result<VmInstance> {
         let instance_fd = ParcelFileDescriptor::new(instance_image);
 
         let apex_dir = Path::new(COMPOS_APEX_ROOT);
@@ -74,28 +85,34 @@ impl VmInstance {
             .context("Failed to open config APK idsig file")?;
         let idsig_fd = ParcelFileDescriptor::new(idsig_fd);
 
+        // Console output and the system log output from the VM are redirected to this file.
         // TODO: Send this to stdout instead? Or specify None?
         let log_fd = File::create(data_dir.join("vm.log")).context("Failed to create log file")?;
         let log_fd = ParcelFileDescriptor::new(log_fd);
+
+        let debug_level = if parameters.debug_mode { DebugLevel::FULL } else { DebugLevel::NONE };
 
         let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
             apk: Some(apk_fd),
             idsig: Some(idsig_fd),
             instanceImage: Some(instance_fd),
             configPath: "assets/vm_config.json".to_owned(),
+            debugLevel: debug_level,
             ..Default::default()
         });
 
-        let service = Self::connect_to_virtualization_service()?;
-
-        let vm = service.createVm(&config, Some(&log_fd)).context("Failed to create VM")?;
+        let vm = service
+            .createVm(&config, Some(&log_fd), Some(&log_fd))
+            .context("Failed to create VM")?;
         let vm_state = Arc::new(VmStateMonitor::default());
 
         let vm_state_clone = Arc::clone(&vm_state);
-        vm.as_binder().link_to_death(&mut DeathRecipient::new(move || {
+        let mut death_recipient = DeathRecipient::new(move || {
             vm_state_clone.set_died();
             log::error!("VirtualizationService died");
-        }))?;
+        });
+        // Note that dropping death_recipient cancels this, so we can't use a temporary here.
+        vm.as_binder().link_to_death(&mut death_recipient)?;
 
         let vm_state_clone = Arc::clone(&vm_state);
         let callback = BnVirtualMachineCallback::new_binder(
@@ -223,14 +240,13 @@ impl VmStateMonitor {
     }
 
     fn wait_until_ready(&self) -> Result<i32> {
-        // 10s is long enough on real hardware, but it can take 90s when using nested
-        // virtualization.
-        // TODO(b/200924405): Reduce timeout/detect nested virtualization
         let (state, result) = self
             .state_ready
-            .wait_timeout_while(self.mutex.lock().unwrap(), Duration::from_secs(120), |state| {
-                state.cid.is_none() && !state.has_died
-            })
+            .wait_timeout_while(
+                self.mutex.lock().unwrap(),
+                timeouts()?.vm_max_time_to_ready,
+                |state| state.cid.is_none() && !state.has_died,
+            )
             .unwrap();
         if result.timed_out() {
             bail!("Timed out waiting for VM")
