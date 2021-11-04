@@ -45,6 +45,7 @@ pub struct CrosvmConfig {
     pub params: Option<String>,
     pub protected: bool,
     pub memory_mib: Option<NonZeroU32>,
+    pub console_fd: Option<File>,
     pub log_fd: Option<File>,
     pub indirect_files: Vec<File>,
 }
@@ -180,8 +181,8 @@ impl VmInstance {
     /// `self.vm_state` to avoid holding the lock on `vm_state` while it is running.
     fn monitor(&self, child: Arc<SharedChild>) {
         match child.wait() {
-            Err(e) => error!("Error waiting for crosvm instance to die: {}", e),
-            Ok(status) => info!("crosvm exited with status {}", status),
+            Err(e) => error!("Error waiting for crosvm({}) instance to die: {}", child.id(), e),
+            Ok(status) => info!("crosvm({}) exited with status {}", child.id(), status),
         }
 
         let mut vm_state = self.vm_state.lock().unwrap();
@@ -219,9 +220,11 @@ impl VmInstance {
     pub fn kill(&self) {
         let vm_state = &*self.vm_state.lock().unwrap();
         if let VmState::Running { child } = vm_state {
+            let id = child.id();
+            debug!("Killing crosvm({})", id);
             // TODO: Talk to crosvm to shutdown cleanly.
             if let Err(e) = child.kill() {
-                error!("Error killing crosvm instance: {}", e);
+                error!("Error killing crosvm({}) instance: {}", id, e);
             }
         }
     }
@@ -243,28 +246,35 @@ fn run_vm(config: CrosvmConfig) -> Result<SharedChild, Error> {
         command.arg("--mem").arg(memory_mib.to_string());
     }
 
+    // Keep track of what file descriptors should be mapped to the crosvm process.
+    let mut preserved_fds = config.indirect_files.iter().map(|file| file.as_raw_fd()).collect();
+
     // Setup the serial devices.
     // 1. uart device: used as the output device by bootloaders and as early console by linux
     // 2. virtio-console device: used as the console device
+    // 3. virtio-console device: used as the logcat output
     //
-    // When log_fd is not specified, the devices are attached to sink, which means what's written
-    // there is discarded.
-    //
+    // When [console|log]_fd is not specified, the devices are attached to sink, which means what's
+    // written there is discarded.
+    let mut format_serial_arg = |fd: &Option<File>| {
+        let path = fd.as_ref().map(|fd| add_preserved_fd(&mut preserved_fds, fd));
+        let type_arg = path.as_ref().map_or("type=sink", |_| "type=file");
+        let path_arg = path.as_ref().map_or(String::new(), |path| format!(",path={}", path));
+        format!("{}{}", type_arg, path_arg)
+    };
+    let console_arg = format_serial_arg(&config.console_fd);
+    let log_arg = format_serial_arg(&config.log_fd);
+
     // Warning: Adding more serial devices requires you to shift the PCI device ID of the boot
     // disks in bootconfig.x86_64. This is because x86 crosvm puts serial devices and the block
     // devices in the same PCI bus and serial devices comes before the block devices. Arm crosvm
     // doesn't have the issue.
-    let backend = if let Some(log_fd) = config.log_fd {
-        command.stdout(log_fd);
-        "stdout"
-    } else {
-        "sink"
-    };
-    command.arg(format!("--serial=type={},hardware=serial", backend));
-    command.arg(format!("--serial=type={},hardware=virtio-console", backend));
-
-    // Keep track of what file descriptors should be mapped to the crosvm process.
-    let mut preserved_fds = config.indirect_files.iter().map(|file| file.as_raw_fd()).collect();
+    // /dev/ttyS0
+    command.arg(format!("--serial={},hardware=serial", &console_arg));
+    // /dev/hvc0
+    command.arg(format!("--serial={},hardware=virtio-console,num=1", &console_arg));
+    // /dev/hvc1
+    command.arg(format!("--serial={},hardware=virtio-console,num=2", &log_arg));
 
     if let Some(bootloader) = &config.bootloader {
         command.arg("--bios").arg(add_preserved_fd(&mut preserved_fds, bootloader));
@@ -293,6 +303,7 @@ fn run_vm(config: CrosvmConfig) -> Result<SharedChild, Error> {
 
     info!("Running {:?}", command);
     let result = SharedChild::spawn(&mut command)?;
+    debug!("Spawned crosvm({}).", result.id());
     Ok(result)
 }
 

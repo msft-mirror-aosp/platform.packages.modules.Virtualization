@@ -197,6 +197,7 @@ public:
             return Error() << "Failed to connect to virtualization service.";
         }
 
+        // Console output and the system log output from the VM are redirected to this file.
         ScopedFileDescriptor logFd;
         if (mLogFile.empty()) {
             logFd.set(dup(STDOUT_FILENO));
@@ -235,11 +236,11 @@ public:
         appConfig.idsig = std::move(idsigFd);
         appConfig.instanceImage = std::move(instanceFd);
         appConfig.configPath = kConfigFilePath;
-        appConfig.debugLevel = VirtualMachineAppConfig::DebugLevel::NONE;
+        appConfig.debugLevel = VirtualMachineAppConfig::DebugLevel::FULL;
         appConfig.memoryMib = 0; // Use default
 
         LOG(INFO) << "Starting VM";
-        auto status = service->createVm(config, logFd, &mVm);
+        auto status = service->createVm(config, logFd, logFd, &mVm);
         if (!status.isOk()) {
             return Error() << status.getDescription();
         }
