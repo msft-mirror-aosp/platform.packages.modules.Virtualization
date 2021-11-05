@@ -19,6 +19,7 @@ package android.system.virtualmachine;
 import static android.os.ParcelFileDescriptor.MODE_READ_ONLY;
 import static android.os.ParcelFileDescriptor.MODE_READ_WRITE;
 
+import android.annotation.CallbackExecutor;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
@@ -42,6 +43,7 @@ import java.io.InputStream;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.util.Optional;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -110,8 +112,14 @@ public class VirtualMachine {
     /** The registered callback */
     private @Nullable VirtualMachineCallback mCallback;
 
+    /** The executor on which the callback will be executed */
+    private @NonNull Executor mCallbackExecutor;
+
     private @Nullable ParcelFileDescriptor mConsoleReader;
     private @Nullable ParcelFileDescriptor mConsoleWriter;
+
+    private @Nullable ParcelFileDescriptor mLogReader;
+    private @Nullable ParcelFileDescriptor mLogWriter;
 
     private final ExecutorService mExecutorService = Executors.newCachedThreadPool();
 
@@ -260,7 +268,10 @@ public class VirtualMachine {
      * Registers the callback object to get events from the virtual machine. If a callback was
      * already registered, it is replaced with the new one.
      */
-    public void setCallback(@Nullable VirtualMachineCallback callback) {
+    public void setCallback(
+            @NonNull @CallbackExecutor Executor executor,
+            @Nullable VirtualMachineCallback callback) {
+        mCallbackExecutor = executor;
         mCallback = callback;
     }
 
@@ -297,6 +308,12 @@ public class VirtualMachine {
                 mConsoleWriter = pipe[1];
             }
 
+            if (mLogReader == null && mLogWriter == null) {
+                ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
+                mLogReader = pipe[0];
+                mLogWriter = pipe[1];
+            }
+
             VirtualMachineAppConfig appConfig = getConfig().toParcel();
 
             // Fill the idsig file by hashing the apk
@@ -310,7 +327,7 @@ public class VirtualMachine {
             android.system.virtualizationservice.VirtualMachineConfig vmConfigParcel =
                     android.system.virtualizationservice.VirtualMachineConfig.appConfig(appConfig);
 
-            mVirtualMachine = service.createVm(vmConfigParcel, mConsoleWriter);
+            mVirtualMachine = service.createVm(vmConfigParcel, mConsoleWriter, mLogWriter);
             mVirtualMachine.registerCallback(
                     new IVirtualMachineCallback.Stub() {
                         @Override
@@ -319,7 +336,8 @@ public class VirtualMachine {
                             if (cb == null) {
                                 return;
                             }
-                            cb.onPayloadStarted(VirtualMachine.this, stream);
+                            mCallbackExecutor.execute(
+                                    () -> cb.onPayloadStarted(VirtualMachine.this, stream));
                         }
 
                         @Override
@@ -328,7 +346,7 @@ public class VirtualMachine {
                             if (cb == null) {
                                 return;
                             }
-                            cb.onPayloadReady(VirtualMachine.this);
+                            mCallbackExecutor.execute(() -> cb.onPayloadReady(VirtualMachine.this));
                         }
 
                         @Override
@@ -337,7 +355,8 @@ public class VirtualMachine {
                             if (cb == null) {
                                 return;
                             }
-                            cb.onPayloadFinished(VirtualMachine.this, exitCode);
+                            mCallbackExecutor.execute(
+                                    () -> cb.onPayloadFinished(VirtualMachine.this, exitCode));
                         }
 
                         @Override
@@ -346,7 +365,7 @@ public class VirtualMachine {
                             if (cb == null) {
                                 return;
                             }
-                            cb.onDied(VirtualMachine.this);
+                            mCallbackExecutor.execute(() -> cb.onDied(VirtualMachine.this));
                         }
                     });
             service.asBinder()
@@ -377,6 +396,14 @@ public class VirtualMachine {
         return new FileInputStream(mConsoleReader.getFileDescriptor());
     }
 
+    /** Returns the stream object representing the log output from the virtual machine. */
+    public @NonNull InputStream getLogOutputStream() throws VirtualMachineException {
+        if (mLogReader == null) {
+            throw new VirtualMachineException("Log output not available");
+        }
+        return new FileInputStream(mLogReader.getFileDescriptor());
+    }
+
     /**
      * Stops this virtual machine. Stopping a virtual machine is like pulling the plug on a real
      * computer; the machine halts immediately. Software running on the virtual machine is not
@@ -401,6 +428,7 @@ public class VirtualMachine {
         final File vmRootDir = mConfigFilePath.getParentFile();
         mConfigFilePath.delete();
         mInstanceFilePath.delete();
+        mIdsigFilePath.delete();
         vmRootDir.delete();
     }
 

@@ -132,7 +132,11 @@ impl PackageManager {
                     let staged_apex_info = pm.getStagedApexInfo(&apex_info.name)?;
                     if let Some(staged_apex_info) = staged_apex_info {
                         apex_info.path = PathBuf::from(staged_apex_info.diskImagePath);
-                        // TODO(b/201788989) copy bootclasspath/systemserverclasspath
+                        apex_info.boot_classpath = staged_apex_info.hasBootClassPathJars;
+                        apex_info.systemserver_classpath =
+                            staged_apex_info.hasSystemServerClassPathJars;
+                        apex_info.dex2oatboot_classpath =
+                            staged_apex_info.hasDex2OatBootClassPathJars;
                     }
                 }
             }
@@ -292,6 +296,14 @@ pub fn add_microdroid_images(
         temporary_directory,
     )?);
 
+    vm_config.disks[1].partitions.push(Partition {
+        label: "vbmeta".to_owned(),
+        image: Some(open_parcel_file(
+            Path::new("/apex/com.android.virt/etc/fs/microdroid_vbmeta_bootconfig.img"),
+            false,
+        )?),
+        writable: false,
+    });
     let bootconfig_image = "/apex/com.android.virt/etc/microdroid_bootconfig.".to_owned()
         + match config.debugLevel {
             DebugLevel::NONE => "normal",

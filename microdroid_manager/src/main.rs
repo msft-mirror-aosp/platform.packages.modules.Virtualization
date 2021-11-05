@@ -27,12 +27,11 @@ use idsig::V4Signature;
 use log::{error, info, warn};
 use microdroid_metadata::{write_metadata, Metadata};
 use microdroid_payload_config::{Task, TaskType, VmPayloadConfig};
-use nix::ioctl_read_bad;
 use payload::{get_apex_data_from_payload, load_metadata, to_metadata};
 use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
 use std::fs::{self, File, OpenOptions};
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str;
@@ -50,6 +49,7 @@ const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
 const VMADDR_CID_HOST: u32 = 2;
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
+const LOGD_ENABLED_PROP: &str = "ro.boot.logd.enabled";
 
 fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
     // SAFETY: AIBinder returned by RpcClient has correct reference count, and the ownership can be
@@ -67,30 +67,12 @@ fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
     }
 }
 
-const IOCTL_VM_SOCKETS_GET_LOCAL_CID: usize = 0x7b9;
-ioctl_read_bad!(
-    /// Gets local cid from /dev/vsock
-    vm_sockets_get_local_cid,
-    IOCTL_VM_SOCKETS_GET_LOCAL_CID,
-    u32
-);
-
-// TODO: remove this after VS can check the peer addresses of binder clients
-fn get_local_cid() -> Result<u32> {
-    let f = OpenOptions::new()
-        .read(true)
-        .write(false)
-        .open("/dev/vsock")
-        .context("failed to open /dev/vsock")?;
-    let mut ret = 0;
-    // SAFETY: the kernel only modifies the given u32 integer.
-    unsafe { vm_sockets_get_local_cid(f.as_raw_fd(), &mut ret) }?;
-    Ok(ret)
-}
-
 fn main() {
     if let Err(e) = try_main() {
-        error!("failed with {:?}", e);
+        error!("Failed with {:?}. Shutting down...", e);
+        if let Err(e) = system_properties::write("sys.powerctl", "shutdown") {
+            error!("failed to shutdown {:?}", e);
+        }
         std::process::exit(1);
     }
 }
@@ -242,14 +224,19 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
     info!("executing main task {:?}...", task);
     let mut command = build_command(task)?;
 
-    let local_cid = get_local_cid()?;
     info!("notifying payload started");
-    service.notifyPayloadStarted(local_cid as i32)?;
+    service.notifyPayloadStarted()?;
+
+    // Start logging if enabled
+    // TODO(b/200914564) set filterspec if debug_level is app_only
+    if system_properties::read(LOGD_ENABLED_PROP)? == "1" {
+        system_properties::write("ctl.start", "seriallogging")?;
+    }
 
     let exit_status = command.spawn()?.wait()?;
     if let Some(code) = exit_status.code() {
         info!("notifying payload finished");
-        service.notifyPayloadFinished(local_cid as i32, code)?;
+        service.notifyPayloadFinished(code)?;
 
         if code == 0 {
             info!("task successfully finished");

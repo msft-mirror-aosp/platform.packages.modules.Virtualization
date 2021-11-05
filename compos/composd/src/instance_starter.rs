@@ -21,9 +21,10 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualizationService::IVirtualizationService, PartitionType::PartitionType,
 };
 use anyhow::{bail, Context, Result};
+use binder_common::lazy_service::LazyServiceGuard;
 use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsService;
 use compos_aidl_interface::binder::{ParcelFileDescriptor, Strong};
-use compos_common::compos_client::VmInstance;
+use compos_common::compos_client::{VmInstance, VmParameters};
 use compos_common::{
     COMPOS_DATA_ROOT, INSTANCE_IMAGE_FILE, PRIVATE_KEY_BLOB_FILE, PUBLIC_KEY_FILE,
 };
@@ -33,9 +34,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct CompOsInstance {
+    service: Strong<dyn ICompOsService>,
     #[allow(dead_code)] // Keeps VirtualizationService & the VM alive
     vm_instance: VmInstance,
-    service: Strong<dyn ICompOsService>,
+    #[allow(dead_code)] // Keeps composd process alive
+    lazy_service_guard: LazyServiceGuard,
 }
 
 impl CompOsInstance {
@@ -50,10 +53,11 @@ pub struct InstanceStarter {
     instance_image: PathBuf,
     key_blob: PathBuf,
     public_key: PathBuf,
+    vm_parameters: VmParameters,
 }
 
 impl InstanceStarter {
-    pub fn new(instance_name: &str) -> Self {
+    pub fn new(instance_name: &str, vm_parameters: VmParameters) -> Self {
         let instance_root = Path::new(COMPOS_DATA_ROOT).join(instance_name);
         let instant_root_path = instance_root.as_path();
         let instance_image = instant_root_path.join(INSTANCE_IMAGE_FILE);
@@ -65,23 +69,27 @@ impl InstanceStarter {
             instance_image,
             key_blob,
             public_key,
+            vm_parameters,
         }
     }
 
     pub fn create_or_start_instance(
         &self,
-        service: &dyn IVirtualizationService,
+        virtualization_service: &dyn IVirtualizationService,
     ) -> Result<CompOsInstance> {
-        let compos_instance = self.start_existing_instance();
+        let compos_instance = self.start_existing_instance(virtualization_service);
         match compos_instance {
             Ok(_) => return compos_instance,
             Err(e) => warn!("Failed to start: {}", e),
         }
 
-        self.start_new_instance(service)
+        self.start_new_instance(virtualization_service)
     }
 
-    fn start_existing_instance(&self) -> Result<CompOsInstance> {
+    fn start_existing_instance(
+        &self,
+        virtualization_service: &dyn IVirtualizationService,
+    ) -> Result<CompOsInstance> {
         // No point even trying if the files we need aren't there.
         self.check_files_exist()?;
 
@@ -90,7 +98,7 @@ impl InstanceStarter {
         let key_blob = fs::read(&self.key_blob).context("Reading private key blob")?;
         let public_key = fs::read(&self.public_key).context("Reading public key")?;
 
-        let compos_instance = self.start_vm()?;
+        let compos_instance = self.start_vm(virtualization_service)?;
         let service = &compos_instance.service;
 
         if !service.verifySigningKey(&key_blob, &public_key).context("Verifying key pair")? {
@@ -117,7 +125,7 @@ impl InstanceStarter {
 
         self.create_instance_image(virtualization_service)?;
 
-        let compos_instance = self.start_vm()?;
+        let compos_instance = self.start_vm(virtualization_service)?;
         let service = &compos_instance.service;
 
         let key_data = service.generateSigningKey().context("Generating signing key")?;
@@ -149,15 +157,20 @@ impl InstanceStarter {
         Ok(())
     }
 
-    fn start_vm(&self) -> Result<CompOsInstance> {
+    fn start_vm(
+        &self,
+        virtualization_service: &dyn IVirtualizationService,
+    ) -> Result<CompOsInstance> {
         let instance_image = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&self.instance_image)
             .context("Failed to open instance image")?;
-        let vm_instance = VmInstance::start(instance_image).context("Starting VM")?;
+        let vm_instance =
+            VmInstance::start(virtualization_service, instance_image, &self.vm_parameters)
+                .context("Starting VM")?;
         let service = vm_instance.get_service().context("Connecting to CompOS")?;
-        Ok(CompOsInstance { vm_instance, service })
+        Ok(CompOsInstance { vm_instance, service, lazy_service_guard: Default::default() })
     }
 
     fn create_instance_image(
@@ -166,6 +179,7 @@ impl InstanceStarter {
     ) -> Result<()> {
         let instance_image = fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .read(true)
             .write(true)
             .open(&self.instance_image)

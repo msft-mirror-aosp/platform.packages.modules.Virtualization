@@ -55,8 +55,10 @@ use std::ffi::CStr;
 use std::fs::{create_dir, File, OpenOptions};
 use std::io::{Error, ErrorKind, Write};
 use std::num::NonZeroU32;
+use std::os::raw;
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::path::{Path, PathBuf};
+use std::ptr::null_mut;
 use std::sync::{Arc, Mutex, Weak};
 use vmconfig::VmConfig;
 use vsock::{SockAddr, VsockListener, VsockStream};
@@ -120,10 +122,12 @@ impl IVirtualizationService for VirtualizationService {
     fn createVm(
         &self,
         config: &VirtualMachineConfig,
+        console_fd: Option<&ParcelFileDescriptor>,
         log_fd: Option<&ParcelFileDescriptor>,
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         check_manage_access()?;
         let state = &mut *self.state.lock().unwrap();
+        let mut console_fd = console_fd.map(clone_file).transpose()?;
         let mut log_fd = log_fd.map(clone_file).transpose()?;
         let requester_uid = ThreadState::get_calling_uid();
         let requester_sid = get_calling_sid()?;
@@ -158,6 +162,9 @@ impl IVirtualizationService for VirtualizationService {
         // doesn't understand the bootconfig parameters.
         if let VirtualMachineConfig::AppConfig(config) = config {
             if config.debugLevel != DebugLevel::FULL {
+                console_fd = None;
+            }
+            if config.debugLevel == DebugLevel::NONE {
                 log_fd = None;
             }
         }
@@ -210,6 +217,7 @@ impl IVirtualizationService for VirtualizationService {
             params: config.params.to_owned(),
             protected: config.protectedVm,
             memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
+            console_fd,
             log_fd,
             indirect_files,
         };
@@ -248,7 +256,13 @@ impl IVirtualizationService for VirtualizationService {
             )
         })?;
         let image = clone_file(image_fd)?;
-
+        // initialize the file. Any data in the file will be erased.
+        image.set_len(0).map_err(|e| {
+            new_binder_exception(
+                ExceptionCode::SERVICE_SPECIFIC,
+                format!("Failed to reset a file: {}", e),
+            )
+        })?;
         let mut part = QcowFile::new(image, size).map_err(|e| {
             new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
@@ -345,15 +359,18 @@ impl VirtualizationService {
         });
 
         // binder server for vm
-        let state = service.state.clone(); // reference to state (not the state itself) is copied
+        let mut state = service.state.clone(); // reference to state (not the state itself) is copied
         std::thread::spawn(move || {
-            let mut service = VirtualMachineService::new_binder(state).as_binder();
+            let state_ptr = &mut state as *mut _ as *mut raw::c_void;
+
             debug!("virtual machine service is starting as an RPC service.");
-            // SAFETY: Service ownership is transferring to the server and won't be valid afterward.
-            // Plus the binder objects are threadsafe.
+            // SAFETY: factory function is only ever called by RunRpcServerWithFactory, within the
+            // lifetime of the state, with context taking the pointer value above (so a properly
+            // aligned non-null pointer to an initialized instance).
             let retval = unsafe {
-                binder_rpc_unstable_bindgen::RunRpcServer(
-                    service.as_native_mut() as *mut binder_rpc_unstable_bindgen::AIBinder,
+                binder_rpc_unstable_bindgen::RunRpcServerWithFactory(
+                    Some(VirtualMachineService::factory),
+                    state_ptr,
                     VM_BINDER_SERVICE_PORT as u32,
                 )
             };
@@ -846,13 +863,14 @@ impl<'a, T> AsRef<T> for BorrowedOrOwned<'a, T> {
 #[derive(Debug, Default)]
 struct VirtualMachineService {
     state: Arc<Mutex<State>>,
+    cid: Cid,
 }
 
 impl Interface for VirtualMachineService {}
 
 impl IVirtualMachineService for VirtualMachineService {
-    fn notifyPayloadStarted(&self, cid: i32) -> binder::Result<()> {
-        let cid = cid as Cid;
+    fn notifyPayloadStarted(&self) -> binder::Result<()> {
+        let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
             info!("VM having CID {} started payload", cid);
             vm.update_payload_state(PayloadState::Started)
@@ -869,8 +887,8 @@ impl IVirtualMachineService for VirtualMachineService {
         }
     }
 
-    fn notifyPayloadReady(&self, cid: i32) -> binder::Result<()> {
-        let cid = cid as Cid;
+    fn notifyPayloadReady(&self) -> binder::Result<()> {
+        let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
             info!("VM having CID {} payload is ready", cid);
             vm.update_payload_state(PayloadState::Ready)
@@ -886,8 +904,8 @@ impl IVirtualMachineService for VirtualMachineService {
         }
     }
 
-    fn notifyPayloadFinished(&self, cid: i32, exit_code: i32) -> binder::Result<()> {
-        let cid = cid as Cid;
+    fn notifyPayloadFinished(&self, exit_code: i32) -> binder::Result<()> {
+        let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
             info!("VM having CID {} finished payload", cid);
             vm.update_payload_state(PayloadState::Finished)
@@ -905,9 +923,26 @@ impl IVirtualMachineService for VirtualMachineService {
 }
 
 impl VirtualMachineService {
-    fn new_binder(state: Arc<Mutex<State>>) -> Strong<dyn IVirtualMachineService> {
+    // SAFETY: Service ownership is held by state, and the binder objects are threadsafe.
+    pub unsafe extern "C" fn factory(
+        cid: Cid,
+        context: *mut raw::c_void,
+    ) -> *mut binder_rpc_unstable_bindgen::AIBinder {
+        let state_ptr = context as *mut Arc<Mutex<State>>;
+        let state = state_ptr.as_ref().unwrap();
+        if let Some(vm) = state.lock().unwrap().get_vm(cid) {
+            let mut vm_service = vm.vm_service.lock().unwrap();
+            let service = vm_service.get_or_insert_with(|| Self::new_binder(state.clone(), cid));
+            service.as_binder().as_native_mut() as *mut binder_rpc_unstable_bindgen::AIBinder
+        } else {
+            error!("connection from cid={} is not from a guest VM", cid);
+            null_mut()
+        }
+    }
+
+    fn new_binder(state: Arc<Mutex<State>>, cid: Cid) -> Strong<dyn IVirtualMachineService> {
         BnVirtualMachineService::new_binder(
-            VirtualMachineService { state },
+            VirtualMachineService { state, cid },
             BinderFeatures::default(),
         )
     }
