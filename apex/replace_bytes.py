@@ -48,12 +48,13 @@ def ReplaceBytes(target_file, old_file, new_file):
     with open(new_file, 'rb') as f:
         new_bytes = f.read()
 
-    assert len(old_bytes) == len(new_bytes)
+    assert len(old_bytes) == len(new_bytes), 'Pubkeys should be the same size. (%d != %d)' % (
+        len(old_bytes), len(new_bytes))
 
     # replace bytes in target_file
     with open(target_file, 'r+b') as f:
         pos = f.read().find(old_bytes)
-        assert pos != -1
+        assert pos != -1, 'Pubkey not found'
         f.seek(pos)
         f.write(new_bytes)
 
