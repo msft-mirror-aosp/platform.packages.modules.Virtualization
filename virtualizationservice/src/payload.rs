@@ -20,7 +20,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     VirtualMachineRawConfig::VirtualMachineRawConfig,
 };
 use android_system_virtualizationservice::binder::ParcelFileDescriptor;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use binder::wait_for_interface;
 use log::{error, info};
 use microdroid_metadata::{ApexPayload, ApkPayload, Metadata};
@@ -36,7 +36,8 @@ use vmconfig::open_parcel_file;
 
 /// The list of APEXes which microdroid requires.
 // TODO(b/192200378) move this to microdroid.json?
-const MICRODROID_REQUIRED_APEXES: [&str; 2] = ["com.android.adbd", "com.android.os.statsd"];
+const MICRODROID_REQUIRED_APEXES: [&str; 1] = ["com.android.os.statsd"];
+const MICRODROID_REQUIRED_APEXES_DEBUG: [&str; 1] = ["com.android.adbd"];
 
 const APEX_INFO_LIST_PATH: &str = "/apex/apex-info-list.xml";
 
@@ -193,21 +194,34 @@ fn make_metadata_file(
 ///   ..
 ///   microdroid-apk: apk
 ///   microdroid-apk-idsig: idsig
+///   extra-apk-0:   additional apk 0
+///   extra-idsig-0: additional idsig 0
+///   extra-apk-1:   additional apk 1
+///   extra-idsig-1: additional idsig 1
+///   ..
 fn make_payload_disk(
+    app_config: &VirtualMachineAppConfig,
     apk_file: File,
     idsig_file: File,
-    config_path: &str,
     vm_payload_config: &VmPayloadConfig,
     temporary_directory: &Path,
 ) -> Result<DiskImage> {
+    if vm_payload_config.extra_apks.len() != app_config.extraIdsigs.len() {
+        bail!(
+            "payload config has {} apks, but app config has {} idsigs",
+            vm_payload_config.extra_apks.len(),
+            app_config.extraIdsigs.len()
+        );
+    }
+
     let pm = PackageManager::new()?;
     let apex_list = pm.get_apex_list(vm_payload_config.prefer_staged)?;
 
     // collect APEX names from config
-    let apexes = collect_apex_names(&apex_list, &vm_payload_config.apexes);
+    let apexes = collect_apex_names(&apex_list, &vm_payload_config.apexes, app_config.debugLevel);
     info!("Microdroid payload APEXes: {:?}", apexes);
 
-    let metadata_file = make_metadata_file(config_path, &apexes, temporary_directory)?;
+    let metadata_file = make_metadata_file(&app_config.configPath, &apexes, temporary_directory)?;
     // put metadata at the first partition
     let mut partitions = vec![Partition {
         label: "payload-metadata".to_owned(),
@@ -235,6 +249,23 @@ fn make_payload_disk(
         writable: false,
     });
 
+    // we've already checked that extra_apks and extraIdsigs are in the same size.
+    let extra_apks = &vm_payload_config.extra_apks;
+    let extra_idsigs = &app_config.extraIdsigs;
+    for (i, (extra_apk, extra_idsig)) in extra_apks.iter().zip(extra_idsigs.iter()).enumerate() {
+        partitions.push(Partition {
+            label: format!("extra-apk-{}", i),
+            image: Some(ParcelFileDescriptor::new(File::open(PathBuf::from(&extra_apk.path))?)),
+            writable: false,
+        });
+
+        partitions.push(Partition {
+            label: format!("extra-idsig-{}", i),
+            image: Some(ParcelFileDescriptor::new(extra_idsig.as_ref().try_clone()?)),
+            writable: false,
+        });
+    }
+
     Ok(DiskImage { image: None, partitions, writable: false })
 }
 
@@ -257,7 +288,11 @@ fn find_apex_names_in_classpath_env(classpath_env_var: &str) -> Vec<String> {
 }
 
 // Collect APEX names from config
-fn collect_apex_names(apex_list: &ApexInfoList, apexes: &[ApexConfig]) -> Vec<String> {
+fn collect_apex_names(
+    apex_list: &ApexInfoList,
+    apexes: &[ApexConfig],
+    debug_level: DebugLevel,
+) -> Vec<String> {
     // Process pseudo names like "{BOOTCLASSPATH}".
     // For now we have following pseudo APEX names:
     // - {BOOTCLASSPATH}: represents APEXes contributing "BOOTCLASSPATH" environment variable
@@ -274,6 +309,9 @@ fn collect_apex_names(apex_list: &ApexInfoList, apexes: &[ApexConfig]) -> Vec<St
         .collect();
     // Add required APEXes
     apex_names.extend(MICRODROID_REQUIRED_APEXES.iter().map(|name| name.to_string()));
+    if debug_level != DebugLevel::NONE {
+        apex_names.extend(MICRODROID_REQUIRED_APEXES_DEBUG.iter().map(|name| name.to_string()));
+    }
     apex_names.sort();
     apex_names.dedup();
     apex_names
@@ -289,9 +327,9 @@ pub fn add_microdroid_images(
     vm_config: &mut VirtualMachineRawConfig,
 ) -> Result<()> {
     vm_config.disks.push(make_payload_disk(
+        config,
         apk_file,
         idsig_file,
-        &config.configPath,
         vm_payload_config,
         temporary_directory,
     )?);

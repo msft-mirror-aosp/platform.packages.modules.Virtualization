@@ -38,7 +38,21 @@ interface ICompOsService {
      * TODO(198211396): Implement properly. We can't simply accepting the classpaths from Android
      * since they are not derived from staged APEX (besides security reasons).
      */
-    void initializeClasspaths(String bootClasspath, String dex2oatBootClasspath);
+    void initializeClasspaths(
+            String bootClasspath, String dex2oatBootClasspath, String systemServerClassPath);
+
+    /**
+     * Run odrefresh in the VM context.
+     *
+     * The execution is based on the VM's APEX mounts, files on Android's /system (by accessing
+     * through systemDirFd over AuthFS), and *CLASSPATH derived in the VM, to generate the same
+     * odrefresh output aritfacts to the output directory (through outputDirFd).
+     *
+     * The caller/Android is allowed to specify the zygote arch (ro.zygote).
+     *
+     * @return a CompilationResult
+     */
+    CompilationResult odrefresh(int systemDirFd, int outputDirFd, String zygoteArch);
 
     /**
      * Run dex2oat command with provided args, in a context that may be specified in FdAnnotation,

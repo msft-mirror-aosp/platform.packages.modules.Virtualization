@@ -14,13 +14,7 @@
  * limitations under the License.
  */
 
-package com.android.virt.fs;
-
-/** @hide */
-parcelable InputFdAnnotation {
-    /**
-     * File descriptor number to be passed to the program.  This is also the same file descriptor
-     * number used in the backend server.
-     */
-    int fd;
+extern "C" int android_native_main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
+    // do nothing
+    return 0;
 }
