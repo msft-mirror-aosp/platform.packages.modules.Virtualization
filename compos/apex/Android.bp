@@ -37,20 +37,18 @@ apex {
     updatable: false,
     platform_apis: true,
 
+    system_ext_specific: true,
+
     binaries: [
         // Used in Android
         "compos_key_cmd",
         "compos_verify_key",
         "composd",
         "composd_cmd",
-        "pvm_exec", // to be superseded by libcompos_client
+        "pvm_exec", // deprecated
 
         // Used in VM
         "compsvc",
-    ],
-
-    native_shared_libs: [
-        "libcompos_client",
     ],
 
     apps: [
