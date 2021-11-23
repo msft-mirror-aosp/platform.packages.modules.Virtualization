@@ -17,15 +17,15 @@ package android.system.composd;
 
 import android.system.composd.ICompilationTask;
 import android.system.composd.ICompilationTaskCallback;
-import com.android.compos.CompilationResult;
-import com.android.compos.FdAnnotation;
 
 interface IIsolatedCompilationService {
     /**
      * Run "odrefresh --dalvik-cache=pending-test --force-compile" in a test instance of CompOS.
+     *
      * This compiles BCP extensions and system server, even if the system artifacts are up to date,
      * and writes the results to a test directory to avoid disrupting any real artifacts in
      * existence.
+     *
      * Compilation continues in the background, and success/failure is reported via the supplied
      * callback, unless the returned ICompilationTask is cancelled. The caller should maintain
      * a reference to the ICompilationTask until compilation completes or is cancelled.
@@ -33,20 +33,13 @@ interface IIsolatedCompilationService {
     ICompilationTask startTestCompile(ICompilationTaskCallback callback);
 
     /**
-     * Run dex2oat in the currently running instance of the CompOS VM. This is a simple proxy
-     * to ICompOsService#compile_cmd.
+     * Run odrefresh in a test instance of CompOS until completed or failed.
      *
-     * This method can only be called from odrefresh. If there is no currently running instance
-     * an error is returned.
-     */
-    CompilationResult compile_cmd(in String[] args, in FdAnnotation fd_annotation);
-
-    /**
-     * Run dex2oat in the currently running instance of the CompOS VM. This is a simple proxy
-     * to ICompOsService#compile.
+     * This compiles BCP extensions and system server, even if the system artifacts are up to date,
+     * and writes the results to a test directory to avoid disrupting any real artifacts in
+     * existence.
      *
-     * This method can only be called from libcompos_client. If there is no currently running
-     * instance an error is returned.
+     * TODO(205750213): Change the API to async.
      */
-    byte compile(in byte[] marshaledArguments, in FdAnnotation fd_annotation);
+    byte startTestOdrefresh();
 }

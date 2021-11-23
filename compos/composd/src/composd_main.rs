@@ -19,8 +19,10 @@
 //! them, and orchestrating trusted compilation.
 
 mod compilation_task;
+mod fd_server_helper;
 mod instance_manager;
 mod instance_starter;
+mod internal_service;
 mod odrefresh;
 mod service;
 mod util;
@@ -30,21 +32,28 @@ use android_system_composd::binder::{register_lazy_service, ProcessState};
 use anyhow::{Context, Result};
 use compos_common::compos_client::VmInstance;
 use log::{error, info};
+use std::sync::Arc;
 
 fn try_main() -> Result<()> {
+    let debuggable = env!("TARGET_BUILD_VARIANT") != "user";
+    let log_level = if debuggable { log::Level::Debug } else { log::Level::Info };
     android_logger::init_once(
-        android_logger::Config::default().with_tag("composd").with_min_level(log::Level::Info),
+        android_logger::Config::default().with_tag("composd").with_min_level(log_level),
     );
 
     ProcessState::start_thread_pool();
 
     let virtualization_service = VmInstance::connect_to_virtualization_service()?;
-    let instance_manager = InstanceManager::new(virtualization_service);
-    let composd_service = service::new_binder(instance_manager);
+    let instance_manager = Arc::new(InstanceManager::new(virtualization_service));
+    let composd_service = service::new_binder(instance_manager.clone());
     register_lazy_service("android.system.composd", composd_service.as_binder())
-        .context("Registering service")?;
+        .context("Registering composd service")?;
 
-    info!("Registered service, joining threadpool");
+    let internal_service = internal_service::new_binder(instance_manager);
+    register_lazy_service("android.system.composd.internal", internal_service.as_binder())
+        .context("Registering internal service")?;
+
+    info!("Registered services, joining threadpool");
     ProcessState::join_thread_pool();
 
     info!("Exiting");
