@@ -53,21 +53,41 @@ pub fn new_binder(
 impl Interface for IsolatedCompilationService {}
 
 impl IIsolatedCompilationService for IsolatedCompilationService {
+    fn startStagedApexCompile(
+        &self,
+        callback: &Strong<dyn ICompilationTaskCallback>,
+    ) -> binder::Result<Strong<dyn ICompilationTask>> {
+        check_permissions()?;
+        to_binder_result(self.do_start_staged_apex_compile(callback))
+    }
+
     fn startTestCompile(
         &self,
         callback: &Strong<dyn ICompilationTaskCallback>,
     ) -> binder::Result<Strong<dyn ICompilationTask>> {
-        check_test_permissions()?;
+        check_permissions()?;
         to_binder_result(self.do_start_test_compile(callback))
     }
 
     fn startTestOdrefresh(&self) -> binder::Result<i8> {
-        check_test_permissions()?;
+        check_permissions()?;
         to_binder_result(self.do_odrefresh_for_test())
     }
 }
 
 impl IsolatedCompilationService {
+    fn do_start_staged_apex_compile(
+        &self,
+        callback: &Strong<dyn ICompilationTaskCallback>,
+    ) -> Result<Strong<dyn ICompilationTask>> {
+        // TODO: Try to start the current instance with staged APEXes to see if it works?
+        let comp_os = self.instance_manager.start_pending_instance().context("Starting CompOS")?;
+
+        let task = CompilationTask::start_staged_apex_compile(comp_os, callback)?;
+
+        Ok(BnCompilationTask::new_binder(task, BinderFeatures::default()))
+    }
+
     fn do_start_test_compile(
         &self,
         callback: &Strong<dyn ICompilationTaskCallback>,
@@ -92,8 +112,8 @@ impl IsolatedCompilationService {
     }
 
     fn do_odrefresh(&self, compos: Arc<CompOsInstance>, staging_dir_path: &Path) -> Result<i8> {
-        let output_dir = open_dir_path(staging_dir_path)?;
-        let system_dir = open_dir_path(Path::new("/system"))?;
+        let output_dir = open_dir(staging_dir_path)?;
+        let system_dir = open_dir(Path::new("/system"))?;
 
         // Spawn a fd_server to serve the FDs.
         let fd_server_config = FdServerConfig {
@@ -114,7 +134,7 @@ impl IsolatedCompilationService {
     }
 }
 
-fn check_test_permissions() -> binder::Result<()> {
+fn check_permissions() -> binder::Result<()> {
     let calling_uid = ThreadState::get_calling_uid();
     // This should only be called by system server, or root while testing
     if calling_uid != AID_SYSTEM && calling_uid != AID_ROOT {
@@ -124,16 +144,12 @@ fn check_test_permissions() -> binder::Result<()> {
     }
 }
 
-/// Returns an owned FD of the directory path. It currently returns a `File` as a FD owner, but
+/// Returns an owned FD of the directory. It currently returns a `File` as a FD owner, but
 /// it's better to use `std::os::unix::io::OwnedFd` once/if it becomes standard.
-fn open_dir_path(path: &Path) -> Result<File> {
+fn open_dir(path: &Path) -> Result<File> {
     OpenOptions::new()
-        .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
-        // The custom flags above is not taken into consideration by the unix implementation of
-        // OpenOptions for flag validation. So even though the man page of open(2) says that
-        // most flags include access mode are ignored, we still need to set a "valid" mode to
-        // make the library happy. The value does not appear to matter elsewhere in the library.
-        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .read(true) // O_DIRECTORY can only be opened with read
         .open(path)
-        .with_context(|| format!("Failed to open {} directory as path fd", path.display()))
+        .with_context(|| format!("Failed to open {:?} directory as path fd", path))
 }

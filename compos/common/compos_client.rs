@@ -17,7 +17,7 @@
 //! Support for starting CompOS in a VM and connecting to the service
 
 use crate::timeouts::timeouts;
-use crate::{COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT};
+use crate::{COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT, DEFAULT_VM_CONFIG_PATH};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     IVirtualMachine::IVirtualMachine,
     IVirtualMachineCallback::{BnVirtualMachineCallback, IVirtualMachineCallback},
@@ -56,6 +56,8 @@ pub struct VmInstance {
 pub struct VmParameters {
     /// Whether the VM should be debuggable.
     pub debug_mode: bool,
+    /// If present, overrides the path to the VM config JSON file
+    pub config_path: Option<String>,
 }
 
 impl VmInstance {
@@ -95,11 +97,12 @@ impl VmInstance {
             (None, DebugLevel::NONE)
         };
 
+        let config_path = parameters.config_path.as_deref().unwrap_or(DEFAULT_VM_CONFIG_PATH);
         let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
             apk: Some(apk_fd),
             idsig: Some(idsig_fd),
             instanceImage: Some(instance_fd),
-            configPath: "assets/vm_config.json".to_owned(),
+            configPath: config_path.to_owned(),
             debugLevel: debug_level,
             ..Default::default()
         });
@@ -199,16 +202,10 @@ impl<'a> VsockFactory<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct VmState {
     has_died: bool,
     cid: Option<i32>,
-}
-
-impl Default for VmState {
-    fn default() -> Self {
-        Self { has_died: false, cid: None }
-    }
 }
 
 #[derive(Debug)]
