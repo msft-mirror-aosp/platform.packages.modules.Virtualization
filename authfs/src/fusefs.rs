@@ -14,16 +14,17 @@
  * limitations under the License.
  */
 
+mod mount;
+
 use anyhow::{anyhow, bail, Result};
-use log::{debug, warn};
+use log::{debug, error, warn};
 use std::collections::{btree_map, BTreeMap};
 use std::convert::TryFrom;
 use std::ffi::{CStr, OsStr};
-use std::fs::OpenOptions;
 use std::io;
 use std::mem::{zeroed, MaybeUninit};
 use std::option::Option;
-use std::os::unix::{ffi::OsStrExt, io::AsRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -33,7 +34,6 @@ use fuse::filesystem::{
     Context, DirEntry, DirectoryIterator, Entry, FileSystem, FsOptions, GetxattrReply,
     SetattrValid, ZeroCopyReader, ZeroCopyWriter,
 };
-use fuse::mount::MountOption;
 
 use crate::common::{divide_roundup, ChunkedSizeIter, CHUNK_SIZE};
 use crate::file::{
@@ -43,19 +43,14 @@ use crate::file::{
 use crate::fsstat::RemoteFsStatsReader;
 use crate::fsverity::{VerifiedFileEditor, VerifiedFileReader};
 
+pub use self::mount::mount_and_enter_message_loop;
+use self::mount::MAX_WRITE_BYTES;
+
 pub type Inode = u64;
 type Handle = u64;
 
 const DEFAULT_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 const ROOT_INODE: Inode = 1;
-
-/// Maximum bytes in the write transaction to the FUSE device. This limits the maximum buffer
-/// size in a read request (including FUSE protocol overhead) that the filesystem writes to.
-const MAX_WRITE_BYTES: u32 = 65536;
-
-/// Maximum bytes in a read operation.
-/// TODO(victorhsieh): This option is deprecated by FUSE. Figure out if we can remove this.
-const MAX_READ_BYTES: u32 = 65536;
 
 /// `AuthFsEntry` defines the filesystem entry type supported by AuthFS.
 pub enum AuthFsEntry {
@@ -77,11 +72,58 @@ pub enum AuthFsEntry {
     VerifiedNewDirectory { dir: RemoteDirEditor },
 }
 
+impl AuthFsEntry {
+    fn expect_empty_writable_directory(&self) -> io::Result<()> {
+        match self {
+            AuthFsEntry::VerifiedNewDirectory { dir } => {
+                if dir.number_of_entries() == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::ENOTEMPTY))
+                }
+            }
+            AuthFsEntry::ReadonlyDirectory { .. } => {
+                Err(io::Error::from_raw_os_error(libc::EACCES))
+            }
+            _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+        }
+    }
+}
+
+struct InodeState {
+    /// Actual inode entry.
+    entry: AuthFsEntry,
+
+    /// Number of `Handle`s (i.e. file descriptors) that are currently referring to the this inode.
+    ///
+    /// Technically, this does not matter to readonly entries, since they live forever. The
+    /// reference count is only needed for manageing lifetime of writable entries like `VerifiedNew`
+    /// and `VerifiedNewDirectory`. That is, when an entry is deleted, the actual entry needs to
+    /// stay alive until the reference count reaches zero.
+    ///
+    /// Note: This is not to be confused with hardlinks, which AuthFS doesn't currently implement.
+    handle_ref_count: u64,
+
+    /// Whether the inode is already unlinked, i.e. should be removed, once `handle_ref_count` is
+    /// down to zero.
+    unlinked: bool,
+}
+
+impl InodeState {
+    fn new(entry: AuthFsEntry) -> Self {
+        InodeState { entry, handle_ref_count: 0, unlinked: false }
+    }
+
+    fn new_with_ref_count(entry: AuthFsEntry, handle_ref_count: u64) -> Self {
+        InodeState { entry, handle_ref_count, unlinked: false }
+    }
+}
+
 // AuthFS needs to be `Sync` to be accepted by fuse::worker::start_message_loop as a `FileSystem`.
 pub struct AuthFs {
-    /// Table for `Inode` to `AuthFsEntry` lookup. This needs to be `Sync` to be used in
+    /// Table for `Inode` to `InodeState` lookup. This needs to be `Sync` to be used in
     /// `fuse::worker::start_message_loop`.
-    inode_table: Mutex<BTreeMap<Inode, AuthFsEntry>>,
+    inode_table: Mutex<BTreeMap<Inode, InodeState>>,
 
     /// The next available inode number.
     next_inode: AtomicU64,
@@ -97,7 +139,10 @@ pub struct AuthFs {
 impl AuthFs {
     pub fn new(remote_fs_stats_reader: RemoteFsStatsReader) -> AuthFs {
         let mut inode_table = BTreeMap::new();
-        inode_table.insert(ROOT_INODE, AuthFsEntry::ReadonlyDirectory { dir: InMemoryDir::new() });
+        inode_table.insert(
+            ROOT_INODE,
+            InodeState::new(AuthFsEntry::ReadonlyDirectory { dir: InMemoryDir::new() }),
+        );
 
         AuthFs {
             inode_table: Mutex::new(inode_table),
@@ -135,10 +180,12 @@ impl AuthFs {
                     Component::Normal(name) => {
                         let inode_table = self.inode_table.get_mut().unwrap();
                         // Locate the internal directory structure.
-                        let current_dir_entry =
-                            inode_table.get_mut(&current_dir_inode).ok_or_else(|| {
+                        let current_dir_entry = &mut inode_table
+                            .get_mut(&current_dir_inode)
+                            .ok_or_else(|| {
                                 anyhow!("Unknown directory inode {}", current_dir_inode)
-                            })?;
+                            })?
+                            .entry;
                         let dir = match current_dir_entry {
                             AuthFsEntry::ReadonlyDirectory { dir } => dir,
                             _ => unreachable!("Not a ReadonlyDirectory"),
@@ -153,7 +200,10 @@ impl AuthFs {
 
                             // Actually update the tables.
                             dir.add_entry(name.as_ref(), new_inode)?;
-                            if inode_table.insert(new_inode, new_dir_entry).is_some() {
+                            if inode_table
+                                .insert(new_inode, InodeState::new(new_dir_entry))
+                                .is_some()
+                            {
                                 bail!("Unexpected to find a duplicated inode");
                             }
                             Ok(new_inode)
@@ -165,7 +215,8 @@ impl AuthFs {
 
         // 2. Insert the entry to the parent directory, as well as the inode table.
         let inode_table = self.inode_table.get_mut().unwrap();
-        match inode_table.get_mut(&parent_inode).expect("previously returned inode") {
+        let inode_state = inode_table.get_mut(&parent_inode).expect("previously returned inode");
+        match &mut inode_state.entry {
             AuthFsEntry::ReadonlyDirectory { dir } => {
                 let basename =
                     path.file_name().ok_or_else(|| anyhow!("Bad file name: {:?}", path))?;
@@ -173,7 +224,7 @@ impl AuthFs {
 
                 // Actually update the tables.
                 dir.add_entry(basename.as_ref(), new_inode)?;
-                if inode_table.insert(new_inode, entry).is_some() {
+                if inode_table.insert(new_inode, InodeState::new(entry)).is_some() {
                     bail!("Unexpected to find a duplicated inode");
                 }
                 Ok(new_inode)
@@ -192,12 +243,11 @@ impl AuthFs {
         F: FnOnce(&AuthFsEntry) -> io::Result<R>,
     {
         let inode_table = self.inode_table.lock().unwrap();
-        let entry =
-            inode_table.get(inode).ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
-        handle_fn(entry)
+        handle_inode_locked(&inode_table, inode, |inode_state| handle_fn(&inode_state.entry))
     }
 
-    /// Adds a new entry `name` created by `create_fn` at `parent_inode`.
+    /// Adds a new entry `name` created by `create_fn` at `parent_inode`, with an initial ref count
+    /// of one.
     ///
     /// The operation involves two updates: adding the name with a new allocated inode to the
     /// parent directory, and insert the new inode and the actual `AuthFsEntry` to the global inode
@@ -205,7 +255,7 @@ impl AuthFs {
     ///
     /// `create_fn` receives the parent directory, through which it can create the new entry at and
     /// register the new inode to. Its returned entry is then added to the inode table.
-    fn create_new_entry<F>(
+    fn create_new_entry_with_ref_count<F>(
         &self,
         parent_inode: Inode,
         name: &CStr,
@@ -215,15 +265,19 @@ impl AuthFs {
         F: FnOnce(&mut AuthFsEntry, &Path, Inode) -> io::Result<AuthFsEntry>,
     {
         let mut inode_table = self.inode_table.lock().unwrap();
-        let parent_entry = inode_table
-            .get_mut(&parent_inode)
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
+        let (new_inode, new_file_entry) = handle_inode_mut_locked(
+            &mut inode_table,
+            &parent_inode,
+            |InodeState { entry, .. }| {
+                let new_inode = self.next_inode.fetch_add(1, Ordering::Relaxed);
+                let basename: &Path = cstr_to_path(name);
+                let new_file_entry = create_fn(entry, basename, new_inode)?;
+                Ok((new_inode, new_file_entry))
+            },
+        )?;
 
-        let new_inode = self.next_inode.fetch_add(1, Ordering::Relaxed);
-        let basename: &Path = cstr_to_path(name);
-        let new_file_entry = create_fn(parent_entry, basename, new_inode)?;
         if let btree_map::Entry::Vacant(entry) = inode_table.entry(new_inode) {
-            entry.insert(new_file_entry);
+            entry.insert(InodeState::new_with_ref_count(new_file_entry, 1));
             Ok(new_inode)
         } else {
             unreachable!("Unexpected duplication of inode {}", new_inode);
@@ -368,39 +422,47 @@ impl FileSystem for AuthFs {
     }
 
     fn lookup(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
-        // Look up the entry's inode number in parent directory.
-        let inode = self.handle_inode(&parent, |parent_entry| match parent_entry {
-            AuthFsEntry::ReadonlyDirectory { dir } => {
-                let path = cstr_to_path(name);
-                dir.lookup_inode(path).ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))
-            }
-            AuthFsEntry::VerifiedNewDirectory { dir } => {
-                let path = cstr_to_path(name);
-                dir.find_inode(path).ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))
-            }
-            _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
-        })?;
+        let mut inode_table = self.inode_table.lock().unwrap();
 
-        // Normally, `lookup` is required to increase a reference count for the inode (while
-        // `forget` will decrease it). It is not yet necessary until we start to support
-        // deletion (only for `VerifiedNewDirectory`).
+        // Look up the entry's inode number in parent directory.
+        let inode =
+            handle_inode_locked(&inode_table, &parent, |inode_state| match &inode_state.entry {
+                AuthFsEntry::ReadonlyDirectory { dir } => {
+                    let path = cstr_to_path(name);
+                    dir.lookup_inode(path).ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))
+                }
+                AuthFsEntry::VerifiedNewDirectory { dir } => {
+                    let path = cstr_to_path(name);
+                    dir.find_inode(path)
+                }
+                _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+            })?;
 
         // Create the entry's stat if found.
-        let st = self.handle_inode(&inode, |entry| match entry {
-            AuthFsEntry::ReadonlyDirectory { dir } => {
-                create_dir_stat(inode, dir.number_of_entries())
-            }
-            AuthFsEntry::UnverifiedReadonly { file_size, .. }
-            | AuthFsEntry::VerifiedReadonly { file_size, .. } => {
-                create_stat(inode, *file_size, AccessMode::ReadOnly)
-            }
-            AuthFsEntry::VerifiedNew { editor } => {
-                create_stat(inode, editor.size(), AccessMode::ReadWrite)
-            }
-            AuthFsEntry::VerifiedNewDirectory { dir } => {
-                create_dir_stat(inode, dir.number_of_entries())
-            }
-        })?;
+        let st = handle_inode_mut_locked(
+            &mut inode_table,
+            &inode,
+            |InodeState { entry, handle_ref_count, .. }| {
+                let st = match entry {
+                    AuthFsEntry::ReadonlyDirectory { dir } => {
+                        create_dir_stat(inode, dir.number_of_entries())
+                    }
+                    AuthFsEntry::UnverifiedReadonly { file_size, .. }
+                    | AuthFsEntry::VerifiedReadonly { file_size, .. } => {
+                        create_stat(inode, *file_size, AccessMode::ReadOnly)
+                    }
+                    AuthFsEntry::VerifiedNew { editor } => {
+                        create_stat(inode, editor.size(), AccessMode::ReadWrite)
+                    }
+                    AuthFsEntry::VerifiedNewDirectory { dir } => {
+                        create_dir_stat(inode, dir.number_of_entries())
+                    }
+                }?;
+                *handle_ref_count += 1;
+                Ok(st)
+            },
+        )?;
+
         Ok(Entry {
             inode,
             generation: 0,
@@ -408,6 +470,38 @@ impl FileSystem for AuthFs {
             entry_timeout: DEFAULT_METADATA_TIMEOUT,
             attr_timeout: DEFAULT_METADATA_TIMEOUT,
         })
+    }
+
+    fn forget(&self, _ctx: Context, inode: Self::Inode, count: u64) {
+        let mut inode_table = self.inode_table.lock().unwrap();
+        let delete_now = handle_inode_mut_locked(
+            &mut inode_table,
+            &inode,
+            |InodeState { handle_ref_count, unlinked, .. }| {
+                if count > *handle_ref_count {
+                    error!(
+                        "Trying to decrease refcount of inode {} by {} (> current {})",
+                        inode, count, *handle_ref_count
+                    );
+                    panic!(); // log to logcat with error!
+                }
+                *handle_ref_count = handle_ref_count.saturating_sub(count);
+                Ok(*unlinked && *handle_ref_count == 0)
+            },
+        );
+
+        match delete_now {
+            Ok(true) => {
+                let _ = inode_table.remove(&inode).expect("Removed an existing entry");
+            }
+            Ok(false) => { /* Let the inode stay */ }
+            Err(e) => {
+                warn!(
+                    "Unexpected failure when tries to forget an inode {} by refcount {}: {:?}",
+                    inode, count, e
+                );
+            }
+        }
     }
 
     fn getattr(
@@ -478,19 +572,20 @@ impl FileSystem for AuthFs {
     ) -> io::Result<(Entry, Option<Self::Handle>, fuse::sys::OpenOptions)> {
         // TODO(205169366): Implement mode properly.
         // TODO(205172873): handle O_TRUNC and O_EXCL properly.
-        let new_inode =
-            self.create_new_entry(parent, name, |parent_entry, basename, new_inode| {
-                match parent_entry {
-                    AuthFsEntry::VerifiedNewDirectory { dir } => {
-                        if dir.find_inode(basename).is_some() {
-                            return Err(io::Error::from_raw_os_error(libc::EEXIST));
-                        }
-                        let new_file = dir.create_file(basename, new_inode)?;
-                        Ok(AuthFsEntry::VerifiedNew { editor: new_file })
+        let new_inode = self.create_new_entry_with_ref_count(
+            parent,
+            name,
+            |parent_entry, basename, new_inode| match parent_entry {
+                AuthFsEntry::VerifiedNewDirectory { dir } => {
+                    if dir.has_entry(basename) {
+                        return Err(io::Error::from_raw_os_error(libc::EEXIST));
                     }
-                    _ => Err(io::Error::from_raw_os_error(libc::EBADF)),
+                    let new_file = dir.create_file(basename, new_inode)?;
+                    Ok(AuthFsEntry::VerifiedNew { editor: new_file })
                 }
-            })?;
+                _ => Err(io::Error::from_raw_os_error(libc::EBADF)),
+            },
+        )?;
 
         Ok((
             Entry {
@@ -656,22 +751,23 @@ impl FileSystem for AuthFs {
         _umask: u32,
     ) -> io::Result<Entry> {
         // TODO(205169366): Implement mode properly.
-        let new_inode =
-            self.create_new_entry(parent, name, |parent_entry, basename, new_inode| {
-                match parent_entry {
-                    AuthFsEntry::VerifiedNewDirectory { dir } => {
-                        if dir.find_inode(basename).is_some() {
-                            return Err(io::Error::from_raw_os_error(libc::EEXIST));
-                        }
-                        let new_dir = dir.mkdir(basename, new_inode)?;
-                        Ok(AuthFsEntry::VerifiedNewDirectory { dir: new_dir })
+        let new_inode = self.create_new_entry_with_ref_count(
+            parent,
+            name,
+            |parent_entry, basename, new_inode| match parent_entry {
+                AuthFsEntry::VerifiedNewDirectory { dir } => {
+                    if dir.has_entry(basename) {
+                        return Err(io::Error::from_raw_os_error(libc::EEXIST));
                     }
-                    AuthFsEntry::ReadonlyDirectory { .. } => {
-                        Err(io::Error::from_raw_os_error(libc::EACCES))
-                    }
-                    _ => Err(io::Error::from_raw_os_error(libc::EBADF)),
+                    let new_dir = dir.mkdir(basename, new_inode)?;
+                    Ok(AuthFsEntry::VerifiedNewDirectory { dir: new_dir })
                 }
-            })?;
+                AuthFsEntry::ReadonlyDirectory { .. } => {
+                    Err(io::Error::from_raw_os_error(libc::EACCES))
+                }
+                _ => Err(io::Error::from_raw_os_error(libc::EBADF)),
+            },
+        )?;
 
         Ok(Entry {
             inode: new_inode,
@@ -680,6 +776,68 @@ impl FileSystem for AuthFs {
             entry_timeout: DEFAULT_METADATA_TIMEOUT,
             attr_timeout: DEFAULT_METADATA_TIMEOUT,
         })
+    }
+
+    fn unlink(&self, _ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<()> {
+        let mut inode_table = self.inode_table.lock().unwrap();
+        handle_inode_mut_locked(
+            &mut inode_table,
+            &parent,
+            |InodeState { entry, unlinked, .. }| match entry {
+                AuthFsEntry::VerifiedNewDirectory { dir } => {
+                    let basename: &Path = cstr_to_path(name);
+                    // Delete the file from in both the local and remote directories.
+                    let _inode = dir.delete_file(basename)?;
+                    *unlinked = true;
+                    Ok(())
+                }
+                AuthFsEntry::ReadonlyDirectory { .. } => {
+                    Err(io::Error::from_raw_os_error(libc::EACCES))
+                }
+                AuthFsEntry::VerifiedNew { .. } => {
+                    // Deleting a entry in filesystem root is not currently supported.
+                    Err(io::Error::from_raw_os_error(libc::ENOSYS))
+                }
+                AuthFsEntry::UnverifiedReadonly { .. } | AuthFsEntry::VerifiedReadonly { .. } => {
+                    Err(io::Error::from_raw_os_error(libc::ENOTDIR))
+                }
+            },
+        )
+    }
+
+    fn rmdir(&self, _ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<()> {
+        let mut inode_table = self.inode_table.lock().unwrap();
+
+        // Check before actual removal, with readonly borrow.
+        handle_inode_locked(&inode_table, &parent, |inode_state| match &inode_state.entry {
+            AuthFsEntry::VerifiedNewDirectory { dir } => {
+                let basename: &Path = cstr_to_path(name);
+                let existing_inode = dir.find_inode(basename)?;
+                handle_inode_locked(&inode_table, &existing_inode, |inode_state| {
+                    inode_state.entry.expect_empty_writable_directory()
+                })
+            }
+            AuthFsEntry::ReadonlyDirectory { .. } => {
+                Err(io::Error::from_raw_os_error(libc::EACCES))
+            }
+            _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+        })?;
+
+        // Look up again, this time with mutable borrow. This needs to be done separately because
+        // the previous lookup needs to borrow multiple entry references in the table.
+        handle_inode_mut_locked(
+            &mut inode_table,
+            &parent,
+            |InodeState { entry, unlinked, .. }| match entry {
+                AuthFsEntry::VerifiedNewDirectory { dir } => {
+                    let basename: &Path = cstr_to_path(name);
+                    let _inode = dir.force_delete_directory(basename)?;
+                    *unlinked = true;
+                    Ok(())
+                }
+                _ => unreachable!("Mismatched entry type that is just checked"),
+            },
+        )
     }
 
     fn statfs(&self, _ctx: Context, _inode: Self::Inode) -> io::Result<libc::statvfs64> {
@@ -709,34 +867,34 @@ impl FileSystem for AuthFs {
     }
 }
 
-/// Mount and start the FUSE instance. This requires CAP_SYS_ADMIN.
-pub fn loop_forever(
-    authfs: AuthFs,
-    mountpoint: &Path,
-    extra_options: &Option<String>,
-) -> Result<(), fuse::Error> {
-    let dev_fuse = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/fuse")
-        .expect("Failed to open /dev/fuse");
-
-    let mut mount_options = vec![
-        MountOption::FD(dev_fuse.as_raw_fd()),
-        MountOption::RootMode(libc::S_IFDIR | libc::S_IXUSR | libc::S_IXGRP | libc::S_IXOTH),
-        MountOption::AllowOther,
-        MountOption::UserId(0),
-        MountOption::GroupId(0),
-        MountOption::MaxRead(MAX_READ_BYTES),
-    ];
-    if let Some(value) = extra_options {
-        mount_options.push(MountOption::Extra(value));
+fn handle_inode_locked<F, R>(
+    inode_table: &BTreeMap<Inode, InodeState>,
+    inode: &Inode,
+    handle_fn: F,
+) -> io::Result<R>
+where
+    F: FnOnce(&InodeState) -> io::Result<R>,
+{
+    if let Some(inode_state) = inode_table.get(inode) {
+        handle_fn(inode_state)
+    } else {
+        Err(io::Error::from_raw_os_error(libc::ENOENT))
     }
+}
 
-    fuse::mount(mountpoint, "authfs", libc::MS_NOSUID | libc::MS_NODEV, &mount_options)
-        .expect("Failed to mount fuse");
-
-    fuse::worker::start_message_loop(dev_fuse, MAX_WRITE_BYTES, MAX_READ_BYTES, authfs)
+fn handle_inode_mut_locked<F, R>(
+    inode_table: &mut BTreeMap<Inode, InodeState>,
+    inode: &Inode,
+    handle_fn: F,
+) -> io::Result<R>
+where
+    F: FnOnce(&mut InodeState) -> io::Result<R>,
+{
+    if let Some(inode_state) = inode_table.get_mut(inode) {
+        handle_fn(inode_state)
+    } else {
+        Err(io::Error::from_raw_os_error(libc::ENOENT))
+    }
 }
 
 fn cstr_to_path(cstr: &CStr) -> &Path {

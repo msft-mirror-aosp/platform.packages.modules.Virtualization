@@ -314,7 +314,9 @@ fn get_key() -> ZeroOnDropKey {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct MicrodroidData {
     pub apk_data: ApkData,
+    pub extra_apks_data: Vec<ApkData>,
     pub apex_data: Vec<ApexData>,
+    pub bootconfig: Box<[u8]>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
