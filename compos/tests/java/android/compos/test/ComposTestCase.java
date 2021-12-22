@@ -104,7 +104,7 @@ public final class ComposTestCase extends VirtualizationTestCaseBase {
             long start = System.currentTimeMillis();
             result =
                     android.runForResultWithTimeout(
-                            ODREFRESH_TIMEOUT_MS, COMPOSD_CMD_BIN, "async-odrefresh");
+                            ODREFRESH_TIMEOUT_MS, COMPOSD_CMD_BIN, "test-compile");
             long elapsed = System.currentTimeMillis() - start;
             assertThat(result.getExitCode()).isEqualTo(0);
             CLog.i("Comp OS compilation took " + elapsed + "ms");
@@ -123,55 +123,11 @@ public final class ComposTestCase extends VirtualizationTestCaseBase {
         android.assumeSuccess("test -f " + ODREFRESH_OUTPUT_DIR + "/compos.info.signature");
     }
 
-    @Test
-    public void testOdrefreshDeprecated() throws Exception {
-        CommandRunner android = new CommandRunner(getDevice());
-
-        // Prepare the groundtruth. The compilation on Android should finish successfully.
-        {
-            long start = System.currentTimeMillis();
-            CommandResult result = runOdrefresh(android, "--force-compile");
-            long elapsed = System.currentTimeMillis() - start;
-            assertThat(result.getExitCode()).isEqualTo(COMPILATION_SUCCESS);
-            CLog.i("Local compilation took " + elapsed + "ms");
-        }
-
-        // Save the expected checksum for the output directory.
-        String expectedChecksumSnapshot = checksumDirectoryContent(android, ODREFRESH_OUTPUT_DIR);
-
-        // Let --check clean up the output.
-        CommandResult result = runOdrefresh(android, "--check");
-        assertThat(result.getExitCode()).isEqualTo(OKAY);
-
-        // Make sure we generate a fresh instance
-        android.tryRun("rm", "-rf", COMPOS_TEST_ROOT);
-
-        // Expect the compilation in Compilation OS to finish successfully.
-        {
-            long start = System.currentTimeMillis();
-            result =
-                    android.runForResultWithTimeout(
-                            ODREFRESH_TIMEOUT_MS, COMPOSD_CMD_BIN, "forced-compile-test");
-            long elapsed = System.currentTimeMillis() - start;
-            assertThat(result.getExitCode()).isEqualTo(0);
-            CLog.i("Comp OS compilation took " + elapsed + "ms");
-        }
-        killVmAndReconnectAdb();
-
-        // Save the actual checksum for the output directory.
-        String actualChecksumSnapshot = checksumDirectoryContent(android, ODREFRESH_OUTPUT_DIR);
-
-        // Expect the output to be valid.
-        result = runOdrefresh(android, "--check");
-        assertThat(result.getExitCode()).isEqualTo(OKAY);
-
-        // Expect the output of Comp OS to be the same as compiled on Android.
-        assertThat(actualChecksumSnapshot).isEqualTo(expectedChecksumSnapshot);
-    }
-
     private CommandResult runOdrefresh(CommandRunner android, String command) throws Exception {
         return android.runForResultWithTimeout(
                 ODREFRESH_TIMEOUT_MS,
+                // TODO(b/210472252): Remove this when the VM handles STANDALONE_SYSTEMSERVER_JARS
+                "STANDALONE_SYSTEMSERVER_JARS=",
                 ODREFRESH_BIN,
                 "--dalvik-cache=" + TEST_ARTIFACTS_DIR,
                 command);
@@ -192,11 +148,6 @@ public final class ComposTestCase extends VirtualizationTestCaseBase {
 
         // Delete stale data
         android.tryRun("rm", "-rf", "/data/misc/virtualizationservice/*");
-    }
-
-    private String checksumDirectoryContent(CommandRunner runner, String path) throws Exception {
-        // Sort by filename (second column) to make comparison easier.
-        return runner.run("find " + path + " -type f -exec sha256sum {} \\; | sort -k2");
     }
 
     private String checksumDirectoryContentPartial(CommandRunner runner, String path)
