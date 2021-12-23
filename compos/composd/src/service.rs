@@ -17,11 +17,8 @@
 //! Implementation of IIsolatedCompilationService, called from system server when compilation is
 //! desired.
 
-use crate::compilation_task::CompilationTask;
 use crate::instance_manager::InstanceManager;
-use crate::odrefresh;
 use crate::odrefresh_task::OdrefreshTask;
-use crate::util::to_binder_result;
 use android_system_composd::aidl::android::system::composd::{
     ICompilationTask::{BnCompilationTask, ICompilationTask},
     ICompilationTaskCallback::ICompilationTaskCallback,
@@ -31,6 +28,7 @@ use android_system_composd::binder::{
     self, BinderFeatures, ExceptionCode, Interface, Status, Strong, ThreadState,
 };
 use anyhow::{Context, Result};
+use compos_common::binder::to_binder_result;
 use rustutils::{users::AID_ROOT, users::AID_SYSTEM};
 use std::sync::Arc;
 
@@ -63,19 +61,6 @@ impl IIsolatedCompilationService for IsolatedCompilationService {
         check_permissions()?;
         to_binder_result(self.do_start_test_compile(callback))
     }
-
-    fn startAsyncOdrefresh(
-        &self,
-        callback: &Strong<dyn ICompilationTaskCallback>,
-    ) -> binder::Result<Strong<dyn ICompilationTask>> {
-        check_permissions()?;
-        to_binder_result(self.do_start_async_odrefresh(callback))
-    }
-
-    fn startTestOdrefresh(&self) -> binder::Result<i8> {
-        check_permissions()?;
-        to_binder_result(self.do_odrefresh_for_test())
-    }
 }
 
 impl IsolatedCompilationService {
@@ -86,7 +71,9 @@ impl IsolatedCompilationService {
         // TODO: Try to start the current instance with staged APEXes to see if it works?
         let comp_os = self.instance_manager.start_pending_instance().context("Starting CompOS")?;
 
-        let task = CompilationTask::start_staged_apex_compile(comp_os, callback)?;
+        // TODO: Write to compos-pending instead
+        let target_dir_name = "test-artifacts".to_owned();
+        let task = OdrefreshTask::start(comp_os, target_dir_name, callback)?;
 
         Ok(BnCompilationTask::new_binder(task, BinderFeatures::default()))
     }
@@ -97,32 +84,10 @@ impl IsolatedCompilationService {
     ) -> Result<Strong<dyn ICompilationTask>> {
         let comp_os = self.instance_manager.start_test_instance().context("Starting CompOS")?;
 
-        let task = CompilationTask::start_test_compile(comp_os, callback)?;
-
-        Ok(BnCompilationTask::new_binder(task, BinderFeatures::default()))
-    }
-
-    fn do_start_async_odrefresh(
-        &self,
-        callback: &Strong<dyn ICompilationTaskCallback>,
-    ) -> Result<Strong<dyn ICompilationTask>> {
-        let comp_os = self.instance_manager.start_test_instance().context("Starting CompOS")?;
-
         let target_dir_name = "test-artifacts".to_owned();
         let task = OdrefreshTask::start(comp_os, target_dir_name, callback)?;
 
         Ok(BnCompilationTask::new_binder(task, BinderFeatures::default()))
-    }
-
-    fn do_odrefresh_for_test(&self) -> Result<i8> {
-        let compos = self
-            .instance_manager
-            .start_test_instance()
-            .context("Starting CompOS for odrefresh test")?;
-        let service = compos.get_service();
-
-        let exit_code = odrefresh::run_in_vm(service, "test-artifacts")?;
-        Ok(exit_code as i8)
     }
 }
 
