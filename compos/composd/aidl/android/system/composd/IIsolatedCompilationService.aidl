@@ -31,7 +31,7 @@ interface IIsolatedCompilationService {
     ICompilationTask startStagedApexCompile(ICompilationTaskCallback callback);
 
     /**
-     * Run "odrefresh --dalvik-cache=pending-test --force-compile" in a test instance of CompOS.
+     * Run odrefresh in a test instance of CompOS until completed or failed.
      *
      * This compiles BCP extensions and system server, even if the system artifacts are up to date,
      * and writes the results to a test directory to avoid disrupting any real artifacts in
@@ -42,15 +42,4 @@ interface IIsolatedCompilationService {
      * a reference to the ICompilationTask until compilation completes or is cancelled.
      */
     ICompilationTask startTestCompile(ICompilationTaskCallback callback);
-
-    /**
-     * Run odrefresh in a test instance of CompOS until completed or failed.
-     *
-     * This compiles BCP extensions and system server, even if the system artifacts are up to date,
-     * and writes the results to a test directory to avoid disrupting any real artifacts in
-     * existence.
-     *
-     * TODO(205750213): Change the API to async.
-     */
-    byte startTestOdrefresh();
 }
