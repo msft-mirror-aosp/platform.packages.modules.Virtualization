@@ -17,7 +17,7 @@
 //! Support for starting CompOS in a VM and connecting to the service
 
 use crate::timeouts::timeouts;
-use crate::{COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT};
+use crate::{COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT, DEFAULT_VM_CONFIG_PATH};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     IVirtualMachine::IVirtualMachine,
     IVirtualMachineCallback::{BnVirtualMachineCallback, IVirtualMachineCallback},
@@ -56,6 +56,8 @@ pub struct VmInstance {
 pub struct VmParameters {
     /// Whether the VM should be debuggable.
     pub debug_mode: bool,
+    /// If present, overrides the path to the VM config JSON file
+    pub config_path: Option<String>,
 }
 
 impl VmInstance {
@@ -70,6 +72,7 @@ impl VmInstance {
     pub fn start(
         service: &dyn IVirtualizationService,
         instance_image: File,
+        idsig: &Path,
         parameters: &VmParameters,
     ) -> Result<VmInstance> {
         let instance_fd = ParcelFileDescriptor::new(instance_image);
@@ -81,31 +84,44 @@ impl VmInstance {
             .context("Failed to open config APK file")?;
         let apk_fd = ParcelFileDescriptor::new(apk_fd);
 
-        let idsig_fd = File::open(apex_dir.join("etc/CompOSPayloadApp.apk.idsig"))
-            .context("Failed to open config APK idsig file")?;
-        let idsig_fd = ParcelFileDescriptor::new(idsig_fd);
+        if !idsig.exists() {
+            // Prepare idsig file via VirtualizationService
+            let idsig_file = File::create(idsig).context("Failed to create idsig file")?;
+            let idsig_fd = ParcelFileDescriptor::new(idsig_file);
+            service
+                .createOrUpdateIdsigFile(&apk_fd, &idsig_fd)
+                .context("Failed to update idsig file")?;
+        }
 
-        let (log_fd, debug_level) = if parameters.debug_mode {
-            // Console output and the system log output from the VM are redirected to this file.
-            let log_fd =
-                File::create(data_dir.join("vm.log")).context("Failed to create log file")?;
+        // Open idsig as read-only
+        let idsig_file = File::open(idsig).context("Failed to open idsig file")?;
+        let idsig_fd = ParcelFileDescriptor::new(idsig_file);
+
+        let (console_fd, log_fd, debug_level) = if parameters.debug_mode {
+            // Console output and the system log output from the VM are redirected to file.
+            let console_fd = File::create(data_dir.join("vm_console.log"))
+                .context("Failed to create console log file")?;
+            let log_fd = File::create(data_dir.join("vm.log"))
+                .context("Failed to create system log file")?;
+            let console_fd = ParcelFileDescriptor::new(console_fd);
             let log_fd = ParcelFileDescriptor::new(log_fd);
-            (Some(log_fd), DebugLevel::FULL)
+            (Some(console_fd), Some(log_fd), DebugLevel::FULL)
         } else {
-            (None, DebugLevel::NONE)
+            (None, None, DebugLevel::NONE)
         };
 
+        let config_path = parameters.config_path.as_deref().unwrap_or(DEFAULT_VM_CONFIG_PATH);
         let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
             apk: Some(apk_fd),
             idsig: Some(idsig_fd),
             instanceImage: Some(instance_fd),
-            configPath: "assets/vm_config.json".to_owned(),
+            configPath: config_path.to_owned(),
             debugLevel: debug_level,
             ..Default::default()
         });
 
         let vm = service
-            .createVm(&config, log_fd.as_ref(), log_fd.as_ref())
+            .createVm(&config, console_fd.as_ref(), log_fd.as_ref())
             .context("Failed to create VM")?;
         let vm_state = Arc::new(VmStateMonitor::default());
 
@@ -199,16 +215,10 @@ impl<'a> VsockFactory<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct VmState {
     has_died: bool,
     cid: Option<i32>,
-}
-
-impl Default for VmState {
-    fn default() -> Self {
-        Self { has_died: false, cid: None }
-    }
 }
 
 #[derive(Debug)]
@@ -295,6 +305,12 @@ impl IVirtualMachineCallback for VmCallback {
         // longer running
         self.0.set_died();
         log::warn!("VM payload finished, cid = {}, exit code = {}", cid, exit_code);
+        Ok(())
+    }
+
+    fn onError(&self, cid: i32, error_code: i32, message: &str) -> BinderResult<()> {
+        self.0.set_died();
+        log::warn!("VM error, cid = {}, error code = {}, message = {}", cid, error_code, message,);
         Ok(())
     }
 }

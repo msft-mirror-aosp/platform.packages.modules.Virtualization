@@ -28,12 +28,13 @@ mod fsverity;
 use anyhow::{bail, Result};
 use binder_common::rpc_server::run_rpc_server;
 use log::debug;
-use nix::dir::Dir;
+use nix::{dir::Dir, sys::stat::umask, sys::stat::Mode};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::os::unix::io::FromRawFd;
 
 use aidl::{FdConfig, FdService};
+use authfs_fsverity_metadata::parse_fsverity_metadata;
 
 const RPC_SERVICE_PORT: u32 = 3264; // TODO: support dynamic port for multiple fd_server instances
 
@@ -54,17 +55,19 @@ fn fd_to_file(fd: i32) -> Result<File> {
 fn parse_arg_ro_fds(arg: &str) -> Result<(i32, FdConfig)> {
     let result: Result<Vec<i32>, _> = arg.split(':').map(|x| x.parse::<i32>()).collect();
     let fds = result?;
-    if fds.len() > 3 {
+    if fds.len() > 2 {
         bail!("Too many options: {}", arg);
     }
     Ok((
         fds[0],
         FdConfig::Readonly {
             file: fd_to_file(fds[0])?,
-            // Alternative Merkle tree, if provided
-            alt_merkle_tree: fds.get(1).map(|fd| fd_to_file(*fd)).transpose()?,
-            // Alternative signature, if provided
-            alt_signature: fds.get(2).map(|fd| fd_to_file(*fd)).transpose()?,
+            // Alternative metadata source, if provided
+            alt_metadata: fds
+                .get(1)
+                .map(|fd| fd_to_file(*fd))
+                .transpose()?
+                .and_then(|f| parse_fsverity_metadata(f).ok()),
         },
     ))
 }
@@ -157,10 +160,15 @@ fn main() -> Result<()> {
     );
 
     let args = parse_args()?;
+
+    // Allow open/create/mkdir from authfs to create with expecting mode. It's possible to still
+    // use a custom mask on creation, then report the actual file mode back to authfs. But there
+    // is no demand now.
+    let old_umask = umask(Mode::empty());
+    debug!("Setting umask to 0 (old: {:03o})", old_umask.bits());
+
     let service = FdService::new_binder(args.fd_pool).as_binder();
-
     debug!("fd_server is starting as a rpc service.");
-
     let mut ready_fd = args.ready_fd;
     let retval = run_rpc_server(service, RPC_SERVICE_PORT, || {
         debug!("fd_server is ready");

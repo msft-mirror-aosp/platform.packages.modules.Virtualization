@@ -39,12 +39,13 @@
 #include <condition_variable>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
 
-#include "compos_signature.pb.h"
+#include "odsign_info.pb.h"
 
 using namespace std::literals;
 
@@ -57,25 +58,26 @@ using aidl::android::system::virtualizationservice::VirtualMachineAppConfig;
 using aidl::android::system::virtualizationservice::VirtualMachineConfig;
 using aidl::com::android::compos::CompOsKeyData;
 using aidl::com::android::compos::ICompOsService;
+using android::base::Dirname;
 using android::base::ErrnoError;
 using android::base::Error;
 using android::base::Fdopen;
 using android::base::Result;
 using android::base::unique_fd;
-using compos::proto::Signature;
+using android::base::WriteFully;
 using ndk::ScopedAStatus;
 using ndk::ScopedFileDescriptor;
 using ndk::SharedRefBase;
+using odsign::proto::OdsignInfo;
 
 constexpr unsigned int kRpcPort = 6432;
 
 constexpr const char* kConfigApkPath =
         "/apex/com.android.compos/app/CompOSPayloadApp/CompOSPayloadApp.apk";
-constexpr const char* kConfigApkIdsigPath =
-        "/apex/com.android.compos/etc/CompOSPayloadApp.apk.idsig";
 
-// This is a path inside the APK
-constexpr const char* kConfigFilePath = "assets/vm_config.json";
+// These are paths inside the APK
+constexpr const char* kDefaultConfigFilePath = "assets/vm_config.json";
+constexpr const char* kPreferStagedConfigFilePath = "assets/vm_config_staged.json";
 
 static bool writeBytesToFile(const std::vector<uint8_t>& bytes, const std::string& path) {
     std::string str(bytes.begin(), bytes.end());
@@ -101,6 +103,10 @@ namespace {
 
 void copyToLog(unique_fd&& fd) {
     FILE* source = Fdopen(std::move(fd), "r");
+    if (source == nullptr) {
+        LOG(INFO) << "Can't log VM output";
+        return;
+    }
     size_t size = 0;
     char* line = nullptr;
 
@@ -145,6 +151,18 @@ public:
         return ScopedAStatus::ok();
     }
 
+    ::ndk::ScopedAStatus onError(int32_t in_cid, int32_t in_error_code,
+                                 const std::string& in_message) override {
+        LOG(WARNING) << "VM error! cid = " << in_cid << ", error_code = " << in_error_code
+                     << ", message = " << in_message;
+        {
+            std::unique_lock lock(mMutex);
+            mDied = true;
+        }
+        mCv.notify_all();
+        return ScopedAStatus::ok();
+    }
+
     ::ndk::ScopedAStatus onDied(int32_t in_cid) override {
         LOG(WARNING) << "VM died! cid = " << in_cid;
         {
@@ -173,8 +191,13 @@ private:
 
 class TargetVm {
 public:
-    TargetVm(int cid, const std::string& logFile, const std::string& instanceImageFile)
-          : mCid(cid), mLogFile(logFile), mInstanceImageFile(instanceImageFile) {}
+    TargetVm(int cid, const std::string& logFile, const std::string& instanceImageFile,
+             bool debuggable, bool preferStaged)
+          : mCid(cid),
+            mLogFile(logFile),
+            mInstanceImageFile(instanceImageFile),
+            mDebuggable(debuggable),
+            mPreferStaged(preferStaged) {}
 
     // Returns 0 if we are to connect to a local service, otherwise the CID of
     // either an existing VM or a VM we have started, depending on the command
@@ -186,6 +209,8 @@ public:
         if (mCid != 0) {
             return Error() << "Can't specify both cid and image file.";
         }
+
+        // Start a new VM with a given instance.img
 
         // We need a thread pool to receive VM callbacks.
         ABinderProcess_startThreadPool();
@@ -218,14 +243,29 @@ public:
             return ErrnoError() << "Failed to open config APK";
         }
 
+        // Prepare an idsig file
+        std::string idsigPath = Dirname(mInstanceImageFile) + "/idsig";
+        {
+            ScopedFileDescriptor idsigFd(TEMP_FAILURE_RETRY(
+                    open(idsigPath.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC,
+                         S_IRUSR | S_IWUSR | S_IRGRP)));
+            if (idsigFd.get() == -1) {
+                return ErrnoError() << "Failed to create an idsig file";
+            }
+            auto status = service->createOrUpdateIdsigFile(apkFd, idsigFd);
+            if (!status.isOk()) {
+                return Error() << status.getDescription();
+            }
+        }
+
         ScopedFileDescriptor idsigFd(
-                TEMP_FAILURE_RETRY(open(kConfigApkIdsigPath, O_RDONLY | O_CLOEXEC)));
+                TEMP_FAILURE_RETRY(open(idsigPath.c_str(), O_RDONLY | O_CLOEXEC)));
         if (idsigFd.get() == -1) {
-            return ErrnoError() << "Failed to open config APK signature";
+            return ErrnoError() << "Failed to open an idsig file";
         }
 
         ScopedFileDescriptor instanceFd(
-                TEMP_FAILURE_RETRY(open(mInstanceImageFile.c_str(), O_RDONLY | O_CLOEXEC)));
+                TEMP_FAILURE_RETRY(open(mInstanceImageFile.c_str(), O_RDWR | O_CLOEXEC)));
         if (instanceFd.get() == -1) {
             return ErrnoError() << "Failed to open instance image file";
         }
@@ -235,8 +275,9 @@ public:
         appConfig.apk = std::move(apkFd);
         appConfig.idsig = std::move(idsigFd);
         appConfig.instanceImage = std::move(instanceFd);
-        appConfig.configPath = kConfigFilePath;
-        appConfig.debugLevel = VirtualMachineAppConfig::DebugLevel::FULL;
+        appConfig.configPath = mPreferStaged ? kPreferStagedConfigFilePath : kDefaultConfigFilePath;
+        appConfig.debugLevel = mDebuggable ? VirtualMachineAppConfig::DebugLevel::FULL
+                                           : VirtualMachineAppConfig::DebugLevel::NONE;
         appConfig.memoryMib = 0; // Use default
 
         LOG(INFO) << "Starting VM";
@@ -279,6 +320,8 @@ private:
     const int mCid;
     const std::string mLogFile;
     const std::string mInstanceImageFile;
+    const bool mDebuggable;
+    const bool mPreferStaged;
     std::shared_ptr<Callback> mCallback;
     std::shared_ptr<IVirtualMachine> mVm;
 };
@@ -378,102 +421,6 @@ static Result<bool> verify(TargetVm& vm, const std::string& blob_file,
     return result;
 }
 
-static Result<void> signFile(ICompOsService* service, const std::string& file) {
-    unique_fd fd(TEMP_FAILURE_RETRY(open(file.c_str(), O_RDONLY | O_CLOEXEC)));
-    if (!fd.ok()) {
-        return ErrnoError() << "Failed to open";
-    }
-
-    std::filesystem::path signature_path{file};
-    signature_path += ".signature";
-    unique_fd out_fd(TEMP_FAILURE_RETRY(open(signature_path.c_str(),
-                                             O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC,
-                                             S_IRUSR | S_IWUSR | S_IRGRP)));
-    if (!out_fd.ok()) {
-        return ErrnoError() << "Unable to create signature file";
-    }
-
-    struct stat filestat;
-    if (fstat(fd, &filestat) != 0) {
-        return ErrnoError() << "Failed to fstat";
-    }
-
-    struct libfsverity_merkle_tree_params params = {
-            .version = 1,
-            .hash_algorithm = FS_VERITY_HASH_ALG_SHA256,
-            .file_size = static_cast<uint64_t>(filestat.st_size),
-            .block_size = 4096,
-    };
-
-    auto read_callback = [](void* file, void* buf, size_t count) {
-        int* fd = static_cast<int*>(file);
-        if (TEMP_FAILURE_RETRY(read(*fd, buf, count)) < 0) return -errno;
-        return 0;
-    };
-
-    struct libfsverity_digest* digest;
-    int ret = libfsverity_compute_digest(&fd, read_callback, &params, &digest);
-    if (ret < 0) {
-        return Error(-ret) << "Failed to compute fs-verity digest";
-    }
-    std::unique_ptr<libfsverity_digest, decltype(&std::free)> digestOwner{digest, std::free};
-
-    std::vector<uint8_t> buffer(sizeof(fsverity_formatted_digest) + digest->digest_size);
-    auto to_be_signed = new (buffer.data()) fsverity_formatted_digest;
-    memcpy(to_be_signed->magic, "FSVerity", sizeof(to_be_signed->magic));
-    to_be_signed->digest_algorithm = __cpu_to_le16(digest->digest_algorithm);
-    to_be_signed->digest_size = __cpu_to_le16(digest->digest_size);
-    memcpy(to_be_signed->digest, digest->digest, digest->digest_size);
-
-    std::vector<uint8_t> signature;
-    auto status = service->sign(buffer, &signature);
-    if (!status.isOk()) {
-        return Error() << "Failed to sign: " << status.getDescription();
-    }
-
-    Signature compos_signature;
-    compos_signature.set_digest(digest->digest, digest->digest_size);
-    compos_signature.set_signature(signature.data(), signature.size());
-    if (!compos_signature.SerializeToFileDescriptor(out_fd.get())) {
-        return Error() << "Failed to write signature";
-    }
-    if (close(out_fd.release()) != 0) {
-        return ErrnoError() << "Failed to close signature file";
-    }
-
-    return {};
-}
-
-static Result<void> sign(TargetVm& vm, const std::string& blob_file,
-                         const std::vector<std::string>& files) {
-    auto cid = vm.resolveCid();
-    if (!cid.ok()) {
-        return cid.error();
-    }
-    auto service = getService(*cid);
-    if (!service) {
-        return Error() << "No service";
-    }
-
-    auto blob = readBytesFromFile(blob_file);
-    if (!blob.ok()) {
-        return blob.error();
-    }
-
-    auto status = service->initializeSigningKey(blob.value());
-    if (!status.isOk()) {
-        return Error() << "Failed to initialize signing key: " << status.getDescription();
-    }
-
-    for (auto& file : files) {
-        auto result = signFile(service.get(), file);
-        if (!result.ok()) {
-            return Error() << result.error() << ": " << file;
-        }
-    }
-    return {};
-}
-
 static Result<void> initializeKey(TargetVm& vm, const std::string& blob_file) {
     auto cid = vm.resolveCid();
     if (!cid.ok()) {
@@ -524,8 +471,26 @@ int main(int argc, char** argv) {
     int cid = 0;
     std::string imageFile;
     std::string logFile;
+    bool debuggable = false;
+    bool preferStaged = false;
 
-    while (argc >= 3) {
+    for (;;) {
+        // Options with no associated value
+        if (argc >= 2) {
+            if (argv[1] == "--debug"sv) {
+                debuggable = true;
+                argc -= 1;
+                argv += 1;
+                continue;
+            } else if (argv[1] == "--staged"sv) {
+                preferStaged = true;
+                argc -= 1;
+                argv += 1;
+                continue;
+            }
+        }
+        if (argc < 3) break;
+        // Options requiring a value
         if (argv[1] == "--cid"sv) {
             cid = atoi(argv[2]);
             if (cid == 0) {
@@ -543,7 +508,7 @@ int main(int argc, char** argv) {
         argv += 2;
     }
 
-    TargetVm vm(cid, logFile, imageFile);
+    TargetVm vm(cid, logFile, imageFile, debuggable, preferStaged);
 
     if (argc == 4 && argv[1] == "generate"sv) {
         auto result = generate(vm, argv[2], argv[3]);
@@ -564,15 +529,6 @@ int main(int argc, char** argv) {
         } else {
             std::cerr << result.error() << '\n';
         }
-    } else if (argc >= 4 && argv[1] == "sign"sv) {
-        const std::vector<std::string> files{&argv[3], &argv[argc]};
-        auto result = sign(vm, argv[2], files);
-        if (result.ok()) {
-            std::cerr << "All signatures generated.\n";
-            return 0;
-        } else {
-            std::cerr << result.error() << '\n';
-        }
     } else if (argc == 3 && argv[1] == "init-key"sv) {
         auto result = initializeKey(vm, argv[2]);
         if (result.ok()) {
@@ -588,19 +544,20 @@ int main(int argc, char** argv) {
             std::cerr << result.error() << '\n';
         }
     } else {
-        std::cerr << "Usage: compos_key_cmd [OPTIONS] generate|verify|sign|make-instance|init-key\n"
+        std::cerr << "Usage: compos_key_cmd [OPTIONS] COMMAND\n"
+                  << "Where COMMAND can be:\n"
+                  << "  make-instance <image file> Create an empty instance image file for a VM.\n"
                   << "  generate <blob file> <public key file> Generate new key pair and write\n"
                   << "    the private key blob and public key to the specified files.\n "
                   << "  verify <blob file> <public key file> Verify that the content of the\n"
                   << "    specified private key blob and public key files are valid.\n "
                   << "  init-key <blob file> Initialize the service key.\n"
-                  << "  sign <blob file> <files to be signed> Generate signatures for one or\n"
-                  << "    more files using the supplied private key blob. Signature is stored in\n"
-                  << "    <filename>.signature\n"
-                  << "  make-instance <image file> Create an empty instance image file for a VM.\n"
                   << "\n"
-                  << "OPTIONS: --log <log file> (--cid <cid> | --start <image file>)\n"
+                  << "OPTIONS: --log <log file> --debug --staged\n"
+                  << "    (--cid <cid> | --start <image file>)\n"
                   << "  Specify --log to write VM log to a file rather than stdout.\n"
+                  << "  Specify --debug with --start to make the VM fully debuggable.\n"
+                  << "  Specify --staged with --start to prefer staged APEXes in the VM.\n"
                   << "  Specify --cid to connect to a VM rather than the host.\n"
                   << "  Specify --start to start a VM from the given instance image file and\n "
                   << "    connect to that.\n";

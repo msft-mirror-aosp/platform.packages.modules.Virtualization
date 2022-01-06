@@ -18,13 +18,10 @@
       "name": "com.android.compos"
     },
     {
-      "name": "{DEX2OATBOOTCLASSPATH}"
+      "name": "com.android.sdkext"
     },
     {
-      "name": "{BOOTCLASSPATH}"
-    },
-    {
-      "name": "{SYSTEMSERVERCLASSPATH}"
+      "name": "{CLASSPATH}"
     }
   ]
 }

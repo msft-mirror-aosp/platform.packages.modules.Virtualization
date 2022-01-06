@@ -19,37 +19,72 @@ mod ioutil;
 mod payload;
 
 use crate::instance::{ApkData, InstanceDisk, MicrodroidData, RootHash};
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use apkverify::{get_public_key_der, verify};
 use binder::unstable_api::{new_spibinder, AIBinder};
 use binder::{FromIBinder, Strong};
+use glob::glob;
 use idsig::V4Signature;
+use itertools::sorted;
 use log::{error, info, warn};
 use microdroid_metadata::{write_metadata, Metadata};
 use microdroid_payload_config::{Task, TaskType, VmPayloadConfig};
+use once_cell::sync::OnceCell;
 use payload::{get_apex_data_from_payload, load_metadata, to_metadata};
 use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, create_dir, File, OpenOptions};
+use std::io::BufRead;
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::str;
 use std::time::{Duration, SystemTime};
 use vsock::VsockStream;
 
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
-    VM_BINDER_SERVICE_PORT, VM_STREAM_SERVICE_PORT, IVirtualMachineService,
+    ERROR_PAYLOAD_CHANGED, ERROR_PAYLOAD_VERIFICATION_FAILED, ERROR_PAYLOAD_INVALID_CONFIG, ERROR_UNKNOWN, VM_BINDER_SERVICE_PORT, VM_STREAM_SERVICE_PORT, IVirtualMachineService,
 };
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAIN_APK_PATH: &str = "/dev/block/by-name/microdroid-apk";
+const MAIN_APK_IDSIG_PATH: &str = "/dev/block/by-name/microdroid-apk-idsig";
+const MAIN_APK_DEVICE_NAME: &str = "microdroid-apk";
+const EXTRA_APK_PATH_PATTERN: &str = "/dev/block/by-name/extra-apk-*";
+const EXTRA_IDSIG_PATH_PATTERN: &str = "/dev/block/by-name/extra-idsig-*";
 const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
+const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
+const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 
 /// The CID representing the host VM
 const VMADDR_CID_HOST: u32 = 2;
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
 const LOGD_ENABLED_PROP: &str = "ro.boot.logd.enabled";
+
+#[derive(thiserror::Error, Debug)]
+enum MicrodroidError {
+    #[error("Payload has changed: {0}")]
+    PayloadChanged(String),
+    #[error("Payload verification has failed: {0}")]
+    PayloadVerificationFailed(String),
+    #[error("Payload config is invalid: {0}")]
+    InvalidConfig(String),
+}
+
+fn translate_error(err: &Error) -> (i32, String) {
+    if let Some(e) = err.downcast_ref::<MicrodroidError>() {
+        match e {
+            MicrodroidError::PayloadChanged(msg) => (ERROR_PAYLOAD_CHANGED, msg.to_string()),
+            MicrodroidError::PayloadVerificationFailed(msg) => {
+                (ERROR_PAYLOAD_VERIFICATION_FAILED, msg.to_string())
+            }
+            MicrodroidError::InvalidConfig(msg) => (ERROR_PAYLOAD_INVALID_CONFIG, msg.to_string()),
+        }
+    } else {
+        (ERROR_UNKNOWN, err.to_string())
+    }
+}
 
 fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
     // SAFETY: AIBinder returned by RpcClient has correct reference count, and the ownership can be
@@ -81,6 +116,28 @@ fn try_main() -> Result<()> {
     kernlog::init()?;
     info!("started.");
 
+    let service = get_vms_rpc_binder().context("cannot connect to VirtualMachineService")?;
+    match try_run_payload(&service) {
+        Ok(code) => {
+            info!("notifying payload finished");
+            service.notifyPayloadFinished(code)?;
+            if code == 0 {
+                info!("task successfully finished");
+            } else {
+                error!("task exited with exit code: {}", code);
+            }
+            Ok(())
+        }
+        Err(err) => {
+            error!("task terminated: {:?}", err);
+            let (error_code, message) = translate_error(&err);
+            service.notifyError(error_code, &message)?;
+            Err(err)
+        }
+    }
+}
+
+fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
     let metadata = load_metadata().context("Failed to load payload metadata")?;
 
     let mut instance = InstanceDisk::new().context("Failed to load instance.img")?;
@@ -90,41 +147,92 @@ fn try_main() -> Result<()> {
     let verified_data =
         verify_payload(&metadata, saved_data.as_ref()).context("Payload verification failed")?;
     if let Some(saved_data) = saved_data {
-        if saved_data == verified_data {
-            info!("Saved data is verified.");
-        } else {
-            bail!("Detected an update of the payload which isn't supported yet.");
-        }
+        ensure!(
+            saved_data == verified_data,
+            MicrodroidError::PayloadChanged(String::from(
+                "Detected an update of the payload which isn't supported yet."
+            ))
+        );
+        info!("Saved data is verified.");
     } else {
         info!("Saving verified data.");
         instance.write_microdroid_data(&verified_data).context("Failed to write identity data")?;
     }
 
     // Before reading a file from the APK, start zipfuse
-    system_properties::write("ctl.start", "zipfuse")?;
+    run_zipfuse(
+        "fscontext=u:object_r:zipfusefs:s0,context=u:object_r:system_file:s0",
+        Path::new("/dev/block/mapper/microdroid-apk"),
+        Path::new("/mnt/apk"),
+    )
+    .context("Failed to run zipfuse")?;
 
-    let service = get_vms_rpc_binder().expect("cannot connect to VirtualMachineService");
-    if !metadata.payload_config_path.is_empty() {
-        let config = load_config(Path::new(&metadata.payload_config_path))?;
+    ensure!(
+        !metadata.payload_config_path.is_empty(),
+        MicrodroidError::InvalidConfig("No payload_config_path in metadata".to_string())
+    );
 
-        let fake_secret = "This is a placeholder for a value that is derived from the images that are loaded in the VM.";
-        if let Err(err) = rustutils::system_properties::write("ro.vmsecret.keymint", fake_secret) {
-            warn!("failed to set ro.vmsecret.keymint: {}", err);
-        }
+    let config = load_config(Path::new(&metadata.payload_config_path))?;
+    if config.extra_apks.len() != verified_data.extra_apks_data.len() {
+        return Err(anyhow!(
+            "config expects {} extra apks, but found only {}",
+            config.extra_apks.len(),
+            verified_data.extra_apks_data.len()
+        ));
+    }
+    mount_extra_apks(&config)?;
 
-        // Wait until apex config is done. (e.g. linker configuration for apexes)
-        // TODO(jooyung): wait until sys.boot_completed?
-        wait_for_apex_config_done()?;
+    let fake_secret = "This is a placeholder for a value that is derived from the images that are loaded in the VM.";
+    if let Err(err) = rustutils::system_properties::write("ro.vmsecret.keymint", fake_secret) {
+        warn!("failed to set ro.vmsecret.keymint: {}", err);
+    }
 
-        if let Some(main_task) = &config.task {
-            exec_task(main_task, &service).map_err(|e| {
-                error!("failed to execute task: {}", e);
-                e
-            })?;
+    // Wait until apex config is done. (e.g. linker configuration for apexes)
+    // TODO(jooyung): wait until sys.boot_completed?
+    wait_for_apex_config_done()?;
+
+    ensure!(
+        config.task.is_some(),
+        MicrodroidError::InvalidConfig("No task in VM config".to_string())
+    );
+    exec_task(&config.task.unwrap(), service)
+}
+
+struct ApkDmverityArgument<'a> {
+    apk: &'a str,
+    idsig: &'a str,
+    name: &'a str,
+    saved_root_hash: Option<&'a RootHash>,
+}
+
+fn run_apkdmverity(args: &[ApkDmverityArgument]) -> Result<Child> {
+    let mut cmd = Command::new(APKDMVERITY_BIN);
+
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+
+    for argument in args {
+        cmd.arg("--apk").arg(argument.apk).arg(argument.idsig).arg(argument.name);
+        if let Some(root_hash) = argument.saved_root_hash {
+            cmd.arg(&to_hex_string(root_hash));
+        } else {
+            cmd.arg("none");
         }
     }
 
-    Ok(())
+    cmd.spawn().context("Spawn apkdmverity")
+}
+
+fn run_zipfuse(option: &str, zip_path: &Path, mount_dir: &Path) -> Result<Child> {
+    Command::new(ZIPFUSE_BIN)
+        .arg("-o")
+        .arg(option)
+        .arg(zip_path)
+        .arg(mount_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Spawn zipfuse")
 }
 
 // Verify payload before executing it. For APK payload, Full verification (which is slow) is done
@@ -137,26 +245,103 @@ fn verify_payload(
 ) -> Result<MicrodroidData> {
     let start_time = SystemTime::now();
 
+    if let Some(saved_bootconfig) = saved_data.map(|d| &d.bootconfig) {
+        ensure!(
+            saved_bootconfig.as_ref() == get_bootconfig()?.as_slice(),
+            MicrodroidError::PayloadChanged(String::from("Bootconfig has changed."))
+        );
+    }
+
+    // Verify main APK
     let root_hash = saved_data.map(|d| &d.apk_data.root_hash);
-    let root_hash_from_idsig = get_apk_root_hash_from_idsig()?;
+    let root_hash_from_idsig = get_apk_root_hash_from_idsig(MAIN_APK_IDSIG_PATH)?;
     let root_hash_trustful = root_hash == Some(&root_hash_from_idsig);
 
     // If root_hash can be trusted, pass it to apkdmverity so that it uses the passed root_hash
     // instead of the value read from the idsig file.
-    if root_hash_trustful {
-        let root_hash = to_hex_string(root_hash.unwrap());
-        system_properties::write("microdroid_manager.apk_root_hash", &root_hash)?;
+    let main_apk_argument = {
+        ApkDmverityArgument {
+            apk: MAIN_APK_PATH,
+            idsig: MAIN_APK_IDSIG_PATH,
+            name: MAIN_APK_DEVICE_NAME,
+            saved_root_hash: if root_hash_trustful {
+                Some(root_hash_from_idsig.as_ref())
+            } else {
+                None
+            },
+        }
+    };
+    let mut apkdmverity_arguments = vec![main_apk_argument];
+
+    // Verify extra APKs
+    // For now, we can't read the payload config, so glob APKs and idsigs.
+    // Later, we'll see if it matches with the payload config.
+
+    // sort globbed paths to match apks (extra-apk-{idx}) and idsigs (extra-idsig-{idx})
+    // e.g. "extra-apk-0" corresponds to "extra-idsig-0"
+    let extra_apks =
+        sorted(glob(EXTRA_APK_PATH_PATTERN)?.collect::<Result<Vec<_>, _>>()?).collect::<Vec<_>>();
+    let extra_idsigs =
+        sorted(glob(EXTRA_IDSIG_PATH_PATTERN)?.collect::<Result<Vec<_>, _>>()?).collect::<Vec<_>>();
+    if extra_apks.len() != extra_idsigs.len() {
+        return Err(anyhow!(
+            "Extra apks/idsigs mismatch: {} apks but {} idsigs",
+            extra_apks.len(),
+            extra_idsigs.len()
+        ));
+    }
+    let extra_apks_count = extra_apks.len();
+
+    let (extra_apk_names, extra_root_hashes_from_idsig): (Vec<_>, Vec<_>) = extra_idsigs
+        .iter()
+        .enumerate()
+        .map(|(i, extra_idsig)| {
+            (
+                format!("extra-apk-{}", i),
+                get_apk_root_hash_from_idsig(extra_idsig.to_str().unwrap())
+                    .expect("Can't find root hash from extra idsig"),
+            )
+        })
+        .unzip();
+
+    let saved_extra_root_hashes: Vec<_> = saved_data
+        .map(|d| d.extra_apks_data.iter().map(|apk_data| &apk_data.root_hash).collect())
+        .unwrap_or_else(Vec::new);
+    let extra_root_hashes_trustful: Vec<_> = extra_root_hashes_from_idsig
+        .iter()
+        .enumerate()
+        .map(|(i, root_hash_from_idsig)| {
+            saved_extra_root_hashes.get(i).copied() == Some(root_hash_from_idsig)
+        })
+        .collect();
+
+    for i in 0..extra_apks_count {
+        apkdmverity_arguments.push({
+            ApkDmverityArgument {
+                apk: extra_apks[i].to_str().unwrap(),
+                idsig: extra_idsigs[i].to_str().unwrap(),
+                name: &extra_apk_names[i],
+                saved_root_hash: if extra_root_hashes_trustful[i] {
+                    Some(&extra_root_hashes_from_idsig[i])
+                } else {
+                    None
+                },
+            }
+        });
     }
 
     // Start apkdmverity and wait for the dm-verify block
-    system_properties::write("ctl.start", "apkdmverity")?;
+    let mut apkdmverity_child = run_apkdmverity(&apkdmverity_arguments)?;
 
     // While waiting for apkdmverity to mount APK, gathers public keys and root digests from
     // APEX payload.
     let apex_data_from_payload = get_apex_data_from_payload(metadata)?;
     if let Some(saved_data) = saved_data.map(|d| &d.apex_data) {
         // We don't support APEX updates. (assuming that update will change root digest)
-        ensure!(saved_data == &apex_data_from_payload, "APEX payloads has changed.");
+        ensure!(
+            saved_data == &apex_data_from_payload,
+            MicrodroidError::PayloadChanged(String::from("APEXes have changed."))
+        );
         let apex_metadata = to_metadata(&apex_data_from_payload);
         // Pass metadata(with public keys and root digests) to apexd so that it uses the passed
         // metadata instead of the default one (/dev/block/by-name/payload-metadata)
@@ -170,27 +355,53 @@ fn verify_payload(
     // Start apexd to activate APEXes
     system_properties::write("ctl.start", "apexd-vm")?;
 
-    ioutil::wait_for_file(DM_MOUNTED_APK_PATH, WAIT_TIMEOUT)?;
+    // TODO(inseob): add timeout
+    apkdmverity_child.wait()?;
 
     // Do the full verification if the root_hash is un-trustful. This requires the full scanning of
     // the APK file and therefore can be very slow if the APK is large. Note that this step is
     // taken only when the root_hash is un-trustful which can be either when this is the first boot
     // of the VM or APK was updated in the host.
     // TODO(jooyung): consider multithreading to make this faster
-    let apk_pubkey = if !root_hash_trustful {
-        verify(DM_MOUNTED_APK_PATH).context(format!("failed to verify {}", DM_MOUNTED_APK_PATH))?
-    } else {
-        get_public_key_der(DM_MOUNTED_APK_PATH)?
-    };
+    let main_apk_pubkey = get_public_key_from_apk(DM_MOUNTED_APK_PATH, root_hash_trustful)?;
+    let extra_apks_data = extra_root_hashes_from_idsig
+        .into_iter()
+        .enumerate()
+        .map(|(i, extra_root_hash)| {
+            let mount_path = format!("/dev/block/mapper/{}", &extra_apk_names[i]);
+            let apk_pubkey = get_public_key_from_apk(&mount_path, extra_root_hashes_trustful[i])?;
+            Ok(ApkData { root_hash: extra_root_hash, pubkey: apk_pubkey })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     info!("payload verification successful. took {:#?}", start_time.elapsed().unwrap());
 
     // At this point, we can ensure that the root_hash from the idsig file is trusted, either by
     // fully verifying the APK or by comparing it with the saved root_hash.
     Ok(MicrodroidData {
-        apk_data: ApkData { root_hash: root_hash_from_idsig, pubkey: apk_pubkey },
+        apk_data: ApkData { root_hash: root_hash_from_idsig, pubkey: main_apk_pubkey },
+        extra_apks_data,
         apex_data: apex_data_from_payload,
+        bootconfig: get_bootconfig()?.clone().into_boxed_slice(),
     })
+}
+
+fn mount_extra_apks(config: &VmPayloadConfig) -> Result<()> {
+    // For now, only the number of apks is important, as the mount point and dm-verity name is fixed
+    for i in 0..config.extra_apks.len() {
+        let mount_dir = format!("/mnt/extra-apk/{}", i);
+        create_dir(Path::new(&mount_dir)).context("Failed to create mount dir for extra apks")?;
+
+        // don't wait, just detach
+        run_zipfuse(
+            "fscontext=u:object_r:zipfusefs:s0,context=u:object_r:extra_apk_file:s0",
+            Path::new(&format!("/dev/block/mapper/extra-apk-{}", i)),
+            Path::new(&mount_dir),
+        )
+        .context("Failed to zipfuse extra apks")?;
+    }
+
+    Ok(())
 }
 
 // Waits until linker config is generated
@@ -206,10 +417,50 @@ fn wait_for_apex_config_done() -> Result<()> {
     Ok(())
 }
 
-fn get_apk_root_hash_from_idsig() -> Result<Box<RootHash>> {
-    let mut idsig = File::open("/dev/block/by-name/microdroid-apk-idsig")?;
+fn get_apk_root_hash_from_idsig(path: &str) -> Result<Box<RootHash>> {
+    let mut idsig = File::open(path)?;
     let idsig = V4Signature::from(&mut idsig)?;
     Ok(idsig.hashing_info.raw_root_hash)
+}
+
+fn get_public_key_from_apk(apk: &str, root_hash_trustful: bool) -> Result<Box<[u8]>> {
+    if !root_hash_trustful {
+        verify(apk).context(MicrodroidError::PayloadVerificationFailed(format!(
+            "failed to verify {}",
+            apk
+        )))
+    } else {
+        get_public_key_der(apk)
+    }
+}
+
+fn get_bootconfig() -> Result<&'static Vec<u8>> {
+    static VAL: OnceCell<Vec<u8>> = OnceCell::new();
+    VAL.get_or_try_init(|| -> Result<Vec<u8>> {
+        let f = File::open("/proc/bootconfig")?;
+
+        // Filter-out androidboot.vbmeta.device which contains UUID of the vbmeta partition. That
+        // UUID could change everytime when the same VM is started because the composite disk image
+        // is ephemeral. A change in UUID is okay as long as other configs (e.g.
+        // androidboot.vbmeta.digest) remain same.
+        Ok(std::io::BufReader::new(f)
+            .lines()
+            // note: this try_fold is to early return when we fail to read a line from the file
+            .try_fold(Vec::new(), |mut lines, line| {
+                line.map(|s| {
+                    lines.push(s);
+                    lines
+                })
+            })?
+            .into_iter()
+            .filter(|line| {
+                let tokens: Vec<&str> = line.splitn(2, '=').collect();
+                // note: if `line` doesn't have =, tokens[0] is the entire line.
+                tokens[0].trim() != "androidboot.vbmeta.device"
+            })
+            .flat_map(|line| (line + "\n").into_bytes())
+            .collect())
+    })
 }
 
 fn load_config(path: &Path) -> Result<VmPayloadConfig> {
@@ -220,7 +471,7 @@ fn load_config(path: &Path) -> Result<VmPayloadConfig> {
 
 /// Executes the given task. Stdout of the task is piped into the vsock stream to the
 /// virtualizationservice in the host side.
-fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Result<()> {
+fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
     info!("executing main task {:?}...", task);
     let mut command = build_command(task)?;
 
@@ -234,19 +485,7 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
     }
 
     let exit_status = command.spawn()?.wait()?;
-    if let Some(code) = exit_status.code() {
-        info!("notifying payload finished");
-        service.notifyPayloadFinished(code)?;
-
-        if code == 0 {
-            info!("task successfully finished");
-        } else {
-            error!("task exited with exit code: {}", code);
-        }
-    } else {
-        error!("task terminated: {}", exit_status);
-    }
-    Ok(())
+    exit_status.code().ok_or_else(|| anyhow!("Failed to get exit_code from the paylaod."))
 }
 
 fn build_command(task: &Task) -> Result<Command> {

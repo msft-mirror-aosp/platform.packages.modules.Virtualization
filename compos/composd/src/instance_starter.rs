@@ -26,10 +26,9 @@ use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsSe
 use compos_aidl_interface::binder::{ParcelFileDescriptor, Strong};
 use compos_common::compos_client::{VmInstance, VmParameters};
 use compos_common::{
-    COMPOS_DATA_ROOT, INSTANCE_IMAGE_FILE, PRIVATE_KEY_BLOB_FILE, PUBLIC_KEY_FILE,
+    COMPOS_DATA_ROOT, IDSIG_FILE, INSTANCE_IMAGE_FILE, PRIVATE_KEY_BLOB_FILE, PUBLIC_KEY_FILE,
 };
 use log::{info, warn};
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -51,6 +50,7 @@ pub struct InstanceStarter {
     instance_name: String,
     instance_root: PathBuf,
     instance_image: PathBuf,
+    idsig: PathBuf,
     key_blob: PathBuf,
     public_key: PathBuf,
     vm_parameters: VmParameters,
@@ -59,14 +59,16 @@ pub struct InstanceStarter {
 impl InstanceStarter {
     pub fn new(instance_name: &str, vm_parameters: VmParameters) -> Self {
         let instance_root = Path::new(COMPOS_DATA_ROOT).join(instance_name);
-        let instant_root_path = instance_root.as_path();
-        let instance_image = instant_root_path.join(INSTANCE_IMAGE_FILE);
-        let key_blob = instant_root_path.join(PRIVATE_KEY_BLOB_FILE);
-        let public_key = instant_root_path.join(PUBLIC_KEY_FILE);
+        let instance_root_path = instance_root.as_path();
+        let instance_image = instance_root_path.join(INSTANCE_IMAGE_FILE);
+        let idsig = instance_root_path.join(IDSIG_FILE);
+        let key_blob = instance_root_path.join(PRIVATE_KEY_BLOB_FILE);
+        let public_key = instance_root_path.join(PUBLIC_KEY_FILE);
         Self {
             instance_name: instance_name.to_owned(),
             instance_root,
             instance_image,
+            idsig,
             key_blob,
             public_key,
             vm_parameters,
@@ -108,8 +110,7 @@ impl InstanceStarter {
         // If we get this far then the instance image is valid in the current context (e.g. the
         // current set of APEXes) and the key blob can be successfully decrypted by the VM. So the
         // files have not been tampered with and we're good to go.
-
-        Self::initialize_service(service, &key_blob)?;
+        service.initializeSigningKey(&key_blob).context("Loading signing key")?;
 
         Ok(compos_instance)
     }
@@ -124,6 +125,8 @@ impl InstanceStarter {
         let _ = fs::create_dir(&self.instance_root);
 
         self.create_instance_image(virtualization_service)?;
+        // Delete existing idsig file. Ignore error in case idsig doesn't exist.
+        let _ = fs::remove_file(&self.idsig);
 
         let compos_instance = self.start_vm(virtualization_service)?;
         let service = &compos_instance.service;
@@ -140,25 +143,9 @@ impl InstanceStarter {
 
         // Unlike when starting an existing instance, we don't need to verify the key, since we
         // just generated it and have it in memory.
-
-        Self::initialize_service(service, &key_data.keyBlob)?;
+        service.initializeSigningKey(&key_data.keyBlob).context("Loading signing key")?;
 
         Ok(compos_instance)
-    }
-
-    fn initialize_service(service: &Strong<dyn ICompOsService>, key_blob: &[u8]) -> Result<()> {
-        // Key blob is assumed to be verified/trusted.
-        service.initializeSigningKey(key_blob).context("Loading signing key")?;
-
-        // TODO(198211396): Implement correctly.
-        service
-            .initializeClasspaths(
-                &env::var("BOOTCLASSPATH")?,
-                &env::var("DEX2OATBOOTCLASSPATH")?,
-                &env::var("SYSTEMSERVERCLASSPATH")?,
-            )
-            .context("Initializing *CLASSPATH")?;
-        Ok(())
     }
 
     fn start_vm(
@@ -170,9 +157,13 @@ impl InstanceStarter {
             .write(true)
             .open(&self.instance_image)
             .context("Failed to open instance image")?;
-        let vm_instance =
-            VmInstance::start(virtualization_service, instance_image, &self.vm_parameters)
-                .context("Starting VM")?;
+        let vm_instance = VmInstance::start(
+            virtualization_service,
+            instance_image,
+            &self.idsig,
+            &self.vm_parameters,
+        )
+        .context("Starting VM")?;
         let service = vm_instance.get_service().context("Connecting to CompOS")?;
         Ok(CompOsInstance { vm_instance, service, lazy_service_guard: Default::default() })
     }
@@ -199,7 +190,7 @@ impl InstanceStarter {
 
     fn check_files_exist(&self) -> Result<()> {
         if !self.instance_root.is_dir() {
-            bail!("Directory {} not found", self.instance_root.display())
+            bail!("Directory {:?} not found", self.instance_root)
         };
         Self::check_file_exists(&self.instance_image)?;
         Self::check_file_exists(&self.key_blob)?;
@@ -209,7 +200,7 @@ impl InstanceStarter {
 
     fn check_file_exists(file: &Path) -> Result<()> {
         if !file.is_file() {
-            bail!("File {} not found", file.display())
+            bail!("File {:?} not found", file)
         };
         Ok(())
     }

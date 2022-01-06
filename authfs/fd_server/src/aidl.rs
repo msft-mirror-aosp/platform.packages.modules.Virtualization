@@ -17,7 +17,9 @@
 use anyhow::Result;
 use log::error;
 use nix::{
-    dir::Dir, errno::Errno, fcntl::openat, fcntl::OFlag, sys::stat::mkdirat, sys::stat::Mode,
+    dir::Dir, errno::Errno, fcntl::openat, fcntl::OFlag, sys::stat::fchmod, sys::stat::mkdirat,
+    sys::stat::mode_t, sys::stat::Mode, sys::statvfs::statvfs, sys::statvfs::Statvfs,
+    unistd::unlinkat, unistd::UnlinkatFlags,
 };
 use std::cmp::min;
 use std::collections::{btree_map, BTreeMap};
@@ -31,24 +33,18 @@ use std::sync::{Arc, Mutex};
 
 use crate::fsverity;
 use authfs_aidl_interface::aidl::com::android::virt::fs::IVirtFdService::{
-    BnVirtFdService, IVirtFdService, MAX_REQUESTING_DATA,
+    BnVirtFdService, FsStat::FsStat, IVirtFdService, MAX_REQUESTING_DATA,
 };
 use authfs_aidl_interface::binder::{
     BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Status, StatusCode, Strong,
 };
+use authfs_fsverity_metadata::{
+    get_fsverity_metadata_path, parse_fsverity_metadata, FSVerityMetadata,
+};
 use binder_common::{new_binder_exception, new_binder_service_specific_error};
 
-fn validate_and_cast_offset(offset: i64) -> Result<u64, Status> {
-    offset.try_into().map_err(|_| new_errno_error(Errno::EINVAL))
-}
-
-fn validate_and_cast_size(size: i32) -> Result<usize, Status> {
-    if size > MAX_REQUESTING_DATA {
-        Err(new_errno_error(Errno::EFBIG))
-    } else {
-        size.try_into().map_err(|_| new_errno_error(Errno::EINVAL))
-    }
-}
+/// Bitflags of forbidden file mode, e.g. setuid, setgid and sticky bit.
+const FORBIDDEN_MODES: Mode = Mode::from_bits_truncate(!0o777);
 
 /// Configuration of a file descriptor to be served/exposed/shared.
 pub enum FdConfig {
@@ -58,13 +54,8 @@ pub enum FdConfig {
         /// The file to read from. fs-verity metadata can be retrieved from this file's FD.
         file: File,
 
-        /// Alternative Merkle tree stored in another file.
-        /// TODO(205987437): Replace with .fsv_meta file.
-        alt_merkle_tree: Option<File>,
-
-        /// Alternative signature stored in another file.
-        /// TODO(205987437): Replace with .fsv_meta file.
-        alt_signature: Option<File>,
+        // Alternative metadata storing merkle tree and signature.
+        alt_metadata: Option<Box<FSVerityMetadata>>,
     },
 
     /// A readable/writable file to serve by this server. This backing file should just be a
@@ -109,8 +100,8 @@ impl FdService {
         F: FnOnce(&mut FdConfig) -> BinderResult<(i32, FdConfig)>,
     {
         let mut fd_pool = self.fd_pool.lock().unwrap();
-        let mut fd_config = fd_pool.get_mut(&fd).ok_or_else(|| new_errno_error(Errno::EBADF))?;
-        let (new_fd, new_fd_config) = create_fn(&mut fd_config)?;
+        let fd_config = fd_pool.get_mut(&fd).ok_or_else(|| new_errno_error(Errno::EBADF))?;
+        let (new_fd, new_fd_config) = create_fn(fd_config)?;
         if let btree_map::Entry::Vacant(entry) = fd_pool.entry(new_fd) {
             entry.insert(new_fd_config);
             Ok(new_fd)
@@ -146,23 +137,23 @@ impl IVirtFdService for FdService {
         let offset: u64 = validate_and_cast_offset(offset)?;
 
         self.handle_fd(id, |config| match config {
-            FdConfig::Readonly { file, alt_merkle_tree, .. } => {
-                if let Some(tree_file) = &alt_merkle_tree {
-                    read_into_buf(tree_file, size, offset).map_err(|e| {
+            FdConfig::Readonly { file, alt_metadata, .. } => {
+                let mut buf = vec![0; size];
+
+                let s = if let Some(metadata) = &alt_metadata {
+                    metadata.read_merkle_tree(offset, &mut buf).map_err(|e| {
                         error!("readFsverityMerkleTree: read error: {}", e);
                         new_errno_error(Errno::EIO)
-                    })
+                    })?
                 } else {
-                    let mut buf = vec![0; size];
-                    let s = fsverity::read_merkle_tree(file.as_raw_fd(), offset, &mut buf)
-                        .map_err(|e| {
-                            error!("readFsverityMerkleTree: failed to retrieve merkle tree: {}", e);
-                            new_errno_error(Errno::EIO)
-                        })?;
-                    debug_assert!(s <= buf.len(), "Shouldn't return more bytes than asked");
-                    buf.truncate(s);
-                    Ok(buf)
-                }
+                    fsverity::read_merkle_tree(file.as_raw_fd(), offset, &mut buf).map_err(|e| {
+                        error!("readFsverityMerkleTree: failed to retrieve merkle tree: {}", e);
+                        new_errno_error(Errno::EIO)
+                    })?
+                };
+                debug_assert!(s <= buf.len(), "Shouldn't return more bytes than asked");
+                buf.truncate(s);
+                Ok(buf)
             }
             FdConfig::ReadWrite(_file) => {
                 // For a writable file, Merkle tree is not expected to be served since Auth FS
@@ -176,15 +167,16 @@ impl IVirtFdService for FdService {
 
     fn readFsveritySignature(&self, id: i32) -> BinderResult<Vec<u8>> {
         self.handle_fd(id, |config| match config {
-            FdConfig::Readonly { file, alt_signature, .. } => {
-                if let Some(sig_file) = &alt_signature {
-                    // Supposedly big enough buffer size to store signature.
-                    let size = MAX_REQUESTING_DATA as usize;
-                    let offset = 0;
-                    read_into_buf(sig_file, size, offset).map_err(|e| {
-                        error!("readFsveritySignature: read error: {}", e);
-                        new_errno_error(Errno::EIO)
-                    })
+            FdConfig::Readonly { file, alt_metadata, .. } => {
+                if let Some(metadata) = &alt_metadata {
+                    if let Some(signature) = &metadata.signature {
+                        Ok(signature.clone())
+                    } else {
+                        Err(new_binder_exception(
+                            ExceptionCode::SERVICE_SPECIFIC,
+                            "metadata doesn't contain a signature".to_string(),
+                        ))
+                    }
                 } else {
                     let mut buf = vec![0; MAX_REQUESTING_DATA as usize];
                     let s = fsverity::read_signature(file.as_raw_fd(), &mut buf).map_err(|e| {
@@ -263,22 +255,23 @@ impl IVirtFdService for FdService {
         })
     }
 
-    fn openFileInDirectory(&self, fd: i32, file_path: &str) -> BinderResult<i32> {
+    fn openFileInDirectory(&self, dir_fd: i32, file_path: &str) -> BinderResult<i32> {
         let path_buf = PathBuf::from(file_path);
         // Checks if the path is a simple, related path.
         if path_buf.components().any(|c| !matches!(c, Component::Normal(_))) {
             return Err(new_errno_error(Errno::EINVAL));
         }
 
-        self.insert_new_fd(fd, |config| match config {
+        self.insert_new_fd(dir_fd, |config| match config {
             FdConfig::InputDir(dir) => {
                 let file = open_readonly_at(dir.as_raw_fd(), &path_buf).map_err(new_errno_error)?;
 
-                // TODO(205987437): Provide the corresponding ".fsv_meta" file when it's created.
-                Ok((
-                    file.as_raw_fd(),
-                    FdConfig::Readonly { file, alt_merkle_tree: None, alt_signature: None },
-                ))
+                let metadata_path_buf = get_fsverity_metadata_path(&path_buf);
+                let metadata = open_readonly_at(dir.as_raw_fd(), &metadata_path_buf)
+                    .ok()
+                    .and_then(|f| parse_fsverity_metadata(f).ok());
+
+                Ok((file.as_raw_fd(), FdConfig::Readonly { file, alt_metadata: metadata }))
             }
             FdConfig::OutputDir(_) => {
                 Err(new_errno_error(Errno::ENOSYS)) // TODO: Implement when needed
@@ -287,20 +280,20 @@ impl IVirtFdService for FdService {
         })
     }
 
-    fn createFileInDirectory(&self, fd: i32, basename: &str) -> BinderResult<i32> {
-        if basename.contains(MAIN_SEPARATOR) {
-            return Err(new_errno_error(Errno::EINVAL));
-        }
-        self.insert_new_fd(fd, |config| match config {
+    fn createFileInDirectory(&self, dir_fd: i32, basename: &str, mode: i32) -> BinderResult<i32> {
+        validate_basename(basename)?;
+
+        self.insert_new_fd(dir_fd, |config| match config {
             FdConfig::InputDir(_) => Err(new_errno_error(Errno::EACCES)),
             FdConfig::OutputDir(dir) => {
+                let mode = validate_file_mode(mode)?;
                 let new_fd = openat(
                     dir.as_raw_fd(),
                     basename,
                     // TODO(205172873): handle the case when the file already exist, e.g. truncate
                     // or fail, and possibly allow the client to specify. For now, always truncate.
                     OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_TRUNC,
-                    Mode::S_IRUSR | Mode::S_IWUSR,
+                    mode,
                 )
                 .map_err(new_errno_error)?;
                 // SAFETY: new_fd is just created and not an error.
@@ -311,14 +304,19 @@ impl IVirtFdService for FdService {
         })
     }
 
-    fn createDirectoryInDirectory(&self, dir_fd: i32, basename: &str) -> BinderResult<i32> {
-        if basename.contains(MAIN_SEPARATOR) {
-            return Err(new_errno_error(Errno::EINVAL));
-        }
+    fn createDirectoryInDirectory(
+        &self,
+        dir_fd: i32,
+        basename: &str,
+        mode: i32,
+    ) -> BinderResult<i32> {
+        validate_basename(basename)?;
+
         self.insert_new_fd(dir_fd, |config| match config {
             FdConfig::InputDir(_) => Err(new_errno_error(Errno::EACCES)),
             FdConfig::OutputDir(_) => {
-                mkdirat(dir_fd, basename, Mode::S_IRWXU).map_err(new_errno_error)?;
+                let mode = validate_file_mode(mode)?;
+                mkdirat(dir_fd, basename, mode).map_err(new_errno_error)?;
                 let new_dir = Dir::openat(
                     dir_fd,
                     basename,
@@ -331,6 +329,60 @@ impl IVirtFdService for FdService {
             _ => Err(new_errno_error(Errno::ENOTDIR)),
         })
     }
+
+    fn deleteFile(&self, dir_fd: i32, basename: &str) -> BinderResult<()> {
+        validate_basename(basename)?;
+
+        self.handle_fd(dir_fd, |config| match config {
+            FdConfig::OutputDir(_dir) => {
+                unlinkat(Some(dir_fd), basename, UnlinkatFlags::NoRemoveDir)
+                    .map_err(new_errno_error)?;
+                Ok(())
+            }
+            FdConfig::InputDir(_) => Err(new_errno_error(Errno::EACCES)),
+            _ => Err(new_errno_error(Errno::ENOTDIR)),
+        })
+    }
+
+    fn deleteDirectory(&self, dir_fd: i32, basename: &str) -> BinderResult<()> {
+        validate_basename(basename)?;
+
+        self.handle_fd(dir_fd, |config| match config {
+            FdConfig::OutputDir(_dir) => {
+                unlinkat(Some(dir_fd), basename, UnlinkatFlags::RemoveDir)
+                    .map_err(new_errno_error)?;
+                Ok(())
+            }
+            FdConfig::InputDir(_) => Err(new_errno_error(Errno::EACCES)),
+            _ => Err(new_errno_error(Errno::ENOTDIR)),
+        })
+    }
+
+    fn chmod(&self, fd: i32, mode: i32) -> BinderResult<()> {
+        self.handle_fd(fd, |config| match config {
+            FdConfig::ReadWrite(_) | FdConfig::OutputDir(_) => {
+                let mode = validate_file_mode(mode)?;
+                fchmod(fd, mode).map_err(new_errno_error)
+            }
+            _ => Err(new_errno_error(Errno::EACCES)),
+        })
+    }
+
+    fn statfs(&self) -> BinderResult<FsStat> {
+        let st = statvfs("/data").map_err(new_errno_error)?;
+        try_into_fs_stat(st).map_err(|_e| new_errno_error(Errno::EINVAL))
+    }
+}
+
+fn try_into_fs_stat(st: Statvfs) -> Result<FsStat, std::num::TryFromIntError> {
+    Ok(FsStat {
+        blockSize: st.block_size().try_into()?,
+        fragmentSize: st.fragment_size().try_into()?,
+        blockNumbers: st.blocks().try_into()?,
+        blockAvailable: st.blocks_available().try_into()?,
+        inodesAvailable: st.files_available().try_into()?,
+        maxFilename: st.name_max().try_into()?,
+    })
 }
 
 fn read_into_buf(file: &File, max_size: usize, offset: u64) -> io::Result<Vec<u8>> {
@@ -350,4 +402,33 @@ fn open_readonly_at(dir_fd: RawFd, path: &Path) -> nix::Result<File> {
     // SAFETY: new_fd is just created successfully and not owned.
     let new_file = unsafe { File::from_raw_fd(new_fd) };
     Ok(new_file)
+}
+
+fn validate_and_cast_offset(offset: i64) -> Result<u64, Status> {
+    offset.try_into().map_err(|_| new_errno_error(Errno::EINVAL))
+}
+
+fn validate_and_cast_size(size: i32) -> Result<usize, Status> {
+    if size > MAX_REQUESTING_DATA {
+        Err(new_errno_error(Errno::EFBIG))
+    } else {
+        size.try_into().map_err(|_| new_errno_error(Errno::EINVAL))
+    }
+}
+
+fn validate_basename(name: &str) -> BinderResult<()> {
+    if name.contains(MAIN_SEPARATOR) {
+        Err(new_errno_error(Errno::EINVAL))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_file_mode(mode: i32) -> BinderResult<Mode> {
+    let mode = Mode::from_bits(mode as mode_t).ok_or_else(|| new_errno_error(Errno::EINVAL))?;
+    if mode.intersects(FORBIDDEN_MODES) {
+        Err(new_errno_error(Errno::EPERM))
+    } else {
+        Ok(mode)
+    }
 }

@@ -27,7 +27,7 @@
 //! of the actual file name, the exposed file names through AuthFS are currently integer, e.g.
 //! /mountpoint/42.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use log::error;
 use std::convert::TryInto;
 use std::path::{Path, PathBuf};
@@ -37,13 +37,15 @@ mod auth;
 mod common;
 mod crypto;
 mod file;
+mod fsstat;
 mod fsverity;
 mod fusefs;
 
 use auth::FakeAuthenticator;
 use file::{
-    InMemoryDir, RemoteDirEditor, RemoteFileEditor, RemoteFileReader, RemoteMerkleTreeReader,
+    Attr, InMemoryDir, RemoteDirEditor, RemoteFileEditor, RemoteFileReader, RemoteMerkleTreeReader,
 };
+use fsstat::RemoteFsStatsReader;
 use fsverity::{VerifiedFileEditor, VerifiedFileReader};
 use fusefs::{AuthFs, AuthFsEntry};
 
@@ -164,7 +166,7 @@ fn new_remote_verified_file_entry(
     remote_fd: i32,
     file_size: u64,
 ) -> Result<AuthFsEntry> {
-    let signature = service.readFsveritySignature(remote_fd).context("Failed to read signature")?;
+    let signature = service.readFsveritySignature(remote_fd).ok();
 
     let authenticator = FakeAuthenticator::always_succeed();
     Ok(AuthFsEntry::VerifiedReadonly {
@@ -172,7 +174,7 @@ fn new_remote_verified_file_entry(
             &authenticator,
             RemoteFileReader::new(service.clone(), remote_fd),
             file_size,
-            signature,
+            signature.as_deref(),
             RemoteMerkleTreeReader::new(service.clone(), remote_fd),
         )?,
         file_size,
@@ -192,21 +194,27 @@ fn new_remote_new_verified_file_entry(
     service: file::VirtFdService,
     remote_fd: i32,
 ) -> Result<AuthFsEntry> {
-    let remote_file = RemoteFileEditor::new(service, remote_fd);
-    Ok(AuthFsEntry::VerifiedNew { editor: VerifiedFileEditor::new(remote_file) })
+    let remote_file = RemoteFileEditor::new(service.clone(), remote_fd);
+    Ok(AuthFsEntry::VerifiedNew {
+        editor: VerifiedFileEditor::new(remote_file),
+        attr: Attr::new_file(service, remote_fd),
+    })
 }
 
 fn new_remote_new_verified_dir_entry(
     service: file::VirtFdService,
     remote_fd: i32,
 ) -> Result<AuthFsEntry> {
-    let dir = RemoteDirEditor::new(service, remote_fd);
-    Ok(AuthFsEntry::VerifiedNewDirectory { dir })
+    let dir = RemoteDirEditor::new(service.clone(), remote_fd);
+    let attr = Attr::new_dir(service, remote_fd);
+    Ok(AuthFsEntry::VerifiedNewDirectory { dir, attr })
 }
 
-fn prepare_root_dir_entries(authfs: &mut AuthFs, args: &Args) -> Result<()> {
-    let service = file::get_rpc_binder_service(args.cid)?;
-
+fn prepare_root_dir_entries(
+    service: file::VirtFdService,
+    authfs: &mut AuthFs,
+    args: &Args,
+) -> Result<()> {
     for config in &args.remote_ro_file {
         authfs.add_entry_at_root_dir(
             remote_fd_to_path_buf(config.remote_fd),
@@ -264,6 +272,8 @@ fn prepare_root_dir_entries(authfs: &mut AuthFs, args: &Args) -> Result<()> {
             Path::new("/system/framework/telephony-common.jar"),
             Path::new("/system/framework/voip-common.jar"),
             Path::new("/system/etc/boot-image.prof"),
+            Path::new("/system/etc/classpaths/bootclasspath.pb"),
+            Path::new("/system/etc/classpaths/systemserverclasspath.pb"),
             Path::new("/system/etc/dirty-image-objects"),
         ];
 
@@ -303,9 +313,11 @@ fn try_main() -> Result<()> {
         android_logger::Config::default().with_tag("authfs").with_min_level(log_level),
     );
 
-    let mut authfs = AuthFs::new();
-    prepare_root_dir_entries(&mut authfs, &args)?;
-    fusefs::loop_forever(authfs, &args.mount_point, &args.extra_options)?;
+    let service = file::get_rpc_binder_service(args.cid)?;
+    let mut authfs = AuthFs::new(RemoteFsStatsReader::new(service.clone()));
+    prepare_root_dir_entries(service, &mut authfs, &args)?;
+
+    fusefs::mount_and_enter_message_loop(authfs, &args.mount_point, &args.extra_options)?;
     bail!("Unexpected exit after the handler loop")
 }
 

@@ -18,6 +18,7 @@ use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmInstance, VmState};
 use crate::payload::add_microdroid_images;
 use crate::{Cid, FIRST_GUEST_CID, SYSPROP_LAST_CID};
+use crate::selinux::{SeContext, getfilecon};
 use ::binder::unstable_api::AsNative;
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
@@ -25,6 +26,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService,
+    Partition::Partition,
     PartitionType::PartitionType,
     VirtualMachineAppConfig::DebugLevel::DebugLevel,
     VirtualMachineAppConfig::VirtualMachineAppConfig,
@@ -47,6 +49,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use binder_common::{lazy_service::LazyServiceGuard, new_binder_exception};
 use disk::QcowFile;
 use idsig::{HashAlgorithm, V4Signature};
+use kvm::{Kvm, Cap};
 use log::{debug, error, info, warn};
 use microdroid_payload_config::VmPayloadConfig;
 use rustutils::system_properties;
@@ -169,6 +172,15 @@ impl IVirtualizationService for VirtualizationService {
             }
         }
 
+        let is_app_config = matches!(config, VirtualMachineConfig::AppConfig(_));
+        let is_debug_level_full = matches!(
+            config,
+            VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
+                debugLevel: DebugLevel::FULL,
+                ..
+            })
+        );
+
         let config = match config {
             VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
                 load_app_config(config, &temporary_directory).map_err(|e| {
@@ -182,6 +194,25 @@ impl IVirtualizationService for VirtualizationService {
             VirtualMachineConfig::RawConfig(config) => BorrowedOrOwned::Borrowed(config),
         };
         let config = config.as_ref();
+
+        // Check if partition images are labeled incorrectly. This is to prevent random images
+        // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
+        // being loaded in a pVM.  Specifically, for images in the raw config, nothing is allowed
+        // to be labeled as app_data_file. For images in the app config, nothing but the instance
+        // partition is allowed to be labeled as such.
+        config
+            .disks
+            .iter()
+            .flat_map(|disk| disk.partitions.iter())
+            .filter(|partition| {
+                if is_app_config {
+                    partition.label != "vm-instance"
+                } else {
+                    true // all partitions are checked
+                }
+            })
+            .try_for_each(check_label_for_partition)
+            .map_err(|e| new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, e.to_string()))?;
 
         let zero_filler_path = temporary_directory.join("zero.img");
         write_zero_filler(&zero_filler_path).map_err(|e| {
@@ -207,6 +238,24 @@ impl IVirtualizationService for VirtualizationService {
             })
             .collect::<Result<Vec<DiskFile>, _>>()?;
 
+        let protected_vm_supported = Kvm::new()
+            .map_err(|e| new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, e.to_string()))?
+            .check_extension(Cap::ArmProtectedVm);
+        let protected = config.protectedVm && protected_vm_supported;
+        if config.protectedVm && !protected_vm_supported {
+            warn!("Protected VM was requested, but it isn't supported on this machine. Ignored.");
+        }
+
+        // And force run in non-protected mode when debug level is FULL
+        let protected = if is_debug_level_full {
+            if protected {
+                warn!("VM will run in FULL debug level. Running in non-protected mode");
+            }
+            false
+        } else {
+            protected
+        };
+
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -215,7 +264,7 @@ impl IVirtualizationService for VirtualizationService {
             initrd: maybe_clone_file(&config.initrd)?,
             disks,
             params: config.params.to_owned(),
-            protected: config.protectedVm,
+            protected,
             memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
             console_fd,
             log_fd,
@@ -606,11 +655,22 @@ fn check_manage_access() -> binder::Result<()> {
     check_permission("android.permission.MANAGE_VIRTUAL_MACHINE")
 }
 
+/// Check if a partition has selinux labels that are not allowed
+fn check_label_for_partition(partition: &Partition) -> Result<()> {
+    let ctx = getfilecon(partition.image.as_ref().unwrap().as_ref())?;
+    if ctx == SeContext::new("u:object_r:app_data_file:s0").unwrap() {
+        Err(anyhow!("Partition {} shouldn't be labeled as {}", &partition.label, ctx))
+    } else {
+        Ok(())
+    }
+}
+
 /// Implementation of the AIDL `IVirtualMachine` interface. Used as a handle to a VM.
 #[derive(Debug)]
 struct VirtualMachine {
     instance: Arc<VmInstance>,
     /// Keeps our service process running as long as this VM instance exists.
+    #[allow(dead_code)]
     lazy_service_guard: LazyServiceGuard,
 }
 
@@ -714,6 +774,16 @@ impl VirtualMachineCallbacks {
         }
     }
 
+    /// Call all registered callbacks to say that the VM encountered an error.
+    pub fn notify_error(&self, cid: Cid, error_code: i32, message: &str) {
+        let callbacks = &*self.0.lock().unwrap();
+        for callback in callbacks {
+            if let Err(e) = callback.onError(cid as i32, error_code, message) {
+                error!("Error notifying error event from VM CID {}: {}", cid, e);
+            }
+        }
+    }
+
     /// Call all registered callbacks to say that the VM has died.
     pub fn callback_on_died(&self, cid: Cid) {
         let callbacks = &*self.0.lock().unwrap();
@@ -732,7 +802,7 @@ impl VirtualMachineCallbacks {
 
 /// The mutable state of the VirtualizationService. There should only be one instance of this
 /// struct.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct State {
     /// The VMs which have been started. When VMs are started a weak reference is added to this list
     /// while a strong reference is returned to the caller over Binder. Once all copies of the
@@ -776,12 +846,6 @@ impl State {
         let pos = self.debug_held_vms.iter().position(|vm| vm.getCid() == Ok(cid))?;
         let vm = self.debug_held_vms.swap_remove(pos);
         Some(vm)
-    }
-}
-
-impl Default for State {
-    fn default() -> Self {
-        State { vms: vec![], debug_held_vms: vec![] }
     }
 }
 
@@ -879,10 +943,10 @@ impl IVirtualMachineService for VirtualMachineService {
             vm.callbacks.notify_payload_started(cid, stream);
             Ok(())
         } else {
-            error!("notifyPayloadStarted is called from an unknown cid {}", cid);
+            error!("notifyPayloadStarted is called from an unknown CID {}", cid);
             Err(new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
-                format!("cannot find a VM with cid {}", cid),
+                format!("cannot find a VM with CID {}", cid),
             ))
         }
     }
@@ -896,10 +960,10 @@ impl IVirtualMachineService for VirtualMachineService {
             vm.callbacks.notify_payload_ready(cid);
             Ok(())
         } else {
-            error!("notifyPayloadReady is called from an unknown cid {}", cid);
+            error!("notifyPayloadReady is called from an unknown CID {}", cid);
             Err(new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
-                format!("cannot find a VM with cid {}", cid),
+                format!("cannot find a VM with CID {}", cid),
             ))
         }
     }
@@ -913,10 +977,27 @@ impl IVirtualMachineService for VirtualMachineService {
             vm.callbacks.notify_payload_finished(cid, exit_code);
             Ok(())
         } else {
-            error!("notifyPayloadFinished is called from an unknown cid {}", cid);
+            error!("notifyPayloadFinished is called from an unknown CID {}", cid);
             Err(new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
-                format!("cannot find a VM with cid {}", cid),
+                format!("cannot find a VM with CID {}", cid),
+            ))
+        }
+    }
+
+    fn notifyError(&self, error_code: i32, message: &str) -> binder::Result<()> {
+        let cid = self.cid;
+        if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
+            info!("VM having CID {} encountered an error", cid);
+            vm.update_payload_state(PayloadState::Finished)
+                .map_err(|e| new_binder_exception(ExceptionCode::ILLEGAL_STATE, e.to_string()))?;
+            vm.callbacks.notify_error(cid, error_code, message);
+            Ok(())
+        } else {
+            error!("notifyPayloadStarted is called from an unknown CID {}", cid);
+            Err(new_binder_exception(
+                ExceptionCode::SERVICE_SPECIFIC,
+                format!("cannot find a VM with CID {}", cid),
             ))
         }
     }
