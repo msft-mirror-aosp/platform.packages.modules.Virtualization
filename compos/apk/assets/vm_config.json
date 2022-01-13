@@ -10,12 +10,20 @@
       "--log_to_stderr"
     ]
   },
+  "extra_apks": [
+    {
+      "path": "/system/etc/security/fsverity/BuildManifest.apk"
+    }
+  ],
   "apexes": [
     {
       "name": "com.android.art"
     },
     {
       "name": "com.android.compos"
+    },
+    {
+      "name": "com.android.sdkext"
     },
     {
       "name": "{CLASSPATH}"

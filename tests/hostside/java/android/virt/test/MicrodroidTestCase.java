@@ -29,13 +29,19 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.Optional;
+
 @RunWith(DeviceJUnit4ClassRunner.class)
 public class MicrodroidTestCase extends VirtualizationTestCaseBase {
     private static final String APK_NAME = "MicrodroidTestApp.apk";
     private static final String PACKAGE_NAME = "com.android.microdroid.test";
 
-    private static final int MIN_MEM_ARM64 = 256;
-    private static final int MIN_MEM_X86_64 = 400;
+    private static final int MIN_MEM_ARM64 = 145;
+    private static final int MIN_MEM_X86_64 = 196;
+
+    // Number of vCPUs and their affinity to host CPUs for testing purpose
+    private static final int NUM_VCPUS = 3;
+    private static final String CPU_AFFINITY = "0,1,2";
 
     private int minMemorySize() throws DeviceNotAvailableException {
         CommandRunner android = new CommandRunner(getDevice());
@@ -61,7 +67,9 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         PACKAGE_NAME,
                         configPath,
                         /* debug */ true,
-                        minMemorySize());
+                        minMemorySize(),
+                        Optional.of(NUM_VCPUS),
+                        Optional.of(CPU_AFFINITY));
         adbConnectToMicrodroid(getDevice(), cid);
 
         // Wait until logd-init starts. The service is one of the last services that are started in
@@ -100,6 +108,9 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
 
         // Check that no denials have happened so far
         assertThat(runOnMicrodroid("logcat -d -e 'avc:[[:space:]]{1,2}denied'"), is(""));
+
+        assertThat(runOnMicrodroid("cat /proc/cpuinfo | grep processor | wc -l"),
+                is(Integer.toString(NUM_VCPUS)));
 
         shutdownMicrodroid(getDevice(), cid);
     }

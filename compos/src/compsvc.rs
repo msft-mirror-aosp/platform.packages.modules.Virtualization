@@ -23,7 +23,6 @@ use binder_common::new_binder_exception;
 use compos_common::binder::to_binder_result;
 use log::warn;
 use std::default::Default;
-use std::env;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
@@ -95,21 +94,6 @@ impl ICompOsService for CompOsService {
         }
     }
 
-    fn initializeClasspaths(
-        &self,
-        boot_classpath: &str,
-        dex2oat_boot_classpath: &str,
-        system_server_classpath: &str,
-        standalone_systemserver_jars: &str,
-    ) -> BinderResult<()> {
-        // TODO(198211396): Implement correctly.
-        env::set_var("BOOTCLASSPATH", boot_classpath);
-        env::set_var("DEX2OATBOOTCLASSPATH", dex2oat_boot_classpath);
-        env::set_var("SYSTEMSERVERCLASSPATH", system_server_classpath);
-        env::set_var("STANDALONE_SYSTEMSERVER_JARS", standalone_systemserver_jars);
-        Ok(())
-    }
-
     fn odrefresh(
         &self,
         system_dir_fd: i32,
@@ -117,6 +101,7 @@ impl ICompOsService for CompOsService {
         staging_dir_fd: i32,
         target_dir_name: &str,
         zygote_arch: &str,
+        system_server_compiler_filter: &str,
     ) -> BinderResult<i8> {
         let context = to_binder_result(OdrefreshContext::new(
             system_dir_fd,
@@ -124,6 +109,7 @@ impl ICompOsService for CompOsService {
             staging_dir_fd,
             target_dir_name,
             zygote_arch,
+            system_server_compiler_filter,
         ))?;
 
         let authfs_service = get_authfs_service()?;

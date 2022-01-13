@@ -15,12 +15,15 @@
  */
 
 use anyhow::{anyhow, bail, Context, Result};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use minijail::{self, Minijail};
+use regex::Regex;
 use std::env;
+use std::ffi::OsString;
 use std::fs::{read_dir, File};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{self, Path, PathBuf};
+use std::process::Command;
 
 use crate::artifact_signer::ArtifactSigner;
 use crate::compos_key_service::Signer;
@@ -67,6 +70,7 @@ pub struct OdrefreshContext<'a> {
     staging_dir_fd: i32,
     target_dir_name: &'a str,
     zygote_arch: &'a str,
+    system_server_compiler_filter: &'a str,
 }
 
 impl<'a> OdrefreshContext<'a> {
@@ -76,11 +80,12 @@ impl<'a> OdrefreshContext<'a> {
         staging_dir_fd: i32,
         target_dir_name: &'a str,
         zygote_arch: &'a str,
+        system_server_compiler_filter: &'a str,
     ) -> Result<Self> {
         if system_dir_fd < 0 || output_dir_fd < 0 || staging_dir_fd < 0 {
             bail!("The remote FDs are expected to be non-negative");
         }
-        if zygote_arch != "zygote64" && zygote_arch != "zygote64_32" {
+        if !matches!(zygote_arch, "zygote64" | "zygote64_32") {
             bail!("Invalid zygote arch");
         }
         // Disallow any sort of path traversal
@@ -88,7 +93,20 @@ impl<'a> OdrefreshContext<'a> {
             bail!("Invalid target directory {}", target_dir_name);
         }
 
-        Ok(Self { system_dir_fd, output_dir_fd, staging_dir_fd, target_dir_name, zygote_arch })
+        // We're not validating/allowlisting the compiler filter, and just assume the compiler will
+        // reject an invalid string. We need to accept "verify" filter anyway, and potential
+        // performance degration by the attacker is not currently in scope. This also allows ART to
+        // specify new compiler filter and configure through system property without change to
+        // CompOS.
+
+        Ok(Self {
+            system_dir_fd,
+            output_dir_fd,
+            staging_dir_fd,
+            target_dir_name,
+            zygote_arch,
+            system_server_compiler_filter,
+        })
     }
 }
 
@@ -104,9 +122,9 @@ pub fn odrefresh(
         port: FD_SERVER_PORT,
         inputDirFdAnnotations: vec![InputDirFdAnnotation {
             fd: context.system_dir_fd,
-            // TODO(206869687): Replace /dev/null with the real path when possible.
-            manifestPath: "/dev/null".to_string(),
-            prefix: "/system".to_string(),
+            // 0 is the index of extra_apks in vm_config_extra_apk.json
+            manifestPath: "/mnt/extra-apk/0/assets/build_manifest.pb".to_string(),
+            prefix: "system/".to_string(),
         }],
         outputDirFdAnnotations: vec![
             OutputDirFdAnnotation { fd: context.output_dir_fd },
@@ -129,14 +147,26 @@ pub fn odrefresh(
 
     let staging_dir = mountpoint.join(context.staging_dir_fd.to_string());
 
-    let args = vec![
+    set_classpaths(&android_root)?;
+
+    let mut args = vec![
         "odrefresh".to_string(),
+        "--compilation-os-mode".to_string(),
         format!("--zygote-arch={}", context.zygote_arch),
         format!("--dalvik-cache={}", context.target_dir_name),
-        "--no-refresh".to_string(),
         format!("--staging-dir={}", staging_dir.display()),
-        "--force-compile".to_string(),
+        "--no-refresh".to_string(),
     ];
+
+    if !context.system_server_compiler_filter.is_empty() {
+        args.push(format!(
+            "--system-server-compiler-filter={}",
+            context.system_server_compiler_filter
+        ));
+    }
+
+    args.push("--compile".to_string());
+
     debug!("Running odrefresh with args: {:?}", &args);
     let jail = spawn_jailed_task(odrefresh_path, &args, Vec::new() /* fd_mapping */)
         .context("Spawn odrefresh")?;
@@ -162,6 +192,53 @@ pub fn odrefresh(
     }
 
     Ok(exit_code)
+}
+
+fn set_classpaths(android_root: &Path) -> Result<()> {
+    let export_lines = run_derive_classpath(android_root)?;
+    load_classpath_vars(&export_lines)
+}
+
+fn run_derive_classpath(android_root: &Path) -> Result<String> {
+    let classpaths_root = android_root.join("etc/classpaths");
+
+    let mut bootclasspath_arg = OsString::new();
+    bootclasspath_arg.push("--bootclasspath-fragment=");
+    bootclasspath_arg.push(classpaths_root.join("bootclasspath.pb"));
+
+    let mut systemserverclasspath_arg = OsString::new();
+    systemserverclasspath_arg.push("--systemserverclasspath-fragment=");
+    systemserverclasspath_arg.push(classpaths_root.join("systemserverclasspath.pb"));
+
+    let result = Command::new("/apex/com.android.sdkext/bin/derive_classpath")
+        .arg(bootclasspath_arg)
+        .arg(systemserverclasspath_arg)
+        .arg("/proc/self/fd/1")
+        .output()
+        .context("Failed to run derive_classpath")?;
+
+    if !result.status.success() {
+        bail!("derive_classpath returned {}", result.status);
+    }
+
+    String::from_utf8(result.stdout).context("Converting derive_classpath output")
+}
+
+fn load_classpath_vars(export_lines: &str) -> Result<()> {
+    // Each line should be in the format "export <var name> <value>"
+    let pattern = Regex::new(r"^export ([^ ]+) ([^ ]+)$").context("Failed to construct Regex")?;
+    for line in export_lines.lines() {
+        if let Some(captures) = pattern.captures(line) {
+            let name = &captures[1];
+            let value = &captures[2];
+            // TODO(b/213416778) Don't modify our env, construct a fresh one for odrefresh
+            env::set_var(name, value);
+        } else {
+            warn!("Malformed line from derive_classpath: {}", line);
+        }
+    }
+
+    Ok(())
 }
 
 fn add_artifacts(target_dir: &Path, artifact_signer: &mut ArtifactSigner) -> Result<()> {

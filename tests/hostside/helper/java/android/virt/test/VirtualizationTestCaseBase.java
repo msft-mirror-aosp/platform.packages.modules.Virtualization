@@ -33,7 +33,9 @@ import com.android.tradefed.util.RunUtil;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -182,7 +184,25 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
             String packageName,
             String configPath,
             boolean debug,
-            int memoryMib)
+            int memoryMib,
+            Optional<Integer> numCpus,
+            Optional<String> cpuAffinity)
+            throws DeviceNotAvailableException {
+        return startMicrodroid(androidDevice, buildInfo, apkName, packageName, null, configPath,
+                debug, memoryMib, numCpus, cpuAffinity);
+    }
+
+    public static String startMicrodroid(
+            ITestDevice androidDevice,
+            IBuildInfo buildInfo,
+            String apkName,
+            String packageName,
+            String[] extraIdsigPaths,
+            String configPath,
+            boolean debug,
+            int memoryMib,
+            Optional<Integer> numCpus,
+            Optional<String> cpuAffinity)
             throws DeviceNotAvailableException {
         CommandRunner android = new CommandRunner(androidDevice);
 
@@ -209,18 +229,26 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         final String debugFlag = debug ? "--debug full" : "";
 
         // Run the VM
-        String ret =
-                android.run(
-                        VIRT_APEX + "bin/vm",
-                        "run-app",
-                        "--daemonize",
-                        "--log " + logPath,
-                        "--mem " + memoryMib,
-                        debugFlag,
-                        apkPath,
-                        outApkIdsigPath,
-                        instanceImg,
-                        configPath);
+        ArrayList<String> args = new ArrayList<>(Arrays.asList(
+                VIRT_APEX + "bin/vm",
+                "run-app",
+                "--daemonize",
+                "--log " + logPath,
+                "--mem " + memoryMib,
+                numCpus.isPresent() ? "--cpus " + numCpus.get() : "",
+                cpuAffinity.isPresent() ? "--cpu-affinity " + cpuAffinity.get() : "",
+                debugFlag,
+                apkPath,
+                outApkIdsigPath,
+                instanceImg,
+                configPath));
+        if (extraIdsigPaths != null) {
+            for (String path : extraIdsigPaths) {
+                args.add("--extra-idsig");
+                args.add(path);
+            }
+        }
+        String ret = android.run(args.toArray(new String[0]));
 
         // Redirect log.txt to logd using logwrapper
         ExecutorService executor = Executors.newFixedThreadPool(1);

@@ -43,6 +43,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -68,6 +69,14 @@ public final class AuthFsHostTest extends VirtualizationTestCaseBase {
 
     /** Path to authfs on Microdroid */
     private static final String AUTHFS_BIN = "/system/bin/authfs";
+
+    /** Idsig paths to be created for each APK in the "extra_apks" of vm_config.json. */
+    private static final String[] EXTRA_IDSIG_PATHS = new String[] {
+        TEST_DIR + "BuildManifest.apk.idsig",
+    };
+
+    /** Build manifest path in the VM. 0 is the index of extra_apks in vm_config.json. */
+    private static final String BUILD_MANIFEST_PATH = "/mnt/extra-apk/0/assets/build_manifest.pb";
 
     /** Plenty of time for authfs to get ready */
     private static final int AUTHFS_INIT_TIMEOUT_MS = 3000;
@@ -110,16 +119,19 @@ public final class AuthFsHostTest extends VirtualizationTestCaseBase {
         CLog.i("Starting the shared VM");
         final String apkName = "MicrodroidTestApp.apk";
         final String packageName = "com.android.microdroid.test";
-        final String configPath = "assets/vm_config.json"; // path inside the APK
+        final String configPath = "assets/vm_config_extra_apk.json"; // path inside the APK
         sCid =
                 startMicrodroid(
                         androidDevice,
                         testInfo.getBuildInfo(),
                         apkName,
                         packageName,
+                        EXTRA_IDSIG_PATHS,
                         configPath,
                         /* debug */ true,
-                        /* use default memoryMib */ 0);
+                        /* use default memoryMib */ 0,
+                        Optional.empty(),
+                        Optional.empty());
         adbConnectToMicrodroid(androidDevice, sCid);
 
         // Root because authfs (started from shell in this test) currently require root to open
@@ -488,9 +500,8 @@ public final class AuthFsHostTest extends VirtualizationTestCaseBase {
         // Setup
         String authfsInputDir = MOUNT_DIR + "/3";
         runFdServerOnAndroid("--open-dir 3:/system", "--ro-dirs 3");
-        // TODO(206869687): Replace /dev/null with real manifest file when it's generated. We
-        // currently hard-coded the files for the test manually, and ignore the integrity check.
-        runAuthFsOnMicrodroid("--remote-ro-dir 3:/dev/null:/system --cid " + VMADDR_CID_HOST);
+        runAuthFsOnMicrodroid("--remote-ro-dir 3:" + BUILD_MANIFEST_PATH + ":system/ --cid "
+                + VMADDR_CID_HOST);
 
         // Action
         String actualHash =
@@ -506,9 +517,8 @@ public final class AuthFsHostTest extends VirtualizationTestCaseBase {
         // Setup
         String authfsInputDir = MOUNT_DIR + "/3";
         runFdServerOnAndroid("--open-dir 3:/system", "--ro-dirs 3");
-        // TODO(206869687): Replace /dev/null with real manifest file when it's generated. We
-        // currently hard-coded the files for the test manually, and ignore the integrity check.
-        runAuthFsOnMicrodroid("--remote-ro-dir 3:/dev/null:/system --cid " + VMADDR_CID_HOST);
+        runAuthFsOnMicrodroid("--remote-ro-dir 3:" + BUILD_MANIFEST_PATH + ":system/ --cid "
+                + VMADDR_CID_HOST);
 
         // Verify
         runOnMicrodroid("test -f " + authfsInputDir + "/system/framework/services.jar");

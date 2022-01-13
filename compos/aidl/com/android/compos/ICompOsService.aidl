@@ -33,15 +33,6 @@ interface ICompOsService {
     void initializeSigningKey(in byte[] keyBlob);
 
     /**
-     * Initializes the classpaths necessary for preparing and running compilation.
-     *
-     * TODO(198211396): Implement properly. We can't simply accepting the classpaths from Android
-     * since they are not derived from staged APEX (besides security reasons).
-     */
-    void initializeClasspaths(String bootClasspath, String dex2oatBootClasspath,
-            String systemServerClasspath, String standaloneSystemServerJars);
-
-    /**
      * Run odrefresh in the VM context.
      *
      * The execution is based on the VM's APEX mounts, files on Android's /system (by accessing
@@ -54,10 +45,11 @@ interface ICompOsService {
      * @param targetDirName The sub-directory of the output directory to which artifacts are to be
      *                      written (e.g. dalvik-cache)
      * @param zygoteArch The zygote architecture (ro.zygote)
+     * @param systemServerCompilerFilter The compiler filter used to compile system server
      * @return odrefresh exit code
      */
     byte odrefresh(int systemDirFd, int outputDirFd, int stagingDirFd, String targetDirName,
-            String zygoteArch);
+            String zygoteArch, String systemServerCompilerFilter);
 
     /**
      * Run dex2oat command with provided args, in a context that may be specified in FdAnnotation,
