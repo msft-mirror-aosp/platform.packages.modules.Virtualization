@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 The Android Open Source Project
+ * Copyright 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package android.system.virtualizationservice;
 
-/// fs-verity version that we are using
-pub const FS_VERITY_VERSION: u8 = 1;
-
-/// Hash algorithm to use from linux/fsverity.h
-pub const FS_VERITY_HASH_ALG_SHA256: u8 = 1;
-
-/// Log 2 of the block size (only 4096 is supported now)
-pub const FS_VERITY_LOG_BLOCKSIZE: u8 = 12;
+/**
+ * The reason why a VM died.
+ */
+@Backing(type="int")
+enum DeathReason {
+    /** The VM requested to shut down. */
+    SHUTDOWN = 0,
+    /** The VM requested to reboot, possibly as the result of a kernel panic. */
+    REBOOT = 1,
+    /** The VM was killed. */
+    KILLED = 2,
+    /** The VM died for an unknown reason. */
+    UNKNOWN = 3,
+    /** There was an error waiting for the VM. */
+    INFRASTRUCTURE_ERROR = 4,
+}

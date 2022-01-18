@@ -17,23 +17,29 @@
 //! This crate implements AuthFS, a FUSE-based, non-generic filesystem where file access is
 //! authenticated. This filesystem assumes the underlying layer is not trusted, e.g. file may be
 //! provided by an untrusted host/VM, so that the content can't be simply trusted. However, with a
-//! public key from a trusted party, this filesystem can still verify a (read-only) file signed by
-//! the trusted party even if the host/VM as the blob provider is malicious. With the Merkle tree,
-//! each read of file block can be verified individually only when needed.
+//! known file hash from trusted party, this filesystem can still verify a (read-only) file even if
+//! the host/VM as the blob provider is malicious. With the Merkle tree, each read of file block can
+//! be verified individually only when needed.
 //!
-//! AuthFS only serve files that are specifically configured. A file configuration may include the
-//! source (e.g. remote file server), verification method (e.g. certificate for fs-verity
-//! verification, or no verification if expected to mount over dm-verity), and file ID. Regardless
-//! of the actual file name, the exposed file names through AuthFS are currently integer, e.g.
-//! /mountpoint/42.
+//! AuthFS only serve files that are specifically configured. Each remote file can be configured to
+//! appear as a local file at the mount point. A file configuration may include its remote file
+//! identifier and its verification method (e.g. by known digest).
+//!
+//! AuthFS also support remote directories. A remote directory may be defined by a manifest file,
+//! which contains file paths and their corresponding digests.
+//!
+//! AuthFS can also be configured for write, in which case the remote file server is treated as a
+//! (untrusted) storage. The file/directory integrity is maintained in memory in the VM. Currently,
+//! the state is not persistent, thus only new file/directory are supported.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use log::error;
+use protobuf::Message;
 use std::convert::TryInto;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 
-mod auth;
 mod common;
 mod crypto;
 mod file;
@@ -41,12 +47,13 @@ mod fsstat;
 mod fsverity;
 mod fusefs;
 
-use auth::FakeAuthenticator;
 use file::{
-    Attr, InMemoryDir, RemoteDirEditor, RemoteFileEditor, RemoteFileReader, RemoteMerkleTreeReader,
+    Attr, EagerChunkReader, InMemoryDir, RemoteDirEditor, RemoteFileEditor, RemoteFileReader,
+    RemoteMerkleTreeReader,
 };
 use fsstat::RemoteFsStatsReader;
-use fsverity::{VerifiedFileEditor, VerifiedFileReader};
+use fsverity::{merkle_tree_size, VerifiedFileEditor, VerifiedFileReader};
+use fsverity_digests_proto::fsverity_digests::FSVerityDigests;
 use fusefs::{AuthFs, AuthFsEntry};
 
 #[derive(StructOpt)]
@@ -65,8 +72,9 @@ struct Args {
 
     /// A read-only remote file with integrity check. Can be multiple.
     ///
-    /// For example, `--remote-ro-file 5:/path/to/cert` tells the filesystem to associate the
-    /// file $MOUNTPOINT/5 with a remote FD 5, and need to be verified against the /path/to/cert.
+    /// For example, `--remote-ro-file 5:sha256-1234abcd` tells the filesystem to associate the
+    /// file $MOUNTPOINT/5 with a remote FD 5, and has a fs-verity digest with sha256 of the hex
+    /// value 1234abcd.
     #[structopt(long, parse(try_from_str = parse_remote_ro_file_option))]
     remote_ro_file: Vec<OptionRemoteRoFile>,
 
@@ -93,10 +101,10 @@ struct Args {
     /// remote host may be included in the mapping file, so the directory view may be partial. The
     /// directory structure won't change throughout the filesystem lifetime.
     ///
-    /// For example, `--remote-ro-dir 5:/path/to/mapping:/prefix/` tells the filesystem to
+    /// For example, `--remote-ro-dir 5:/path/to/mapping:prefix/` tells the filesystem to
     /// construct a directory structure defined in the mapping file at $MOUNTPOINT/5, which may
-    /// include a file like /5/system/framework/framework.jar. "/prefix/" tells the filesystem to
-    /// strip the path (e.g. "/system/") from the mount point to match the expected location of the
+    /// include a file like /5/system/framework/framework.jar. "prefix/" tells the filesystem to
+    /// strip the path (e.g. "system/") from the mount point to match the expected location of the
     /// remote FD (e.g. a directory FD of "/system" in the remote).
     #[structopt(long, parse(try_from_str = parse_remote_new_ro_dir_option))]
     remote_ro_dir: Vec<OptionRemoteRoDir>,
@@ -119,9 +127,8 @@ struct OptionRemoteRoFile {
     /// ID to refer to the remote file.
     remote_fd: i32,
 
-    /// Certificate to verify the authenticity of the file's fs-verity signature.
-    /// TODO(170494765): Implement PKCS#7 signature verification.
-    _certificate_path: PathBuf,
+    /// Expected fs-verity digest (with sha256) for the remote file.
+    digest: String,
 }
 
 struct OptionRemoteRoDir {
@@ -131,11 +138,9 @@ struct OptionRemoteRoDir {
     /// A mapping file that describes the expecting file/directory structure and integrity metadata
     /// in the remote directory. The file contains serialized protobuf of
     /// android.security.fsverity.FSVerityDigests.
-    /// TODO(206869687): Really use the file when it's generated.
-    #[allow(dead_code)]
     mapping_file_path: PathBuf,
 
-    prefix: PathBuf,
+    prefix: String,
 }
 
 fn parse_remote_ro_file_option(option: &str) -> Result<OptionRemoteRoFile> {
@@ -143,10 +148,11 @@ fn parse_remote_ro_file_option(option: &str) -> Result<OptionRemoteRoFile> {
     if strs.len() != 2 {
         bail!("Invalid option: {}", option);
     }
-    Ok(OptionRemoteRoFile {
-        remote_fd: strs[0].parse::<i32>()?,
-        _certificate_path: PathBuf::from(strs[1]),
-    })
+    if let Some(digest) = strs[1].strip_prefix("sha256-") {
+        Ok(OptionRemoteRoFile { remote_fd: strs[0].parse::<i32>()?, digest: String::from(digest) })
+    } else {
+        bail!("Unsupported hash algorithm or invalid format: {}", strs[1]);
+    }
 }
 
 fn parse_remote_new_ro_dir_option(option: &str) -> Result<OptionRemoteRoDir> {
@@ -157,25 +163,40 @@ fn parse_remote_new_ro_dir_option(option: &str) -> Result<OptionRemoteRoDir> {
     Ok(OptionRemoteRoDir {
         remote_dir_fd: strs[0].parse::<i32>().unwrap(),
         mapping_file_path: PathBuf::from(strs[1]),
-        prefix: PathBuf::from(strs[2]),
+        prefix: String::from(strs[2]),
     })
+}
+
+fn from_hex_string(s: &str) -> Result<Vec<u8>> {
+    if s.len() % 2 == 1 {
+        bail!("Incomplete hex string: {}", s);
+    } else {
+        let results = (0..s.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&s[i..i + 2], 16)
+                    .map_err(|e| anyhow!("Cannot parse hex {}: {}", &s[i..i + 2], e))
+            })
+            .collect::<Result<Vec<_>>>();
+        Ok(results?)
+    }
 }
 
 fn new_remote_verified_file_entry(
     service: file::VirtFdService,
     remote_fd: i32,
+    expected_digest: &str,
     file_size: u64,
 ) -> Result<AuthFsEntry> {
-    let signature = service.readFsveritySignature(remote_fd).ok();
-
-    let authenticator = FakeAuthenticator::always_succeed();
     Ok(AuthFsEntry::VerifiedReadonly {
         reader: VerifiedFileReader::new(
-            &authenticator,
             RemoteFileReader::new(service.clone(), remote_fd),
             file_size,
-            signature.as_deref(),
-            RemoteMerkleTreeReader::new(service.clone(), remote_fd),
+            &from_hex_string(expected_digest)?,
+            EagerChunkReader::new(
+                RemoteMerkleTreeReader::new(service.clone(), remote_fd),
+                merkle_tree_size(file_size),
+            )?,
         )?,
         file_size,
     })
@@ -221,6 +242,7 @@ fn prepare_root_dir_entries(
             new_remote_verified_file_entry(
                 service.clone(),
                 config.remote_fd,
+                &config.digest,
                 service.getFileSize(config.remote_fd)?.try_into()?,
             )?,
         )?;
@@ -260,42 +282,40 @@ fn prepare_root_dir_entries(
             AuthFsEntry::ReadonlyDirectory { dir: InMemoryDir::new() },
         )?;
 
-        // TODO(206869687): Read actual path from config.mapping_file_path when it's generated.
-        let paths = vec![
-            Path::new("/system/framework/com.android.location.provider.jar"),
-            Path::new("/system/framework/ethernet-service.jar"),
-            Path::new("/system/framework/ext.jar"),
-            Path::new("/system/framework/framework-graphics.jar"),
-            Path::new("/system/framework/framework.jar"),
-            Path::new("/system/framework/ims-common.jar"),
-            Path::new("/system/framework/services.jar"),
-            Path::new("/system/framework/services.jar.prof"),
-            Path::new("/system/framework/telephony-common.jar"),
-            Path::new("/system/framework/voip-common.jar"),
-            Path::new("/system/etc/boot-image.prof"),
-            Path::new("/system/etc/classpaths/bootclasspath.pb"),
-            Path::new("/system/etc/classpaths/systemserverclasspath.pb"),
-            Path::new("/system/etc/dirty-image-objects"),
-        ];
+        // Build the directory tree based on the mapping file.
+        let mut reader = File::open(&config.mapping_file_path)?;
+        let proto = FSVerityDigests::parse_from_reader(&mut reader)?;
+        for (path_str, digest) in &proto.digests {
+            if digest.hash_alg != "sha256" {
+                bail!("Unsupported hash algorithm: {}", digest.hash_alg);
+            }
 
-        for path in &paths {
             let file_entry = {
+                let remote_path_str = path_str.strip_prefix(&config.prefix).ok_or_else(|| {
+                    anyhow!("Expect path {} to match prefix {}", path_str, config.prefix)
+                })?;
                 // TODO(205883847): Not all files will be used. Open the remote file lazily.
-                let related_path = path.strip_prefix(&config.prefix)?;
                 let remote_file = RemoteFileReader::new_by_path(
                     service.clone(),
                     config.remote_dir_fd,
-                    related_path,
+                    Path::new(remote_path_str),
                 )?;
-                let file_size = service.getFileSize(remote_file.get_remote_fd())?.try_into()?;
-                // TODO(206869687): Switch to VerifiedReadonly
-                AuthFsEntry::UnverifiedReadonly { reader: remote_file, file_size }
+                let remote_fd = remote_file.get_remote_fd();
+                let file_size = service.getFileSize(remote_fd)?.try_into()?;
+                AuthFsEntry::VerifiedReadonly {
+                    reader: VerifiedFileReader::new(
+                        remote_file,
+                        file_size,
+                        &digest.digest,
+                        EagerChunkReader::new(
+                            RemoteMerkleTreeReader::new(service.clone(), remote_fd),
+                            merkle_tree_size(file_size),
+                        )?,
+                    )?,
+                    file_size,
+                }
             };
-            authfs.add_entry_at_ro_dir_by_path(
-                dir_root_inode,
-                path.strip_prefix("/")?,
-                file_entry,
-            )?;
+            authfs.add_entry_at_ro_dir_by_path(dir_root_inode, Path::new(path_str), file_entry)?;
         }
     }
 
@@ -326,5 +346,20 @@ fn main() {
     if let Err(e) = try_main() {
         error!("failed with {:?}", e);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hex_string() {
+        assert_eq!(from_hex_string("deadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(from_hex_string("DEADBEEF").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(from_hex_string("").unwrap(), Vec::<u8>::new());
+
+        assert!(from_hex_string("deadbee").is_err());
+        assert!(from_hex_string("X").is_err());
     }
 }
