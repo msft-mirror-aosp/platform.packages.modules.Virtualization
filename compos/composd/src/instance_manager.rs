@@ -19,11 +19,16 @@
 
 use crate::instance_starter::{CompOsInstance, InstanceStarter};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice;
-use anyhow::{bail, Context, Result};
-use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsService;
+use anyhow::{bail, Result};
 use compos_aidl_interface::binder::Strong;
 use compos_common::compos_client::VmParameters;
-use compos_common::{PENDING_INSTANCE_DIR, PREFER_STAGED_VM_CONFIG_PATH, TEST_INSTANCE_DIR};
+use compos_common::{
+    DEX2OAT_CPU_SET_PROP_NAME, DEX2OAT_THREADS_PROP_NAME, PENDING_INSTANCE_DIR,
+    PREFER_STAGED_VM_CONFIG_PATH, TEST_INSTANCE_DIR,
+};
+use rustutils::system_properties;
+use std::num::NonZeroU32;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, Weak};
 use virtualizationservice::IVirtualizationService::IVirtualizationService;
 
@@ -37,15 +42,14 @@ impl InstanceManager {
         Self { service, state: Default::default() }
     }
 
-    pub fn get_running_service(&self) -> Result<Strong<dyn ICompOsService>> {
-        let mut state = self.state.lock().unwrap();
-        let instance = state.get_running_instance().context("No running instance")?;
-        Ok(instance.get_service())
-    }
-
     pub fn start_pending_instance(&self) -> Result<Arc<CompOsInstance>> {
         let config_path = Some(PREFER_STAGED_VM_CONFIG_PATH.to_owned());
-        let vm_parameters = VmParameters { config_path, ..Default::default() };
+        let mut vm_parameters = VmParameters { config_path, ..Default::default() };
+        vm_parameters.cpus = NonZeroU32::from_str(
+            &system_properties::read(DEX2OAT_THREADS_PROP_NAME).unwrap_or_default(),
+        )
+        .ok();
+        vm_parameters.cpu_set = system_properties::read(DEX2OAT_CPU_SET_PROP_NAME).ok();
         self.start_instance(PENDING_INSTANCE_DIR, vm_parameters)
     }
 
@@ -130,18 +134,5 @@ impl State {
         self.is_starting = false;
         self.running_instance = Some(Arc::downgrade(instance));
         Ok(())
-    }
-
-    // Return the running instance if we are in the Started state.
-    fn get_running_instance(&mut self) -> Option<Arc<CompOsInstance>> {
-        if self.is_starting {
-            return None;
-        }
-        let instance = self.running_instance.as_ref()?.upgrade();
-        if instance.is_none() {
-            // No point keeping an orphaned weak reference
-            self.running_instance = None;
-        }
-        instance
     }
 }
