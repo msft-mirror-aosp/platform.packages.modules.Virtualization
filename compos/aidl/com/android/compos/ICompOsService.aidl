@@ -17,8 +17,6 @@
 package com.android.compos;
 
 import com.android.compos.CompOsKeyData;
-import com.android.compos.CompilationResult;
-import com.android.compos.FdAnnotation;
 
 /** {@hide} */
 interface ICompOsService {
@@ -52,34 +50,6 @@ interface ICompOsService {
             String zygoteArch, String systemServerCompilerFilter);
 
     /**
-     * Run dex2oat command with provided args, in a context that may be specified in FdAnnotation,
-     * e.g. with file descriptors pre-opened. The service is responsible to decide what executables
-     * it may run.
-     *
-     * @param args The command line arguments to run. The 0-th args is normally the program name,
-     *             which may not be used by the service. The service may be configured to always use
-     *             a fixed executable, or possibly use the 0-th args are the executable lookup hint.
-     * @param fd_annotation Additional file descriptor information of the execution
-     * @return a CompilationResult
-     */
-    CompilationResult compile_cmd(in String[] args, in FdAnnotation fd_annotation);
-
-    /**
-     * Runs dexopt compilation encoded in the marshaled dexopt arguments.
-     *
-     * To keep ART indepdendantly updatable, the compilation arguments are not stabilized. As a
-     * result, the arguments are marshaled into byte array.  Upon received, the service asks ART to
-     * return relevant information (since ART is able to unmarshal its own encoding), in order to
-     * set up the execution context (mainly file descriptors for compiler input and output) then
-     * invokes the compiler.
-     *
-     * @param marshaledArguments The marshaled dexopt arguments.
-     * @param fd_annotation Additional file descriptor information of the execution.
-     * @return exit code
-     */
-    byte compile(in byte[] marshaledArguments, in FdAnnotation fd_annotation);
-
-    /**
      * Generate a new public/private key pair suitable for signing CompOs output files.
      *
      * @return a certificate for the public key and the encrypted private key
@@ -96,4 +66,9 @@ interface ICompOsService {
      * @return whether the inputs are valid and correspond to each other.
      */
     boolean verifySigningKey(in byte[] keyBlob, in byte[] publicKey);
+
+    /**
+     * Returns the DICE BCC for this instance of CompOS, allowing signatures to be verified.
+     */
+    byte[] getBootCertificateChain();
 }
