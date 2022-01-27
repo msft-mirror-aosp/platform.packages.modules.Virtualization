@@ -17,7 +17,6 @@
 package com.android.compos;
 
 import com.android.compos.CompOsKeyData;
-import com.android.compos.FdAnnotation;
 
 /** {@hide} */
 interface ICompOsService {
@@ -51,21 +50,6 @@ interface ICompOsService {
             String zygoteArch, String systemServerCompilerFilter);
 
     /**
-     * Runs dexopt compilation encoded in the marshaled dexopt arguments.
-     *
-     * To keep ART indepdendantly updatable, the compilation arguments are not stabilized. As a
-     * result, the arguments are marshaled into byte array.  Upon received, the service asks ART to
-     * return relevant information (since ART is able to unmarshal its own encoding), in order to
-     * set up the execution context (mainly file descriptors for compiler input and output) then
-     * invokes the compiler.
-     *
-     * @param marshaledArguments The marshaled dexopt arguments.
-     * @param fd_annotation Additional file descriptor information of the execution.
-     * @return exit code
-     */
-    byte compile(in byte[] marshaledArguments, in FdAnnotation fd_annotation);
-
-    /**
      * Generate a new public/private key pair suitable for signing CompOs output files.
      *
      * @return a certificate for the public key and the encrypted private key
@@ -82,9 +66,4 @@ interface ICompOsService {
      * @return whether the inputs are valid and correspond to each other.
      */
     boolean verifySigningKey(in byte[] keyBlob, in byte[] publicKey);
-
-    /**
-     * Returns the DICE BCC for this instance of CompOS, allowing signatures to be verified.
-     */
-    byte[] getBootCertificateChain();
 }
