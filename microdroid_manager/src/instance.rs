@@ -316,6 +316,7 @@ fn get_key() -> Result<ZeroOnDropKey> {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct MicrodroidData {
+    pub salt: Vec<u8>, // Should be [u8; 64] but that isn't serializable.
     pub apk_data: ApkData,
     pub extra_apks_data: Vec<ApkData>,
     pub apex_data: Vec<ApexData>,
@@ -336,4 +337,5 @@ pub struct ApexData {
     pub public_key: Vec<u8>,
     pub root_digest: Vec<u8>,
     pub last_update_seconds: u64,
+    pub is_factory: bool,
 }
