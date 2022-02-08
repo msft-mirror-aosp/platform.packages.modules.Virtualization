@@ -12,5 +12,5 @@ java_test_host {
     static_libs: [
         "VirtualizationTestHelper",
     ],
-    data: [":MicrodroidTestApp.signed"],
+    data: [":MicrodroidTestApp"],
 }
