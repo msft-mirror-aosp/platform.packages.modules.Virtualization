@@ -17,7 +17,7 @@ java_test_host {
     data_device_bins: ["open_then_run"],
     data: [
         ":authfs_test_files",
-        ":MicrodroidTestApp.signed",
+        ":MicrodroidTestApp",
     ],
 }
 
