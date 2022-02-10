@@ -35,8 +35,11 @@ pub struct Timeouts {
 /// Whether the current platform requires extra time for operations inside a VM.
 pub fn need_extra_time() -> Result<bool> {
     // Nested virtualization is slow. Check if we are running on vsoc as a proxy for this.
-    let value = system_properties::read("ro.build.product")?;
-    Ok(value == "vsoc_x86_64" || value == "vsoc_x86")
+    if let Some(value) = system_properties::read("ro.build.product")? {
+        Ok(value == "vsoc_x86_64" || value == "vsoc_x86")
+    } else {
+        Ok(false)
+    }
 }
 
 /// Return the timeouts that are appropriate on the current platform.
@@ -53,7 +56,7 @@ pub const NORMAL_TIMEOUTS: Timeouts = Timeouts {
     // Note: the source of truth for these odrefresh timeouts is art/odrefresh/odr_config.h.
     odrefresh_max_execution_time: Duration::from_secs(300),
     odrefresh_max_child_process_time: Duration::from_secs(90),
-    vm_max_time_to_ready: Duration::from_secs(10),
+    vm_max_time_to_ready: Duration::from_secs(15),
 };
 
 /// The timeouts that we use when need_extra_time() returns true.

@@ -50,7 +50,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use binder_common::{lazy_service::LazyServiceGuard, new_binder_exception};
 use disk::QcowFile;
 use idsig::{HashAlgorithm, V4Signature};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, warn, trace};
 use microdroid_payload_config::VmPayloadConfig;
 use rustutils::system_properties;
 use statslog_virtualization_rust::vm_creation_requested::{stats_write, Hypervisor};
@@ -440,9 +440,9 @@ impl VirtualizationService {
 fn write_vm_creation_stats(protected: bool, success: bool) {
     match stats_write(Hypervisor::Pkvm, protected, success) {
         Err(e) => {
-            info!("stastlog_rust fails with error: {}", e);
+            warn!("statslog_rust failed with error: {}", e);
         }
-        Ok(_) => info!("stastlog_rust succeeded for virtualization service"),
+        Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
     }
 }
 
@@ -868,7 +868,7 @@ impl State {
 /// a system property so that restart of virtualizationservice doesn't reuse CID while the host
 /// Android is up.
 fn next_cid() -> Result<Cid> {
-    let next = if let Ok(val) = system_properties::read(SYSPROP_LAST_CID) {
+    let next = if let Some(val) = system_properties::read(SYSPROP_LAST_CID)? {
         if let Ok(num) = val.parse::<u32>() {
             num.checked_add(1).ok_or_else(|| anyhow!("run out of CID"))?
         } else {

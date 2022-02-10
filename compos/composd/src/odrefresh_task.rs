@@ -27,7 +27,7 @@ use compos_aidl_interface::aidl::com::android::compos::ICompOsService::{
     CompilationMode::CompilationMode, ICompOsService,
 };
 use compos_common::odrefresh::ExitCode;
-use log::{error, warn};
+use log::{error, info, warn};
 use rustutils::system_properties;
 use std::fs::{remove_dir_all, File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
@@ -96,7 +96,10 @@ impl OdrefreshTask {
             // We don't do the callback if cancel has already happened.
             if let Some(task) = task {
                 let result = match exit_code {
-                    Ok(ExitCode::CompilationSuccess) => task.callback.onSuccess(),
+                    Ok(ExitCode::CompilationSuccess) => {
+                        info!("CompilationSuccess");
+                        task.callback.onSuccess()
+                    }
                     Ok(exit_code) => {
                         error!("Unexpected odrefresh result: {:?}", exit_code);
                         task.callback.onFailure()
@@ -142,9 +145,9 @@ fn run_in_vm(
     };
     let fd_server_raii = fd_server_config.into_fd_server()?;
 
-    let zygote_arch = system_properties::read("ro.zygote")?;
+    let zygote_arch = system_properties::read("ro.zygote")?.context("ro.zygote not set")?;
     let system_server_compiler_filter =
-        system_properties::read("dalvik.vm.systemservercompilerfilter").unwrap_or_default();
+        system_properties::read("dalvik.vm.systemservercompilerfilter")?.unwrap_or_default();
     let exit_code = service.odrefresh(
         compilation_mode,
         system_dir.as_raw_fd(),

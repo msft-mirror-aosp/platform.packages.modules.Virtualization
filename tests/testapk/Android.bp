@@ -4,7 +4,10 @@ package {
 
 android_test {
     name: "MicrodroidTestApp",
-    test_suites: ["device-tests"],
+    test_suites: [
+        "cts",
+        "general-tests",
+    ],
     srcs: ["src/java/**/*.java"],
     static_libs: [
         "androidx.test.runner",
@@ -16,6 +19,8 @@ android_test {
     jni_libs: ["MicrodroidTestNativeLib"],
     platform_apis: true,
     use_embedded_native_libs: true,
+    // We only support 64-bit ABI, but CTS demands all APKs to be multi-ABI.
+    compile_multilib: "both",
 }
 
 // TODO(jiyong): make this a binary, not a shared library
@@ -41,21 +46,4 @@ cc_library_shared {
 cc_library_shared {
     name: "MicrodroidTestNativeLibSub",
     srcs: ["src/native/testlib.cpp"],
-}
-
-genrule {
-    name: "MicrodroidTestApp.signed",
-    out: [
-        "MicrodroidTestApp.apk",
-        "MicrodroidTestApp.apk.idsig",
-    ],
-    srcs: [":MicrodroidTestApp"],
-    tools: ["apksigner"],
-    tool_files: ["test.keystore"],
-    cmd: "$(location apksigner) sign " +
-        "--ks $(location test.keystore) " +
-        "--ks-pass=pass:testkey --key-pass=pass:testkey " +
-        "--in $(in) " +
-        "--out $(genDir)/MicrodroidTestApp.apk",
-    // $(genDir)/MicrodroidTestApp.apk.idsig is generated implicitly
 }
