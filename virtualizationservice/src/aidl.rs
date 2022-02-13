@@ -29,7 +29,6 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualizationService::IVirtualizationService,
     Partition::Partition,
     PartitionType::PartitionType,
-    VirtualMachineAppConfig::DebugLevel::DebugLevel,
     VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineConfig::VirtualMachineConfig,
     VirtualMachineDebugInfo::VirtualMachineDebugInfo,
@@ -131,8 +130,8 @@ impl IVirtualizationService for VirtualizationService {
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         check_manage_access()?;
         let state = &mut *self.state.lock().unwrap();
-        let mut console_fd = console_fd.map(clone_file).transpose()?;
-        let mut log_fd = log_fd.map(clone_file).transpose()?;
+        let console_fd = console_fd.map(clone_file).transpose()?;
+        let log_fd = log_fd.map(clone_file).transpose()?;
         let requester_uid = ThreadState::get_calling_uid();
         let requester_sid = get_calling_sid()?;
         let requester_debug_pid = ThreadState::get_calling_pid();
@@ -163,27 +162,7 @@ impl IVirtualizationService for VirtualizationService {
             )
         })?;
 
-        // Disable console logging if debug level != full. Note that kernel anyway doesn't use the
-        // console output when debug level != full. So, users won't be able to see the kernel
-        // output even without this overriding. This is to silence output from the bootloader which
-        // doesn't understand the bootconfig parameters.
-        if let VirtualMachineConfig::AppConfig(config) = config {
-            if config.debugLevel != DebugLevel::FULL {
-                console_fd = None;
-            }
-            if config.debugLevel == DebugLevel::NONE {
-                log_fd = None;
-            }
-        }
-
         let is_app_config = matches!(config, VirtualMachineConfig::AppConfig(_));
-        let is_debug_level_full = matches!(
-            config,
-            VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
-                debugLevel: DebugLevel::FULL,
-                ..
-            })
-        );
 
         let config = match config {
             VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
@@ -200,14 +179,6 @@ impl IVirtualizationService for VirtualizationService {
         };
         let config = config.as_ref();
         let protected = config.protectedVm;
-
-        // Debug level FULL is only supported for non-protected VMs.
-        if is_debug_level_full && protected {
-            return Err(new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                "FULL debug level not supported for protected VMs.",
-            ));
-        };
 
         // Check if partition images are labeled incorrectly. This is to prevent random images
         // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
@@ -868,7 +839,7 @@ impl State {
 /// a system property so that restart of virtualizationservice doesn't reuse CID while the host
 /// Android is up.
 fn next_cid() -> Result<Cid> {
-    let next = if let Ok(val) = system_properties::read(SYSPROP_LAST_CID) {
+    let next = if let Some(val) = system_properties::read(SYSPROP_LAST_CID)? {
         if let Ok(num) = val.parse::<u32>() {
             num.checked_add(1).ok_or_else(|| anyhow!("run out of CID"))?
         } else {
