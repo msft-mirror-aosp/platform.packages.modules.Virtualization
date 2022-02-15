@@ -22,16 +22,19 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
 use android_system_virtualizationservice::binder::ParcelFileDescriptor;
 use anyhow::{anyhow, bail, Context, Result};
 use binder::wait_for_interface;
-use log::{error, info};
+use log::{info, warn};
 use microdroid_metadata::{ApexPayload, ApkPayload, Metadata};
 use microdroid_payload_config::{ApexConfig, VmPayloadConfig};
 use once_cell::sync::OnceCell;
 use packagemanager_aidl::aidl::android::content::pm::IPackageManagerNative::IPackageManagerNative;
+use regex::Regex;
 use serde::Deserialize;
 use serde_xml_rs::from_reader;
-use std::env;
-use std::fs::{File, OpenOptions};
+use std::collections::HashSet;
+use std::fs::{metadata, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::SystemTime;
 use vmconfig::open_parcel_file;
 
 /// The list of APEXes which microdroid requires.
@@ -50,7 +53,7 @@ struct ApexInfoList {
     list: Vec<ApexInfo>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 struct ApexInfo {
     #[serde(rename = "moduleName")]
     name: String,
@@ -58,11 +61,20 @@ struct ApexInfo {
     path: PathBuf,
 
     #[serde(default)]
-    boot_classpath: bool,
-    #[serde(default)]
-    systemserver_classpath: bool,
-    #[serde(default)]
-    dex2oatboot_classpath: bool,
+    has_classpath_jar: bool,
+
+    // The field claims to be milliseconds but is actually seconds.
+    #[serde(rename = "lastUpdateMillis")]
+    last_update_seconds: u64,
+
+    #[serde(rename = "isFactory")]
+    is_factory: bool,
+
+    #[serde(rename = "isActive")]
+    is_active: bool,
+
+    #[serde(rename = "provideSharedApexLibs")]
+    provide_shared_apex_libs: bool,
 }
 
 impl ApexInfoList {
@@ -75,41 +87,36 @@ impl ApexInfoList {
             let mut apex_info_list: ApexInfoList = from_reader(apex_info_list)
                 .context(format!("Failed to parse {}", APEX_INFO_LIST_PATH))?;
 
-            // For active APEXes, we refer env variables to see if it contributes to classpath
-            let boot_classpath_apexes = find_apex_names_in_classpath_env("BOOTCLASSPATH");
-            let systemserver_classpath_apexes =
-                find_apex_names_in_classpath_env("SYSTEMSERVERCLASSPATH");
-            let dex2oatboot_classpath_apexes =
-                find_apex_names_in_classpath_env("DEX2OATBOOTCLASSPATH");
+            // For active APEXes, we run derive_classpath and parse its output to see if it
+            // contributes to the classpath(s). (This allows us to handle any new classpath env
+            // vars seamlessly.)
+            let classpath_vars = run_derive_classpath()?;
+            let classpath_apexes = find_apex_names_in_classpath(&classpath_vars)?;
+
             for apex_info in apex_info_list.list.iter_mut() {
-                apex_info.boot_classpath = boot_classpath_apexes.contains(&apex_info.name);
-                apex_info.systemserver_classpath =
-                    systemserver_classpath_apexes.contains(&apex_info.name);
-                apex_info.dex2oatboot_classpath =
-                    dex2oatboot_classpath_apexes.contains(&apex_info.name);
+                apex_info.has_classpath_jar = classpath_apexes.contains(&apex_info.name);
             }
+
             Ok(apex_info_list)
         })
     }
+}
 
-    /// Returns the list of apex names matching with the predicate
-    fn get_matching(&self, predicate: fn(&ApexInfo) -> bool) -> Vec<String> {
-        self.list.iter().filter(|info| predicate(info)).map(|info| info.name.clone()).collect()
-    }
-
-    fn get_path_for(&self, apex_name: &str) -> Result<PathBuf> {
-        Ok(self
-            .list
-            .iter()
-            .find(|apex| apex.name == apex_name)
-            .ok_or_else(|| anyhow!("{} not found.", apex_name))?
-            .path
-            .clone())
+impl ApexInfo {
+    fn matches(&self, apex_config: &ApexConfig) -> bool {
+        // Match with pseudo name "{CLASSPATH}" which represents APEXes contributing
+        // to any derive_classpath environment variable
+        if apex_config.name == "{CLASSPATH}" && self.has_classpath_jar {
+            return true;
+        }
+        if apex_config.name == self.name {
+            return true;
+        }
+        false
     }
 }
 
 struct PackageManager {
-    // TODO(b/199146189) use IPackageManagerNative
     apex_info_list: &'static ApexInfoList,
 }
 
@@ -130,14 +137,14 @@ impl PackageManager {
             let staged = pm.getStagedApexModuleNames()?;
             for apex_info in list.list.iter_mut() {
                 if staged.contains(&apex_info.name) {
-                    let staged_apex_info = pm.getStagedApexInfo(&apex_info.name)?;
-                    if let Some(staged_apex_info) = staged_apex_info {
+                    if let Some(staged_apex_info) = pm.getStagedApexInfo(&apex_info.name)? {
                         apex_info.path = PathBuf::from(staged_apex_info.diskImagePath);
-                        apex_info.boot_classpath = staged_apex_info.hasBootClassPathJars;
-                        apex_info.systemserver_classpath =
-                            staged_apex_info.hasSystemServerClassPathJars;
-                        apex_info.dex2oatboot_classpath =
-                            staged_apex_info.hasDex2OatBootClassPathJars;
+                        apex_info.has_classpath_jar = staged_apex_info.hasClassPathJars;
+                        let metadata = metadata(&apex_info.path)?;
+                        apex_info.last_update_seconds =
+                            metadata.modified()?.duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+                        // by definition, staged apex can't be a factory apex.
+                        apex_info.is_factory = false;
                     }
                 }
             }
@@ -148,21 +155,25 @@ impl PackageManager {
 
 fn make_metadata_file(
     config_path: &str,
-    apex_names: &[String],
+    apex_infos: &[&ApexInfo],
     temporary_directory: &Path,
 ) -> Result<ParcelFileDescriptor> {
     let metadata_path = temporary_directory.join("metadata");
     let metadata = Metadata {
         version: 1,
-        apexes: apex_names
+        apexes: apex_infos
             .iter()
             .enumerate()
-            .map(|(i, apex_name)| ApexPayload {
-                name: apex_name.clone(),
-                partition_name: format!("microdroid-apex-{}", i),
-                ..Default::default()
+            .map(|(i, apex_info)| {
+                Ok(ApexPayload {
+                    name: apex_info.name.clone(),
+                    partition_name: format!("microdroid-apex-{}", i),
+                    last_update_seconds: apex_info.last_update_seconds,
+                    is_factory: apex_info.is_factory,
+                    ..Default::default()
+                })
             })
-            .collect(),
+            .collect::<Result<_>>()?,
         apk: Some(ApkPayload {
             name: "apk".to_owned(),
             payload_partition_name: "microdroid-apk".to_owned(),
@@ -217,11 +228,13 @@ fn make_payload_disk(
     let pm = PackageManager::new()?;
     let apex_list = pm.get_apex_list(vm_payload_config.prefer_staged)?;
 
-    // collect APEX names from config
-    let apexes = collect_apex_names(&apex_list, &vm_payload_config.apexes, app_config.debugLevel);
-    info!("Microdroid payload APEXes: {:?}", apexes);
+    // collect APEXes from config
+    let apex_infos =
+        collect_apex_infos(&apex_list, &vm_payload_config.apexes, app_config.debugLevel);
+    info!("Microdroid payload APEXes: {:?}", apex_infos.iter().map(|ai| &ai.name));
 
-    let metadata_file = make_metadata_file(&app_config.configPath, &apexes, temporary_directory)?;
+    let metadata_file =
+        make_metadata_file(&app_config.configPath, &apex_infos, temporary_directory)?;
     // put metadata at the first partition
     let mut partitions = vec![Partition {
         label: "payload-metadata".to_owned(),
@@ -229,9 +242,8 @@ fn make_payload_disk(
         writable: false,
     }];
 
-    for (i, apex) in apexes.iter().enumerate() {
-        let apex_path = apex_list.get_path_for(apex)?;
-        let apex_file = open_parcel_file(&apex_path, false)?;
+    for (i, apex_info) in apex_infos.iter().enumerate() {
+        let apex_file = open_parcel_file(&apex_info.path, false)?;
         partitions.push(Partition {
             label: format!("microdroid-apex-{}", i),
             image: Some(apex_file),
@@ -269,52 +281,63 @@ fn make_payload_disk(
     Ok(DiskImage { image: None, partitions, writable: false })
 }
 
-fn find_apex_names_in_classpath_env(classpath_env_var: &str) -> Vec<String> {
-    let val = env::var(classpath_env_var).unwrap_or_else(|e| {
-        error!("Reading {} failed: {}", classpath_env_var, e);
-        String::from("")
-    });
-    val.split(':')
-        .filter_map(|path| {
-            Path::new(path)
-                .strip_prefix("/apex/")
-                .map(|stripped| {
-                    let first = stripped.iter().next().unwrap();
-                    first.to_str().unwrap().to_string()
-                })
-                .ok()
-        })
-        .collect()
+fn run_derive_classpath() -> Result<String> {
+    let result = Command::new("/apex/com.android.sdkext/bin/derive_classpath")
+        .arg("/proc/self/fd/1")
+        .output()
+        .context("Failed to run derive_classpath")?;
+
+    if !result.status.success() {
+        bail!("derive_classpath returned {}", result.status);
+    }
+
+    String::from_utf8(result.stdout).context("Converting derive_classpath output")
 }
 
-// Collect APEX names from config
-fn collect_apex_names(
-    apex_list: &ApexInfoList,
-    apexes: &[ApexConfig],
-    debug_level: DebugLevel,
-) -> Vec<String> {
-    // Process pseudo names like "{BOOTCLASSPATH}".
-    // For now we have following pseudo APEX names:
-    // - {BOOTCLASSPATH}: represents APEXes contributing "BOOTCLASSPATH" environment variable
-    // - {DEX2OATBOOTCLASSPATH}: represents APEXes contributing "DEX2OATBOOTCLASSPATH" environment variable
-    // - {SYSTEMSERVERCLASSPATH}: represents APEXes contributing "SYSTEMSERVERCLASSPATH" environment variable
-    let mut apex_names: Vec<String> = apexes
-        .iter()
-        .flat_map(|apex| match apex.name.as_str() {
-            "{BOOTCLASSPATH}" => apex_list.get_matching(|apex| apex.boot_classpath),
-            "{DEX2OATBOOTCLASSPATH}" => apex_list.get_matching(|apex| apex.dex2oatboot_classpath),
-            "{SYSTEMSERVERCLASSPATH}" => apex_list.get_matching(|apex| apex.systemserver_classpath),
-            _ => vec![apex.name.clone()],
-        })
-        .collect();
-    // Add required APEXes
-    apex_names.extend(MICRODROID_REQUIRED_APEXES.iter().map(|name| name.to_string()));
-    if debug_level != DebugLevel::NONE {
-        apex_names.extend(MICRODROID_REQUIRED_APEXES_DEBUG.iter().map(|name| name.to_string()));
+fn find_apex_names_in_classpath(classpath_vars: &str) -> Result<HashSet<String>> {
+    // Each line should be in the format "export <var name> <paths>", where <paths> is a
+    // colon-separated list of paths to JARs. We don't care about the var names, and we're only
+    // interested in paths that look like "/apex/<apex name>/<anything>" so we know which APEXes
+    // contribute to at least one var.
+    let mut apexes = HashSet::new();
+
+    let pattern = Regex::new(r"^export [^ ]+ ([^ ]+)$").context("Failed to construct Regex")?;
+    for line in classpath_vars.lines() {
+        if let Some(captures) = pattern.captures(line) {
+            if let Some(paths) = captures.get(1) {
+                apexes.extend(paths.as_str().split(':').filter_map(|path| {
+                    let path = path.strip_prefix("/apex/")?;
+                    Some(path[..path.find('/')?].to_owned())
+                }));
+                continue;
+            }
+        }
+        warn!("Malformed line from derive_classpath: {}", line);
     }
-    apex_names.sort();
-    apex_names.dedup();
-    apex_names
+
+    Ok(apexes)
+}
+
+// Collect ApexInfos from VM config
+fn collect_apex_infos<'a>(
+    apex_list: &'a ApexInfoList,
+    apex_configs: &[ApexConfig],
+    debug_level: DebugLevel,
+) -> Vec<&'a ApexInfo> {
+    let mut additional_apexes: Vec<&str> = MICRODROID_REQUIRED_APEXES.to_vec();
+    if debug_level != DebugLevel::NONE {
+        additional_apexes.extend(MICRODROID_REQUIRED_APEXES_DEBUG.to_vec());
+    }
+
+    apex_list
+        .list
+        .iter()
+        .filter(|ai| {
+            apex_configs.iter().any(|cfg| ai.matches(cfg) && ai.is_active)
+                || additional_apexes.iter().any(|name| name == &ai.name && ai.is_active)
+                || ai.provide_shared_apex_libs
+        })
+        .collect()
 }
 
 pub fn add_microdroid_images(
@@ -368,14 +391,142 @@ pub fn add_microdroid_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn test_find_apex_names_in_classpath_env() {
-        let key = "TEST_BOOTCLASSPATH";
-        let classpath = "/apex/com.android.foo/javalib/foo.jar:/system/framework/framework.jar:/apex/com.android.bar/javalib/bar.jar";
-        env::set_var(key, classpath);
+    fn test_find_apex_names_in_classpath() {
+        let vars = r#"
+export FOO /apex/unterminated
+export BAR /apex/valid.apex/something
+wrong
+export EMPTY
+export OTHER /foo/bar:/baz:/apex/second.valid.apex/:gibberish:"#;
+        let expected = vec!["valid.apex", "second.valid.apex"];
+        let expected: HashSet<_> = expected.into_iter().map(ToString::to_string).collect();
+
+        assert_eq!(find_apex_names_in_classpath(vars).unwrap(), expected);
+    }
+
+    #[test]
+    fn test_collect_apexes() {
+        let apex_info_list = ApexInfoList {
+            list: vec![
+                ApexInfo {
+                    // 0
+                    name: "com.android.adbd".to_string(),
+                    path: PathBuf::from("adbd"),
+                    has_classpath_jar: false,
+                    last_update_seconds: 12345678,
+                    is_factory: true,
+                    is_active: true,
+                    ..Default::default()
+                },
+                ApexInfo {
+                    // 1
+                    name: "com.android.os.statsd".to_string(),
+                    path: PathBuf::from("statsd"),
+                    has_classpath_jar: false,
+                    last_update_seconds: 12345678,
+                    is_factory: true,
+                    is_active: false,
+                    ..Default::default()
+                },
+                ApexInfo {
+                    // 2
+                    name: "com.android.os.statsd".to_string(),
+                    path: PathBuf::from("statsd/updated"),
+                    has_classpath_jar: false,
+                    last_update_seconds: 12345678 + 1,
+                    is_factory: false,
+                    is_active: true,
+                    ..Default::default()
+                },
+                ApexInfo {
+                    // 3
+                    name: "no_classpath".to_string(),
+                    path: PathBuf::from("no_classpath"),
+                    has_classpath_jar: false,
+                    last_update_seconds: 12345678,
+                    is_factory: true,
+                    is_active: true,
+                    ..Default::default()
+                },
+                ApexInfo {
+                    // 4
+                    name: "has_classpath".to_string(),
+                    path: PathBuf::from("has_classpath"),
+                    has_classpath_jar: true,
+                    last_update_seconds: 87654321,
+                    is_factory: true,
+                    is_active: false,
+                    ..Default::default()
+                },
+                ApexInfo {
+                    // 5
+                    name: "has_classpath".to_string(),
+                    path: PathBuf::from("has_classpath/updated"),
+                    has_classpath_jar: true,
+                    last_update_seconds: 87654321 + 1,
+                    is_factory: false,
+                    is_active: true,
+                    ..Default::default()
+                },
+                ApexInfo {
+                    // 6
+                    name: "apex-foo".to_string(),
+                    path: PathBuf::from("apex-foo"),
+                    has_classpath_jar: false,
+                    last_update_seconds: 87654321,
+                    is_factory: true,
+                    is_active: false,
+                    ..Default::default()
+                },
+                ApexInfo {
+                    // 7
+                    name: "apex-foo".to_string(),
+                    path: PathBuf::from("apex-foo/updated"),
+                    has_classpath_jar: false,
+                    last_update_seconds: 87654321 + 1,
+                    is_factory: false,
+                    is_active: true,
+                    ..Default::default()
+                },
+                ApexInfo {
+                    // 8
+                    name: "sharedlibs".to_string(),
+                    path: PathBuf::from("apex-foo"),
+                    last_update_seconds: 87654321,
+                    is_factory: true,
+                    provide_shared_apex_libs: true,
+                    ..Default::default()
+                },
+                ApexInfo {
+                    // 9
+                    name: "sharedlibs".to_string(),
+                    path: PathBuf::from("apex-foo/updated"),
+                    last_update_seconds: 87654321 + 1,
+                    is_active: true,
+                    provide_shared_apex_libs: true,
+                    ..Default::default()
+                },
+            ],
+        };
+        let apex_configs = vec![
+            ApexConfig { name: "apex-foo".to_string() },
+            ApexConfig { name: "{CLASSPATH}".to_string() },
+        ];
         assert_eq!(
-            find_apex_names_in_classpath_env(key),
-            vec!["com.android.foo".to_owned(), "com.android.bar".to_owned()]
+            collect_apex_infos(&apex_info_list, &apex_configs, DebugLevel::FULL),
+            vec![
+                // Pass active/required APEXes
+                &apex_info_list.list[0],
+                &apex_info_list.list[2],
+                // Pass active APEXes specified in the config
+                &apex_info_list.list[5],
+                &apex_info_list.list[7],
+                // Pass both preinstalled(inactive) and updated(active) for "sharedlibs" APEXes
+                &apex_info_list.list[8],
+                &apex_info_list.list[9],
+            ]
         );
     }
 }

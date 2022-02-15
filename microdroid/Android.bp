@@ -72,23 +72,18 @@ android_system_image {
 
         "apexd",
         "debuggerd",
-        "keystore2_microdroid",
+        "diced.microdroid",
         "linker",
         "linkerconfig",
-        "servicemanager",
+        "servicemanager.microdroid",
         "tombstoned",
         "cgroups.json",
         "public.libraries.android.txt",
 
-        // TODO(b/185767624): remove hidl after full keymint support
-        "hwservicemanager",
-
         "microdroid_plat_sepolicy_and_mapping.sha256",
         "microdroid_file_contexts",
-        "microdroid_hwservice_contexts",
         "microdroid_property_contexts",
         "microdroid_service_contexts",
-        "microdroid_keystore2_key_contexts",
         "microdroid_compatibility_matrix",
         "microdroid_manifest",
 
@@ -177,7 +172,7 @@ android_filesystem {
     partition_name: "vendor",
     use_avb: true,
     deps: [
-        "android.hardware.security.keymint-service.microdroid",
+        "android.hardware.security.dice-service.microdroid",
         "microdroid_fstab",
         "microdroid_precompiled_sepolicy.plat_sepolicy_and_mapping.sha256",
         "microdroid_vendor_manifest",
@@ -221,7 +216,6 @@ microdroid_boot_cmdline = [
 
 bootimg {
     name: "microdroid_boot-5.10",
-    ramdisk_module: "microdroid_ramdisk-5.10",
     // We don't have kernel for arm and x86. But Soong demands one when it builds for
     // arm or x86 target. Satisfy that by providing an empty file as the kernel.
     kernel_prebuilt: "empty_kernel",
@@ -247,6 +241,16 @@ bootimg {
     dtb_prebuilt: "dummy_dtb.img",
     header_version: "4",
     partition_name: "boot",
+    use_avb: true,
+    avb_private_key: ":microdroid_sign_key",
+}
+
+bootimg {
+    name: "microdroid_init_boot",
+    ramdisk_module: "microdroid_ramdisk-5.10",
+    kernel_prebuilt: "empty_kernel",
+    header_version: "4",
+    partition_name: "init_boot",
     use_avb: true,
     avb_private_key: ":microdroid_sign_key",
 }
@@ -288,18 +292,24 @@ bootimg {
     avb_private_key: ":microdroid_sign_key",
 }
 
-android_filesystem {
-    name: "microdroid_vendor_ramdisk-5.10",
+prebuilt_kernel_modules {
+    name: "microdroid_kernel_modules",
     arch: {
         arm64: {
-            deps: ["virt_device_prebuilts_kernel_modules-5.10-arm64"],
+            srcs: [":virt_device_prebuilts_kernel_modules_microdroid-5.10-arm64"],
         },
         x86_64: {
-            deps: ["virt_device_prebuilts_kernel_modules-5.10-x86_64"],
+            srcs: [":virt_device_prebuilts_kernel_modules_microdroid-5.10-x86_64"],
         },
     },
+    kernel_version: "5.10",
+}
+
+android_filesystem {
+    name: "microdroid_vendor_ramdisk-5.10",
     deps: [
         "microdroid_fstab",
+        "microdroid_kernel_modules",
     ],
     base_dir: "first_stage_ramdisk",
     type: "compressed_cpio",
@@ -342,6 +352,10 @@ vbmeta {
     chained_partitions: [
         {
             name: "bootconfig",
+            private_key: ":microdroid_sign_key",
+        },
+        {
+            name: "uboot_env",
             private_key: ":microdroid_sign_key",
         },
     ],
@@ -510,28 +524,27 @@ genrule {
 prebuilt_etc {
     name: "microdroid_uboot_env",
     src: ":microdroid_uboot_env_gen",
-    arch: {
-        x86_64: {
-            src: ":microdroid_uboot_env_gen_x86_64",
-        },
-    },
     filename: "uboot_env.img",
 }
 
 genrule {
     name: "microdroid_uboot_env_gen",
-    tools: ["mkenvimage_host"],
-    srcs: ["uboot-env.txt"],
+    tools: [
+        "mkenvimage_host",
+        "avbtool",
+    ],
+    srcs: [
+        "uboot-env.txt",
+        ":microdroid_sign_key",
+    ],
     out: ["output.img"],
-    cmd: "$(location mkenvimage_host) -s 4096 -o $(out) $(in)",
-}
-
-genrule {
-    name: "microdroid_uboot_env_gen_x86_64",
-    tools: ["mkenvimage_host"],
-    srcs: ["uboot-env-x86_64.txt"],
-    out: ["output.img"],
-    cmd: "$(location mkenvimage_host) -s 4096 -o $(out) $(in)",
+    cmd: "$(location mkenvimage_host) -s 4096 -o $(out) $(location uboot-env.txt) && " +
+        "$(location avbtool) add_hash_footer " +
+        "--algorithm SHA256_RSA4096 " +
+        "--partition_name uboot_env " +
+        "--key $(location :microdroid_sign_key) " +
+        "--partition_size $$(( " + avb_hash_footer_kb + " * 1024 + ( $$(stat --format=%s $(out)) + 4096 - 1 ) / 4096 * 4096 )) " +
+        "--image $(out)",
 }
 
 // Note that keys can be different for filesystem images even though we're using the same key
@@ -551,6 +564,7 @@ vbmeta {
         "microdroid_vendor_boot-5.10",
         "microdroid",
         "microdroid_boot-5.10",
+        "microdroid_init_boot",
     ],
 }
 

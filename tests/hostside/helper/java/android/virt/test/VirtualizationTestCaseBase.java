@@ -33,7 +33,9 @@ import com.android.tradefed.util.RunUtil;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -147,9 +149,26 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
     }
 
     public static CommandResult runOnMicrodroidForResult(String... cmd) {
-        final long timeout = 30000; // 30 sec. Microdroid is extremely slow on GCE-on-CF.
+        final long timeoutMs = 30000; // 30 sec. Microdroid is extremely slow on GCE-on-CF.
         return RunUtil.getDefault()
-                .runTimedCmd(timeout, "adb", "-s", MICRODROID_SERIAL, "shell", join(cmd));
+                .runTimedCmd(timeoutMs, "adb", "-s", MICRODROID_SERIAL, "shell", join(cmd));
+    }
+
+    public static void pullMicrodroidFile(String path, File target) {
+        final long timeoutMs = 30000; // 30 sec. Microdroid is extremely slow on GCE-on-CF.
+        CommandResult result =
+                RunUtil.getDefault()
+                        .runTimedCmd(
+                                timeoutMs,
+                                "adb",
+                                "-s",
+                                MICRODROID_SERIAL,
+                                "pull",
+                                path,
+                                target.getPath());
+        if (result.getStatus() != CommandStatus.SUCCESS) {
+            fail("pulling " + path + " has failed: " + result);
+        }
     }
 
     // Asserts the command will fail on Microdroid.
@@ -182,20 +201,60 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
             String packageName,
             String configPath,
             boolean debug,
-            int memoryMib)
+            int memoryMib,
+            Optional<Integer> numCpus,
+            Optional<String> cpuAffinity)
+            throws DeviceNotAvailableException {
+        return startMicrodroid(androidDevice, buildInfo, apkName, packageName, null, configPath,
+                debug, memoryMib, numCpus, cpuAffinity);
+    }
+
+    public static String startMicrodroid(
+            ITestDevice androidDevice,
+            IBuildInfo buildInfo,
+            String apkName,
+            String packageName,
+            String[] extraIdsigPaths,
+            String configPath,
+            boolean debug,
+            int memoryMib,
+            Optional<Integer> numCpus,
+            Optional<String> cpuAffinity)
+            throws DeviceNotAvailableException {
+        return startMicrodroid(androidDevice, buildInfo, apkName, null, packageName,
+                extraIdsigPaths, configPath, debug,
+                memoryMib, numCpus, cpuAffinity);
+    }
+
+    public static String startMicrodroid(
+            ITestDevice androidDevice,
+            IBuildInfo buildInfo,
+            String apkName,
+            String apkPath,
+            String packageName,
+            String[] extraIdsigPaths,
+            String configPath,
+            boolean debug,
+            int memoryMib,
+            Optional<Integer> numCpus,
+            Optional<String> cpuAffinity)
             throws DeviceNotAvailableException {
         CommandRunner android = new CommandRunner(androidDevice);
 
-        // Install APK
-        File apkFile = findTestFile(buildInfo, apkName);
-        androidDevice.installPackage(apkFile, /* reinstall */ true);
+        // Install APK if necessary
+        if (apkName != null) {
+            File apkFile = findTestFile(buildInfo, apkName);
+            androidDevice.installPackage(apkFile, /* reinstall */ true);
+        }
 
         // Get the path to the installed apk. Note that
         // getDevice().getAppPackageInfo(...).getCodePath() doesn't work due to the incorrect
         // parsing of the "=" character. (b/190975227). So we use the `pm path` command directly.
-        String apkPath = android.run("pm", "path", packageName);
-        assertTrue(apkPath.startsWith("package:"));
-        apkPath = apkPath.substring("package:".length());
+        if (apkPath == null) {
+            apkPath = android.run("pm", "path", packageName);
+            assertTrue(apkPath.startsWith("package:"));
+            apkPath = apkPath.substring("package:".length());
+        }
 
         android.run("mkdir", "-p", TEST_ROOT);
 
@@ -207,18 +266,26 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         final String debugFlag = debug ? "--debug full" : "";
 
         // Run the VM
-        String ret =
-                android.run(
-                        VIRT_APEX + "bin/vm",
-                        "run-app",
-                        "--daemonize",
-                        "--log " + logPath,
-                        "--mem " + memoryMib,
-                        debugFlag,
-                        apkPath,
-                        outApkIdsigPath,
-                        instanceImg,
-                        configPath);
+        ArrayList<String> args = new ArrayList<>(Arrays.asList(
+                VIRT_APEX + "bin/vm",
+                "run-app",
+                "--daemonize",
+                "--log " + logPath,
+                "--mem " + memoryMib,
+                numCpus.isPresent() ? "--cpus " + numCpus.get() : "",
+                cpuAffinity.isPresent() ? "--cpu-affinity " + cpuAffinity.get() : "",
+                debugFlag,
+                apkPath,
+                outApkIdsigPath,
+                instanceImg,
+                configPath));
+        if (extraIdsigPaths != null) {
+            for (String path : extraIdsigPaths) {
+                args.add("--extra-idsig");
+                args.add(path);
+            }
+        }
+        String ret = android.run(args.toArray(new String[0]));
 
         // Redirect log.txt to logd using logwrapper
         ExecutorService executor = Executors.newFixedThreadPool(1);

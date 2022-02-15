@@ -19,6 +19,7 @@
 use crate::timeouts::timeouts;
 use crate::{COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT, DEFAULT_VM_CONFIG_PATH};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    DeathReason::DeathReason,
     IVirtualMachine::IVirtualMachine,
     IVirtualMachineCallback::{BnVirtualMachineCallback, IVirtualMachineCallback},
     IVirtualizationService::IVirtualizationService,
@@ -36,13 +37,18 @@ use binder::{
 };
 use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsService;
 use log::{info, warn};
+use rustutils::system_properties;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::num::NonZeroU32;
 use std::os::raw;
 use std::os::unix::io::IntoRawFd;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+
+// Enough memory to complete odrefresh in the VM.
+const VM_MEMORY_MIB: i32 = 1024;
 
 /// This owns an instance of the CompOS VM.
 pub struct VmInstance {
@@ -56,6 +62,11 @@ pub struct VmInstance {
 pub struct VmParameters {
     /// Whether the VM should be debuggable.
     pub debug_mode: bool,
+    /// Number of vCPUs to have in the VM. If None, defaults to 1.
+    pub cpus: Option<NonZeroU32>,
+    /// Comma separated list of host CPUs where vCPUs are assigned to. If None, any host CPU can be
+    /// used to run any vCPU.
+    pub cpu_set: Option<String>,
     /// If present, overrides the path to the VM config JSON file
     pub config_path: Option<String>,
 }
@@ -72,8 +83,12 @@ impl VmInstance {
     pub fn start(
         service: &dyn IVirtualizationService,
         instance_image: File,
+        idsig: &Path,
+        idsig_manifest_apk: &Path,
         parameters: &VmParameters,
     ) -> Result<VmInstance> {
+        let protected_vm = want_protected_vm()?;
+
         let instance_fd = ParcelFileDescriptor::new(instance_image);
 
         let apex_dir = Path::new(COMPOS_APEX_ROOT);
@@ -82,10 +97,12 @@ impl VmInstance {
         let apk_fd = File::open(apex_dir.join("app/CompOSPayloadApp/CompOSPayloadApp.apk"))
             .context("Failed to open config APK file")?;
         let apk_fd = ParcelFileDescriptor::new(apk_fd);
+        let idsig_fd = prepare_idsig(service, &apk_fd, idsig)?;
 
-        let idsig_fd = File::open(apex_dir.join("etc/CompOSPayloadApp.apk.idsig"))
-            .context("Failed to open config APK idsig file")?;
-        let idsig_fd = ParcelFileDescriptor::new(idsig_fd);
+        let manifest_apk_fd = File::open("/system/etc/security/fsverity/BuildManifest.apk")
+            .context("Failed to open build manifest APK file")?;
+        let manifest_apk_fd = ParcelFileDescriptor::new(manifest_apk_fd);
+        let idsig_manifest_apk_fd = prepare_idsig(service, &manifest_apk_fd, idsig_manifest_apk)?;
 
         let (console_fd, log_fd, debug_level) = if parameters.debug_mode {
             // Console output and the system log output from the VM are redirected to file.
@@ -95,7 +112,9 @@ impl VmInstance {
                 .context("Failed to create system log file")?;
             let console_fd = ParcelFileDescriptor::new(console_fd);
             let log_fd = ParcelFileDescriptor::new(log_fd);
-            (Some(console_fd), Some(log_fd), DebugLevel::FULL)
+            // Full debug is not available in a protected VM
+            let debug_level = if protected_vm { DebugLevel::APP_ONLY } else { DebugLevel::FULL };
+            (Some(console_fd), Some(log_fd), debug_level)
         } else {
             (None, None, DebugLevel::NONE)
         };
@@ -107,7 +126,11 @@ impl VmInstance {
             instanceImage: Some(instance_fd),
             configPath: config_path.to_owned(),
             debugLevel: debug_level,
-            ..Default::default()
+            extraIdsigs: vec![idsig_manifest_apk_fd],
+            protectedVm: protected_vm,
+            memoryMib: VM_MEMORY_MIB,
+            numCpus: parameters.cpus.map_or(1, NonZeroU32::get) as i32,
+            cpuAffinity: parameters.cpu_set.clone(),
         });
 
         let vm = service
@@ -153,6 +176,49 @@ impl VmInstance {
         // TODO: Do we actually need/use this?
         self.cid
     }
+}
+
+fn prepare_idsig(
+    service: &dyn IVirtualizationService,
+    apk_fd: &ParcelFileDescriptor,
+    idsig_path: &Path,
+) -> Result<ParcelFileDescriptor> {
+    if !idsig_path.exists() {
+        // Prepare idsig file via VirtualizationService
+        let idsig_file = File::create(idsig_path).context("Failed to create idsig file")?;
+        let idsig_fd = ParcelFileDescriptor::new(idsig_file);
+        service
+            .createOrUpdateIdsigFile(apk_fd, &idsig_fd)
+            .context("Failed to update idsig file")?;
+    }
+
+    // Open idsig as read-only
+    let idsig_file = File::open(idsig_path).context("Failed to open idsig file")?;
+    let idsig_fd = ParcelFileDescriptor::new(idsig_file);
+    Ok(idsig_fd)
+}
+
+fn want_protected_vm() -> Result<bool> {
+    let have_protected_vm =
+        system_properties::read_bool("ro.boot.hypervisor.protected_vm.supported", false)?;
+    if have_protected_vm {
+        info!("Starting protected VM");
+        return Ok(true);
+    }
+
+    let is_debug_build = system_properties::read("ro.debuggable")?.as_deref().unwrap_or("0") == "1";
+    if !is_debug_build {
+        bail!("Protected VM not supported, unable to start VM");
+    }
+
+    let have_unprotected_vm =
+        system_properties::read_bool("ro.boot.hypervisor.vm.supported", false)?;
+    if have_unprotected_vm {
+        warn!("Protected VM not supported, falling back to unprotected on debuggable build");
+        return Ok(false);
+    }
+
+    bail!("No VM support available")
 }
 
 struct VsockFactory<'a> {
@@ -264,9 +330,9 @@ struct VmCallback(Arc<VmStateMonitor>);
 impl Interface for VmCallback {}
 
 impl IVirtualMachineCallback for VmCallback {
-    fn onDied(&self, cid: i32) -> BinderResult<()> {
+    fn onDied(&self, cid: i32, reason: DeathReason) -> BinderResult<()> {
         self.0.set_died();
-        log::warn!("VM died, cid = {}", cid);
+        log::warn!("VM died, cid = {}, reason = {:?}", cid, reason);
         Ok(())
     }
 

@@ -18,62 +18,45 @@
 //! file descriptors backed by authfs (via authfs_service) and pass the file descriptors to the
 //! actual compiler.
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use binder_common::new_binder_exception;
+use compos_common::binder::to_binder_result;
 use log::warn;
 use std::default::Default;
-use std::env;
-use std::path::PathBuf;
+use std::fs::read_dir;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use crate::compilation::{compile_cmd, odrefresh, CompilerOutput};
-use crate::compos_key_service::CompOsKeyService;
-use crate::fsverity;
+use crate::artifact_signer::ArtifactSigner;
+use crate::compilation::{odrefresh, OdrefreshContext};
+use crate::dice::Dice;
+use crate::signing_key::DiceSigningKey;
 use authfs_aidl_interface::aidl::com::android::virt::fs::IAuthFsService::IAuthFsService;
 use compos_aidl_interface::aidl::com::android::compos::{
     CompOsKeyData::CompOsKeyData,
-    CompilationResult::CompilationResult,
-    FdAnnotation::FdAnnotation,
-    ICompOsService::{BnCompOsService, ICompOsService},
+    ICompOsService::{BnCompOsService, CompilationMode::CompilationMode, ICompOsService},
 };
 use compos_aidl_interface::binder::{
     BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Strong,
 };
+use compos_common::odrefresh::ODREFRESH_PATH;
 
 const AUTHFS_SERVICE_NAME: &str = "authfs_service";
-const DEX2OAT_PATH: &str = "/apex/com.android.art/bin/dex2oat64";
-const ODREFRESH_PATH: &str = "/apex/com.android.art/bin/odrefresh";
 
 /// Constructs a binder object that implements ICompOsService.
 pub fn new_binder() -> Result<Strong<dyn ICompOsService>> {
     let service = CompOsService {
-        dex2oat_path: PathBuf::from(DEX2OAT_PATH),
         odrefresh_path: PathBuf::from(ODREFRESH_PATH),
-        key_service: CompOsKeyService::new()?,
+        signing_key: DiceSigningKey::new(Dice::new()?),
         key_blob: RwLock::new(Vec::new()),
     };
     Ok(BnCompOsService::new_binder(service, BinderFeatures::default()))
 }
 
 struct CompOsService {
-    dex2oat_path: PathBuf,
     odrefresh_path: PathBuf,
-    key_service: CompOsKeyService,
+    signing_key: DiceSigningKey,
     key_blob: RwLock<Vec<u8>>,
-}
-
-impl CompOsService {
-    fn generate_raw_fsverity_signature(
-        &self,
-        key_blob: &[u8],
-        fsverity_digest: &fsverity::Sha256Digest,
-    ) -> Vec<u8> {
-        let formatted_digest = fsverity::to_formatted_digest(fsverity_digest);
-        self.key_service.sign(key_blob, &formatted_digest[..]).unwrap_or_else(|e| {
-            warn!("Failed to sign the fsverity digest, returning empty signature.  Error: {}", e);
-            Vec::new()
-        })
-    }
 }
 
 impl Interface for CompOsService {}
@@ -89,131 +72,82 @@ impl ICompOsService for CompOsService {
         }
     }
 
-    fn initializeClasspaths(
-        &self,
-        boot_classpath: &str,
-        dex2oat_boot_classpath: &str,
-        system_server_classpath: &str,
-    ) -> BinderResult<()> {
-        // TODO(198211396): Implement correctly.
-        env::set_var("BOOTCLASSPATH", boot_classpath);
-        env::set_var("DEX2OATBOOTCLASSPATH", dex2oat_boot_classpath);
-        env::set_var("SYSTEMSERVERCLASSPATH", system_server_classpath);
-        Ok(())
-    }
-
     fn odrefresh(
         &self,
+        compilation_mode: CompilationMode,
         system_dir_fd: i32,
         output_dir_fd: i32,
+        staging_dir_fd: i32,
+        target_dir_name: &str,
         zygote_arch: &str,
-    ) -> BinderResult<CompilationResult> {
-        if system_dir_fd < 0 || output_dir_fd < 0 {
+        system_server_compiler_filter: &str,
+    ) -> BinderResult<i8> {
+        let key = &*self.key_blob.read().unwrap();
+        if key.is_empty() {
             return Err(new_binder_exception(
-                ExceptionCode::ILLEGAL_ARGUMENT,
-                "The remote FDs are expected to be non-negative",
-            ));
-        }
-        if zygote_arch != "zygote64" && zygote_arch != "zygote64_32" {
-            return Err(new_binder_exception(
-                ExceptionCode::ILLEGAL_ARGUMENT,
-                "Invalid zygote arch",
+                ExceptionCode::ILLEGAL_STATE,
+                "Key is not initialized",
             ));
         }
 
-        let authfs_service = get_authfs_service()?;
-        let output = odrefresh(
-            &self.odrefresh_path,
+        let context = to_binder_result(OdrefreshContext::new(
+            compilation_mode,
             system_dir_fd,
             output_dir_fd,
+            staging_dir_fd,
+            target_dir_name,
             zygote_arch,
-            authfs_service,
-        )
-        .map_err(|e| {
-            warn!("odrefresh failed: {}", e);
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("odrefresh failed: {}", e),
-            )
-        })?;
-        match output {
-            CompilerOutput::ExitCode(exit_code) => {
-                Ok(CompilationResult { exitCode: exit_code, ..Default::default() })
-            }
-            _ => Err(new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, "odrefresh failed")),
-        }
-    }
+            system_server_compiler_filter,
+        ))?;
 
-    fn compile_cmd(
-        &self,
-        args: &[String],
-        fd_annotation: &FdAnnotation,
-    ) -> BinderResult<CompilationResult> {
         let authfs_service = get_authfs_service()?;
-        let output =
-            compile_cmd(&self.dex2oat_path, args, authfs_service, fd_annotation).map_err(|e| {
-                new_binder_exception(
-                    ExceptionCode::SERVICE_SPECIFIC,
-                    format!("Compilation failed: {}", e),
-                )
-            })?;
-        match output {
-            CompilerOutput::Digests { oat, vdex, image } => {
-                let key = &*self.key_blob.read().unwrap();
-                if key.is_empty() {
-                    Err(new_binder_exception(
-                        ExceptionCode::ILLEGAL_STATE,
-                        "Key is not initialized",
-                    ))
-                } else {
-                    let oat_signature = self.generate_raw_fsverity_signature(key, &oat);
-                    let vdex_signature = self.generate_raw_fsverity_signature(key, &vdex);
-                    let image_signature = self.generate_raw_fsverity_signature(key, &image);
-                    Ok(CompilationResult {
-                        exitCode: 0,
-                        oatSignature: oat_signature,
-                        vdexSignature: vdex_signature,
-                        imageSignature: image_signature,
-                    })
-                }
-            }
-            CompilerOutput::ExitCode(exit_code) => {
-                Ok(CompilationResult { exitCode: exit_code, ..Default::default() })
-            }
-        }
-    }
+        let exit_code = to_binder_result(
+            odrefresh(&self.odrefresh_path, context, authfs_service, |output_dir| {
+                // authfs only shows us the files we created, so it's ok to just sign everything
+                // under the output directory.
+                let mut artifact_signer = ArtifactSigner::new(&output_dir);
+                add_artifacts(&output_dir, &mut artifact_signer)?;
 
-    fn compile(&self, _marshaled: &[u8], _fd_annotation: &FdAnnotation) -> BinderResult<i8> {
-        Err(new_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION, "Not yet implemented"))
+                let signer = to_binder_result(self.signing_key.new_signer(key))?;
+                artifact_signer.write_info_and_signature(signer, &output_dir.join("compos.info"))
+            })
+            .context("odrefresh failed"),
+        )?;
+        Ok(exit_code as i8)
     }
 
     fn generateSigningKey(&self) -> BinderResult<CompOsKeyData> {
-        self.key_service
-            .generate()
-            .map_err(|e| new_binder_exception(ExceptionCode::ILLEGAL_STATE, e.to_string()))
+        to_binder_result(self.signing_key.generate())
     }
 
     fn verifySigningKey(&self, key_blob: &[u8], public_key: &[u8]) -> BinderResult<bool> {
-        Ok(if let Err(e) = self.key_service.verify(key_blob, public_key) {
-            warn!("Signing key verification failed: {}", e.to_string());
+        Ok(if let Err(e) = self.signing_key.verify(key_blob, public_key) {
+            warn!("Signing key verification failed: {:?}", e);
             false
         } else {
             true
         })
     }
-
-    fn sign(&self, data: &[u8]) -> BinderResult<Vec<u8>> {
-        let key = &*self.key_blob.read().unwrap();
-        if key.is_empty() {
-            Err(new_binder_exception(ExceptionCode::ILLEGAL_STATE, "Key is not initialized"))
-        } else {
-            self.key_service
-                .sign(key, data)
-                .map_err(|e| new_binder_exception(ExceptionCode::ILLEGAL_STATE, e.to_string()))
-        }
-    }
 }
 
 fn get_authfs_service() -> BinderResult<Strong<dyn IAuthFsService>> {
     Ok(authfs_aidl_interface::binder::get_interface(AUTHFS_SERVICE_NAME)?)
+}
+
+fn add_artifacts(target_dir: &Path, artifact_signer: &mut ArtifactSigner) -> Result<()> {
+    for entry in
+        read_dir(&target_dir).with_context(|| format!("Traversing {}", target_dir.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            add_artifacts(&entry.path(), artifact_signer)?;
+        } else if file_type.is_file() {
+            artifact_signer.add_artifact(&entry.path())?;
+        } else {
+            // authfs shouldn't create anything else, but just in case
+            bail!("Unexpected file type in artifacts: {:?}", entry);
+        }
+    }
+    Ok(())
 }

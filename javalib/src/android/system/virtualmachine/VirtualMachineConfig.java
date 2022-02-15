@@ -24,6 +24,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.Signature; // This actually is certificate!
 import android.os.ParcelFileDescriptor;
 import android.os.PersistableBundle;
+import android.sysprop.HypervisorProperties;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
 
 import java.io.File;
@@ -34,6 +35,7 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Represents a configuration of a virtual machine. A configuration consists of hardware
@@ -50,7 +52,10 @@ public final class VirtualMachineConfig {
     private static final String KEY_APKPATH = "apkPath";
     private static final String KEY_PAYLOADCONFIGPATH = "payloadConfigPath";
     private static final String KEY_DEBUGLEVEL = "debugLevel";
+    private static final String KEY_PROTECTED_VM = "protectedVm";
     private static final String KEY_MEMORY_MIB = "memoryMib";
+    private static final String KEY_NUM_CPUS = "numCpus";
+    private static final String KEY_CPU_AFFINITY = "cpuAffinity";
 
     // Paths to the APK file of this application.
     private final @NonNull String mApkPath;
@@ -80,9 +85,26 @@ public final class VirtualMachineConfig {
     private final DebugLevel mDebugLevel;
 
     /**
+     * Whether to run the VM in protected mode, so the host can't access its memory.
+     */
+    private final boolean mProtectedVm;
+
+    /**
      * The amount of RAM to give the VM, in MiB. If this is 0 or negative the default will be used.
      */
     private final int mMemoryMib;
+
+    /**
+     * Number of vCPUs in the VM. Defaults to 1 when not specified.
+     */
+    private final int mNumCpus;
+
+    /**
+     * Comma-separated list of CPUs or CPU ranges to run vCPUs on (e.g. 0,1-3,5), or
+     * colon-separated list of assignments of vCPU to host CPU assignments (e.g. 0=0:1=1:2=2).
+     * Default is no mask which means a vCPU can run on any host CPU.
+     */
+    private final String mCpuAffinity;
 
     /**
      * Path within the APK to the payload config file that defines software aspects of this config.
@@ -96,12 +118,18 @@ public final class VirtualMachineConfig {
             @NonNull Signature[] certs,
             @NonNull String payloadConfigPath,
             DebugLevel debugLevel,
-            int memoryMib) {
+            boolean protectedVm,
+            int memoryMib,
+            int numCpus,
+            String cpuAffinity) {
         mApkPath = apkPath;
         mCerts = certs;
         mPayloadConfigPath = payloadConfigPath;
         mDebugLevel = debugLevel;
+        mProtectedVm = protectedVm;
         mMemoryMib = memoryMib;
+        mNumCpus = numCpus;
+        mCpuAffinity = cpuAffinity;
     }
 
     /** Loads a config from a stream, for example a file. */
@@ -130,8 +158,12 @@ public final class VirtualMachineConfig {
             throw new VirtualMachineException("No payloadConfigPath");
         }
         final DebugLevel debugLevel = DebugLevel.values()[b.getInt(KEY_DEBUGLEVEL)];
+        final boolean protectedVm = b.getBoolean(KEY_PROTECTED_VM);
         final int memoryMib = b.getInt(KEY_MEMORY_MIB);
-        return new VirtualMachineConfig(apkPath, certs, payloadConfigPath, debugLevel, memoryMib);
+        final int numCpus = b.getInt(KEY_NUM_CPUS);
+        final String cpuAffinity = b.getString(KEY_CPU_AFFINITY);
+        return new VirtualMachineConfig(apkPath, certs, payloadConfigPath, debugLevel, protectedVm,
+                memoryMib, numCpus, cpuAffinity);
     }
 
     /** Persists this config to a stream, for example a file. */
@@ -147,6 +179,8 @@ public final class VirtualMachineConfig {
         b.putStringArray(KEY_CERTS, certs);
         b.putString(KEY_PAYLOADCONFIGPATH, mPayloadConfigPath);
         b.putInt(KEY_DEBUGLEVEL, mDebugLevel.ordinal());
+        b.putBoolean(KEY_PROTECTED_VM, mProtectedVm);
+        b.putInt(KEY_NUM_CPUS, mNumCpus);
         if (mMemoryMib > 0) {
             b.putInt(KEY_MEMORY_MIB, mMemoryMib);
         }
@@ -173,6 +207,9 @@ public final class VirtualMachineConfig {
             // TODO(jiyong): should we treat APP_ONLY and FULL the same?
             return false;
         }
+        if (this.mProtectedVm != other.mProtectedVm) {
+            return false;
+        }
         return true;
     }
 
@@ -197,7 +234,10 @@ public final class VirtualMachineConfig {
                 parcel.debugLevel = VirtualMachineAppConfig.DebugLevel.FULL;
                 break;
         }
+        parcel.protectedVm = mProtectedVm;
         parcel.memoryMib = mMemoryMib;
+        parcel.numCpus = mNumCpus;
+        parcel.cpuAffinity = mCpuAffinity;
         return parcel;
     }
 
@@ -206,19 +246,30 @@ public final class VirtualMachineConfig {
         private Context mContext;
         private String mPayloadConfigPath;
         private DebugLevel mDebugLevel;
+        private boolean mProtectedVm;
         private int mMemoryMib;
-        // TODO(jiyong): add more items like # of cpu, size of ram, debuggability, etc.
+        private int mNumCpus;
+        private String mCpuAffinity;
 
         /** Creates a builder for the given context (APK), and the payload config file in APK. */
         public Builder(@NonNull Context context, @NonNull String payloadConfigPath) {
             mContext = context;
             mPayloadConfigPath = payloadConfigPath;
             mDebugLevel = DebugLevel.NONE;
+            mProtectedVm = false;
+            mNumCpus = 1;
+            mCpuAffinity = null;
         }
 
         /** Sets the debug level */
         public Builder debugLevel(DebugLevel debugLevel) {
             mDebugLevel = debugLevel;
+            return this;
+        }
+
+        /** Sets whether to protect the VM memory from the host. Defaults to false. */
+        public Builder protectedVm(boolean protectedVm) {
+            mProtectedVm = protectedVm;
             return this;
         }
 
@@ -228,6 +279,25 @@ public final class VirtualMachineConfig {
          */
         public Builder memoryMib(int memoryMib) {
             mMemoryMib = memoryMib;
+            return this;
+        }
+
+        /**
+         * Sets the number of vCPUs in the VM. Defaults to 1.
+         */
+        public Builder numCpus(int num) {
+            mNumCpus = num;
+            return this;
+        }
+
+        /**
+         * Sets on which host CPUs the vCPUs can run. The format is a comma-separated list of CPUs
+         * or CPU ranges to run vCPUs on. e.g. "0,1-3,5" to choose host CPUs 0, 1, 2, 3, and 5.
+         * Or this can be a colon-separated list of assignments of vCPU to host CPU assignments.
+         * e.g. "0=0:1=1:2=2" to map vCPU 0 to host CPU 0, and so on.
+         */
+        public Builder cpuAffinity(String affinity) {
+            mCpuAffinity = affinity;
             return this;
         }
 
@@ -248,8 +318,32 @@ public final class VirtualMachineConfig {
                 throw new RuntimeException(e);
             }
 
+            final int availableCpus = Runtime.getRuntime().availableProcessors();
+            if (mNumCpus < 1 || mNumCpus > availableCpus) {
+                throw new IllegalArgumentException("Number of vCPUs (" + mNumCpus + ") is out of "
+                        + "range [1, " + availableCpus + "]");
+            }
+
+            if (mCpuAffinity != null
+                    && !Pattern.matches("[\\d]+(-[\\d]+)?(,[\\d]+(-[\\d]+)?)*", mCpuAffinity)
+                    && !Pattern.matches("[\\d]+=[\\d]+(:[\\d]+=[\\d]+)*", mCpuAffinity)) {
+                throw new IllegalArgumentException("CPU affinity [" + mCpuAffinity + "]"
+                        + " is invalid");
+            }
+
+            if (mProtectedVm
+                    && !HypervisorProperties.hypervisor_protected_vm_supported().orElse(false)) {
+                throw new UnsupportedOperationException(
+                        "Protected VMs are not supported on this device.");
+            }
+            if (!mProtectedVm && !HypervisorProperties.hypervisor_vm_supported().orElse(false)) {
+                throw new UnsupportedOperationException(
+                        "Unprotected VMs are not supported on this device.");
+            }
+
             return new VirtualMachineConfig(
-                    apkPath, certs, mPayloadConfigPath, mDebugLevel, mMemoryMib);
+                    apkPath, certs, mPayloadConfigPath, mDebugLevel, mProtectedVm, mMemoryMib,
+                    mNumCpus, mCpuAffinity);
         }
     }
 }

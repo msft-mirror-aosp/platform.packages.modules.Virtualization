@@ -5,11 +5,13 @@
   },
   "task": {
     "type": "executable",
-    "command": "/apex/com.android.compos/bin/compsvc",
-    "args": [
-      "--log_to_stderr"
-    ]
+    "command": "/apex/com.android.compos/bin/compsvc"
   },
+  "extra_apks": [
+    {
+      "path": "/system/etc/security/fsverity/BuildManifest.apk"
+    }
+  ],
   "apexes": [
     {
       "name": "com.android.art"
@@ -18,13 +20,10 @@
       "name": "com.android.compos"
     },
     {
-      "name": "{DEX2OATBOOTCLASSPATH}"
+      "name": "com.android.sdkext"
     },
     {
-      "name": "{BOOTCLASSPATH}"
-    },
-    {
-      "name": "{SYSTEMSERVERCLASSPATH}"
+      "name": "{CLASSPATH}"
     }
   ]
 }

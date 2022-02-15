@@ -26,7 +26,8 @@ use android_system_virtualizationservice::binder::{wait_for_interface, ProcessSt
 use anyhow::{Context, Error};
 use create_partition::command_create_partition;
 use run::{command_run, command_run_app};
-use std::path::PathBuf;
+use rustutils::system_properties;
+use std::path::{Path, PathBuf};
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 
@@ -72,13 +73,25 @@ enum Opt {
         #[structopt(long, default_value = "none", parse(try_from_str=parse_debug_level))]
         debug: DebugLevel,
 
+        /// Run VM in protected mode.
+        #[structopt(short, long)]
+        protected: bool,
+
         /// Memory size (in MiB) of the VM. If unspecified, defaults to the value of `memory_mib`
         /// in the VM config file.
         #[structopt(short, long)]
         mem: Option<u32>,
 
-        /// Paths to extra idsig files.
+        /// Number of vCPUs in the VM. If unspecified, defaults to 1.
         #[structopt(long)]
+        cpus: Option<u32>,
+
+        /// Host CPUs where vCPUs are run on. If unspecified, vCPU runs on any host CPU.
+        #[structopt(long)]
+        cpu_affinity: Option<String>,
+
+        /// Paths to extra idsig files.
+        #[structopt(long = "extra-idsig")]
         extra_idsigs: Vec<PathBuf>,
     },
     /// Run a virtual machine
@@ -91,6 +104,18 @@ enum Opt {
         #[structopt(short, long)]
         daemonize: bool,
 
+        /// Number of vCPUs in the VM. If unspecified, defaults to 1.
+        #[structopt(long)]
+        cpus: Option<u32>,
+
+        /// Host CPUs where vCPUs are run on. If unspecified, vCPU runs on any host CPU. The format
+        /// can be either a comma-separated list of CPUs or CPU ranges to run vCPUs on (e.g.
+        /// "0,1-3,5" to choose host CPUs 0, 1, 2, 3, and 5, or a colon-separated list of
+        /// assignments of vCPU-to-host-CPU assignments e.g. "0=0:1=1:2=2" to map vCPU 0 to host
+        /// CPU 0 and so on.
+        #[structopt(long)]
+        cpu_affinity: Option<String>,
+
         /// Path to file for VM console output.
         #[structopt(long)]
         console: Option<PathBuf>,
@@ -102,6 +127,8 @@ enum Opt {
     },
     /// List running virtual machines
     List,
+    /// Print information about virtual machine support
+    Info,
     /// Create a new empty partition to be used as a writable partition for a VM
     CreatePartition {
         /// Path at which to create the image file
@@ -154,7 +181,10 @@ fn main() -> Result<(), Error> {
             console,
             log,
             debug,
+            protected,
             mem,
+            cpus,
+            cpu_affinity,
             extra_idsigs,
         } => command_run_app(
             service,
@@ -166,14 +196,26 @@ fn main() -> Result<(), Error> {
             console.as_deref(),
             log.as_deref(),
             debug,
+            protected,
             mem,
+            cpus,
+            cpu_affinity,
             &extra_idsigs,
         ),
-        Opt::Run { config, daemonize, console } => {
-            command_run(service, &config, daemonize, console.as_deref(), /* mem */ None)
+        Opt::Run { config, daemonize, cpus, cpu_affinity, console } => {
+            command_run(
+                service,
+                &config,
+                daemonize,
+                console.as_deref(),
+                /* mem */ None,
+                cpus,
+                cpu_affinity,
+            )
         }
         Opt::Stop { cid } => command_stop(service, cid),
         Opt::List => command_list(service),
+        Opt::Info => command_info(),
         Opt::CreatePartition { path, size, partition_type } => {
             command_create_partition(service, &path, size, partition_type)
         }
@@ -193,5 +235,33 @@ fn command_stop(service: Strong<dyn IVirtualizationService>, cid: u32) -> Result
 fn command_list(service: Strong<dyn IVirtualizationService>) -> Result<(), Error> {
     let vms = service.debugListVms().context("Failed to get list of VMs")?;
     println!("Running VMs: {:#?}", vms);
+    Ok(())
+}
+
+/// Print information about supported VM types.
+fn command_info() -> Result<(), Error> {
+    let unprotected_vm_supported =
+        system_properties::read_bool("ro.boot.hypervisor.vm.supported", false)?;
+    let protected_vm_supported =
+        system_properties::read_bool("ro.boot.hypervisor.protected_vm.supported", false)?;
+    match (unprotected_vm_supported, protected_vm_supported) {
+        (false, false) => println!("VMs are not supported."),
+        (false, true) => println!("Only protected VMs are supported."),
+        (true, false) => println!("Only unprotected VMs are supported."),
+        (true, true) => println!("Both protected and unprotected VMs are supported."),
+    }
+
+    if let Some(version) = system_properties::read("ro.boot.hypervisor.version")? {
+        println!("Hypervisor version: {}", version);
+    } else {
+        println!("Hypervisor version not set.");
+    }
+
+    if Path::new("/dev/kvm").exists() {
+        println!("/dev/kvm exists.");
+    } else {
+        println!("/dev/kvm does not exist.");
+    }
+
     Ok(())
 }

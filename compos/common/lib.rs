@@ -16,7 +16,9 @@
 
 //! Common items used by CompOS server and/or clients
 
+pub mod binder;
 pub mod compos_client;
+pub mod odrefresh;
 pub mod timeouts;
 
 /// Special CID indicating "any".
@@ -53,9 +55,22 @@ pub const PUBLIC_KEY_FILE: &str = "key.pubkey";
 /// The file that holds the instance image for a CompOS instance.
 pub const INSTANCE_IMAGE_FILE: &str = "instance.img";
 
+/// The file that holds the idsig for the CompOS Payload APK.
+pub const IDSIG_FILE: &str = "idsig";
+
+/// The file that holds the idsig for the build manifest APK (that makes enumerated files from
+/// /system available in CompOS).
+pub const IDSIG_MANIFEST_APK_FILE: &str = "idsig_manifest_apk";
+
 /// The path within our config APK of our default VM configuration file, used at boot time.
 pub const DEFAULT_VM_CONFIG_PATH: &str = "assets/vm_config.json";
 
 /// The path within our config APK of the VM configuration file we use when compiling staged
 /// APEXes before reboot.
 pub const PREFER_STAGED_VM_CONFIG_PATH: &str = "assets/vm_config_staged.json";
+
+/// Number of CPUs to run dex2oat (actually the entire compos VM) with
+pub const DEX2OAT_THREADS_PROP_NAME: &str = "dalvik.vm.boot-dex2oat-threads";
+
+/// Set of host-side CPUs to run dex2oat (actually the entire compos VM) on
+pub const DEX2OAT_CPU_SET_PROP_NAME: &str = "dalvik.vm.boot-dex2oat-cpu-set";

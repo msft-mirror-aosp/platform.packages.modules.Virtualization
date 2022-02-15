@@ -21,4 +21,10 @@ interface ITestService {
 
     /* add two integers. */
     int addInteger(int a, int b);
+
+    /* read a system property. */
+    String readProperty(String prop);
+
+    /* get the VM's stable secret. */
+    byte[] insecurelyExposeSecret();
 }

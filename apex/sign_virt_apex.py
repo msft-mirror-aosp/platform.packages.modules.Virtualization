@@ -15,7 +15,8 @@
 # limitations under the License.
 """sign_virt_apex is a command line tool for sign the Virt APEX file.
 
-Typical usage: sign_virt_apex [-v] [--avbtool path_to_avbtool] path_to_key payload_contents_dir
+Typical usage:
+  sign_virt_apex [-v] [--avbtool path_to_avbtool] [--signing_args args] payload_key payload_dir
 
 sign_virt_apex uses external tools which are assumed to be available via PATH.
 - avbtool (--avbtool can override the tool)
@@ -26,6 +27,7 @@ import glob
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -44,6 +46,10 @@ def ParseArgs(argv):
         '--avbtool',
         default='avbtool',
         help='Optional flag that specifies the AVB tool to use. Defaults to `avbtool`.')
+    parser.add_argument(
+        '--signing_args',
+        help='the extra signing arguments passed to avbtool.'
+    )
     parser.add_argument(
         'key',
         help='path to the private key file.')
@@ -163,6 +169,8 @@ def AddHashFooter(args, key, image_path):
                '--partition_name', partition_name,
                '--partition_size', partition_size,
                '--image', image_path]
+        if args.signing_args:
+            cmd.extend(shlex.split(args.signing_args))
         RunCommand(args, cmd)
 
 
@@ -182,6 +190,8 @@ def AddHashTreeFooter(args, key, image_path):
                '--partition_size', partition_size,
                '--do_not_generate_fec',
                '--image', image_path]
+        if args.signing_args:
+            cmd.extend(shlex.split(args.signing_args))
         RunCommand(args, cmd)
 
 
@@ -215,6 +225,9 @@ def MakeVbmetaImage(args, key, vbmeta_img, images=None, chained_partitions=None)
                 ExtractAvbPubkey(args, part_key, avbpubkey)
                 cmd.extend(['--chain_partition', '%s:%s:%s' %
                            (part_name, ril, avbpubkey)])
+
+        if args.signing_args:
+            cmd.extend(shlex.split(args.signing_args))
 
         RunCommand(args, cmd)
         # libavb expects to be able to read the maximum vbmeta size, so we must provide a partition
@@ -282,6 +295,8 @@ def SignVirtApex(args):
     boot_img = os.path.join(input_dir, 'etc', 'fs', 'microdroid_boot-5.10.img')
     vendor_boot_img = os.path.join(
         input_dir, 'etc', 'fs', 'microdroid_vendor_boot-5.10.img')
+    init_boot_img = os.path.join(
+        input_dir, 'etc', 'fs', 'microdroid_init_boot.img')
     super_img = os.path.join(input_dir, 'etc', 'fs', 'microdroid_super.img')
     vbmeta_img = os.path.join(input_dir, 'etc', 'fs', 'microdroid_vbmeta.img')
     vbmeta_bootconfig_img = os.path.join(
@@ -292,15 +307,18 @@ def SignVirtApex(args):
         input_dir, 'etc', 'microdroid_bootconfig.app_debuggable')
     bootconfig_full_debuggable = os.path.join(
         input_dir, 'etc', 'microdroid_bootconfig.full_debuggable')
+    uboot_env_img = os.path.join(
+        input_dir, 'etc', 'uboot_env.img')
 
     # Key(pubkey) for bootloader should match with the one used to make VBmeta below
     # while it's okay to use different keys for other image files.
     ReplaceBootloaderPubkey(args, key, bootloader, bootloader_pubkey)
 
-    # re-sign bootloader, boot.img, vendor_boot.img
+    # re-sign bootloader, boot.img, vendor_boot.img, and init_boot.img
     AddHashFooter(args, key, bootloader)
     AddHashFooter(args, key, boot_img)
     AddHashFooter(args, key, vendor_boot_img)
+    AddHashFooter(args, key, init_boot_img)
 
     # re-sign super.img
     with TempDirectory() as work_dir:
@@ -320,24 +338,28 @@ def SignVirtApex(args):
         # re-pack super.img
         MakeSuperImage(args, partitions, super_img)
 
-        # re-generate vbmeta from re-signed {boot, vendor_boot, system_a, vendor_a}.img
+        # re-generate vbmeta from re-signed {boot, vendor_boot, init_boot, system_a, vendor_a}.img
         # Ideally, making VBmeta should be done out of TempDirectory block. But doing it here
         # to avoid unpacking re-signed super.img for system/vendor images which are available
         # in this block.
         MakeVbmetaImage(args, key, vbmeta_img, images=[
-                        boot_img, vendor_boot_img, system_a_img, vendor_a_img])
+                        boot_img, vendor_boot_img, init_boot_img, system_a_img, vendor_a_img])
 
-    # Re-sign bootconfigs with the same key
+    # Re-sign bootconfigs and the uboot_env with the same key
     bootconfig_sign_key = key
     AddHashFooter(args, bootconfig_sign_key, bootconfig_normal)
     AddHashFooter(args, bootconfig_sign_key, bootconfig_app_debuggable)
     AddHashFooter(args, bootconfig_sign_key, bootconfig_full_debuggable)
+    AddHashFooter(args, bootconfig_sign_key, uboot_env_img)
 
-    # Re-sign vbmeta_bootconfig with a chained_partition to "bootconfig"
-    # Note that, for now, `key` and `bootconfig_sign_key` are the same, but technically they
-    # can be different. Vbmeta records pubkeys which signed chained partitions.
+    # Re-sign vbmeta_bootconfig with chained_partitions to "bootconfig" and
+    # "uboot_env". Note that, for now, `key` and `bootconfig_sign_key` are the
+    # same, but technically they can be different. Vbmeta records pubkeys which
+    # signed chained partitions.
     MakeVbmetaImage(args, key, vbmeta_bootconfig_img, chained_partitions={
-                    'bootconfig': bootconfig_sign_key})
+                    'bootconfig': bootconfig_sign_key,
+                    'uboot_env': bootconfig_sign_key,
+    })
 
 
 def VerifyVirtApex(args):

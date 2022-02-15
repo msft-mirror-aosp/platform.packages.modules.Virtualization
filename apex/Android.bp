@@ -5,6 +5,7 @@ package {
 microdroid_filesystem_images = [
     "microdroid_super",
     "microdroid_boot-5.10",
+    "microdroid_init_boot",
     "microdroid_vendor_boot-5.10",
     "microdroid_vbmeta",
     "microdroid_vbmeta_bootconfig",
@@ -67,6 +68,7 @@ apex {
         "microdroid_bootconfig_full_debuggable",
     ],
     file_contexts: ":com.android.virt-file_contexts",
+    canned_fs_config: "canned_fs_config",
 }
 
 apex_key {

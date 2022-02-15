@@ -18,21 +18,18 @@
 //! responsible for managing the lifecycle of the CompOS VM instances, providing key management for
 //! them, and orchestrating trusted compilation.
 
-mod compilation_task;
 mod fd_server_helper;
 mod instance_manager;
 mod instance_starter;
-mod internal_service;
-mod odrefresh;
 mod odrefresh_task;
 mod service;
-mod util;
 
 use crate::instance_manager::InstanceManager;
 use android_system_composd::binder::{register_lazy_service, ProcessState};
 use anyhow::{Context, Result};
 use compos_common::compos_client::VmInstance;
 use log::{error, info};
+use std::panic;
 use std::sync::Arc;
 
 fn try_main() -> Result<()> {
@@ -42,17 +39,18 @@ fn try_main() -> Result<()> {
         android_logger::Config::default().with_tag("composd").with_min_level(log_level),
     );
 
+    // Redirect panic messages to logcat.
+    panic::set_hook(Box::new(|panic_info| {
+        log::error!("{}", panic_info);
+    }));
+
     ProcessState::start_thread_pool();
 
     let virtualization_service = VmInstance::connect_to_virtualization_service()?;
     let instance_manager = Arc::new(InstanceManager::new(virtualization_service));
-    let composd_service = service::new_binder(instance_manager.clone());
+    let composd_service = service::new_binder(instance_manager);
     register_lazy_service("android.system.composd", composd_service.as_binder())
         .context("Registering composd service")?;
-
-    let internal_service = internal_service::new_binder(instance_manager);
-    register_lazy_service("android.system.composd.internal", internal_service.as_binder())
-        .context("Registering internal service")?;
 
     info!("Registered services, joining threadpool");
     ProcessState::join_thread_pool();

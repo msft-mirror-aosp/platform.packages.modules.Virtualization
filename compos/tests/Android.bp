@@ -13,8 +13,7 @@ java_test_host {
     static_libs: [
         "VirtualizationTestHelper",
     ],
-    test_suites: ["general-tests"],
-    data: [
-        ":CompOSPayloadApp.signing",
+    test_suites: [
+        "general-tests",
     ],
 }

@@ -14,6 +14,8 @@
 
 //! Routines for handling payload
 
+mod apex;
+
 use crate::instance::ApexData;
 use crate::ioutil::wait_for_file;
 use anyhow::Result;
@@ -41,7 +43,13 @@ pub fn get_apex_data_from_payload(metadata: &Metadata) -> Result<Vec<ApexData>> 
             let name = apex.name.clone();
             let apex_path = format!("/dev/block/by-name/{}", apex.partition_name);
             let result = verify(&apex_path)?;
-            Ok(ApexData { name, public_key: result.public_key, root_digest: result.root_digest })
+            Ok(ApexData {
+                name,
+                public_key: result.public_key,
+                root_digest: result.root_digest,
+                last_update_seconds: apex.last_update_seconds,
+                is_factory: apex.is_factory,
+            })
         })
         .collect()
 }
@@ -55,11 +63,11 @@ pub fn to_metadata(apex_data: &[ApexData]) -> Metadata {
                 name: data.name.clone(),
                 public_key: data.public_key.clone(),
                 root_digest: data.root_digest.clone(),
+                last_update_seconds: data.last_update_seconds,
+                is_factory: data.is_factory,
                 ..Default::default()
             })
             .collect(),
         ..Default::default()
     }
 }
-
-mod apex;

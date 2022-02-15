@@ -17,25 +17,47 @@
 package android.virt.test;
 
 import static org.hamcrest.CoreMatchers.is;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.testtype.DeviceJUnit4ClassRunner;
+import com.android.tradefed.util.CommandResult;
+import com.android.tradefed.util.CommandStatus;
+import com.android.tradefed.util.FileUtil;
+import com.android.tradefed.util.RunUtil;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.io.File;
+import java.util.Optional;
+
 @RunWith(DeviceJUnit4ClassRunner.class)
 public class MicrodroidTestCase extends VirtualizationTestCaseBase {
     private static final String APK_NAME = "MicrodroidTestApp.apk";
     private static final String PACKAGE_NAME = "com.android.microdroid.test";
 
-    private static final int MIN_MEM_ARM64 = 256;
-    private static final int MIN_MEM_X86_64 = 400;
+    private static final int MIN_MEM_ARM64 = 145;
+    private static final int MIN_MEM_X86_64 = 196;
+
+    // Number of vCPUs and their affinity to host CPUs for testing purpose
+    private static final int NUM_VCPUS = 3;
+    private static final String CPU_AFFINITY = "0,1,2";
+
+    // TODO(b/176805428): remove this
+    private boolean isCuttlefish() throws Exception {
+        String productName = getDevice().getProperty("ro.product.name");
+        return (null != productName)
+                && (productName.startsWith("aosp_cf_x86")
+                        || productName.startsWith("aosp_cf_arm")
+                        || productName.startsWith("cf_x86")
+                        || productName.startsWith("cf_arm"));
+    }
 
     private int minMemorySize() throws DeviceNotAvailableException {
         CommandRunner android = new CommandRunner(getDevice());
@@ -61,7 +83,9 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         PACKAGE_NAME,
                         configPath,
                         /* debug */ true,
-                        minMemorySize());
+                        minMemorySize(),
+                        Optional.of(NUM_VCPUS),
+                        Optional.of(CPU_AFFINITY));
         adbConnectToMicrodroid(getDevice(), cid);
 
         // Wait until logd-init starts. The service is one of the last services that are started in
@@ -89,17 +113,39 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         final String label = "u:object_r:system_file:s0";
         assertThat(runOnMicrodroid("ls", "-Z", testLib), is(label + " " + testLib));
 
-        // Check if the command in vm_config.json was executed by examining the side effect of the
-        // command
-        assertThat(runOnMicrodroid("getprop", "debug.microdroid.app.run"), is("true"));
-        assertThat(runOnMicrodroid("getprop", "debug.microdroid.app.sublib.run"), is("true"));
-
-        // Check that keystore was found by the payload. Wait until the property is set.
-        tryRunOnMicrodroid("watch -e \"getprop debug.microdroid.test.keystore | grep '^$'\"");
-        assertThat(runOnMicrodroid("getprop", "debug.microdroid.test.keystore"), is("PASS"));
-
         // Check that no denials have happened so far
         assertThat(runOnMicrodroid("logcat -d -e 'avc:[[:space:]]{1,2}denied'"), is(""));
+
+        assertThat(runOnMicrodroid("cat /proc/cpuinfo | grep processor | wc -l"),
+                is(Integer.toString(NUM_VCPUS)));
+
+        // Check that selinux is enabled
+        assertThat(runOnMicrodroid("getenforce"), is("Enforcing"));
+
+        // TODO(b/176805428): adb is broken for nested VM
+        if (!isCuttlefish()) {
+            // Check neverallow rules on microdroid
+            File policyFile = FileUtil.createTempFile("microdroid_sepolicy", "");
+            pullMicrodroidFile("/sys/fs/selinux/policy", policyFile);
+
+            File generalPolicyConfFile = findTestFile("microdroid_general_sepolicy.conf");
+            File sepolicyAnalyzeBin = findTestFile("sepolicy-analyze");
+
+            CommandResult result =
+                    RunUtil.getDefault()
+                            .runTimedCmd(
+                                    10000,
+                                    sepolicyAnalyzeBin.getPath(),
+                                    policyFile.getPath(),
+                                    "neverallow",
+                                    "-w",
+                                    "-f",
+                                    generalPolicyConfFile.getPath());
+            assertEquals(
+                    "neverallow check failed: " + result.getStderr().trim(),
+                    result.getStatus(),
+                    CommandStatus.SUCCESS);
+        }
 
         shutdownMicrodroid(getDevice(), cid);
     }

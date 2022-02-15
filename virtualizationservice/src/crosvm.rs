@@ -21,18 +21,27 @@ use command_fds::CommandFdExt;
 use log::{debug, error, info};
 use shared_child::SharedChild;
 use std::fs::{remove_dir_all, File};
+use std::io;
 use std::mem;
 use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use vsock::VsockStream;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::DeathReason::DeathReason;
 use android_system_virtualmachineservice::binder::Strong;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
 
 const CROSVM_PATH: &str = "/apex/com.android.virt/bin/crosvm";
+
+/// The exit status which crosvm returns when it has an error starting a VM.
+const CROSVM_ERROR_STATUS: i32 = 1;
+/// The exit status which crosvm returns when a VM requests a reboot.
+const CROSVM_REBOOT_STATUS: i32 = 32;
+/// The exit status which crosvm returns when it crashes due to an error.
+const CROSVM_CRASH_STATUS: i32 = 33;
 
 /// Configuration for a VM to run with crosvm.
 #[derive(Debug)]
@@ -45,6 +54,8 @@ pub struct CrosvmConfig {
     pub params: Option<String>,
     pub protected: bool,
     pub memory_mib: Option<NonZeroU32>,
+    pub cpus: Option<NonZeroU32>,
+    pub cpu_affinity: Option<String>,
     pub console_fd: Option<File>,
     pub log_fd: Option<File>,
     pub indirect_files: Vec<File>,
@@ -180,7 +191,8 @@ impl VmInstance {
     /// This takes a separate reference to the `SharedChild` rather than using the one in
     /// `self.vm_state` to avoid holding the lock on `vm_state` while it is running.
     fn monitor(&self, child: Arc<SharedChild>) {
-        match child.wait() {
+        let result = child.wait();
+        match &result {
             Err(e) => error!("Error waiting for crosvm({}) instance to die: {}", child.id(), e),
             Ok(status) => info!("crosvm({}) exited with status {}", child.id(), status),
         }
@@ -190,7 +202,7 @@ impl VmInstance {
         // Ensure that the mutex is released before calling the callbacks.
         drop(vm_state);
 
-        self.callbacks.callback_on_died(self.cid);
+        self.callbacks.callback_on_died(self.cid, death_reason(&result));
 
         // Delete temporary files.
         if let Err(e) = remove_dir_all(&self.temporary_directory) {
@@ -230,20 +242,55 @@ impl VmInstance {
     }
 }
 
+fn death_reason(result: &Result<ExitStatus, io::Error>) -> DeathReason {
+    if let Ok(status) = result {
+        match status.code() {
+            None => DeathReason::KILLED,
+            Some(0) => DeathReason::SHUTDOWN,
+            Some(CROSVM_ERROR_STATUS) => DeathReason::ERROR,
+            Some(CROSVM_REBOOT_STATUS) => DeathReason::REBOOT,
+            Some(CROSVM_CRASH_STATUS) => DeathReason::CRASH,
+            Some(_) => DeathReason::UNKNOWN,
+        }
+    } else {
+        DeathReason::INFRASTRUCTURE_ERROR
+    }
+}
+
 /// Starts an instance of `crosvm` to manage a new VM.
 fn run_vm(config: CrosvmConfig) -> Result<SharedChild, Error> {
     validate_config(&config)?;
 
     let mut command = Command::new(CROSVM_PATH);
     // TODO(qwandor): Remove --disable-sandbox.
-    command.arg("run").arg("--disable-sandbox").arg("--cid").arg(config.cid.to_string());
+    command
+        .arg("--extended-status")
+        .arg("run")
+        .arg("--disable-sandbox")
+        .arg("--cid")
+        .arg(config.cid.to_string());
 
     if config.protected {
         command.arg("--protected-vm");
+
+        // 3 virtio-console devices + vsock = 4.
+        let virtio_pci_device_count = 4 + config.disks.len();
+        // crosvm virtio queue has 256 entries, so 2 MiB per device (2 pages per entry) should be
+        // enough.
+        let swiotlb_size_mib = 2 * virtio_pci_device_count;
+        command.arg("--swiotlb").arg(swiotlb_size_mib.to_string());
     }
 
     if let Some(memory_mib) = config.memory_mib {
         command.arg("--mem").arg(memory_mib.to_string());
+    }
+
+    if let Some(cpus) = config.cpus {
+        command.arg("--cpus").arg(cpus.to_string());
+    }
+
+    if let Some(cpu_affinity) = config.cpu_affinity {
+        command.arg("--cpu-affinity").arg(cpu_affinity);
     }
 
     // Keep track of what file descriptors should be mapped to the crosvm process.

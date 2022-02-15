@@ -22,13 +22,13 @@ use crate::selinux::{SeContext, getfilecon};
 use ::binder::unstable_api::AsNative;
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    DeathReason::DeathReason,
     DiskImage::DiskImage,
     IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService,
     Partition::Partition,
     PartitionType::PartitionType,
-    VirtualMachineAppConfig::DebugLevel::DebugLevel,
     VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineConfig::VirtualMachineConfig,
     VirtualMachineDebugInfo::VirtualMachineDebugInfo,
@@ -49,9 +49,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use binder_common::{lazy_service::LazyServiceGuard, new_binder_exception};
 use disk::QcowFile;
 use idsig::{HashAlgorithm, V4Signature};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, warn, trace};
 use microdroid_payload_config::VmPayloadConfig;
 use rustutils::system_properties;
+use statslog_virtualization_rust::vm_creation_requested::{stats_write, Hypervisor};
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fs::{create_dir, File, OpenOptions};
@@ -129,8 +130,8 @@ impl IVirtualizationService for VirtualizationService {
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         check_manage_access()?;
         let state = &mut *self.state.lock().unwrap();
-        let mut console_fd = console_fd.map(clone_file).transpose()?;
-        let mut log_fd = log_fd.map(clone_file).transpose()?;
+        let console_fd = console_fd.map(clone_file).transpose()?;
+        let log_fd = log_fd.map(clone_file).transpose()?;
         let requester_uid = ThreadState::get_calling_uid();
         let requester_sid = get_calling_sid()?;
         let requester_debug_pid = ThreadState::get_calling_pid();
@@ -145,6 +146,9 @@ impl IVirtualizationService for VirtualizationService {
         // Make directory for temporary files.
         let temporary_directory: PathBuf = format!("{}/{}", TEMPORARY_DIRECTORY, cid).into();
         create_dir(&temporary_directory).map_err(|e| {
+            // At this point, we do not know the protected status of Vm
+            // setting it to false, though this may not be correct.
+            write_vm_creation_stats(false, false);
             error!(
                 "Failed to create temporary directory {:?} for VM files: {}",
                 temporary_directory, e
@@ -158,25 +162,13 @@ impl IVirtualizationService for VirtualizationService {
             )
         })?;
 
-        // Disable console logging if debug level != full. Note that kernel anyway doesn't use the
-        // console output when debug level != full. So, users won't be able to see the kernel
-        // output even without this overriding. This is to silence output from the bootloader which
-        // doesn't understand the bootconfig parameters.
-        if let VirtualMachineConfig::AppConfig(config) = config {
-            if config.debugLevel != DebugLevel::FULL {
-                console_fd = None;
-            }
-            if config.debugLevel == DebugLevel::NONE {
-                log_fd = None;
-            }
-        }
-
         let is_app_config = matches!(config, VirtualMachineConfig::AppConfig(_));
 
         let config = match config {
             VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
                 load_app_config(config, &temporary_directory).map_err(|e| {
                     error!("Failed to load app config from {}: {}", &config.configPath, e);
+                    write_vm_creation_stats(config.protectedVm, false);
                     new_binder_exception(
                         ExceptionCode::SERVICE_SPECIFIC,
                         format!("Failed to load app config from {}: {}", &config.configPath, e),
@@ -186,6 +178,7 @@ impl IVirtualizationService for VirtualizationService {
             VirtualMachineConfig::RawConfig(config) => BorrowedOrOwned::Borrowed(config),
         };
         let config = config.as_ref();
+        let protected = config.protectedVm;
 
         // Check if partition images are labeled incorrectly. This is to prevent random images
         // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
@@ -209,6 +202,7 @@ impl IVirtualizationService for VirtualizationService {
         let zero_filler_path = temporary_directory.join("zero.img");
         write_zero_filler(&zero_filler_path).map_err(|e| {
             error!("Failed to make composite image: {}", e);
+            write_vm_creation_stats(protected, false);
             new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
                 format!("Failed to make composite image: {}", e),
@@ -238,8 +232,10 @@ impl IVirtualizationService for VirtualizationService {
             initrd: maybe_clone_file(&config.initrd)?,
             disks,
             params: config.params.to_owned(),
-            protected: config.protectedVm,
+            protected,
             memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
+            cpus: config.numCpus.try_into().ok().and_then(NonZeroU32::new),
+            cpu_affinity: config.cpuAffinity.clone(),
             console_fd,
             log_fd,
             indirect_files,
@@ -254,6 +250,7 @@ impl IVirtualizationService for VirtualizationService {
             )
             .map_err(|e| {
                 error!("Failed to create VM with config {:?}: {}", config, e);
+                write_vm_creation_stats(protected, false);
                 new_binder_exception(
                     ExceptionCode::SERVICE_SPECIFIC,
                     format!("Failed to create VM: {}", e),
@@ -261,6 +258,7 @@ impl IVirtualizationService for VirtualizationService {
             })?,
         );
         state.add_vm(Arc::downgrade(&instance));
+        write_vm_creation_stats(protected, true);
         Ok(VirtualMachine::create(instance))
     }
 
@@ -409,6 +407,16 @@ impl VirtualizationService {
     }
 }
 
+/// Write the stats of VMCreation to statsd
+fn write_vm_creation_stats(protected: bool, success: bool) {
+    match stats_write(Hypervisor::Pkvm, protected, success) {
+        Err(e) => {
+            warn!("statslog_rust failed with error: {}", e);
+        }
+        Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
+    }
+}
+
 /// Waits for incoming connections from VM. If a new connection is made, stores the stream in the
 /// corresponding `VmInstance`.
 fn handle_stream_connection_from_vm(state: Arc<Mutex<State>>) -> Result<()> {
@@ -536,6 +544,10 @@ fn load_app_config(
     if config.memoryMib > 0 {
         vm_config.memoryMib = config.memoryMib;
     }
+
+    vm_config.protectedVm = config.protectedVm;
+    vm_config.numCpus = config.numCpus;
+    vm_config.cpuAffinity = config.cpuAffinity.clone();
 
     // Microdroid requires an additional payload disk image and the bootconfig partition.
     if os_name == "microdroid" {
@@ -759,10 +771,10 @@ impl VirtualMachineCallbacks {
     }
 
     /// Call all registered callbacks to say that the VM has died.
-    pub fn callback_on_died(&self, cid: Cid) {
+    pub fn callback_on_died(&self, cid: Cid, reason: DeathReason) {
         let callbacks = &*self.0.lock().unwrap();
         for callback in callbacks {
-            if let Err(e) = callback.onDied(cid as i32) {
+            if let Err(e) = callback.onDied(cid as i32, reason) {
                 error!("Error notifying exit of VM CID {}: {}", cid, e);
             }
         }
@@ -827,7 +839,7 @@ impl State {
 /// a system property so that restart of virtualizationservice doesn't reuse CID while the host
 /// Android is up.
 fn next_cid() -> Result<Cid> {
-    let next = if let Ok(val) = system_properties::read(SYSPROP_LAST_CID) {
+    let next = if let Some(val) = system_properties::read(SYSPROP_LAST_CID)? {
         if let Ok(num) = val.parse::<u32>() {
             num.checked_add(1).ok_or_else(|| anyhow!("run out of CID"))?
         } else {
