@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+/// Magic used in fs-verity digest
+pub const FS_VERITY_MAGIC: &[u8; 8] = b"FSVerity";
+
 /// fs-verity version that we are using
 pub const FS_VERITY_VERSION: u8 = 1;
 
