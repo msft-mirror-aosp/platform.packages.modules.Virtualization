@@ -17,15 +17,12 @@
 package android.virt.test;
 
 import static org.hamcrest.CoreMatchers.is;
-import static org.junit.Assert.assertEquals;
+import static org.hamcrest.CoreMatchers.not;
 import static org.junit.Assert.assertThat;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
-import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.testtype.DeviceJUnit4ClassRunner;
+import com.android.tradefed.testtype.junit4.BaseHostJUnit4Test;
 import com.android.tradefed.util.CommandResult;
-import com.android.tradefed.util.CommandStatus;
 import com.android.tradefed.util.FileUtil;
 import com.android.tradefed.util.RunUtil;
 
@@ -35,134 +32,160 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.io.File;
-import java.util.Optional;
+import java.io.FileWriter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @RunWith(DeviceJUnit4ClassRunner.class)
-public class MicrodroidTestCase extends VirtualizationTestCaseBase {
-    private static final String APK_NAME = "MicrodroidTestApp.apk";
-    private static final String PACKAGE_NAME = "com.android.microdroid.test";
+public class MicrodroidTestCase extends BaseHostJUnit4Test {
+    private static final String TEST_ROOT = "/data/local/tmp/virt/";
+    private static final String VIRT_APEX = "/apex/com.android.virt/";
+    private static final int TEST_VM_CID = 5;
+    private static final int TEST_VM_ADB_PORT = 8000;
+    private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
+    private static final long MICRODROID_BOOT_TIMEOUT_MILLIS = 15000;
 
-    private static final int MIN_MEM_ARM64 = 145;
-    private static final int MIN_MEM_X86_64 = 196;
-
-    // Number of vCPUs and their affinity to host CPUs for testing purpose
-    private static final int NUM_VCPUS = 3;
-    private static final String CPU_AFFINITY = "0,1,2";
-
-    // TODO(b/176805428): remove this
-    private boolean isCuttlefish() throws Exception {
-        String productName = getDevice().getProperty("ro.product.name");
-        return (null != productName)
-                && (productName.startsWith("aosp_cf_x86")
-                        || productName.startsWith("aosp_cf_arm")
-                        || productName.startsWith("cf_x86")
-                        || productName.startsWith("cf_arm"));
+    private String executeCommand(String cmd) {
+        final long defaultCommandTimeoutMillis = 1000; // 1 sec
+        return executeCommand(defaultCommandTimeoutMillis, cmd);
     }
 
-    private int minMemorySize() throws DeviceNotAvailableException {
-        CommandRunner android = new CommandRunner(getDevice());
-        String abi = android.run("getprop", "ro.product.cpu.abi");
-        assertTrue(abi != null && !abi.isEmpty());
-        if (abi.startsWith("arm64")) {
-            return MIN_MEM_ARM64;
-        } else if (abi.startsWith("x86_64")) {
-            return MIN_MEM_X86_64;
-        }
-        fail("Unsupported ABI: " + abi);
-        return 0;
+    private String executeCommand(long timeout, String cmd) {
+        CommandResult result = RunUtil.getDefault().runTimedCmd(timeout, cmd.split(" "));
+        return result.getStdout().trim(); // remove the trailing whitespace including newline
     }
 
     @Test
     public void testMicrodroidBoots() throws Exception {
-        final String configPath = "assets/vm_config.json"; // path inside the APK
-        final String cid =
-                startMicrodroid(
-                        getDevice(),
-                        getBuild(),
-                        APK_NAME,
-                        PACKAGE_NAME,
-                        configPath,
-                        /* debug */ true,
-                        minMemorySize(),
-                        Optional.of(NUM_VCPUS),
-                        Optional.of(CPU_AFFINITY));
-        adbConnectToMicrodroid(getDevice(), cid);
+        // Prepare input files
+        String prepareImagesCmd =
+                String.format(
+                        "mkdir -p %s; cd %s; "
+                                + "cp %setc/microdroid_bootloader bootloader && "
+                                + "cp %setc/fs/*.img . && "
+                                + "cp %setc/uboot_env.img . && "
+                                + "dd if=/dev/zero of=misc.img bs=4k count=256 && "
+                                + "dd if=/dev/zero of=userdata.img bs=1 count=0 seek=4G && "
+                                + "mkfs.ext4 userdata.img",
+                        TEST_ROOT, TEST_ROOT, VIRT_APEX, VIRT_APEX, VIRT_APEX);
+        getDevice().executeShellCommand(prepareImagesCmd);
 
-        // Wait until logd-init starts. The service is one of the last services that are started in
-        // the microdroid boot procedure. Therefore, waiting for the service means that we wait for
-        // the boot to complete. TODO: we need a better marker eventually.
-        tryRunOnMicrodroid("watch -e \"getprop init.svc.logd-reinit | grep '^$'\"");
+        // Create os_composite.img, env_composite.img, userdata.img, and payload.img
+        String makeOsCompositeCmd =
+                String.format(
+                        "cd %s; %sbin/mk_cdisk %setc/microdroid_cdisk.json os_composite.img",
+                        TEST_ROOT, VIRT_APEX, VIRT_APEX);
+        getDevice().executeShellCommand(makeOsCompositeCmd);
+        String makeEnvCompositeCmd =
+                String.format(
+                        "cd %s; %sbin/mk_cdisk %setc/microdroid_cdisk_env.json env_composite.img",
+                        TEST_ROOT, VIRT_APEX, VIRT_APEX);
+        getDevice().executeShellCommand(makeEnvCompositeCmd);
+        String makeDataCompositeCmd =
+                String.format(
+                        "cd %s; %sbin/mk_cdisk %setc/microdroid_cdisk_userdata.json"
+                                + " userdata_composite.img",
+                        TEST_ROOT, VIRT_APEX, VIRT_APEX);
+        getDevice().executeShellCommand(makeDataCompositeCmd);
+        String makeDataCompositeQcow2Cmd =
+                String.format(
+                        "cd %s; %sbin/crosvm create_qcow2 --backing_file=userdata_composite.img"
+                                + " userdata_composite.qcow2",
+                        TEST_ROOT, VIRT_APEX);
+        getDevice().executeShellCommand(makeDataCompositeQcow2Cmd);
+        String makePayloadCompositeCmd =
+                String.format(
+                        "cd %s; %sbin/mk_payload %setc/microdroid_payload.json payload.img",
+                        TEST_ROOT, VIRT_APEX, VIRT_APEX);
+        getDevice().executeShellCommand(makePayloadCompositeCmd);
+
+        // Make sure that the composite images are created
+        final List<String> compositeImages =
+                new ArrayList<>(
+                        Arrays.asList(
+                                TEST_ROOT + "/os_composite.img",
+                                TEST_ROOT + "/env_composite.img",
+                                TEST_ROOT + "/userdata_composite.qcow2",
+                                TEST_ROOT + "/payload.img"));
+        CommandResult result =
+                getDevice().executeShellV2Command("du -b " + String.join(" ", compositeImages));
+        assertThat(result.getExitCode(), is(0));
+        assertThat(result.getStdout(), is(not("")));
+
+        // Start microdroid using crosvm
+        ExecutorService executor = Executors.newFixedThreadPool(1);
+        String runMicrodroidCmd =
+                String.format(
+                        "cd %s; %sbin/crosvm run --cid=%d --disable-sandbox --bios=bootloader"
+                                + " --serial=type=syslog --disk=os_composite.img"
+                                + " --disk=env_composite.img --disk=payload.img"
+                                + " --rwdisk=userdata_composite.qcow2",
+                        TEST_ROOT, VIRT_APEX, TEST_VM_CID);
+        executor.execute(
+                () -> {
+                    try {
+                        getDevice().executeShellV2Command(runMicrodroidCmd);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+        // .. and wait for microdroid to boot
+        // TODO(jiyong): don't wait too long. We can wait less by monitoring log from microdroid
+        Thread.sleep(MICRODROID_BOOT_TIMEOUT_MILLIS);
+
+        // Connect to microdroid and read a system property from there
+        executeCommand(
+                "adb -s "
+                        + getDevice().getSerialNumber()
+                        + " forward tcp:"
+                        + TEST_VM_ADB_PORT
+                        + " vsock:"
+                        + TEST_VM_CID
+                        + ":5555");
+        executeCommand("adb connect " + MICRODROID_SERIAL);
+        String prop = executeCommand("adb -s " + MICRODROID_SERIAL + " shell getprop ro.hardware");
+        assertThat(prop, is("microdroid"));
 
         // Test writing to /data partition
-        runOnMicrodroid("echo MicrodroidTest > /data/local/tmp/test.txt");
-        assertThat(runOnMicrodroid("cat /data/local/tmp/test.txt"), is("MicrodroidTest"));
+        File tmpFile = FileUtil.createTempFile("test", ".txt");
+        tmpFile.deleteOnExit();
+        FileWriter writer = new FileWriter(tmpFile);
+        writer.write("MicrodroidTest");
+        writer.close();
 
-        // Check if the APK & its idsig partitions exist
-        final String apkPartition = "/dev/block/by-name/microdroid-apk";
-        assertThat(runOnMicrodroid("ls", apkPartition), is(apkPartition));
-        final String apkIdsigPartition = "/dev/block/by-name/microdroid-apk-idsig";
-        assertThat(runOnMicrodroid("ls", apkIdsigPartition), is(apkIdsigPartition));
-        // Check the vm-instance partition as well
-        final String vmInstancePartition = "/dev/block/by-name/vm-instance";
-        assertThat(runOnMicrodroid("ls", vmInstancePartition), is(vmInstancePartition));
+        executeCommand(
+                "adb -s "
+                        + MICRODROID_SERIAL
+                        + " push "
+                        + tmpFile.getPath()
+                        + " /data/local/tmp/test.txt");
+        String catResult =
+                executeCommand(
+                        "adb -s " + MICRODROID_SERIAL + " shell cat /data/local/tmp/test.txt");
+        assertThat(catResult, is("MicrodroidTest"));
 
-        // Check if the native library in the APK is has correct filesystem info
-        final String[] abis = runOnMicrodroid("getprop", "ro.product.cpu.abilist").split(",");
-        assertThat(abis.length, is(1));
-        final String testLib = "/mnt/apk/lib/" + abis[0] + "/MicrodroidTestNativeLib.so";
-        final String label = "u:object_r:system_file:s0";
-        assertThat(runOnMicrodroid("ls", "-Z", testLib), is(label + " " + testLib));
-
-        // Check that no denials have happened so far
-        assertThat(runOnMicrodroid("logcat -d -e 'avc:[[:space:]]{1,2}denied'"), is(""));
-
-        assertThat(runOnMicrodroid("cat /proc/cpuinfo | grep processor | wc -l"),
-                is(Integer.toString(NUM_VCPUS)));
-
-        // TODO(b/176805428): adb is broken for nested VM
-        if (!isCuttlefish()) {
-            // Check neverallow rules on microdroid
-            File policyFile = FileUtil.createTempFile("microdroid_sepolicy", "");
-            pullMicrodroidFile("/sys/fs/selinux/policy", policyFile);
-
-            File generalPolicyConfFile = findTestFile("microdroid_general_sepolicy.conf");
-            File sepolicyAnalyzeBin = findTestFile("sepolicy-analyze");
-
-            CommandResult result =
-                    RunUtil.getDefault()
-                            .runTimedCmd(
-                                    10000,
-                                    sepolicyAnalyzeBin.getPath(),
-                                    policyFile.getPath(),
-                                    "neverallow",
-                                    "-w",
-                                    "-f",
-                                    generalPolicyConfFile.getPath());
-            assertEquals(
-                    "neverallow check failed: " + result.getStderr().trim(),
-                    result.getStatus(),
-                    CommandStatus.SUCCESS);
-        }
-
-        shutdownMicrodroid(getDevice(), cid);
+        // Shutdown microdroid
+        executeCommand("adb -s localhost:" + TEST_VM_ADB_PORT + " shell reboot");
     }
 
     @Before
     public void setUp() throws Exception {
-        testIfDeviceIsCapable(getDevice());
+        // delete the test root
+        getDevice().executeShellCommand("rm -rf " + TEST_ROOT);
 
-        prepareVirtualizationTestSetup(getDevice());
-
-        getDevice().installPackage(findTestFile(APK_NAME), /* reinstall */ false);
-
-        // clear the log
-        getDevice().executeShellV2Command("logcat -c");
+        // disconnect from microdroid
+        executeCommand("adb disconnect " + MICRODROID_SERIAL);
     }
 
     @After
     public void shutdown() throws Exception {
-        cleanUpVirtualizationTestSetup(getDevice());
+        // disconnect from microdroid
+        executeCommand("adb disconnect " + MICRODROID_SERIAL);
 
-        getDevice().uninstallPackage(PACKAGE_NAME);
+        // kill stale crosvm processes
+        getDevice().executeShellV2Command("killall crosvm");
     }
 }
