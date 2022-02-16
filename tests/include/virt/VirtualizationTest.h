@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 
-#include "android/system/virtualizationservice/IVirtualMachine.h"
-#include "android/system/virtualizationservice/IVirtualizationService.h"
+#include "android/system/virtmanager/IVirtManager.h"
+#include "android/system/virtmanager/IVirtualMachine.h"
 #include "binder/IServiceManager.h"
 #include "gtest/gtest.h"
 
 using namespace android;
-using namespace android::system::virtualizationservice;
+using namespace android::system::virtmanager;
 
 namespace virt {
 
@@ -28,7 +28,7 @@ class VirtualizationTest : public ::testing::Test {
 protected:
     void SetUp() override;
 
-    sp<IVirtualizationService> mVirtualizationService;
+    sp<IVirtManager> mVirtManager;
 };
 
 } // namespace virt
