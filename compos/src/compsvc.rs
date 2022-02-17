@@ -14,141 +14,140 @@
  * limitations under the License.
  */
 
-//! compsvc is a service to run computational tasks in a PVM upon request. It is able to set up
-//! file descriptors backed by fd_server and pass the file descriptors to the actual tasks for
-//! read/write. The service also attempts to sandbox the execution so that one task cannot leak or
-//! impact future tasks.
-//!
-//! Example:
-//! $ compsvc /system/bin/sleep
-//!
-//! The current architecture / process hierarchy looks like:
-//! - compsvc (handle requests)
-//!   - compsvc_worker (for environment setup)
-//!     - authfs (fd translation)
-//!     - actual task
+//! compsvc is a service to run compilation tasks in a PVM upon request. It is able to set up
+//! file descriptors backed by authfs (via authfs_service) and pass the file descriptors to the
+//! actual compiler.
 
 use anyhow::{bail, Context, Result};
-use log::error;
-use minijail::{self, Minijail};
-use std::path::PathBuf;
+use binder_common::new_binder_exception;
+use compos_common::binder::to_binder_result;
+use log::warn;
+use std::default::Default;
+use std::fs::read_dir;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
-use compos_aidl_interface::aidl::com::android::compos::ICompService::{
-    BnCompService, ICompService,
+use crate::artifact_signer::ArtifactSigner;
+use crate::compilation::{odrefresh, OdrefreshContext};
+use crate::dice::Dice;
+use crate::signing_key::DiceSigningKey;
+use authfs_aidl_interface::aidl::com::android::virt::fs::IAuthFsService::IAuthFsService;
+use compos_aidl_interface::aidl::com::android::compos::{
+    CompOsKeyData::CompOsKeyData,
+    ICompOsService::{BnCompOsService, CompilationMode::CompilationMode, ICompOsService},
 };
-use compos_aidl_interface::aidl::com::android::compos::Metadata::Metadata;
 use compos_aidl_interface::binder::{
-    add_service, BinderFeatures, Interface, ProcessState, Result as BinderResult, Status,
-    StatusCode, Strong,
+    BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Strong,
 };
+use compos_common::odrefresh::ODREFRESH_PATH;
 
-const SERVICE_NAME: &str = "compsvc";
-// TODO(b/161470604): Move the executable into an apex.
-const WORKER_BIN: &str = "/system/bin/compsvc_worker";
-// TODO: Replace with a valid directory setup in the VM.
-const AUTHFS_MOUNTPOINT: &str = "/data/local/tmp/authfs_mnt";
+const AUTHFS_SERVICE_NAME: &str = "authfs_service";
 
-struct CompService {
-    worker_bin: PathBuf,
-    task_bin: String,
-    debuggable: bool,
+/// Constructs a binder object that implements ICompOsService.
+pub fn new_binder() -> Result<Strong<dyn ICompOsService>> {
+    let service = CompOsService {
+        odrefresh_path: PathBuf::from(ODREFRESH_PATH),
+        signing_key: DiceSigningKey::new(Dice::new()?),
+        key_blob: RwLock::new(Vec::new()),
+    };
+    Ok(BnCompOsService::new_binder(service, BinderFeatures::default()))
 }
 
-impl CompService {
-    pub fn new_binder(service: CompService) -> Strong<dyn ICompService> {
-        BnCompService::new_binder(service, BinderFeatures::default())
-    }
+struct CompOsService {
+    odrefresh_path: PathBuf,
+    signing_key: DiceSigningKey,
+    key_blob: RwLock<Vec<u8>>,
+}
 
-    fn run_worker_in_jail_and_wait(&self, args: &[String]) -> Result<(), minijail::Error> {
-        let mut jail = Minijail::new()?;
+impl Interface for CompOsService {}
 
-        // TODO(b/185175567): New user and uid namespace when supported. Run as nobody.
-        // New mount namespace to isolate the FUSE mount.
-        jail.namespace_vfs();
-
-        let inheritable_fds = if self.debuggable {
-            vec![1, 2] // inherit/redirect stdout/stderr for debugging
+impl ICompOsService for CompOsService {
+    fn initializeSigningKey(&self, key_blob: &[u8]) -> BinderResult<()> {
+        let mut w = self.key_blob.write().unwrap();
+        if w.is_empty() {
+            *w = Vec::from(key_blob);
+            Ok(())
         } else {
-            vec![]
-        };
-        let _pid = jail.run(&self.worker_bin, &inheritable_fds, &args)?;
-        jail.wait()
+            Err(new_binder_exception(ExceptionCode::ILLEGAL_STATE, "Cannot re-initialize the key"))
+        }
     }
 
-    fn build_worker_args(&self, args: &[String], metadata: &Metadata) -> Vec<String> {
-        let mut worker_args = vec![
-            WORKER_BIN.to_string(),
-            "--authfs-root".to_string(),
-            AUTHFS_MOUNTPOINT.to_string(),
-        ];
-        for annotation in &metadata.input_fd_annotations {
-            worker_args.push("--in-fd".to_string());
-            worker_args.push(format!("{}:{}", annotation.fd, annotation.file_size));
+    fn odrefresh(
+        &self,
+        compilation_mode: CompilationMode,
+        system_dir_fd: i32,
+        output_dir_fd: i32,
+        staging_dir_fd: i32,
+        target_dir_name: &str,
+        zygote_arch: &str,
+        system_server_compiler_filter: &str,
+    ) -> BinderResult<i8> {
+        let key = &*self.key_blob.read().unwrap();
+        if key.is_empty() {
+            return Err(new_binder_exception(
+                ExceptionCode::ILLEGAL_STATE,
+                "Key is not initialized",
+            ));
         }
-        for annotation in &metadata.output_fd_annotations {
-            worker_args.push("--out-fd".to_string());
-            worker_args.push(annotation.fd.to_string());
-        }
-        if self.debuggable {
-            worker_args.push("--debug".to_string());
-        }
-        worker_args.push("--".to_string());
 
-        // Do not accept arbitrary code execution. We want to execute some specific task of this
-        // service. Use the associated executable.
-        worker_args.push(self.task_bin.clone());
-        worker_args.extend_from_slice(&args[1..]);
-        worker_args
+        let context = to_binder_result(OdrefreshContext::new(
+            compilation_mode,
+            system_dir_fd,
+            output_dir_fd,
+            staging_dir_fd,
+            target_dir_name,
+            zygote_arch,
+            system_server_compiler_filter,
+        ))?;
+
+        let authfs_service = get_authfs_service()?;
+        let exit_code = to_binder_result(
+            odrefresh(&self.odrefresh_path, context, authfs_service, |output_dir| {
+                // authfs only shows us the files we created, so it's ok to just sign everything
+                // under the output directory.
+                let mut artifact_signer = ArtifactSigner::new(&output_dir);
+                add_artifacts(&output_dir, &mut artifact_signer)?;
+
+                let signer = to_binder_result(self.signing_key.new_signer(key))?;
+                artifact_signer.write_info_and_signature(signer, &output_dir.join("compos.info"))
+            })
+            .context("odrefresh failed"),
+        )?;
+        Ok(exit_code as i8)
+    }
+
+    fn generateSigningKey(&self) -> BinderResult<CompOsKeyData> {
+        to_binder_result(self.signing_key.generate())
+    }
+
+    fn verifySigningKey(&self, key_blob: &[u8], public_key: &[u8]) -> BinderResult<bool> {
+        Ok(if let Err(e) = self.signing_key.verify(key_blob, public_key) {
+            warn!("Signing key verification failed: {:?}", e);
+            false
+        } else {
+            true
+        })
     }
 }
 
-impl Interface for CompService {}
+fn get_authfs_service() -> BinderResult<Strong<dyn IAuthFsService>> {
+    Ok(authfs_aidl_interface::binder::get_interface(AUTHFS_SERVICE_NAME)?)
+}
 
-impl ICompService for CompService {
-    fn execute(&self, args: &[String], metadata: &Metadata) -> BinderResult<i8> {
-        let worker_args = self.build_worker_args(args, metadata);
-
-        match self.run_worker_in_jail_and_wait(&worker_args) {
-            Ok(_) => Ok(0), // TODO(b/161471326): Sign the output on succeed.
-            Err(minijail::Error::ReturnCode(exit_code)) => {
-                error!("Task failed with exit code {}", exit_code);
-                Err(Status::from(StatusCode::FAILED_TRANSACTION))
-            }
-            Err(e) => {
-                error!("Unexpected error: {}", e);
-                Err(Status::from(StatusCode::UNKNOWN_ERROR))
-            }
+fn add_artifacts(target_dir: &Path, artifact_signer: &mut ArtifactSigner) -> Result<()> {
+    for entry in
+        read_dir(&target_dir).with_context(|| format!("Traversing {}", target_dir.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            add_artifacts(&entry.path(), artifact_signer)?;
+        } else if file_type.is_file() {
+            artifact_signer.add_artifact(&entry.path())?;
+        } else {
+            // authfs shouldn't create anything else, but just in case
+            bail!("Unexpected file type in artifacts: {:?}", entry);
         }
     }
-}
-
-fn parse_args() -> Result<CompService> {
-    #[rustfmt::skip]
-    let matches = clap::App::new("compsvc")
-        .arg(clap::Arg::with_name("debug")
-             .long("debug"))
-        .arg(clap::Arg::with_name("task_bin")
-             .required(true))
-        .get_matches();
-
-    Ok(CompService {
-        task_bin: matches.value_of("task_bin").unwrap().to_string(),
-        worker_bin: PathBuf::from(WORKER_BIN),
-        debuggable: matches.is_present("debug"),
-    })
-}
-
-fn main() -> Result<()> {
-    android_logger::init_once(
-        android_logger::Config::default().with_tag("compsvc").with_min_level(log::Level::Debug),
-    );
-
-    let service = parse_args()?;
-
-    ProcessState::start_thread_pool();
-    // TODO: switch to remote binder
-    add_service(SERVICE_NAME, CompService::new_binder(service).as_binder())
-        .with_context(|| format!("Failed to register service {}", SERVICE_NAME))?;
-    ProcessState::join_thread_pool();
-    bail!("Unexpected exit after join_thread_pool")
+    Ok(())
 }
