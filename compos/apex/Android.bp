@@ -42,11 +42,12 @@ apex {
 
     binaries: [
         // Used in Android
-        "compos_verify_key",
+        "compos_verify",
         "composd",
         "composd_cmd",
 
         // Used in VM
+        "compos_key_helper",
         "compsvc",
     ],
 
