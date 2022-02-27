@@ -43,7 +43,7 @@ import java.util.regex.Pattern;
 
 public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
     protected static final String TEST_ROOT = "/data/local/tmp/virt/";
-    private static final String VIRT_APEX = "/apex/com.android.virt/";
+    protected static final String VIRT_APEX = "/apex/com.android.virt/";
     private static final int TEST_VM_ADB_PORT = 8000;
     private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
     private static final String INSTANCE_IMG = "instance.img";
@@ -194,6 +194,22 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         }
     }
 
+    public String getPathForPackage(String packageName)
+            throws DeviceNotAvailableException {
+        return getPathForPackage(getDevice(), packageName);
+    }
+
+    // Get the path to the installed apk. Note that
+    // getDevice().getAppPackageInfo(...).getCodePath() doesn't work due to the incorrect
+    // parsing of the "=" character. (b/190975227). So we use the `pm path` command directly.
+    private static String getPathForPackage(ITestDevice device, String packageName)
+            throws DeviceNotAvailableException {
+        CommandRunner android = new CommandRunner(device);
+        String pathLine = android.run("pm", "path", packageName);
+        assertTrue("package not found", pathLine.startsWith("package:"));
+        return pathLine.substring("package:".length());
+    }
+
     public static String startMicrodroid(
             ITestDevice androidDevice,
             IBuildInfo buildInfo,
@@ -247,13 +263,8 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
             androidDevice.installPackage(apkFile, /* reinstall */ true);
         }
 
-        // Get the path to the installed apk. Note that
-        // getDevice().getAppPackageInfo(...).getCodePath() doesn't work due to the incorrect
-        // parsing of the "=" character. (b/190975227). So we use the `pm path` command directly.
         if (apkPath == null) {
-            apkPath = android.run("pm", "path", packageName);
-            assertTrue(apkPath.startsWith("package:"));
-            apkPath = apkPath.substring("package:".length());
+            apkPath = getPathForPackage(androidDevice, packageName);
         }
 
         android.run("mkdir", "-p", TEST_ROOT);

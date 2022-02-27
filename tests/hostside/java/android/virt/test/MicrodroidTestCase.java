@@ -16,12 +16,14 @@
 
 package android.virt.test;
 
+import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
 
 import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.result.TestDescription;
@@ -33,14 +35,24 @@ import com.android.tradefed.util.CommandStatus;
 import com.android.tradefed.util.FileUtil;
 import com.android.tradefed.util.RunUtil;
 
+import com.google.gson.Gson;
+import com.google.gson.annotations.SerializedName;
+
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @RunWith(DeviceJUnit4ClassRunner.class)
 public class MicrodroidTestCase extends VirtualizationTestCaseBase {
@@ -77,6 +89,11 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         return 0;
     }
 
+    private boolean isProtectedVmSupported() throws DeviceNotAvailableException {
+        return getDevice().getBooleanProperty("ro.boot.hypervisor.protected_vm.supported",
+                false);
+    }
+
     @Test
     public void testCreateVmRequiresPermission() throws Exception {
         // Revoke the MANAGE_VIRTUAL_MACHINE permission for the test app
@@ -96,6 +113,259 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         assertTrue("The test should fail with a permission error",
                 result.getStackTrace()
                 .contains("android.permission.MANAGE_VIRTUAL_MACHINE permission"));
+    }
+
+    // Helper classes for (de)serialization of VM raw configs
+    static class VmRawConfig {
+        String bootloader;
+        List<Disk> disks;
+        int memory_mib;
+        @SerializedName("protected")
+        boolean isProtected;
+        String platform_version;
+    }
+
+    static class Disk {
+        List<Partition> partitions;
+        boolean writable;
+        public void addPartition(String label, String path) {
+            if (partitions == null) {
+                partitions = new ArrayList<Partition>();
+            }
+            Partition partition = new Partition();
+            partition.label = label;
+            partition.path = path;
+            partitions.add(partition);
+        }
+    }
+
+    static class Partition {
+        String label;
+        String path;
+        boolean writable;
+    }
+
+    private void resignVirtApex(File virtApexDir, File signingKey, Map<String, File> keyOverrides) {
+        File signVirtApex = findTestFile("sign_virt_apex");
+
+        RunUtil runUtil = new RunUtil();
+        // Set the parent dir on the PATH (e.g. <workdir>/bin)
+        String separator = System.getProperty("path.separator");
+        String path = signVirtApex.getParentFile().getPath() + separator + System.getenv("PATH");
+        runUtil.setEnvVariable("PATH", path);
+
+        List<String> command = new ArrayList<String>();
+        command.add("sign_virt_apex");
+        for (Map.Entry<String, File> entry : keyOverrides.entrySet()) {
+            String filename = entry.getKey();
+            File overridingKey = entry.getValue();
+            command.add("--key_override " + filename + "=" + overridingKey.getPath());
+        }
+        command.add(signingKey.getPath());
+        command.add(virtApexDir.getPath());
+
+        CommandResult result = runUtil.runTimedCmd(
+                                    20 * 1000,
+                                    "/bin/bash",
+                                    "-c",
+                                    String.join(" ", command));
+        String out = result.getStdout();
+        String err = result.getStderr();
+        assertEquals(
+                "resigning the Virt APEX failed:\n\tout: " + out + "\n\terr: " + err + "\n",
+                CommandStatus.SUCCESS, result.getStatus());
+    }
+
+    private static <T> void assertThatEventually(long timeoutMillis, Callable<T> callable,
+            org.hamcrest.Matcher<T> matcher) throws Exception {
+        long start = System.currentTimeMillis();
+        while (true) {
+            try {
+                assertThat(callable.call(), matcher);
+                return;
+            } catch (Throwable e) {
+                if (System.currentTimeMillis() - start < timeoutMillis) {
+                    Thread.sleep(500);
+                } else {
+                    throw e;
+                }
+            }
+        }
+    }
+
+    private String runMicrodroidWithResignedImages(File key, Map<String, File> keyOverrides,
+            boolean isProtected, boolean daemonize, String consolePath)
+            throws DeviceNotAvailableException, IOException {
+        CommandRunner android = new CommandRunner(getDevice());
+
+        File virtApexDir = FileUtil.createTempDir("virt_apex");
+
+        // Pull the virt apex's etc/ directory (which contains images and microdroid.json)
+        File virtApexEtcDir = new File(virtApexDir, "etc");
+        // We need only etc/ directory for images
+        assertTrue(virtApexEtcDir.mkdirs());
+        assertTrue(getDevice().pullDir(VIRT_APEX + "etc", virtApexEtcDir));
+
+        resignVirtApex(virtApexDir, key, keyOverrides);
+
+        // Push back re-signed virt APEX contents and updated microdroid.json
+        getDevice().pushDir(virtApexDir, TEST_ROOT);
+
+        // Create the idsig file for the APK
+        final String apkPath = getPathForPackage(PACKAGE_NAME);
+        final String idSigPath = TEST_ROOT + "idsig";
+        android.run(VIRT_APEX + "bin/vm", "create-idsig", apkPath, idSigPath);
+
+        // Create the instance image for the VM
+        final String instanceImgPath = TEST_ROOT + "instance.img";
+        android.run(VIRT_APEX + "bin/vm", "create-partition", "--type instance",
+                instanceImgPath, Integer.toString(10 * 1024 * 1024));
+
+        // payload-metadata is prepared on host with the two APEXes and APK
+        final String payloadMetadataPath = TEST_ROOT + "payload-metadata.img";
+        getDevice().pushFile(findTestFile("test-payload-metadata.img"), payloadMetadataPath);
+
+        // push APEXes required for the VM.
+        final String statsdApexPath = TEST_ROOT + "com.android.os.statsd.apex";
+        final String adbdApexPath = TEST_ROOT + "com.android.adbd.apex";
+        getDevice().pushFile(findTestFile("com.android.os.statsd.apex"), statsdApexPath);
+        getDevice().pushFile(findTestFile("com.android.adbd.apex"), adbdApexPath);
+
+        // Since Java APP can't start a VM with a custom image, here, we start a VM using `vm run`
+        // command with a VM Raw config which is equiv. to what virtualizationservice creates with
+        // a VM App config.
+        //
+        // 1. use etc/microdroid.json as base
+        // 2. add partitions: bootconfig, vbmeta, instance image
+        // 3. add a payload image disk with
+        //   - payload-metadata
+        //   - apexes
+        //   - test apk
+        //   - its idsig
+
+        // Load etc/microdroid.json
+        Gson gson = new Gson();
+        File microdroidConfigFile = new File(virtApexEtcDir, "microdroid.json");
+        VmRawConfig config = gson.fromJson(new FileReader(microdroidConfigFile),
+                VmRawConfig.class);
+
+        // Replace paths so that the config uses re-signed images from TEST_ROOT
+        config.bootloader = config.bootloader.replace(VIRT_APEX, TEST_ROOT);
+        for (Disk disk : config.disks) {
+            for (Partition part : disk.partitions) {
+                part.path = part.path.replace(VIRT_APEX, TEST_ROOT);
+            }
+        }
+
+        // Add partitions to the second disk
+        Disk secondDisk = config.disks.get(1);
+        secondDisk.addPartition("vbmeta",
+                TEST_ROOT + "etc/fs/microdroid_vbmeta_bootconfig.img");
+        secondDisk.addPartition("bootconfig",
+                TEST_ROOT + "etc/microdroid_bootconfig.full_debuggable");
+        secondDisk.addPartition("vm-instance", instanceImgPath);
+
+        // Add payload image disk with partitions:
+        // - payload-metadata
+        // - apexes: com.android.os.statsd, com.android.adbd
+        // - apk and idsig
+        Disk payloadDisk = new Disk();
+        payloadDisk.addPartition("payload-metadata", payloadMetadataPath);
+        payloadDisk.addPartition("microdroid-apex-0", statsdApexPath);
+        payloadDisk.addPartition("microdroid-apex-1", adbdApexPath);
+        payloadDisk.addPartition("microdroid-apk", apkPath);
+        payloadDisk.addPartition("microdroid-apk-idsig", idSigPath);
+        config.disks.add(payloadDisk);
+
+        config.isProtected = isProtected;
+
+        // Write updated raw config
+        final String configPath = TEST_ROOT + "raw_config.json";
+        getDevice().pushString(gson.toJson(config), configPath);
+
+        final String logPath = TEST_ROOT + "log";
+        final String ret = android.runWithTimeout(
+                60 * 1000,
+                VIRT_APEX + "bin/vm run",
+                daemonize ? "--daemonize" : "",
+                (consolePath != null) ? "--console " + consolePath : "",
+                "--log " + logPath,
+                configPath);
+        Pattern pattern = Pattern.compile("with CID (\\d+)");
+        Matcher matcher = pattern.matcher(ret);
+        assertTrue(matcher.find());
+        return matcher.group(1);
+    }
+
+    @Test
+    public void testBootFailsWhenProtectedVmStartsWithImagesSignedWithDifferentKey()
+            throws Exception {
+        assumeTrue(isProtectedVmSupported());
+
+        File key = findTestFile("test.com.android.virt.pem");
+        Map<String, File> keyOverrides = Map.of();
+        boolean isProtected = true;
+        boolean daemonize = false;  // VM should shut down due to boot failure.
+        String consolePath = TEST_ROOT + "console";
+        runMicrodroidWithResignedImages(key, keyOverrides, isProtected, daemonize, consolePath);
+        assertThat(getDevice().pullFileContents(consolePath),
+                containsString("pvmfw boot failed"));
+    }
+
+    @Test
+    public void testBootSucceedsWhenNonProtectedVmStartsWithImagesSignedWithDifferentKey()
+            throws Exception {
+        File key = findTestFile("test.com.android.virt.pem");
+        Map<String, File> keyOverrides = Map.of();
+        boolean isProtected = false;
+        boolean daemonize = true;
+        String consolePath = TEST_ROOT + "console";
+        String cid = runMicrodroidWithResignedImages(key, keyOverrides, isProtected, daemonize,
+                consolePath);
+        // Adb connection to the microdroid means that boot succeeded.
+        adbConnectToMicrodroid(getDevice(), cid);
+        shutdownMicrodroid(getDevice(), cid);
+    }
+
+    @Test
+    public void testBootFailsWhenBootloaderAndVbMetaAreSignedWithDifferentKeys()
+            throws Exception {
+        // Sign everything with key1 except vbmeta
+        File key = findTestFile("test.com.android.virt.pem");
+        File key2 = findTestFile("test2.com.android.virt.pem");
+        Map<String, File> keyOverrides = Map.of(
+                "microdroid_vbmeta.img", key2);
+        boolean isProtected = false;  // Not interested in pvwfw
+        boolean daemonize = true;  // Bootloader fails and enters prompts.
+                                   // To be able to stop it, it should be a daemon.
+        String consolePath = TEST_ROOT + "console";
+        String cid = runMicrodroidWithResignedImages(key, keyOverrides, isProtected, daemonize,
+                consolePath);
+        // Wail for a while so that bootloader prints errors to console
+        assertThatEventually(10000, () -> getDevice().pullFileContents(consolePath),
+                containsString("Public key was rejected"));
+        shutdownMicrodroid(getDevice(), cid);
+    }
+
+    @Test
+    public void testBootSucceedsWhenBootloaderAndVbmetaHaveSameSigningKeys()
+            throws Exception {
+        // Sign everything with key1 except bootloader and vbmeta
+        File key = findTestFile("test.com.android.virt.pem");
+        File key2 = findTestFile("test2.com.android.virt.pem");
+        Map<String, File> keyOverrides = Map.of(
+                "microdroid_bootloader", key2,
+                "microdroid_vbmeta.img", key2,
+                "microdroid_vbmeta_bootconfig.img", key2);
+        boolean isProtected = false;  // Not interested in pvwfw
+        boolean daemonize = true;  // Bootloader should succeed.
+                                   // To be able to stop it, it should be a daemon.
+        String consolePath = TEST_ROOT + "console";
+        String cid = runMicrodroidWithResignedImages(key, keyOverrides, isProtected, daemonize,
+                consolePath);
+        // Adb connection to the microdroid means that boot succeeded.
+        adbConnectToMicrodroid(getDevice(), cid);
+        shutdownMicrodroid(getDevice(), cid);
     }
 
     @Test

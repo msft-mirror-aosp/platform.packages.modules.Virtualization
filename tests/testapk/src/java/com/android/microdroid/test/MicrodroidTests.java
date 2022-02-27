@@ -47,16 +47,24 @@ import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
+import java.util.List;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+
+import co.nstant.in.cbor.CborDecoder;
+import co.nstant.in.cbor.CborException;
+import co.nstant.in.cbor.model.Array;
+import co.nstant.in.cbor.model.DataItem;
+import co.nstant.in.cbor.model.MajorType;
 
 @RunWith(Parameterized.class)
 public class MicrodroidTests {
@@ -65,9 +73,20 @@ public class MicrodroidTests {
     private static final String KERNEL_VERSION = SystemProperties.get("ro.kernel.version");
 
     private static class Inner {
+        public boolean mProtectedVm;
         public Context mContext;
         public VirtualMachineManager mVmm;
         public VirtualMachine mVm;
+
+        Inner(boolean protectedVm) {
+            mProtectedVm = protectedVm;
+        }
+
+        /** Create a new VirtualMachineConfig.Builder with the parameterized protection mode. */
+        public VirtualMachineConfig.Builder newVmConfigBuilder(String payloadConfigPath) {
+            return new VirtualMachineConfig.Builder(mContext, payloadConfigPath)
+                            .protectedVm(mProtectedVm);
+        }
     }
 
     @Parameterized.Parameters(name = "protectedVm={0}")
@@ -104,7 +123,7 @@ public class MicrodroidTests {
                 .that(HypervisorProperties.hypervisor_vm_supported().orElse(false))
                 .isTrue();
         }
-        mInner = new Inner();
+        mInner = new Inner(mProtectedVm);
         mInner.mContext = ApplicationProvider.getApplicationContext();
         mInner.mVmm = VirtualMachineManager.getInstance(mInner.mContext);
     }
@@ -134,7 +153,13 @@ public class MicrodroidTests {
         }
 
         void forceStop(VirtualMachine vm) {
-            this.onDied(vm, VirtualMachineCallback.DEATH_REASON_KILLED);
+            try {
+                vm.clearCallback();
+                vm.stop();
+                mExecutorService.shutdown();
+            } catch (VirtualMachineException e) {
+                throw new RuntimeException(e);
+            }
         }
 
         @Override
@@ -152,12 +177,7 @@ public class MicrodroidTests {
         @Override
         @CallSuper
         public void onDied(VirtualMachine vm, @DeathReason int reason) {
-            try {
-                vm.stop();
-                mExecutorService.shutdown();
-            } catch (VirtualMachineException e) {
-                throw new RuntimeException(e);
-            }
+            mExecutorService.shutdown();
         }
     }
 
@@ -172,8 +192,7 @@ public class MicrodroidTests {
             .isNotEqualTo("5.4");
 
         VirtualMachineConfig.Builder builder =
-                new VirtualMachineConfig.Builder(mInner.mContext, "assets/vm_config_extra_apk.json")
-                        .protectedVm(mProtectedVm);
+                mInner.newVmConfigBuilder("assets/vm_config_extra_apk.json");
         if (Build.SUPPORTED_ABIS.length > 0) {
             String primaryAbi = Build.SUPPORTED_ABIS[0];
             switch(primaryAbi) {
@@ -252,9 +271,7 @@ public class MicrodroidTests {
             .that(KERNEL_VERSION)
             .isNotEqualTo("5.4");
 
-        VirtualMachineConfig.Builder builder =
-                new VirtualMachineConfig.Builder(mInner.mContext, "assets/vm_config.json")
-                        .protectedVm(mProtectedVm);
+        VirtualMachineConfig.Builder builder = mInner.newVmConfigBuilder("assets/vm_config.json");
         VirtualMachineConfig normalConfig = builder.debugLevel(DebugLevel.NONE).build();
         mInner.mVm = mInner.mVmm.getOrCreate("test_vm", normalConfig);
         VmEventListener listener =
@@ -290,14 +307,18 @@ public class MicrodroidTests {
         assertThat(payloadStarted.getNow(false)).isFalse();
     }
 
-    private byte[] launchVmAndGetSecret(String instanceName)
+    private class VmCdis {
+        public byte[] cdiAttest;
+        public byte[] cdiSeal;
+    }
+
+    private VmCdis launchVmAndGetCdis(String instanceName)
             throws VirtualMachineException, InterruptedException {
-        VirtualMachineConfig.Builder builder =
-                new VirtualMachineConfig.Builder(mInner.mContext, "assets/vm_config.json")
-                        .protectedVm(mProtectedVm);
-        VirtualMachineConfig normalConfig = builder.debugLevel(DebugLevel.NONE).build();
+        VirtualMachineConfig normalConfig = mInner.newVmConfigBuilder("assets/vm_config.json")
+                .debugLevel(DebugLevel.NONE)
+                .build();
         mInner.mVm = mInner.mVmm.getOrCreate(instanceName, normalConfig);
-        final CompletableFuture<byte[]> secret = new CompletableFuture<>();
+        final VmCdis vmCdis = new VmCdis();
         final CompletableFuture<Exception> exception = new CompletableFuture<>();
         VmEventListener listener =
                 new VmEventListener() {
@@ -306,7 +327,8 @@ public class MicrodroidTests {
                         try {
                             ITestService testService = ITestService.Stub.asInterface(
                                     vm.connectToVsockServer(ITestService.SERVICE_PORT).get());
-                            secret.complete(testService.insecurelyExposeSecret());
+                            vmCdis.cdiAttest = testService.insecurelyExposeAttestationCdi();
+                            vmCdis.cdiSeal = testService.insecurelyExposeSealingCdi();
                             forceStop(vm);
                         } catch (Exception e) {
                             exception.complete(e);
@@ -315,11 +337,11 @@ public class MicrodroidTests {
                 };
         listener.runToFinish(mInner.mVm);
         assertThat(exception.getNow(null)).isNull();
-        return secret.getNow(null);
+        return vmCdis;
     }
 
     @Test
-    public void instancesOfSameVmHaveDifferentSecrets()
+    public void instancesOfSameVmHaveDifferentCdis()
             throws VirtualMachineException, InterruptedException {
         assume()
             .withMessage("Skip on Cuttlefish. b/195765441")
@@ -331,15 +353,19 @@ public class MicrodroidTests {
             .that(KERNEL_VERSION)
             .isNotEqualTo("5.4");
 
-        byte[] vm_a_secret = launchVmAndGetSecret("test_vm_a");
-        byte[] vm_b_secret = launchVmAndGetSecret("test_vm_b");
-        assertThat(vm_a_secret).isNotNull();
-        assertThat(vm_b_secret).isNotNull();
-        assertThat(vm_a_secret).isNotEqualTo(vm_b_secret);
+        VmCdis vm_a_cdis = launchVmAndGetCdis("test_vm_a");
+        VmCdis vm_b_cdis = launchVmAndGetCdis("test_vm_b");
+        assertThat(vm_a_cdis.cdiAttest).isNotNull();
+        assertThat(vm_b_cdis.cdiAttest).isNotNull();
+        assertThat(vm_a_cdis.cdiAttest).isNotEqualTo(vm_b_cdis.cdiAttest);
+        assertThat(vm_a_cdis.cdiSeal).isNotNull();
+        assertThat(vm_b_cdis.cdiSeal).isNotNull();
+        assertThat(vm_a_cdis.cdiSeal).isNotEqualTo(vm_b_cdis.cdiSeal);
+        assertThat(vm_a_cdis.cdiAttest).isNotEqualTo(vm_b_cdis.cdiSeal);
     }
 
     @Test
-    public void sameInstanceKeepsSameSecrets()
+    public void sameInstanceKeepsSameCdis()
             throws VirtualMachineException, InterruptedException {
         assume()
             .withMessage("Skip on Cuttlefish. b/195765441")
@@ -351,15 +377,72 @@ public class MicrodroidTests {
             .that(KERNEL_VERSION)
             .isNotEqualTo("5.4");
 
-        byte[] vm_secret_first_boot = launchVmAndGetSecret("test_vm");
-        byte[] vm_secret_second_boot = launchVmAndGetSecret("test_vm");
-        assertThat(vm_secret_first_boot).isNotNull();
-        assertThat(vm_secret_second_boot).isNotNull();
-        assertThat(vm_secret_first_boot).isEqualTo(vm_secret_second_boot);
+        VmCdis first_boot_cdis = launchVmAndGetCdis("test_vm");
+        VmCdis second_boot_cdis = launchVmAndGetCdis("test_vm");
+        // The attestation CDI isn't specified to be stable, though it might be
+        assertThat(first_boot_cdis.cdiSeal).isNotNull();
+        assertThat(second_boot_cdis.cdiSeal).isNotNull();
+        assertThat(first_boot_cdis.cdiSeal).isEqualTo(second_boot_cdis.cdiSeal);
+    }
+
+    @Test
+    public void bccIsSuperficiallyWellFormed()
+            throws VirtualMachineException, InterruptedException, CborException {
+        assume()
+            .withMessage("Skip on Cuttlefish. b/195765441")
+            .that(android.os.Build.DEVICE)
+            .isNotEqualTo("vsoc_x86_64");
+
+        assume()
+            .withMessage("SKip on 5.4 kernel. b/218303240")
+            .that(KERNEL_VERSION)
+            .isNotEqualTo("5.4");
+
+        VirtualMachineConfig normalConfig = mInner.newVmConfigBuilder("assets/vm_config.json")
+                .debugLevel(DebugLevel.NONE)
+                .build();
+        mInner.mVm = mInner.mVmm.getOrCreate("bcc_vm", normalConfig);
+        final VmCdis vmCdis = new VmCdis();
+        final CompletableFuture<byte[]> bcc = new CompletableFuture<>();
+        final CompletableFuture<Exception> exception = new CompletableFuture<>();
+        VmEventListener listener =
+                new VmEventListener() {
+                    @Override
+                    public void onPayloadReady(VirtualMachine vm) {
+                        try {
+                            ITestService testService = ITestService.Stub.asInterface(
+                                    vm.connectToVsockServer(ITestService.SERVICE_PORT).get());
+                            bcc.complete(testService.getBcc());
+                            forceStop(vm);
+                        } catch (Exception e) {
+                            exception.complete(e);
+                        }
+                    }
+                };
+        listener.runToFinish(mInner.mVm);
+        byte[] bccBytes = bcc.getNow(null);
+        assertThat(exception.getNow(null)).isNull();
+        assertThat(bccBytes).isNotNull();
+
+        ByteArrayInputStream bais = new ByteArrayInputStream(bccBytes);
+        List<DataItem> dataItems = new CborDecoder(bais).decode();
+        assertThat(dataItems.size()).isEqualTo(1);
+        assertThat(dataItems.get(0).getMajorType()).isEqualTo(MajorType.ARRAY);
+        List<DataItem> rootArrayItems = ((Array) dataItems.get(0)).getDataItems();
+        assertThat(rootArrayItems.size()).isAtLeast(2); // Public key and one certificate
+        if (mProtectedVm) {
+            // When a true BCC is created, microdroid expects entries for at least: the root public
+            // key, pvmfw, u-boot, u-boot-env, microdroid, app payload and the service process.
+            assertThat(rootArrayItems.size()).isAtLeast(7);
+        }
     }
 
     private static final UUID MICRODROID_PARTITION_UUID =
             UUID.fromString("cf9afe9a-0662-11ec-a329-c32663a09d75");
+    private static final UUID U_BOOT_AVB_PARTITION_UUID =
+            UUID.fromString("7e8221e7-03e6-4969-948b-73a4c809a4f2");
+    private static final UUID U_BOOT_ENV_PARTITION_UUID =
+            UUID.fromString("0ab72d30-86ae-4d05-81b2-c1760be2b1f9");
     private static final long BLOCK_SIZE = 512;
 
     // Find the starting offset which holds the data of a partition having UUID.
@@ -387,53 +470,11 @@ public class MicrodroidTests {
         file.writeByte(b ^ 1);
     }
 
-    @Test
-    public void bootFailsWhenInstanceDiskIsCompromised()
-            throws VirtualMachineException, InterruptedException, IOException {
-        assume().withMessage("Skip on Cuttlefish. b/195765441")
-                .that(android.os.Build.DEVICE)
-                .isNotEqualTo("vsoc_x86_64");
-
-        VirtualMachineConfig config =
-                new VirtualMachineConfig.Builder(mInner.mContext, "assets/vm_config.json")
-                        .protectedVm(mProtectedVm)
-                        .debugLevel(DebugLevel.NONE)
-                        .build();
-
-        // Remove any existing VM so we can start from scratch
-        VirtualMachine oldVm = mInner.mVmm.getOrCreate("test_vm_integrity", config);
-        oldVm.delete();
-
-        mInner.mVm = mInner.mVmm.getOrCreate("test_vm_integrity", config);
-
-        final CompletableFuture<Boolean> payloadReady = new CompletableFuture<>();
-        VmEventListener listener =
-                new VmEventListener() {
-                    @Override
-                    public void onPayloadReady(VirtualMachine vm) {
-                        payloadReady.complete(true);
-                        forceStop(vm);
-                    }
-                };
-        listener.runToFinish(mInner.mVm);
-        assertThat(payloadReady.getNow(false)).isTrue();
-
-        // Launch the same VM after flipping a bit of the instance image.
-        // Flip actual data, as flipping trivial bits like the magic string isn't interesting.
-        File vmRoot = new File(mInner.mContext.getFilesDir(), "vm");
-        File vmDir = new File(vmRoot, "test_vm_integrity");
-        File instanceImgPath = new File(vmDir, "instance.img");
-        RandomAccessFile instanceFile = new RandomAccessFile(instanceImgPath, "rw");
-
-        // microdroid data partition must exist.
-        OptionalLong microdroidPartitionOffset =
-                findPartitionDataOffset(instanceFile, MICRODROID_PARTITION_UUID);
-        assertThat(microdroidPartitionOffset.isPresent()).isTrue();
-
-        flipBit(instanceFile, microdroidPartitionOffset.getAsLong());
-        mInner.mVm = mInner.mVmm.get("test_vm_integrity"); // re-load the vm with new instance disk
+    private boolean tryBootVm(String vmName)
+            throws VirtualMachineException, InterruptedException {
+        mInner.mVm = mInner.mVmm.get(vmName); // re-load the vm before running tests
         final CompletableFuture<Boolean> payloadStarted = new CompletableFuture<>();
-        listener =
+        VmEventListener listener =
                 new VmEventListener() {
                     @Override
                     public void onPayloadStarted(VirtualMachine vm, ParcelFileDescriptor stream) {
@@ -442,7 +483,45 @@ public class MicrodroidTests {
                     }
                 };
         listener.runToFinish(mInner.mVm);
-        assertThat(payloadStarted.getNow(false)).isFalse();
-        flipBit(instanceFile, microdroidPartitionOffset.getAsLong());
+        return payloadStarted.getNow(false);
+    }
+
+    @Test
+    public void bootFailsWhenInstanceDiskIsCompromised()
+            throws VirtualMachineException, InterruptedException, IOException {
+        assume().withMessage("Skip on Cuttlefish. b/195765441")
+                .that(android.os.Build.DEVICE)
+                .isNotEqualTo("vsoc_x86_64");
+
+        VirtualMachineConfig config = mInner.newVmConfigBuilder("assets/vm_config.json")
+                .debugLevel(DebugLevel.NONE)
+                .build();
+
+        // Remove any existing VM so we can start from scratch
+        VirtualMachine oldVm = mInner.mVmm.getOrCreate("test_vm_integrity", config);
+        oldVm.delete();
+        mInner.mVmm.getOrCreate("test_vm_integrity", config);
+
+        assertThat(tryBootVm("test_vm_integrity")).isTrue();
+
+        // Launch the same VM after flipping a bit of the instance image.
+        // Flip actual data, as flipping trivial bits like the magic string isn't interesting.
+        File vmRoot = new File(mInner.mContext.getFilesDir(), "vm");
+        File vmDir = new File(vmRoot, "test_vm_integrity");
+        File instanceImgPath = new File(vmDir, "instance.img");
+        RandomAccessFile instanceFile = new RandomAccessFile(instanceImgPath, "rw");
+
+        // partitions may or may not exist
+        for (UUID uuid :
+                new UUID[] {
+                    MICRODROID_PARTITION_UUID, U_BOOT_AVB_PARTITION_UUID, U_BOOT_ENV_PARTITION_UUID
+                }) {
+            OptionalLong offset = findPartitionDataOffset(instanceFile, uuid);
+            if (!offset.isPresent()) continue;
+
+            flipBit(instanceFile, offset.getAsLong());
+            assertThat(tryBootVm("test_vm_integrity")).isFalse();
+            flipBit(instanceFile, offset.getAsLong());
+        }
     }
 }
