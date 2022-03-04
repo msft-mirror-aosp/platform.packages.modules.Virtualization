@@ -34,7 +34,6 @@ use itertools::sorted;
 use log::{error, info};
 use microdroid_metadata::{write_metadata, Metadata};
 use microdroid_payload_config::{Task, TaskType, VmPayloadConfig};
-use once_cell::sync::OnceCell;
 use payload::{get_apex_data_from_payload, load_metadata, to_metadata};
 use rand::Fill;
 use ring::digest;
@@ -42,7 +41,6 @@ use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
 use std::convert::TryInto;
 use std::fs::{self, create_dir, File, OpenOptions};
-use std::io::BufRead;
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -69,8 +67,7 @@ const VMADDR_CID_HOST: u32 = 2;
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
 const LOGD_ENABLED_PROP: &str = "ro.boot.logd.enabled";
-const ADBD_ENABLED_PROP: &str = "ro.boot.adb.enabled";
-const DEBUGGABLE_PROP: &str = "ro.boot.microdroid.debuggable";
+const APP_DEBUGGABLE_PROP: &str = "ro.boot.microdroid.app_debuggable";
 
 #[derive(thiserror::Error, Debug)]
 enum MicrodroidError {
@@ -123,7 +120,7 @@ fn main() {
 }
 
 fn try_main() -> Result<()> {
-    kernlog::init()?;
+    let _ = kernlog::init();
     info!("started.");
 
     let service = get_vms_rpc_binder().context("cannot connect to VirtualMachineService")?;
@@ -145,15 +142,6 @@ fn try_main() -> Result<()> {
             Err(err)
         }
     }
-}
-
-fn is_debuggable() -> Result<bool> {
-    // Read all the properties so the behaviour is most similar between debug and non-debug boots.
-    // Defensively default to debug enabled for unrecognised values.
-    let adb = system_properties::read_bool(ADBD_ENABLED_PROP, true)?;
-    let logd = system_properties::read_bool(LOGD_ENABLED_PROP, true)?;
-    let debuggable = system_properties::read_bool(DEBUGGABLE_PROP, true)?;
-    Ok(adb || logd || debuggable)
 }
 
 fn dice_derivation(verified_data: MicrodroidData, payload_config_path: &str) -> Result<()> {
@@ -185,6 +173,9 @@ fn dice_derivation(verified_data: MicrodroidData, payload_config_path: &str) -> 
     encode_header(3, config_path_bytes.len().try_into().unwrap(), &mut config_desc)?;
     config_desc.extend_from_slice(config_path_bytes);
 
+    // Check app debuggability, conervatively assuming it is debuggable
+    let app_debuggable = system_properties::read_bool(APP_DEBUGGABLE_PROP, true)?;
+
     // Send the details to diced
     let diced =
         wait_for_interface::<dyn IDiceMaintenance>("android.security.dice.IDiceMaintenance")
@@ -195,7 +186,7 @@ fn dice_derivation(verified_data: MicrodroidData, payload_config_path: &str) -> 
             config: Config { desc: config_desc },
             authorityHash: authority_hash,
             authorityDescriptor: None,
-            mode: if is_debuggable()? { Mode::DEBUG } else { Mode::NORMAL },
+            mode: if app_debuggable { Mode::DEBUG } else { Mode::NORMAL },
             hidden: verified_data.salt.try_into().unwrap(),
         }])
         .context("IDiceMaintenance::demoteSelf failed")?;
@@ -307,13 +298,6 @@ fn verify_payload(
     saved_data: Option<&MicrodroidData>,
 ) -> Result<MicrodroidData> {
     let start_time = SystemTime::now();
-
-    if let Some(saved_bootconfig) = saved_data.map(|d| &d.bootconfig) {
-        ensure!(
-            saved_bootconfig.as_ref() == get_bootconfig()?.as_slice(),
-            MicrodroidError::PayloadChanged(String::from("Bootconfig has changed."))
-        );
-    }
 
     // Verify main APK
     let root_hash = saved_data.map(|d| &d.apk_data.root_hash);
@@ -455,7 +439,6 @@ fn verify_payload(
         apk_data: ApkData { root_hash: root_hash_from_idsig, pubkey: main_apk_pubkey },
         extra_apks_data,
         apex_data: apex_data_from_payload,
-        bootconfig: get_bootconfig()?.clone().into_boxed_slice(),
     })
 }
 
@@ -504,35 +487,6 @@ fn get_public_key_from_apk(apk: &str, root_hash_trustful: bool) -> Result<Box<[u
     } else {
         get_public_key_der(apk)
     }
-}
-
-fn get_bootconfig() -> Result<&'static Vec<u8>> {
-    static VAL: OnceCell<Vec<u8>> = OnceCell::new();
-    VAL.get_or_try_init(|| -> Result<Vec<u8>> {
-        let f = File::open("/proc/bootconfig")?;
-
-        // Filter-out androidboot.vbmeta.device which contains UUID of the vbmeta partition. That
-        // UUID could change everytime when the same VM is started because the composite disk image
-        // is ephemeral. A change in UUID is okay as long as other configs (e.g.
-        // androidboot.vbmeta.digest) remain same.
-        Ok(std::io::BufReader::new(f)
-            .lines()
-            // note: this try_fold is to early return when we fail to read a line from the file
-            .try_fold(Vec::new(), |mut lines, line| {
-                line.map(|s| {
-                    lines.push(s);
-                    lines
-                })
-            })?
-            .into_iter()
-            .filter(|line| {
-                let tokens: Vec<&str> = line.splitn(2, '=').collect();
-                // note: if `line` doesn't have =, tokens[0] is the entire line.
-                tokens[0].trim() != "androidboot.vbmeta.device"
-            })
-            .flat_map(|line| (line + "\n").into_bytes())
-            .collect())
-    })
 }
 
 fn load_config(path: &Path) -> Result<VmPayloadConfig> {

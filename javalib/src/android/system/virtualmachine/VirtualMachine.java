@@ -23,6 +23,7 @@ import android.annotation.CallbackExecutor;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
+import android.os.Binder;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
@@ -137,7 +138,7 @@ public class VirtualMachine {
     private @Nullable VirtualMachineCallback mCallback;
 
     /** The executor on which the callback will be executed */
-    private @NonNull Executor mCallbackExecutor;
+    private @Nullable Executor mCallbackExecutor;
 
     private @Nullable ParcelFileDescriptor mConsoleReader;
     private @Nullable ParcelFileDescriptor mConsoleWriter;
@@ -222,7 +223,7 @@ public class VirtualMachine {
     }
 
     /** Loads a virtual machine that is already created before. */
-    /* package */ static @NonNull VirtualMachine load(
+    /* package */ static @Nullable VirtualMachine load(
             @NonNull Context context, @NonNull String name) throws VirtualMachineException {
         File configFilePath = getConfigFilePath(context, name);
         VirtualMachineConfig config;
@@ -297,9 +298,16 @@ public class VirtualMachine {
      */
     public void setCallback(
             @NonNull @CallbackExecutor Executor executor,
-            @Nullable VirtualMachineCallback callback) {
+            @NonNull VirtualMachineCallback callback) {
         mCallbackExecutor = executor;
         mCallback = callback;
+    }
+
+    /** Clears the currently registered callback. */
+    public void clearCallback() {
+        // TODO(b/220730550): synchronize with the callers of the callback
+        mCallback = null;
+        mCallbackExecutor = null;
     }
 
     /** Returns the currently registered callback. */
@@ -368,6 +376,18 @@ public class VirtualMachine {
             android.system.virtualizationservice.VirtualMachineConfig vmConfigParcel =
                     android.system.virtualizationservice.VirtualMachineConfig.appConfig(appConfig);
 
+            IBinder.DeathRecipient deathRecipient = new IBinder.DeathRecipient() {
+                @Override
+                public void binderDied() {
+                    final VirtualMachineCallback cb = mCallback;
+                    if (cb != null) {
+                        // TODO(b/220730550): don't call if the VM already died
+                        cb.onDied(VirtualMachine.this, VirtualMachineCallback
+                                .DEATH_REASON_VIRTUALIZATIONSERVICE_DIED);
+                    }
+                }
+            };
+
             mVirtualMachine = service.createVm(vmConfigParcel, mConsoleWriter, mLogWriter);
             mVirtualMachine.registerCallback(
                     new IVirtualMachineCallback.Stub() {
@@ -377,8 +397,13 @@ public class VirtualMachine {
                             if (cb == null) {
                                 return;
                             }
-                            mCallbackExecutor.execute(
-                                    () -> cb.onPayloadStarted(VirtualMachine.this, stream));
+                            final long restoreToken = Binder.clearCallingIdentity();
+                            try {
+                                mCallbackExecutor.execute(
+                                        () -> cb.onPayloadStarted(VirtualMachine.this, stream));
+                            } finally {
+                                Binder.restoreCallingIdentity(restoreToken);
+                            }
                         }
 
                         @Override
@@ -387,7 +412,13 @@ public class VirtualMachine {
                             if (cb == null) {
                                 return;
                             }
-                            mCallbackExecutor.execute(() -> cb.onPayloadReady(VirtualMachine.this));
+                            final long restoreToken = Binder.clearCallingIdentity();
+                            try {
+                                mCallbackExecutor.execute(
+                                        () -> cb.onPayloadReady(VirtualMachine.this));
+                            } finally {
+                                Binder.restoreCallingIdentity(restoreToken);
+                            }
                         }
 
                         @Override
@@ -396,8 +427,13 @@ public class VirtualMachine {
                             if (cb == null) {
                                 return;
                             }
-                            mCallbackExecutor.execute(
-                                    () -> cb.onPayloadFinished(VirtualMachine.this, exitCode));
+                            final long restoreToken = Binder.clearCallingIdentity();
+                            try {
+                                mCallbackExecutor.execute(
+                                        () -> cb.onPayloadFinished(VirtualMachine.this, exitCode));
+                            } finally {
+                                Binder.restoreCallingIdentity(restoreToken);
+                            }
                         }
 
                         @Override
@@ -406,32 +442,32 @@ public class VirtualMachine {
                             if (cb == null) {
                                 return;
                             }
-                            mCallbackExecutor.execute(
-                                    () -> cb.onError(VirtualMachine.this, errorCode, message));
+                            final long restoreToken = Binder.clearCallingIdentity();
+                            try {
+                                mCallbackExecutor.execute(
+                                        () -> cb.onError(VirtualMachine.this, errorCode, message));
+                            } finally {
+                                Binder.restoreCallingIdentity(restoreToken);
+                            }
                         }
 
                         @Override
                         public void onDied(int cid, int reason) {
+                            service.asBinder().unlinkToDeath(deathRecipient, 0);
                             final VirtualMachineCallback cb = mCallback;
                             if (cb == null) {
                                 return;
                             }
-                            mCallbackExecutor.execute(() -> cb.onDied(VirtualMachine.this, reason));
+                            final long restoreToken = Binder.clearCallingIdentity();
+                            try {
+                                mCallbackExecutor.execute(
+                                        () -> cb.onDied(VirtualMachine.this, reason));
+                            } finally {
+                                Binder.restoreCallingIdentity(restoreToken);
+                            }
                         }
                     });
-            service.asBinder()
-                    .linkToDeath(
-                            new IBinder.DeathRecipient() {
-                                @Override
-                                public void binderDied() {
-                                    final VirtualMachineCallback cb = mCallback;
-                                    if (cb != null) {
-                                        cb.onDied(VirtualMachine.this, VirtualMachineCallback
-                                                .DEATH_REASON_VIRTUALIZATIONSERVICE_DIED);
-                                    }
-                                }
-                            },
-                            0);
+            service.asBinder().linkToDeath(deathRecipient, 0);
             mVirtualMachine.start();
         } catch (IOException e) {
             throw new VirtualMachineException(e);

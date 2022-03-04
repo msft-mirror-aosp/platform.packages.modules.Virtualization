@@ -29,7 +29,6 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualizationService::IVirtualizationService,
     Partition::Partition,
     PartitionType::PartitionType,
-    VirtualMachineAppConfig::DebugLevel::DebugLevel,
     VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineConfig::VirtualMachineConfig,
     VirtualMachineDebugInfo::VirtualMachineDebugInfo,
@@ -53,6 +52,7 @@ use idsig::{HashAlgorithm, V4Signature};
 use log::{debug, error, info, warn, trace};
 use microdroid_payload_config::VmPayloadConfig;
 use rustutils::system_properties;
+use semver::VersionReq;
 use statslog_virtualization_rust::vm_creation_requested::{stats_write, Hypervisor};
 use std::convert::TryInto;
 use std::ffi::CStr;
@@ -131,8 +131,8 @@ impl IVirtualizationService for VirtualizationService {
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         check_manage_access()?;
         let state = &mut *self.state.lock().unwrap();
-        let mut console_fd = console_fd.map(clone_file).transpose()?;
-        let mut log_fd = log_fd.map(clone_file).transpose()?;
+        let console_fd = console_fd.map(clone_file).transpose()?;
+        let log_fd = log_fd.map(clone_file).transpose()?;
         let requester_uid = ThreadState::get_calling_uid();
         let requester_sid = get_calling_sid()?;
         let requester_debug_pid = ThreadState::get_calling_pid();
@@ -163,27 +163,7 @@ impl IVirtualizationService for VirtualizationService {
             )
         })?;
 
-        // Disable console logging if debug level != full. Note that kernel anyway doesn't use the
-        // console output when debug level != full. So, users won't be able to see the kernel
-        // output even without this overriding. This is to silence output from the bootloader which
-        // doesn't understand the bootconfig parameters.
-        if let VirtualMachineConfig::AppConfig(config) = config {
-            if config.debugLevel != DebugLevel::FULL {
-                console_fd = None;
-            }
-            if config.debugLevel == DebugLevel::NONE {
-                log_fd = None;
-            }
-        }
-
         let is_app_config = matches!(config, VirtualMachineConfig::AppConfig(_));
-        let is_debug_level_full = matches!(
-            config,
-            VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
-                debugLevel: DebugLevel::FULL,
-                ..
-            })
-        );
 
         let config = match config {
             VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
@@ -200,14 +180,6 @@ impl IVirtualizationService for VirtualizationService {
         };
         let config = config.as_ref();
         let protected = config.protectedVm;
-
-        // Debug level FULL is only supported for non-protected VMs.
-        if is_debug_level_full && protected {
-            return Err(new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                "FULL debug level not supported for protected VMs.",
-            ));
-        };
 
         // Check if partition images are labeled incorrectly. This is to prevent random images
         // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
@@ -268,6 +240,7 @@ impl IVirtualizationService for VirtualizationService {
             console_fd,
             log_fd,
             indirect_files,
+            platform_version: parse_platform_version_req(&config.platformVersion)?,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -920,6 +893,16 @@ fn vsock_stream_to_pfd(stream: VsockStream) -> ParcelFileDescriptor {
     // SAFETY: ownership is transferred from stream to f
     let f = unsafe { File::from_raw_fd(stream.into_raw_fd()) };
     ParcelFileDescriptor::new(f)
+}
+
+/// Parses the platform version requirement string.
+fn parse_platform_version_req(s: &str) -> Result<VersionReq, Status> {
+    VersionReq::parse(s).map_err(|e| {
+        new_binder_exception(
+            ExceptionCode::BAD_PARCELABLE,
+            format!("Invalid platform version requirement {}: {}", s, e),
+        )
+    })
 }
 
 /// Simple utility for referencing Borrowed or Owned. Similar to std::borrow::Cow, but

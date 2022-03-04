@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 The Android Open Source Project
+ * Copyright 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,5 @@
 
 #include "lib.rs.h"
 
-KeyResult generate_key_pair();
-
-SignResult sign(rust::Slice<const uint8_t> private_key, rust::Slice<const uint8_t> data);
+bool verify(rust::Slice<const uint8_t> public_key, rust::Slice<const uint8_t> signature,
+            rust::Slice<const uint8_t> data);
