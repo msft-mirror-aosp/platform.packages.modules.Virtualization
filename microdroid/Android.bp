@@ -59,7 +59,6 @@ android_system_image {
         "libstdc++",
         "logcat",
         "logd",
-        "run-as",
         "secilc",
 
         // "com.android.adbd" requires these,
@@ -71,6 +70,7 @@ android_system_image {
         "libartpalette-system",
 
         "apexd",
+        "atrace",
         "debuggerd",
         "diced.microdroid",
         "linker",
