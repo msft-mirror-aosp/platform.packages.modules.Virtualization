@@ -18,70 +18,39 @@
 //! file descriptors backed by authfs (via authfs_service) and pass the file descriptors to the
 //! actual compiler.
 
-use anyhow::{Context, Result};
-use binder_common::new_binder_exception;
-use compos_common::binder::to_binder_result;
-use log::warn;
+use anyhow::{bail, Context, Result};
 use std::default::Default;
-use std::path::PathBuf;
-use std::sync::RwLock;
+use std::fs::read_dir;
+use std::path::{Path, PathBuf};
 
+use crate::artifact_signer::ArtifactSigner;
 use crate::compilation::{odrefresh, OdrefreshContext};
-use crate::signing_key::{Signer, SigningKey};
-use authfs_aidl_interface::aidl::com::android::virt::fs::IAuthFsService::IAuthFsService;
-use compos_aidl_interface::aidl::com::android::compos::{
-    CompOsKeyData::CompOsKeyData,
-    ICompOsService::{BnCompOsService, ICompOsService},
+use crate::compos_key;
+use compos_aidl_interface::aidl::com::android::compos::ICompOsService::{
+    BnCompOsService, CompilationMode::CompilationMode, ICompOsService,
 };
-use compos_aidl_interface::binder::{
-    BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Strong,
-};
+use compos_aidl_interface::binder::{BinderFeatures, Interface, Result as BinderResult, Strong};
+use compos_common::binder::to_binder_result;
 use compos_common::odrefresh::ODREFRESH_PATH;
 
 const AUTHFS_SERVICE_NAME: &str = "authfs_service";
 
 /// Constructs a binder object that implements ICompOsService.
 pub fn new_binder() -> Result<Strong<dyn ICompOsService>> {
-    let service = CompOsService {
-        odrefresh_path: PathBuf::from(ODREFRESH_PATH),
-        signing_key: SigningKey::new()?,
-        key_blob: RwLock::new(Vec::new()),
-    };
+    let service = CompOsService { odrefresh_path: PathBuf::from(ODREFRESH_PATH) };
     Ok(BnCompOsService::new_binder(service, BinderFeatures::default()))
 }
 
 struct CompOsService {
     odrefresh_path: PathBuf,
-    signing_key: SigningKey,
-    key_blob: RwLock<Vec<u8>>,
-}
-
-impl CompOsService {
-    fn new_signer(&self) -> BinderResult<Signer> {
-        let key = &*self.key_blob.read().unwrap();
-        if key.is_empty() {
-            Err(new_binder_exception(ExceptionCode::ILLEGAL_STATE, "Key is not initialized"))
-        } else {
-            to_binder_result(self.signing_key.new_signer(key))
-        }
-    }
 }
 
 impl Interface for CompOsService {}
 
 impl ICompOsService for CompOsService {
-    fn initializeSigningKey(&self, key_blob: &[u8]) -> BinderResult<()> {
-        let mut w = self.key_blob.write().unwrap();
-        if w.is_empty() {
-            *w = Vec::from(key_blob);
-            Ok(())
-        } else {
-            Err(new_binder_exception(ExceptionCode::ILLEGAL_STATE, "Cannot re-initialize the key"))
-        }
-    }
-
     fn odrefresh(
         &self,
+        compilation_mode: CompilationMode,
         system_dir_fd: i32,
         output_dir_fd: i32,
         staging_dir_fd: i32,
@@ -90,6 +59,7 @@ impl ICompOsService for CompOsService {
         system_server_compiler_filter: &str,
     ) -> BinderResult<i8> {
         let context = to_binder_result(OdrefreshContext::new(
+            compilation_mode,
             system_dir_fd,
             output_dir_fd,
             staging_dir_fd,
@@ -98,28 +68,40 @@ impl ICompOsService for CompOsService {
             system_server_compiler_filter,
         ))?;
 
-        let authfs_service = get_authfs_service()?;
+        let authfs_service = authfs_aidl_interface::binder::get_interface(AUTHFS_SERVICE_NAME)?;
         let exit_code = to_binder_result(
-            odrefresh(&self.odrefresh_path, context, authfs_service, self.new_signer()?)
-                .context("odrefresh failed"),
+            odrefresh(&self.odrefresh_path, context, authfs_service, |output_dir| {
+                // authfs only shows us the files we created, so it's ok to just sign everything
+                // under the output directory.
+                let mut artifact_signer = ArtifactSigner::new(&output_dir);
+                add_artifacts(&output_dir, &mut artifact_signer)?;
+
+                artifact_signer.write_info_and_signature(&output_dir.join("compos.info"))
+            })
+            .context("odrefresh failed"),
         )?;
         Ok(exit_code as i8)
     }
 
-    fn generateSigningKey(&self) -> BinderResult<CompOsKeyData> {
-        to_binder_result(self.signing_key.generate())
-    }
-
-    fn verifySigningKey(&self, key_blob: &[u8], public_key: &[u8]) -> BinderResult<bool> {
-        Ok(if let Err(e) = self.signing_key.verify(key_blob, public_key) {
-            warn!("Signing key verification failed: {:?}", e);
-            false
-        } else {
-            true
-        })
+    fn getPublicKey(&self) -> BinderResult<Vec<u8>> {
+        to_binder_result(compos_key::get_public_key())
     }
 }
 
-fn get_authfs_service() -> BinderResult<Strong<dyn IAuthFsService>> {
-    Ok(authfs_aidl_interface::binder::get_interface(AUTHFS_SERVICE_NAME)?)
+fn add_artifacts(target_dir: &Path, artifact_signer: &mut ArtifactSigner) -> Result<()> {
+    for entry in
+        read_dir(&target_dir).with_context(|| format!("Traversing {}", target_dir.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            add_artifacts(&entry.path(), artifact_signer)?;
+        } else if file_type.is_file() {
+            artifact_signer.add_artifact(&entry.path())?;
+        } else {
+            // authfs shouldn't create anything else, but just in case
+            bail!("Unexpected file type in artifacts: {:?}", entry);
+        }
+    }
+    Ok(())
 }

@@ -23,9 +23,11 @@ use android_system_composd::aidl::android::system::composd::{
 };
 use android_system_composd::binder::{Interface, Result as BinderResult, Strong};
 use anyhow::{Context, Result};
-use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsService;
-use compos_common::odrefresh::ExitCode;
-use log::{error, warn};
+use compos_aidl_interface::aidl::com::android::compos::ICompOsService::{
+    CompilationMode::CompilationMode, ICompOsService,
+};
+use compos_common::odrefresh::{ExitCode, ODREFRESH_OUTPUT_ROOT_DIR};
+use log::{error, info, warn};
 use rustutils::system_properties;
 use std::fs::{remove_dir_all, File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
@@ -33,8 +35,6 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
-
-const ART_APEX_DATA: &str = "/data/misc/apexdata/com.android.art";
 
 #[derive(Clone)]
 pub struct OdrefreshTask {
@@ -68,6 +68,7 @@ impl OdrefreshTask {
 
     pub fn start(
         comp_os: Arc<CompOsInstance>,
+        compilation_mode: CompilationMode,
         target_dir_name: String,
         callback: &Strong<dyn ICompilationTaskCallback>,
     ) -> Result<OdrefreshTask> {
@@ -75,20 +76,28 @@ impl OdrefreshTask {
         let task = RunningTask { comp_os, callback: callback.clone() };
         let task = OdrefreshTask { running_task: Arc::new(Mutex::new(Some(task))) };
 
-        task.clone().start_thread(service, target_dir_name);
+        task.clone().start_thread(service, compilation_mode, target_dir_name);
 
         Ok(task)
     }
 
-    fn start_thread(self, service: Strong<dyn ICompOsService>, target_dir_name: String) {
+    fn start_thread(
+        self,
+        service: Strong<dyn ICompOsService>,
+        compilation_mode: CompilationMode,
+        target_dir_name: String,
+    ) {
         thread::spawn(move || {
-            let exit_code = run_in_vm(service, &target_dir_name);
+            let exit_code = run_in_vm(service, compilation_mode, &target_dir_name);
 
             let task = self.take();
             // We don't do the callback if cancel has already happened.
             if let Some(task) = task {
                 let result = match exit_code {
-                    Ok(ExitCode::CompilationSuccess) => task.callback.onSuccess(),
+                    Ok(ExitCode::CompilationSuccess) => {
+                        info!("CompilationSuccess");
+                        task.callback.onSuccess()
+                    }
                     Ok(exit_code) => {
                         error!("Unexpected odrefresh result: {:?}", exit_code);
                         task.callback.onFailure()
@@ -106,8 +115,12 @@ impl OdrefreshTask {
     }
 }
 
-fn run_in_vm(service: Strong<dyn ICompOsService>, target_dir_name: &str) -> Result<ExitCode> {
-    let output_root = Path::new(ART_APEX_DATA);
+fn run_in_vm(
+    service: Strong<dyn ICompOsService>,
+    compilation_mode: CompilationMode,
+    target_dir_name: &str,
+) -> Result<ExitCode> {
+    let output_root = Path::new(ODREFRESH_OUTPUT_ROOT_DIR);
 
     // We need to remove the target directory because odrefresh running in compos will create it
     // (and can't see the existing one, since authfs doesn't show it existing files in an output
@@ -130,10 +143,11 @@ fn run_in_vm(service: Strong<dyn ICompOsService>, target_dir_name: &str) -> Resu
     };
     let fd_server_raii = fd_server_config.into_fd_server()?;
 
-    let zygote_arch = system_properties::read("ro.zygote")?;
+    let zygote_arch = system_properties::read("ro.zygote")?.context("ro.zygote not set")?;
     let system_server_compiler_filter =
-        system_properties::read("dalvik.vm.systemservercompilerfilter").unwrap_or_default();
+        system_properties::read("dalvik.vm.systemservercompilerfilter")?.unwrap_or_default();
     let exit_code = service.odrefresh(
+        compilation_mode,
         system_dir.as_raw_fd(),
         output_dir.as_raw_fd(),
         staging_dir.as_raw_fd(),

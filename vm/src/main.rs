@@ -14,6 +14,7 @@
 
 //! Android VM control tool.
 
+mod create_idsig;
 mod create_partition;
 mod run;
 mod sync;
@@ -24,9 +25,11 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
 };
 use android_system_virtualizationservice::binder::{wait_for_interface, ProcessState, Strong};
 use anyhow::{Context, Error};
+use create_idsig::command_create_idsig;
 use create_partition::command_create_partition;
 use run::{command_run, command_run_app};
-use std::path::PathBuf;
+use rustutils::system_properties;
+use std::path::{Path, PathBuf};
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 
@@ -72,6 +75,10 @@ enum Opt {
         #[structopt(long, default_value = "none", parse(try_from_str=parse_debug_level))]
         debug: DebugLevel,
 
+        /// Run VM in protected mode.
+        #[structopt(short, long)]
+        protected: bool,
+
         /// Memory size (in MiB) of the VM. If unspecified, defaults to the value of `memory_mib`
         /// in the VM config file.
         #[structopt(short, long)]
@@ -114,6 +121,10 @@ enum Opt {
         /// Path to file for VM console output.
         #[structopt(long)]
         console: Option<PathBuf>,
+
+        /// Path to file for VM log output.
+        #[structopt(long)]
+        log: Option<PathBuf>,
     },
     /// Stop a virtual machine running in the background
     Stop {
@@ -122,6 +133,8 @@ enum Opt {
     },
     /// List running virtual machines
     List,
+    /// Print information about virtual machine support
+    Info,
     /// Create a new empty partition to be used as a writable partition for a VM
     CreatePartition {
         /// Path at which to create the image file
@@ -134,6 +147,15 @@ enum Opt {
         /// Type of the partition
         #[structopt(short="t", long="type", default_value="raw", parse(try_from_str=parse_partition_type))]
         partition_type: PartitionType,
+    },
+    /// Creates or update the idsig file by digesting the input APK file.
+    CreateIdsig {
+        /// Path to VM Payload APK
+        #[structopt(parse(from_os_str))]
+        apk: PathBuf,
+        /// Path to idsig of the APK
+        #[structopt(parse(from_os_str))]
+        path: PathBuf,
     },
 }
 
@@ -174,6 +196,7 @@ fn main() -> Result<(), Error> {
             console,
             log,
             debug,
+            protected,
             mem,
             cpus,
             cpu_affinity,
@@ -188,17 +211,19 @@ fn main() -> Result<(), Error> {
             console.as_deref(),
             log.as_deref(),
             debug,
+            protected,
             mem,
             cpus,
             cpu_affinity,
             &extra_idsigs,
         ),
-        Opt::Run { config, daemonize, cpus, cpu_affinity, console } => {
+        Opt::Run { config, daemonize, cpus, cpu_affinity, console, log } => {
             command_run(
                 service,
                 &config,
                 daemonize,
                 console.as_deref(),
+                log.as_deref(),
                 /* mem */ None,
                 cpus,
                 cpu_affinity,
@@ -206,9 +231,11 @@ fn main() -> Result<(), Error> {
         }
         Opt::Stop { cid } => command_stop(service, cid),
         Opt::List => command_list(service),
+        Opt::Info => command_info(),
         Opt::CreatePartition { path, size, partition_type } => {
             command_create_partition(service, &path, size, partition_type)
         }
+        Opt::CreateIdsig { apk, path } => command_create_idsig(service, &apk, &path),
     }
 }
 
@@ -225,5 +252,33 @@ fn command_stop(service: Strong<dyn IVirtualizationService>, cid: u32) -> Result
 fn command_list(service: Strong<dyn IVirtualizationService>) -> Result<(), Error> {
     let vms = service.debugListVms().context("Failed to get list of VMs")?;
     println!("Running VMs: {:#?}", vms);
+    Ok(())
+}
+
+/// Print information about supported VM types.
+fn command_info() -> Result<(), Error> {
+    let unprotected_vm_supported =
+        system_properties::read_bool("ro.boot.hypervisor.vm.supported", false)?;
+    let protected_vm_supported =
+        system_properties::read_bool("ro.boot.hypervisor.protected_vm.supported", false)?;
+    match (unprotected_vm_supported, protected_vm_supported) {
+        (false, false) => println!("VMs are not supported."),
+        (false, true) => println!("Only protected VMs are supported."),
+        (true, false) => println!("Only unprotected VMs are supported."),
+        (true, true) => println!("Both protected and unprotected VMs are supported."),
+    }
+
+    if let Some(version) = system_properties::read("ro.boot.hypervisor.version")? {
+        println!("Hypervisor version: {}", version);
+    } else {
+        println!("Hypervisor version not set.");
+    }
+
+    if Path::new("/dev/kvm").exists() {
+        println!("/dev/kvm exists.");
+    } else {
+        println!("/dev/kvm does not exist.");
+    }
+
     Ok(())
 }

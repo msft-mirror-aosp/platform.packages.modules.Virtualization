@@ -16,19 +16,18 @@
 
 package com.android.compos;
 
-import com.android.compos.CompOsKeyData;
-
 /** {@hide} */
 interface ICompOsService {
     /**
-     * Initializes the service with the supplied encrypted private key blob. The key cannot be
-     * changed once initialized, so once initiailzed, a repeated call will fail with
-     * EX_ILLEGAL_STATE.
-     *
-     * @param keyBlob The encrypted blob containing the private key, as returned by
-     *                generateSigningKey().
+     * What type of compilation to perform.
      */
-    void initializeSigningKey(in byte[] keyBlob);
+    @Backing(type="int")
+    enum CompilationMode {
+        /** Compile artifacts required by the current set of APEXes for use on reboot. */
+        NORMAL_COMPILE = 0,
+        /** Compile a full set of artifacts for test purposes. */
+        TEST_COMPILE = 1,
+    }
 
     /**
      * Run odrefresh in the VM context.
@@ -37,6 +36,7 @@ interface ICompOsService {
      * through systemDirFd over AuthFS), and *CLASSPATH derived in the VM, to generate the same
      * odrefresh output artifacts to the output directory (through outputDirFd).
      *
+     * @param compilationMode The type of compilation to be performed
      * @param systemDirFd An fd referring to /system
      * @param outputDirFd An fd referring to the output directory, ART_APEX_DATA
      * @param stagingDirFd An fd referring to the staging directory, e.g. ART_APEX_DATA/staging
@@ -46,24 +46,13 @@ interface ICompOsService {
      * @param systemServerCompilerFilter The compiler filter used to compile system server
      * @return odrefresh exit code
      */
-    byte odrefresh(int systemDirFd, int outputDirFd, int stagingDirFd, String targetDirName,
-            String zygoteArch, String systemServerCompilerFilter);
+    byte odrefresh(CompilationMode compilation_mode, int systemDirFd, int outputDirFd,
+            int stagingDirFd, String targetDirName, String zygoteArch,
+            String systemServerCompilerFilter);
 
     /**
-     * Generate a new public/private key pair suitable for signing CompOs output files.
-     *
-     * @return a certificate for the public key and the encrypted private key
+     * Returns the current VM's signing key, as an Ed25519 public key
+     * (https://datatracker.ietf.org/doc/html/rfc8032#section-5.1.5).
      */
-    CompOsKeyData generateSigningKey();
-
-    /**
-     * Check that the supplied encrypted private key is valid for signing CompOs output files, and
-     * corresponds to the public key.
-     *
-     * @param keyBlob The encrypted blob containing the private key, as returned by
-     *                generateSigningKey().
-     * @param publicKey The public key, as a DER encoded RSAPublicKey (RFC 3447 Appendix-A.1.1).
-     * @return whether the inputs are valid and correspond to each other.
-     */
-    boolean verifySigningKey(in byte[] keyBlob, in byte[] publicKey);
+    byte[] getPublicKey();
 }

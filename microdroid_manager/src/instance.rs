@@ -33,6 +33,8 @@
 //! The payload of a partition is encrypted/signed by a key that is unique to the loader and to the
 //! VM as well. Failing to decrypt/authenticate a partition by a loader stops the boot process.
 
+use crate::ioutil;
+
 use android_security_dice::aidl::android::security::dice::IDiceNode::IDiceNode;
 use anyhow::{anyhow, bail, Context, Result};
 use binder::wait_for_interface;
@@ -180,7 +182,7 @@ impl InstanceDisk {
 
         // Persist the encrypted payload data
         self.file.write_all(&data)?;
-        self.file.flush()?;
+        ioutil::blkflsbuf(&mut self.file)?;
 
         Ok(())
     }
@@ -316,10 +318,10 @@ fn get_key() -> Result<ZeroOnDropKey> {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct MicrodroidData {
+    pub salt: Vec<u8>, // Should be [u8; 64] but that isn't serializable.
     pub apk_data: ApkData,
     pub extra_apks_data: Vec<ApkData>,
     pub apex_data: Vec<ApexData>,
-    pub bootconfig: Box<[u8]>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -336,4 +338,5 @@ pub struct ApexData {
     pub public_key: Vec<u8>,
     pub root_digest: Vec<u8>,
     pub last_update_seconds: u64,
+    pub is_factory: bool,
 }

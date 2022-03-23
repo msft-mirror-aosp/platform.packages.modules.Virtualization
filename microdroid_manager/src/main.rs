@@ -19,22 +19,28 @@ mod ioutil;
 mod payload;
 
 use crate::instance::{ApkData, InstanceDisk, MicrodroidData, RootHash};
+use android_hardware_security_dice::aidl::android::hardware::security::dice::{
+    Config::Config, InputValues::InputValues, Mode::Mode,
+};
+use android_security_dice::aidl::android::security::dice::IDiceMaintenance::IDiceMaintenance;
 use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use apkverify::{get_public_key_der, verify};
 use binder::unstable_api::{new_spibinder, AIBinder};
-use binder::{FromIBinder, Strong};
+use binder::{wait_for_interface, FromIBinder, Strong};
+use diced_utils::cbor::encode_header;
 use glob::glob;
 use idsig::V4Signature;
 use itertools::sorted;
-use log::{error, info, warn};
+use log::{error, info};
 use microdroid_metadata::{write_metadata, Metadata};
 use microdroid_payload_config::{Task, TaskType, VmPayloadConfig};
-use once_cell::sync::OnceCell;
 use payload::{get_apex_data_from_payload, load_metadata, to_metadata};
+use rand::Fill;
+use ring::digest;
 use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
+use std::convert::TryInto;
 use std::fs::{self, create_dir, File, OpenOptions};
-use std::io::BufRead;
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -55,12 +61,15 @@ const EXTRA_IDSIG_PATH_PATTERN: &str = "/dev/block/by-name/extra-idsig-*";
 const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
 const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
 const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
+const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
+const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
 
 /// The CID representing the host VM
 const VMADDR_CID_HOST: u32 = 2;
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
 const LOGD_ENABLED_PROP: &str = "ro.boot.logd.enabled";
+const APP_DEBUGGABLE_PROP: &str = "ro.boot.microdroid.app_debuggable";
 
 #[derive(thiserror::Error, Debug)]
 enum MicrodroidError {
@@ -113,7 +122,7 @@ fn main() {
 }
 
 fn try_main() -> Result<()> {
-    kernlog::init()?;
+    let _ = kernlog::init();
     info!("started.");
 
     let service = get_vms_rpc_binder().context("cannot connect to VirtualMachineService")?;
@@ -137,11 +146,83 @@ fn try_main() -> Result<()> {
     }
 }
 
+fn dice_derivation(verified_data: MicrodroidData, payload_config_path: &str) -> Result<()> {
+    // Calculate compound digests of code and authorities
+    let mut code_hash_ctx = digest::Context::new(&digest::SHA512);
+    let mut authority_hash_ctx = digest::Context::new(&digest::SHA512);
+    code_hash_ctx.update(verified_data.apk_data.root_hash.as_ref());
+    authority_hash_ctx.update(verified_data.apk_data.pubkey.as_ref());
+    for extra_apk in verified_data.extra_apks_data {
+        code_hash_ctx.update(extra_apk.root_hash.as_ref());
+        authority_hash_ctx.update(extra_apk.pubkey.as_ref());
+    }
+    for apex in verified_data.apex_data {
+        code_hash_ctx.update(apex.root_digest.as_ref());
+        authority_hash_ctx.update(apex.public_key.as_ref());
+    }
+    let code_hash = code_hash_ctx.finish().as_ref().try_into().unwrap();
+    let authority_hash = authority_hash_ctx.finish().as_ref().try_into().unwrap();
+
+    // {
+    //   -70002: "Microdroid payload",
+    //   -71000: payload_config_path
+    // }
+    let mut config_desc = vec![
+        0xa2, 0x3a, 0x00, 0x01, 0x11, 0x71, 0x72, 0x4d, 0x69, 0x63, 0x72, 0x6f, 0x64, 0x72, 0x6f,
+        0x69, 0x64, 0x20, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x3a, 0x00, 0x01, 0x15, 0x57,
+    ];
+    let config_path_bytes = payload_config_path.as_bytes();
+    encode_header(3, config_path_bytes.len().try_into().unwrap(), &mut config_desc)?;
+    config_desc.extend_from_slice(config_path_bytes);
+
+    // Check app debuggability, conervatively assuming it is debuggable
+    let app_debuggable = system_properties::read_bool(APP_DEBUGGABLE_PROP, true)?;
+
+    // Send the details to diced
+    let diced =
+        wait_for_interface::<dyn IDiceMaintenance>("android.security.dice.IDiceMaintenance")
+            .context("IDiceMaintenance service not found")?;
+    diced
+        .demoteSelf(&[InputValues {
+            codeHash: code_hash,
+            config: Config { desc: config_desc },
+            authorityHash: authority_hash,
+            authorityDescriptor: None,
+            mode: if app_debuggable { Mode::DEBUG } else { Mode::NORMAL },
+            hidden: verified_data.salt.try_into().unwrap(),
+        }])
+        .context("IDiceMaintenance::demoteSelf failed")?;
+    Ok(())
+}
+
+fn is_strict_boot() -> bool {
+    Path::new(AVF_STRICT_BOOT).exists()
+}
+
+fn is_new_instance() -> bool {
+    Path::new(AVF_NEW_INSTANCE).exists()
+}
+
 fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
     let metadata = load_metadata().context("Failed to load payload metadata")?;
 
     let mut instance = InstanceDisk::new().context("Failed to load instance.img")?;
     let saved_data = instance.read_microdroid_data().context("Failed to read identity data")?;
+
+    if is_strict_boot() {
+        // Provisioning must happen on the first boot and never again.
+        if is_new_instance() {
+            ensure!(
+                saved_data.is_none(),
+                MicrodroidError::InvalidConfig("Found instance data on first boot.".to_string())
+            );
+        } else {
+            ensure!(
+                saved_data.is_some(),
+                MicrodroidError::InvalidConfig("Instance data not found.".to_string())
+            );
+        };
+    }
 
     // Verify the payload before using it.
     let verified_data =
@@ -182,10 +263,8 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     }
     mount_extra_apks(&config)?;
 
-    let fake_secret = "This is a placeholder for a value that is derived from the images that are loaded in the VM.";
-    if let Err(err) = rustutils::system_properties::write("ro.vmsecret.keymint", fake_secret) {
-        warn!("failed to set ro.vmsecret.keymint: {}", err);
-    }
+    info!("DICE derivation for payload");
+    dice_derivation(verified_data, &metadata.payload_config_path)?;
 
     // Wait until apex config is done. (e.g. linker configuration for apexes)
     // TODO(jooyung): wait until sys.boot_completed?
@@ -244,13 +323,6 @@ fn verify_payload(
     saved_data: Option<&MicrodroidData>,
 ) -> Result<MicrodroidData> {
     let start_time = SystemTime::now();
-
-    if let Some(saved_bootconfig) = saved_data.map(|d| &d.bootconfig) {
-        ensure!(
-            saved_bootconfig.as_ref() == get_bootconfig()?.as_slice(),
-            MicrodroidError::PayloadChanged(String::from("Bootconfig has changed."))
-        );
-    }
 
     // Verify main APK
     let root_hash = saved_data.map(|d| &d.apk_data.root_hash);
@@ -376,13 +448,22 @@ fn verify_payload(
 
     info!("payload verification successful. took {:#?}", start_time.elapsed().unwrap());
 
+    // Use the salt from a verified instance, or generate a salt for a new instance.
+    let salt = if let Some(saved_data) = saved_data {
+        saved_data.salt.clone()
+    } else {
+        let mut salt = vec![0u8; 64];
+        salt.as_mut_slice().try_fill(&mut rand::thread_rng())?;
+        salt
+    };
+
     // At this point, we can ensure that the root_hash from the idsig file is trusted, either by
     // fully verifying the APK or by comparing it with the saved root_hash.
     Ok(MicrodroidData {
+        salt,
         apk_data: ApkData { root_hash: root_hash_from_idsig, pubkey: main_apk_pubkey },
         extra_apks_data,
         apex_data: apex_data_from_payload,
-        bootconfig: get_bootconfig()?.clone().into_boxed_slice(),
     })
 }
 
@@ -409,8 +490,7 @@ fn wait_for_apex_config_done() -> Result<()> {
     let mut prop = PropertyWatcher::new(APEX_CONFIG_DONE_PROP)?;
     loop {
         prop.wait()?;
-        let val = system_properties::read(APEX_CONFIG_DONE_PROP)?;
-        if val == "true" {
+        if system_properties::read_bool(APEX_CONFIG_DONE_PROP, false)? {
             break;
         }
     }
@@ -434,35 +514,6 @@ fn get_public_key_from_apk(apk: &str, root_hash_trustful: bool) -> Result<Box<[u
     }
 }
 
-fn get_bootconfig() -> Result<&'static Vec<u8>> {
-    static VAL: OnceCell<Vec<u8>> = OnceCell::new();
-    VAL.get_or_try_init(|| -> Result<Vec<u8>> {
-        let f = File::open("/proc/bootconfig")?;
-
-        // Filter-out androidboot.vbmeta.device which contains UUID of the vbmeta partition. That
-        // UUID could change everytime when the same VM is started because the composite disk image
-        // is ephemeral. A change in UUID is okay as long as other configs (e.g.
-        // androidboot.vbmeta.digest) remain same.
-        Ok(std::io::BufReader::new(f)
-            .lines()
-            // note: this try_fold is to early return when we fail to read a line from the file
-            .try_fold(Vec::new(), |mut lines, line| {
-                line.map(|s| {
-                    lines.push(s);
-                    lines
-                })
-            })?
-            .into_iter()
-            .filter(|line| {
-                let tokens: Vec<&str> = line.splitn(2, '=').collect();
-                // note: if `line` doesn't have =, tokens[0] is the entire line.
-                tokens[0].trim() != "androidboot.vbmeta.device"
-            })
-            .flat_map(|line| (line + "\n").into_bytes())
-            .collect())
-    })
-}
-
 fn load_config(path: &Path) -> Result<VmPayloadConfig> {
     info!("loading config from {:?}...", path);
     let file = ioutil::wait_for_file(path, WAIT_TIMEOUT)?;
@@ -480,7 +531,7 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
 
     // Start logging if enabled
     // TODO(b/200914564) set filterspec if debug_level is app_only
-    if system_properties::read(LOGD_ENABLED_PROP)? == "1" {
+    if system_properties::read_bool(LOGD_ENABLED_PROP, false)? {
         system_properties::write("ctl.start", "seriallogging")?;
     }
 

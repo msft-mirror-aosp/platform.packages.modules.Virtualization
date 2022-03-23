@@ -29,7 +29,6 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualizationService::IVirtualizationService,
     Partition::Partition,
     PartitionType::PartitionType,
-    VirtualMachineAppConfig::DebugLevel::DebugLevel,
     VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineConfig::VirtualMachineConfig,
     VirtualMachineDebugInfo::VirtualMachineDebugInfo,
@@ -50,10 +49,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use binder_common::{lazy_service::LazyServiceGuard, new_binder_exception};
 use disk::QcowFile;
 use idsig::{HashAlgorithm, V4Signature};
-use kvm::{Kvm, Cap};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, warn, trace};
 use microdroid_payload_config::VmPayloadConfig;
 use rustutils::system_properties;
+use semver::VersionReq;
 use statslog_virtualization_rust::vm_creation_requested::{stats_write, Hypervisor};
 use std::convert::TryInto;
 use std::ffi::CStr;
@@ -132,8 +131,8 @@ impl IVirtualizationService for VirtualizationService {
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         check_manage_access()?;
         let state = &mut *self.state.lock().unwrap();
-        let mut console_fd = console_fd.map(clone_file).transpose()?;
-        let mut log_fd = log_fd.map(clone_file).transpose()?;
+        let console_fd = console_fd.map(clone_file).transpose()?;
+        let log_fd = log_fd.map(clone_file).transpose()?;
         let requester_uid = ThreadState::get_calling_uid();
         let requester_sid = get_calling_sid()?;
         let requester_debug_pid = ThreadState::get_calling_pid();
@@ -164,35 +163,13 @@ impl IVirtualizationService for VirtualizationService {
             )
         })?;
 
-        // Disable console logging if debug level != full. Note that kernel anyway doesn't use the
-        // console output when debug level != full. So, users won't be able to see the kernel
-        // output even without this overriding. This is to silence output from the bootloader which
-        // doesn't understand the bootconfig parameters.
-        if let VirtualMachineConfig::AppConfig(config) = config {
-            if config.debugLevel != DebugLevel::FULL {
-                console_fd = None;
-            }
-            if config.debugLevel == DebugLevel::NONE {
-                log_fd = None;
-            }
-        }
-
         let is_app_config = matches!(config, VirtualMachineConfig::AppConfig(_));
-        let is_debug_level_full = matches!(
-            config,
-            VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
-                debugLevel: DebugLevel::FULL,
-                ..
-            })
-        );
 
         let config = match config {
             VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
                 load_app_config(config, &temporary_directory).map_err(|e| {
                     error!("Failed to load app config from {}: {}", &config.configPath, e);
-                    // At this point, we do not know the protected status of Vm
-                    // setting it to false, though this may not be correct.
-                    write_vm_creation_stats(false, false);
+                    write_vm_creation_stats(config.protectedVm, false);
                     new_binder_exception(
                         ExceptionCode::SERVICE_SPECIFIC,
                         format!("Failed to load app config from {}: {}", &config.configPath, e),
@@ -202,7 +179,7 @@ impl IVirtualizationService for VirtualizationService {
             VirtualMachineConfig::RawConfig(config) => BorrowedOrOwned::Borrowed(config),
         };
         let config = config.as_ref();
-        let protected_vm = config.protectedVm;
+        let protected = config.protectedVm;
 
         // Check if partition images are labeled incorrectly. This is to prevent random images
         // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
@@ -226,7 +203,7 @@ impl IVirtualizationService for VirtualizationService {
         let zero_filler_path = temporary_directory.join("zero.img");
         write_zero_filler(&zero_filler_path).map_err(|e| {
             error!("Failed to make composite image: {}", e);
-            write_vm_creation_stats(protected_vm, false);
+            write_vm_creation_stats(protected, false);
             new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
                 format!("Failed to make composite image: {}", e),
@@ -248,24 +225,6 @@ impl IVirtualizationService for VirtualizationService {
             })
             .collect::<Result<Vec<DiskFile>, _>>()?;
 
-        let protected_vm_supported = Kvm::new()
-            .map_err(|e| new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, e.to_string()))?
-            .check_extension(Cap::ArmProtectedVm);
-        let protected = config.protectedVm && protected_vm_supported;
-        if config.protectedVm && !protected_vm_supported {
-            warn!("Protected VM was requested, but it isn't supported on this machine. Ignored.");
-        }
-
-        // And force run in non-protected mode when debug level is FULL
-        let protected = if is_debug_level_full {
-            if protected {
-                warn!("VM will run in FULL debug level. Running in non-protected mode");
-            }
-            false
-        } else {
-            protected
-        };
-
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -281,6 +240,7 @@ impl IVirtualizationService for VirtualizationService {
             console_fd,
             log_fd,
             indirect_files,
+            platform_version: parse_platform_version_req(&config.platformVersion)?,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -292,7 +252,7 @@ impl IVirtualizationService for VirtualizationService {
             )
             .map_err(|e| {
                 error!("Failed to create VM with config {:?}: {}", config, e);
-                write_vm_creation_stats(protected_vm, false);
+                write_vm_creation_stats(protected, false);
                 new_binder_exception(
                     ExceptionCode::SERVICE_SPECIFIC,
                     format!("Failed to create VM: {}", e),
@@ -300,7 +260,7 @@ impl IVirtualizationService for VirtualizationService {
             })?,
         );
         state.add_vm(Arc::downgrade(&instance));
-        write_vm_creation_stats(protected_vm, true);
+        write_vm_creation_stats(protected, true);
         Ok(VirtualMachine::create(instance))
     }
 
@@ -453,9 +413,9 @@ impl VirtualizationService {
 fn write_vm_creation_stats(protected: bool, success: bool) {
     match stats_write(Hypervisor::Pkvm, protected, success) {
         Err(e) => {
-            info!("stastlog_rust fails with error: {}", e);
+            warn!("statslog_rust failed with error: {}", e);
         }
-        Ok(_) => info!("stastlog_rust succeeded for virtualization service"),
+        Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
     }
 }
 
@@ -587,6 +547,7 @@ fn load_app_config(
         vm_config.memoryMib = config.memoryMib;
     }
 
+    vm_config.protectedVm = config.protectedVm;
     vm_config.numCpus = config.numCpus;
     vm_config.cpuAffinity = config.cpuAffinity.clone();
 
@@ -880,7 +841,7 @@ impl State {
 /// a system property so that restart of virtualizationservice doesn't reuse CID while the host
 /// Android is up.
 fn next_cid() -> Result<Cid> {
-    let next = if let Ok(val) = system_properties::read(SYSPROP_LAST_CID) {
+    let next = if let Some(val) = system_properties::read(SYSPROP_LAST_CID)? {
         if let Ok(num) = val.parse::<u32>() {
             num.checked_add(1).ok_or_else(|| anyhow!("run out of CID"))?
         } else {
@@ -932,6 +893,16 @@ fn vsock_stream_to_pfd(stream: VsockStream) -> ParcelFileDescriptor {
     // SAFETY: ownership is transferred from stream to f
     let f = unsafe { File::from_raw_fd(stream.into_raw_fd()) };
     ParcelFileDescriptor::new(f)
+}
+
+/// Parses the platform version requirement string.
+fn parse_platform_version_req(s: &str) -> Result<VersionReq, Status> {
+    VersionReq::parse(s).map_err(|e| {
+        new_binder_exception(
+            ExceptionCode::BAD_PARCELABLE,
+            format!("Invalid platform version requirement {}: {}", s, e),
+        )
+    })
 }
 
 /// Simple utility for referencing Borrowed or Owned. Similar to std::borrow::Cow, but
