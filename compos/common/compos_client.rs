@@ -68,6 +68,8 @@ pub struct VmParameters {
     pub config_path: Option<String>,
     /// If present, overrides the amount of RAM to give the VM
     pub memory_mib: Option<i32>,
+    /// Never save VM logs to files.
+    pub never_log: bool,
 }
 
 impl VmInstance {
@@ -103,7 +105,15 @@ impl VmInstance {
         let manifest_apk_fd = ParcelFileDescriptor::new(manifest_apk_fd);
         let idsig_manifest_apk_fd = prepare_idsig(service, &manifest_apk_fd, idsig_manifest_apk)?;
 
-        let (console_fd, log_fd, debug_level) = if parameters.debug_mode {
+        let debug_level = match (protected_vm, parameters.debug_mode) {
+            (_, true) => DebugLevel::FULL,
+            (false, false) => DebugLevel::APP_ONLY,
+            (true, false) => DebugLevel::NONE,
+        };
+
+        let (console_fd, log_fd) = if parameters.never_log || debug_level == DebugLevel::NONE {
+            (None, None)
+        } else {
             // Console output and the system log output from the VM are redirected to file.
             let console_fd = File::create(data_dir.join("vm_console.log"))
                 .context("Failed to create console log file")?;
@@ -111,10 +121,8 @@ impl VmInstance {
                 .context("Failed to create system log file")?;
             let console_fd = ParcelFileDescriptor::new(console_fd);
             let log_fd = ParcelFileDescriptor::new(log_fd);
-            info!("Running in debug mode");
-            (Some(console_fd), Some(log_fd), DebugLevel::FULL)
-        } else {
-            (None, None, DebugLevel::NONE)
+            info!("Running in debug level {:?}", debug_level);
+            (Some(console_fd), Some(log_fd))
         };
 
         let config_path = parameters.config_path.as_deref().unwrap_or(DEFAULT_VM_CONFIG_PATH);
