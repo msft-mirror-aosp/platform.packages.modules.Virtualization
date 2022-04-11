@@ -16,16 +16,18 @@
 
 use fuse::mount::MountOption;
 use std::fs::OpenOptions;
+use std::num::NonZeroU8;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use super::AuthFs;
 
-/// Maximum bytes in the write transaction to the FUSE device. This limits the maximum buffer
-/// size in a read request (including FUSE protocol overhead) that the filesystem writes to.
+/// Maximum bytes (excluding the FUSE header) `AuthFs` will receive from the kernel for write
+/// operations by another process.
 pub const MAX_WRITE_BYTES: u32 = 65536;
 
-/// Maximum bytes in a read operation.
+/// Maximum bytes (excluding the FUSE header) `AuthFs` will receive from the kernel for read
+/// operations by another process.
 /// TODO(victorhsieh): This option is deprecated by FUSE. Figure out if we can remove this.
 const MAX_READ_BYTES: u32 = 65536;
 
@@ -34,6 +36,7 @@ pub fn mount_and_enter_message_loop(
     authfs: AuthFs,
     mountpoint: &Path,
     extra_options: &Option<String>,
+    threads: Option<NonZeroU8>,
 ) -> Result<(), fuse::Error> {
     let dev_fuse = OpenOptions::new()
         .read(true)
@@ -61,5 +64,10 @@ pub fn mount_and_enter_message_loop(
     )
     .expect("Failed to mount fuse");
 
-    fuse::worker::start_message_loop(dev_fuse, MAX_WRITE_BYTES, MAX_READ_BYTES, authfs)
+    let mut config = fuse::FuseConfig::new();
+    config.dev_fuse(dev_fuse).max_write(MAX_WRITE_BYTES).max_read(MAX_READ_BYTES);
+    if let Some(num) = threads {
+        config.num_threads(u8::from(num).into());
+    }
+    config.enter_message_loop(authfs)
 }
