@@ -16,6 +16,8 @@
 
 package android.virt.test;
 
+import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
+
 import static org.hamcrest.CoreMatchers.is;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
@@ -28,6 +30,8 @@ import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.device.ITestDevice;
 import com.android.tradefed.device.TestDevice;
 import com.android.tradefed.log.LogUtil.CLog;
+import com.android.tradefed.result.FileInputStreamSource;
+import com.android.tradefed.result.LogDataType;
 import com.android.tradefed.testtype.junit4.BaseHostJUnit4Test;
 import com.android.tradefed.util.CommandResult;
 import com.android.tradefed.util.CommandStatus;
@@ -46,6 +50,7 @@ import java.util.regex.Pattern;
 public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
     protected static final String TEST_ROOT = "/data/local/tmp/virt/";
     protected static final String VIRT_APEX = "/apex/com.android.virt/";
+    protected static final String LOG_PATH = TEST_ROOT + "log.txt";
     private static final int TEST_VM_ADB_PORT = 8000;
     private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
     private static final String INSTANCE_IMG = "instance.img";
@@ -77,36 +82,30 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         // disconnect from microdroid
         tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
 
-        reconnectHostAdb(androidDevice);
-
         // kill stale VMs and directories
         android.tryRun("killall", "crosvm");
         android.tryRun("stop", "virtualizationservice");
         android.tryRun("rm", "-rf", "/data/misc/virtualizationservice/*");
     }
 
-    public static void reconnectHostAdb(ITestDevice androidDevice)
-            throws DeviceNotAvailableException {
-        CommandRunner android = new CommandRunner(androidDevice);
-
-        // Make sure we're connected to the host adb; this connection seems to get dropped when a VM
-        // exits.
-        for (int retry = 0; retry < 10; ++retry) {
-            if (android.tryRun("true") != null) {
-                break;
-            }
-            androidDevice.waitForDeviceOnline(1000);
-        }
-    }
-
     public static void testIfDeviceIsCapable(ITestDevice androidDevice) throws Exception {
         assumeTrue("Need an actual TestDevice", androidDevice instanceof TestDevice);
         TestDevice testDevice = (TestDevice) androidDevice;
-        assumeTrue("Requires VM support", testDevice.deviceSupportsMicrodroid());
+        assumeTrue("Requires VM support", testDevice.supportsMicrodroid());
+    }
+
+    public static void archiveLogThenDelete(TestLogData logs, ITestDevice device, String remotePath,
+            String localName) throws DeviceNotAvailableException {
+        File logFile = device.pullFile(remotePath);
+        if (logFile != null) {
+            logs.addTestLog(localName, LogDataType.TEXT, new FileInputStreamSource(logFile));
+            // Delete to avoid confusing logs from a previous run, just in case.
+            device.deleteFile(remotePath);
+        }
     }
 
     // Run an arbitrary command in the host side and returns the result
-    private static String runOnHost(String... cmd) {
+    public static String runOnHost(String... cmd) {
         return runOnHostWithTimeout(10000, cmd);
     }
 
@@ -128,6 +127,19 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
     // Run a shell command on Microdroid
     public static String runOnMicrodroid(String... cmd) {
         CommandResult result = runOnMicrodroidForResult(cmd);
+        if (result.getStatus() != CommandStatus.SUCCESS) {
+            fail(join(cmd) + " has failed: " + result);
+        }
+        return result.getStdout().trim();
+    }
+
+    // Same as runOnMicrodroid, but keeps retrying on error till timeout
+    private static String runOnMicrodroidRetryingOnFailure(String... cmd) {
+        final long timeoutMs = 30000; // 30 sec. Microdroid is extremely slow on GCE-on-CF.
+        int attempts = (int) MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES * 60 * 1000 / 500;
+        CommandResult result = RunUtil.getDefault()
+                .runTimedCmdRetry(timeoutMs, 500, attempts,
+                        "adb", "-s", MICRODROID_SERIAL, "shell", join(cmd));
         if (result.getStatus() != CommandStatus.SUCCESS) {
             fail(join(cmd) + " has failed: " + result);
         }
@@ -270,7 +282,7 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
         final String outApkIdsigPath = TEST_ROOT + apkName + ".idsig";
 
         final String instanceImg = TEST_ROOT + INSTANCE_IMG;
-        final String logPath = TEST_ROOT + "log.txt";
+        final String logPath = LOG_PATH;
         final String debugFlag = debug ? "--debug full" : "";
 
         // Run the VM
@@ -329,34 +341,20 @@ public abstract class VirtualizationTestCaseBase extends BaseHostJUnit4Test {
 
         // Shutdown the VM
         android.run(VIRT_APEX + "bin/vm", "stop", cid);
-
-        // TODO(192660485): Figure out why shutting down the VM disconnects adb on cuttlefish
-        // temporarily. Without this wait, the rest of `runOnAndroid/skipIfFail` fails due to the
-        // connection loss, and results in assumption error exception for the rest of the tests.
-        try {
-            Thread.sleep(1000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     public static void rootMicrodroid() {
         runOnHost("adb", "-s", MICRODROID_SERIAL, "root");
-
-        // TODO(192660959): Figure out the root cause and remove the sleep. For unknown reason,
-        // even though `adb root` actually wait-for-disconnect then wait-for-device, the next
-        // `adb -s $MICRODROID_SERIAL shell ...` often fails with "adb: device offline".
-        try {
-            Thread.sleep(1000);
-            runOnHostWithTimeout(
-                    MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES * 60 * 1000,
-                    "adb",
-                    "-s",
-                    MICRODROID_SERIAL,
-                    "wait-for-device");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        runOnHostWithTimeout(
+                MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES * 60 * 1000,
+                "adb",
+                "-s",
+                MICRODROID_SERIAL,
+                "wait-for-device");
+        // There have been tests when adb wait-for-device succeeded but the following command
+        // fails with error: closed. Hence, we run adb shell true in microdroid with retries
+        // before returning.
+        runOnMicrodroidRetryingOnFailure("true");
     }
 
     // Establish an adb connection to microdroid by letting Android forward the connection to

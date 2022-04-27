@@ -104,7 +104,7 @@ struct InodeState {
     /// stay alive until the reference count reaches zero.
     ///
     /// Note: This is not to be confused with hardlinks, which AuthFS doesn't currently implement.
-    handle_ref_count: u64,
+    handle_ref_count: AtomicU64,
 
     /// Whether the inode is already unlinked, i.e. should be removed, once `handle_ref_count` is
     /// down to zero.
@@ -113,11 +113,11 @@ struct InodeState {
 
 impl InodeState {
     fn new(entry: AuthFsEntry) -> Self {
-        InodeState { entry, handle_ref_count: 0, unlinked: false }
+        InodeState { entry, handle_ref_count: AtomicU64::new(0), unlinked: false }
     }
 
     fn new_with_ref_count(entry: AuthFsEntry, handle_ref_count: u64) -> Self {
-        InodeState { entry, handle_ref_count, unlinked: false }
+        InodeState { entry, handle_ref_count: AtomicU64::new(handle_ref_count), unlinked: false }
     }
 }
 
@@ -184,10 +184,9 @@ impl<'a> DirectoryIterator for DirEntriesSnapshotIterator {
 
 type DirHandleTable = BTreeMap<Handle, Arc<DirEntriesSnapshot>>;
 
-// AuthFS needs to be `Sync` to be accepted by fuse::worker::start_message_loop as a `FileSystem`.
+// AuthFS needs to be `Sync` to be used with the `fuse` crate.
 pub struct AuthFs {
-    /// Table for `Inode` to `InodeState` lookup. This needs to be `Sync` to be used in
-    /// `fuse::worker::start_message_loop`.
+    /// Table for `Inode` to `InodeState` lookup.
     inode_table: RwLock<BTreeMap<Inode, InodeState>>,
 
     /// The next available inode number.
@@ -511,7 +510,7 @@ impl FileSystem for AuthFs {
     }
 
     fn lookup(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
-        let mut inode_table = self.inode_table.write().unwrap();
+        let inode_table = self.inode_table.read().unwrap();
 
         // Look up the entry's inode number in parent directory.
         let inode =
@@ -528,8 +527,8 @@ impl FileSystem for AuthFs {
             })?;
 
         // Create the entry's stat if found.
-        let st = handle_inode_mut_locked(
-            &mut inode_table,
+        let st = handle_inode_locked(
+            &inode_table,
             &inode,
             |InodeState { entry, handle_ref_count, .. }| {
                 let st = match entry {
@@ -551,7 +550,9 @@ impl FileSystem for AuthFs {
                         AccessMode::Variable(attr.mode()),
                     ),
                 }?;
-                *handle_ref_count += 1;
+                if handle_ref_count.fetch_add(1, Ordering::Relaxed) == u64::MAX {
+                    panic!("Handle reference count overflow");
+                }
                 Ok(st)
             },
         )?;
@@ -571,15 +572,16 @@ impl FileSystem for AuthFs {
             &mut inode_table,
             &inode,
             |InodeState { handle_ref_count, unlinked, .. }| {
-                if count > *handle_ref_count {
+                let current = handle_ref_count.get_mut();
+                if count > *current {
                     error!(
                         "Trying to decrease refcount of inode {} by {} (> current {})",
-                        inode, count, *handle_ref_count
+                        inode, count, *current
                     );
                     panic!(); // log to logcat with error!
                 }
-                *handle_ref_count = handle_ref_count.saturating_sub(count);
-                Ok(*unlinked && *handle_ref_count == 0)
+                *current -= count;
+                Ok(*unlinked && *current == 0)
             },
         );
 
