@@ -23,6 +23,7 @@ import android.annotation.CallbackExecutor;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
+import android.os.Binder;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
@@ -34,6 +35,8 @@ import android.system.virtualizationservice.PartitionType;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
 import android.system.virtualizationservice.VirtualMachineState;
 import android.util.JsonReader;
+
+import com.android.internal.annotations.GuardedBy;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -51,6 +54,8 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.zip.ZipFile;
 
 /**
@@ -90,6 +95,9 @@ public class VirtualMachine {
          */
         DELETED,
     }
+
+    /** Lock for internal synchronization. */
+    private final Object mLock = new Object();
 
     /** The package which owns this VM. */
     private final @NonNull String mPackageName;
@@ -134,10 +142,12 @@ public class VirtualMachine {
     private @Nullable IVirtualMachine mVirtualMachine;
 
     /** The registered callback */
+    @GuardedBy("mLock")
     private @Nullable VirtualMachineCallback mCallback;
 
     /** The executor on which the callback will be executed */
-    private @NonNull Executor mCallbackExecutor;
+    @GuardedBy("mLock")
+    private @Nullable Executor mCallbackExecutor;
 
     private @Nullable ParcelFileDescriptor mConsoleReader;
     private @Nullable ParcelFileDescriptor mConsoleWriter;
@@ -222,7 +232,7 @@ public class VirtualMachine {
     }
 
     /** Loads a virtual machine that is already created before. */
-    /* package */ static @NonNull VirtualMachine load(
+    /* package */ static @Nullable VirtualMachine load(
             @NonNull Context context, @NonNull String name) throws VirtualMachineException {
         File configFilePath = getConfigFilePath(context, name);
         VirtualMachineConfig config;
@@ -297,14 +307,38 @@ public class VirtualMachine {
      */
     public void setCallback(
             @NonNull @CallbackExecutor Executor executor,
-            @Nullable VirtualMachineCallback callback) {
-        mCallbackExecutor = executor;
-        mCallback = callback;
+            @NonNull VirtualMachineCallback callback) {
+        synchronized (mLock) {
+            mCallback = callback;
+            mCallbackExecutor = executor;
+        }
     }
 
-    /** Returns the currently registered callback. */
-    public @Nullable VirtualMachineCallback getCallback() {
-        return mCallback;
+    /** Clears the currently registered callback. */
+    public void clearCallback() {
+        synchronized (mLock) {
+            mCallback = null;
+            mCallbackExecutor = null;
+        }
+    }
+
+    /** Executes a callback on the callback executor. */
+    private void executeCallback(Consumer<VirtualMachineCallback> fn) {
+        final VirtualMachineCallback callback;
+        final Executor executor;
+        synchronized (mLock) {
+            callback = mCallback;
+            executor = mCallbackExecutor;
+        }
+        if (callback == null || executor == null) {
+            return;
+        }
+        final long restoreToken = Binder.clearCallingIdentity();
+        try {
+            executor.execute(() -> fn.accept(callback));
+        } finally {
+            Binder.restoreCallingIdentity(restoreToken);
+        }
     }
 
     /**
@@ -368,70 +402,51 @@ public class VirtualMachine {
             android.system.virtualizationservice.VirtualMachineConfig vmConfigParcel =
                     android.system.virtualizationservice.VirtualMachineConfig.appConfig(appConfig);
 
+            // The VM should only be observed to die once
+            AtomicBoolean onDiedCalled = new AtomicBoolean(false);
+
+            IBinder.DeathRecipient deathRecipient = new IBinder.DeathRecipient() {
+                @Override
+                public void binderDied() {
+                    if (onDiedCalled.compareAndSet(false, true)) {
+                        executeCallback((cb) -> cb.onDied(VirtualMachine.this,
+                                VirtualMachineCallback.DEATH_REASON_VIRTUALIZATIONSERVICE_DIED));
+                    }
+                }
+            };
+
             mVirtualMachine = service.createVm(vmConfigParcel, mConsoleWriter, mLogWriter);
             mVirtualMachine.registerCallback(
                     new IVirtualMachineCallback.Stub() {
                         @Override
                         public void onPayloadStarted(int cid, ParcelFileDescriptor stream) {
-                            final VirtualMachineCallback cb = mCallback;
-                            if (cb == null) {
-                                return;
-                            }
-                            mCallbackExecutor.execute(
-                                    () -> cb.onPayloadStarted(VirtualMachine.this, stream));
+                            executeCallback(
+                                    (cb) -> cb.onPayloadStarted(VirtualMachine.this, stream));
                         }
-
                         @Override
                         public void onPayloadReady(int cid) {
-                            final VirtualMachineCallback cb = mCallback;
-                            if (cb == null) {
-                                return;
-                            }
-                            mCallbackExecutor.execute(() -> cb.onPayloadReady(VirtualMachine.this));
+                            executeCallback((cb) -> cb.onPayloadReady(VirtualMachine.this));
                         }
-
                         @Override
                         public void onPayloadFinished(int cid, int exitCode) {
-                            final VirtualMachineCallback cb = mCallback;
-                            if (cb == null) {
-                                return;
-                            }
-                            mCallbackExecutor.execute(
-                                    () -> cb.onPayloadFinished(VirtualMachine.this, exitCode));
+                            executeCallback(
+                                    (cb) -> cb.onPayloadFinished(VirtualMachine.this, exitCode));
                         }
-
                         @Override
                         public void onError(int cid, int errorCode, String message) {
-                            final VirtualMachineCallback cb = mCallback;
-                            if (cb == null) {
-                                return;
-                            }
-                            mCallbackExecutor.execute(
-                                    () -> cb.onError(VirtualMachine.this, errorCode, message));
+                            executeCallback(
+                                    (cb) -> cb.onError(VirtualMachine.this, errorCode, message));
                         }
-
                         @Override
                         public void onDied(int cid, int reason) {
-                            final VirtualMachineCallback cb = mCallback;
-                            if (cb == null) {
-                                return;
+                            service.asBinder().unlinkToDeath(deathRecipient, 0);
+                            if (onDiedCalled.compareAndSet(false, true)) {
+                                executeCallback((cb) -> cb.onDied(VirtualMachine.this, reason));
                             }
-                            mCallbackExecutor.execute(() -> cb.onDied(VirtualMachine.this, reason));
                         }
-                    });
-            service.asBinder()
-                    .linkToDeath(
-                            new IBinder.DeathRecipient() {
-                                @Override
-                                public void binderDied() {
-                                    final VirtualMachineCallback cb = mCallback;
-                                    if (cb != null) {
-                                        cb.onDied(VirtualMachine.this, VirtualMachineCallback
-                                                .DEATH_REASON_VIRTUALIZATIONSERVICE_DIED);
-                                    }
-                                }
-                            },
-                            0);
+                    }
+            );
+            service.asBinder().linkToDeath(deathRecipient, 0);
             mVirtualMachine.start();
         } catch (IOException e) {
             throw new VirtualMachineException(e);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,18 +14,22 @@
  * limitations under the License.
  */
 
-package com.android.compos;
+use std::fs::File;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
-/** {@hide} */
-parcelable CompOsKeyData {
-    /**
-     * The public key, as a DER-encoded RSAPublicKey
-     * (https://datatracker.ietf.org/doc/html/rfc8017#appendix-A.1.1).
-     */
-    byte[] publicKey;
+// TODO: Remove if/when std::os::unix::io::OwnedFd is standardized.
+pub struct OwnedFd {
+    owner: File,
+}
 
-    /**
-     * Opaque encrypted blob containing the private key and related metadata.
-     */
-    byte[] keyBlob;
+impl FromRawFd for OwnedFd {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        OwnedFd { owner: File::from_raw_fd(fd) }
+    }
+}
+
+impl AsRawFd for OwnedFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.owner.as_raw_fd()
+    }
 }
