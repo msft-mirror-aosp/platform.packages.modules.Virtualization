@@ -19,14 +19,15 @@
 use crate::fd_server_helper::FdServerConfig;
 use crate::instance_starter::CompOsInstance;
 use android_system_composd::aidl::android::system::composd::{
-    ICompilationTask::ICompilationTask, ICompilationTaskCallback::ICompilationTaskCallback,
+    ICompilationTask::ICompilationTask,
+    ICompilationTaskCallback::{FailureReason::FailureReason, ICompilationTaskCallback},
 };
 use android_system_composd::binder::{Interface, Result as BinderResult, Strong};
 use anyhow::{Context, Result};
 use compos_aidl_interface::aidl::com::android::compos::ICompOsService::{
     CompilationMode::CompilationMode, ICompOsService,
 };
-use compos_common::odrefresh::ExitCode;
+use compos_common::odrefresh::{ExitCode, ODREFRESH_OUTPUT_ROOT_DIR};
 use log::{error, info, warn};
 use rustutils::system_properties;
 use std::fs::{remove_dir_all, File, OpenOptions};
@@ -35,8 +36,6 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
-
-const ART_APEX_DATA: &str = "/data/misc/apexdata/com.android.art";
 
 #[derive(Clone)]
 pub struct OdrefreshTask {
@@ -101,12 +100,15 @@ impl OdrefreshTask {
                         task.callback.onSuccess()
                     }
                     Ok(exit_code) => {
-                        error!("Unexpected odrefresh result: {:?}", exit_code);
-                        task.callback.onFailure()
+                        let message = format!("Unexpected odrefresh result: {:?}", exit_code);
+                        error!("{}", message);
+                        task.callback
+                            .onFailure(FailureReason::UnexpectedCompilationResult, &message)
                     }
                     Err(e) => {
-                        error!("Running odrefresh failed: {:?}", e);
-                        task.callback.onFailure()
+                        let message = format!("Running odrefresh failed: {:?}", e);
+                        error!("{}", message);
+                        task.callback.onFailure(FailureReason::CompilationFailed, &message)
                     }
                 };
                 if let Err(e) = result {
@@ -122,7 +124,7 @@ fn run_in_vm(
     compilation_mode: CompilationMode,
     target_dir_name: &str,
 ) -> Result<ExitCode> {
-    let output_root = Path::new(ART_APEX_DATA);
+    let output_root = Path::new(ODREFRESH_OUTPUT_ROOT_DIR);
 
     // We need to remove the target directory because odrefresh running in compos will create it
     // (and can't see the existing one, since authfs doesn't show it existing files in an output
