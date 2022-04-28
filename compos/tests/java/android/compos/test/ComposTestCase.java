@@ -16,6 +16,8 @@
 
 package android.compos.test;
 
+import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
+
 import static com.google.common.truth.Truth.assertThat;
 
 import android.platform.test.annotations.RootPermissionTest;
@@ -28,7 +30,9 @@ import com.android.tradefed.util.CommandResult;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 
 @RootPermissionTest
@@ -38,8 +42,10 @@ public final class ComposTestCase extends VirtualizationTestCaseBase {
     // Binaries used in test. (These paths are valid both in host and Microdroid.)
     private static final String ODREFRESH_BIN = "/apex/com.android.art/bin/odrefresh";
     private static final String COMPOSD_CMD_BIN = "/apex/com.android.compos/bin/composd_cmd";
-    private static final String COMPOS_VERIFY_KEY_BIN =
-            "/apex/com.android.compos/bin/compos_verify_key";
+    private static final String COMPOS_VERIFY_BIN =
+            "/apex/com.android.compos/bin/compos_verify";
+
+    private static final String COMPOS_APEXDATA_DIR = "/data/misc/apexdata/com.android.compos";
 
     /** Output directory of odrefresh */
     private static final String TEST_ARTIFACTS_DIR = "test-artifacts";
@@ -61,6 +67,9 @@ public final class ComposTestCase extends VirtualizationTestCaseBase {
             "dalvik.vm.systemservercompilerfilter";
     private String mBackupSystemServerCompilerFilter;
 
+    @Rule public TestLogData mTestLogs = new TestLogData();
+    @Rule public TestName mTestName = new TestName();
+
     @Before
     public void setUp() throws Exception {
         testIfDeviceIsCapable(getDevice());
@@ -76,6 +85,11 @@ public final class ComposTestCase extends VirtualizationTestCaseBase {
     @After
     public void tearDown() throws Exception {
         killVmAndReconnectAdb();
+
+        archiveLogThenDelete(mTestLogs, getDevice(), COMPOS_APEXDATA_DIR + "/vm_console.log",
+                "vm_console.log-" + mTestName.getMethodName());
+        archiveLogThenDelete(mTestLogs, getDevice(), COMPOS_APEXDATA_DIR + "/vm.log",
+                "vm.log-" + mTestName.getMethodName());
 
         CommandRunner android = new CommandRunner(getDevice());
 
@@ -153,8 +167,8 @@ public final class ComposTestCase extends VirtualizationTestCaseBase {
         android.run("test -f " + ODREFRESH_OUTPUT_DIR + "/compos.info");
         android.run("test -f " + ODREFRESH_OUTPUT_DIR + "/compos.info.signature");
 
-        // Expect the CompOS public key & key blob to be valid
-        android.run(COMPOS_VERIFY_KEY_BIN + " --debug --instance test");
+        // Expect the CompOS signature to be valid
+        android.run(COMPOS_VERIFY_BIN + " --debug --instance test");
     }
 
     private CommandResult runOdrefresh(CommandRunner android, String command) throws Exception {
@@ -168,15 +182,8 @@ public final class ComposTestCase extends VirtualizationTestCaseBase {
     private void killVmAndReconnectAdb() throws Exception {
         CommandRunner android = new CommandRunner(getDevice());
 
-        // When a VM exits, we tend to see adb disconnecting. So we attempt to reconnect
-        // when we kill it to avoid problems. Of course VirtualizationService may exit anyway
-        // (it's an on-demand service and all its clients have gone), taking the VM with it,
-        // which makes this a bit unpredictable.
-        reconnectHostAdb(getDevice());
         android.tryRun("killall", "crosvm");
-        reconnectHostAdb(getDevice());
         android.tryRun("stop", "virtualizationservice");
-        reconnectHostAdb(getDevice());
 
         // Delete stale data
         android.tryRun("rm", "-rf", "/data/misc/virtualizationservice/*");
