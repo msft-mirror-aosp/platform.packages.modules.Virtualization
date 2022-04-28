@@ -29,7 +29,6 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualizationService::IVirtualizationService,
     Partition::Partition,
     PartitionType::PartitionType,
-    VirtualMachineAppConfig::DebugLevel::DebugLevel,
     VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineConfig::VirtualMachineConfig,
     VirtualMachineDebugInfo::VirtualMachineDebugInfo,
@@ -43,7 +42,7 @@ use android_system_virtualizationservice::binder::{
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::{
     IVirtualMachineService::{
         BnVirtualMachineService, IVirtualMachineService, VM_BINDER_SERVICE_PORT,
-        VM_STREAM_SERVICE_PORT,
+        VM_STREAM_SERVICE_PORT, VM_TOMBSTONES_SERVICE_PORT,
     },
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -53,17 +52,19 @@ use idsig::{HashAlgorithm, V4Signature};
 use log::{debug, error, info, warn, trace};
 use microdroid_payload_config::VmPayloadConfig;
 use rustutils::system_properties;
+use semver::VersionReq;
 use statslog_virtualization_rust::vm_creation_requested::{stats_write, Hypervisor};
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fs::{create_dir, File, OpenOptions};
-use std::io::{Error, ErrorKind, Write};
+use std::io::{Error, ErrorKind, Write, Read};
 use std::num::NonZeroU32;
 use std::os::raw;
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::{Arc, Mutex, Weak};
+use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
 use vmconfig::VmConfig;
 use vsock::{SockAddr, VsockListener, VsockStream};
 use zip::ZipArchive;
@@ -85,6 +86,8 @@ const ANDROID_VM_INSTANCE_MAGIC: &str = "Android-VM-instance";
 
 /// Version of the instance image format
 const ANDROID_VM_INSTANCE_VERSION: u16 = 1;
+
+const CHUNK_RECV_MAX_LEN: usize = 1024;
 
 /// Implementation of `IVirtualizationService`, the entry point of the AIDL service.
 #[derive(Debug, Default)]
@@ -129,166 +132,26 @@ impl IVirtualizationService for VirtualizationService {
         console_fd: Option<&ParcelFileDescriptor>,
         log_fd: Option<&ParcelFileDescriptor>,
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
-        check_manage_access()?;
-        let state = &mut *self.state.lock().unwrap();
-        let mut console_fd = console_fd.map(clone_file).transpose()?;
-        let mut log_fd = log_fd.map(clone_file).transpose()?;
-        let requester_uid = ThreadState::get_calling_uid();
-        let requester_sid = get_calling_sid()?;
-        let requester_debug_pid = ThreadState::get_calling_pid();
-        let cid = next_cid().or(Err(ExceptionCode::ILLEGAL_STATE))?;
-
-        // Counter to generate unique IDs for temporary image files.
-        let mut next_temporary_image_id = 0;
-        // Files which are referred to from composite images. These must be mapped to the crosvm
-        // child process, and not closed before it is started.
-        let mut indirect_files = vec![];
-
-        // Make directory for temporary files.
-        let temporary_directory: PathBuf = format!("{}/{}", TEMPORARY_DIRECTORY, cid).into();
-        create_dir(&temporary_directory).map_err(|e| {
-            // At this point, we do not know the protected status of Vm
-            // setting it to false, though this may not be correct.
-            write_vm_creation_stats(false, false);
-            error!(
-                "Failed to create temporary directory {:?} for VM files: {}",
-                temporary_directory, e
-            );
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!(
-                    "Failed to create temporary directory {:?} for VM files: {}",
-                    temporary_directory, e
-                ),
-            )
-        })?;
-
-        // Disable console logging if debug level != full. Note that kernel anyway doesn't use the
-        // console output when debug level != full. So, users won't be able to see the kernel
-        // output even without this overriding. This is to silence output from the bootloader which
-        // doesn't understand the bootconfig parameters.
-        if let VirtualMachineConfig::AppConfig(config) = config {
-            if config.debugLevel != DebugLevel::FULL {
-                console_fd = None;
+        let mut is_protected = false;
+        let ret = self.create_vm_internal(config, console_fd, log_fd, &mut is_protected);
+        match ret {
+            Ok(_) => {
+                let ok_status = Status::ok();
+                write_vm_creation_stats(
+                    is_protected,
+                    /*creation_succeeded*/ true,
+                    ok_status.exception_code() as i32,
+                );
             }
-            if config.debugLevel == DebugLevel::NONE {
-                log_fd = None;
+            Err(ref e) => {
+                write_vm_creation_stats(
+                    is_protected,
+                    /*creation_succeeded*/ false,
+                    e.exception_code() as i32,
+                );
             }
         }
-
-        let is_app_config = matches!(config, VirtualMachineConfig::AppConfig(_));
-        let is_debug_level_full = matches!(
-            config,
-            VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
-                debugLevel: DebugLevel::FULL,
-                ..
-            })
-        );
-
-        let config = match config {
-            VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
-                load_app_config(config, &temporary_directory).map_err(|e| {
-                    error!("Failed to load app config from {}: {}", &config.configPath, e);
-                    write_vm_creation_stats(config.protectedVm, false);
-                    new_binder_exception(
-                        ExceptionCode::SERVICE_SPECIFIC,
-                        format!("Failed to load app config from {}: {}", &config.configPath, e),
-                    )
-                })?,
-            ),
-            VirtualMachineConfig::RawConfig(config) => BorrowedOrOwned::Borrowed(config),
-        };
-        let config = config.as_ref();
-        let protected = config.protectedVm;
-
-        // Debug level FULL is only supported for non-protected VMs.
-        if is_debug_level_full && protected {
-            return Err(new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                "FULL debug level not supported for protected VMs.",
-            ));
-        };
-
-        // Check if partition images are labeled incorrectly. This is to prevent random images
-        // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
-        // being loaded in a pVM.  Specifically, for images in the raw config, nothing is allowed
-        // to be labeled as app_data_file. For images in the app config, nothing but the instance
-        // partition is allowed to be labeled as such.
-        config
-            .disks
-            .iter()
-            .flat_map(|disk| disk.partitions.iter())
-            .filter(|partition| {
-                if is_app_config {
-                    partition.label != "vm-instance"
-                } else {
-                    true // all partitions are checked
-                }
-            })
-            .try_for_each(check_label_for_partition)
-            .map_err(|e| new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, e.to_string()))?;
-
-        let zero_filler_path = temporary_directory.join("zero.img");
-        write_zero_filler(&zero_filler_path).map_err(|e| {
-            error!("Failed to make composite image: {}", e);
-            write_vm_creation_stats(protected, false);
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("Failed to make composite image: {}", e),
-            )
-        })?;
-
-        // Assemble disk images if needed.
-        let disks = config
-            .disks
-            .iter()
-            .map(|disk| {
-                assemble_disk_image(
-                    disk,
-                    &zero_filler_path,
-                    &temporary_directory,
-                    &mut next_temporary_image_id,
-                    &mut indirect_files,
-                )
-            })
-            .collect::<Result<Vec<DiskFile>, _>>()?;
-
-        // Actually start the VM.
-        let crosvm_config = CrosvmConfig {
-            cid,
-            bootloader: maybe_clone_file(&config.bootloader)?,
-            kernel: maybe_clone_file(&config.kernel)?,
-            initrd: maybe_clone_file(&config.initrd)?,
-            disks,
-            params: config.params.to_owned(),
-            protected,
-            memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
-            cpus: config.numCpus.try_into().ok().and_then(NonZeroU32::new),
-            cpu_affinity: config.cpuAffinity.clone(),
-            console_fd,
-            log_fd,
-            indirect_files,
-        };
-        let instance = Arc::new(
-            VmInstance::new(
-                crosvm_config,
-                temporary_directory,
-                requester_uid,
-                requester_sid,
-                requester_debug_pid,
-            )
-            .map_err(|e| {
-                error!("Failed to create VM with config {:?}: {}", config, e);
-                write_vm_creation_stats(protected, false);
-                new_binder_exception(
-                    ExceptionCode::SERVICE_SPECIFIC,
-                    format!("Failed to create VM: {}", e),
-                )
-            })?,
-        );
-        state.add_vm(Arc::downgrade(&instance));
-        write_vm_creation_stats(protected, true);
-        Ok(VirtualMachine::create(instance))
+        ret
     }
 
     /// Initialise an empty partition image of the given size to be used as a writable partition.
@@ -398,6 +261,55 @@ impl IVirtualizationService for VirtualizationService {
     }
 }
 
+fn handle_stream_connection_tombstoned() -> Result<()> {
+    let listener =
+        VsockListener::bind_with_cid_port(VMADDR_CID_HOST, VM_TOMBSTONES_SERVICE_PORT as u32)?;
+    info!("Listening to tombstones from guests ...");
+    for incoming_stream in listener.incoming() {
+        let mut incoming_stream = match incoming_stream {
+            Err(e) => {
+                warn!("invalid incoming connection: {}", e);
+                continue;
+            }
+            Ok(s) => s,
+        };
+        std::thread::spawn(move || {
+            if let Err(e) = handle_tombstone(&mut incoming_stream) {
+                error!("Failed to write tombstone- {:?}", e);
+            }
+        });
+    }
+    Ok(())
+}
+
+fn handle_tombstone(stream: &mut VsockStream) -> Result<()> {
+    if let Ok(SockAddr::Vsock(addr)) = stream.peer_addr() {
+        info!("Vsock Stream connected to cid={} for tombstones", addr.cid());
+    }
+    let tb_connection =
+        TombstonedConnection::connect(std::process::id() as i32, DebuggerdDumpType::Tombstone)
+            .context("Failed to connect to tombstoned")?;
+    let mut text_output = tb_connection
+        .text_output
+        .as_ref()
+        .ok_or_else(|| anyhow!("Could not get file to write the tombstones on"))?;
+    let mut num_bytes_read = 0;
+    loop {
+        let mut chunk_recv = [0; CHUNK_RECV_MAX_LEN];
+        let n = stream
+            .read(&mut chunk_recv)
+            .context("Failed to read tombstone data from Vsock stream")?;
+        if n == 0 {
+            break;
+        }
+        num_bytes_read += n;
+        text_output.write_all(&chunk_recv[0..n]).context("Failed to write guests tombstones")?;
+    }
+    info!("Received {} bytes from guest & wrote to tombstone file", num_bytes_read);
+    tb_connection.notify_completion()?;
+    Ok(())
+}
+
 impl VirtualizationService {
     pub fn init() -> VirtualizationService {
         let service = VirtualizationService::default();
@@ -408,8 +320,15 @@ impl VirtualizationService {
             handle_stream_connection_from_vm(state).unwrap();
         });
 
+        std::thread::spawn(|| {
+            if let Err(e) = handle_stream_connection_tombstoned() {
+                warn!("Error receiving tombstone from guest or writing them. Error: {}", e);
+            }
+        });
+
         // binder server for vm
-        let mut state = service.state.clone(); // reference to state (not the state itself) is copied
+        // reference to state (not the state itself) is copied
+        let mut state = service.state.clone();
         std::thread::spawn(move || {
             let state_ptr = &mut state as *mut _ as *mut raw::c_void;
 
@@ -434,11 +353,150 @@ impl VirtualizationService {
         });
         service
     }
+
+    fn create_vm_internal(
+        &self,
+        config: &VirtualMachineConfig,
+        console_fd: Option<&ParcelFileDescriptor>,
+        log_fd: Option<&ParcelFileDescriptor>,
+        is_protected: &mut bool,
+    ) -> binder::Result<Strong<dyn IVirtualMachine>> {
+        check_manage_access()?;
+        let state = &mut *self.state.lock().unwrap();
+        let console_fd = console_fd.map(clone_file).transpose()?;
+        let log_fd = log_fd.map(clone_file).transpose()?;
+        let requester_uid = ThreadState::get_calling_uid();
+        let requester_sid = get_calling_sid()?;
+        let requester_debug_pid = ThreadState::get_calling_pid();
+        let cid = next_cid().or(Err(ExceptionCode::ILLEGAL_STATE))?;
+
+        // Counter to generate unique IDs for temporary image files.
+        let mut next_temporary_image_id = 0;
+        // Files which are referred to from composite images. These must be mapped to the crosvm
+        // child process, and not closed before it is started.
+        let mut indirect_files = vec![];
+
+        // Make directory for temporary files.
+        let temporary_directory: PathBuf = format!("{}/{}", TEMPORARY_DIRECTORY, cid).into();
+        create_dir(&temporary_directory).map_err(|e| {
+            // At this point, we do not know the protected status of Vm
+            // setting it to false, though this may not be correct.
+            error!(
+                "Failed to create temporary directory {:?} for VM files: {}",
+                temporary_directory, e
+            );
+            new_binder_exception(
+                ExceptionCode::SERVICE_SPECIFIC,
+                format!(
+                    "Failed to create temporary directory {:?} for VM files: {}",
+                    temporary_directory, e
+                ),
+            )
+        })?;
+
+        let is_app_config = matches!(config, VirtualMachineConfig::AppConfig(_));
+
+        let config = match config {
+            VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
+                load_app_config(config, &temporary_directory).map_err(|e| {
+                    error!("Failed to load app config from {}: {}", &config.configPath, e);
+                    *is_protected = config.protectedVm;
+                    new_binder_exception(
+                        ExceptionCode::SERVICE_SPECIFIC,
+                        format!("Failed to load app config from {}: {}", &config.configPath, e),
+                    )
+                })?,
+            ),
+            VirtualMachineConfig::RawConfig(config) => BorrowedOrOwned::Borrowed(config),
+        };
+        let config = config.as_ref();
+        *is_protected = config.protectedVm;
+
+        // Check if partition images are labeled incorrectly. This is to prevent random images
+        // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
+        // being loaded in a pVM.  Specifically, for images in the raw config, nothing is allowed
+        // to be labeled as app_data_file. For images in the app config, nothing but the instance
+        // partition is allowed to be labeled as such.
+        config
+            .disks
+            .iter()
+            .flat_map(|disk| disk.partitions.iter())
+            .filter(|partition| {
+                if is_app_config {
+                    partition.label != "vm-instance"
+                } else {
+                    true // all partitions are checked
+                }
+            })
+            .try_for_each(check_label_for_partition)
+            .map_err(|e| new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, e.to_string()))?;
+
+        let zero_filler_path = temporary_directory.join("zero.img");
+        write_zero_filler(&zero_filler_path).map_err(|e| {
+            error!("Failed to make composite image: {}", e);
+            new_binder_exception(
+                ExceptionCode::SERVICE_SPECIFIC,
+                format!("Failed to make composite image: {}", e),
+            )
+        })?;
+
+        // Assemble disk images if needed.
+        let disks = config
+            .disks
+            .iter()
+            .map(|disk| {
+                assemble_disk_image(
+                    disk,
+                    &zero_filler_path,
+                    &temporary_directory,
+                    &mut next_temporary_image_id,
+                    &mut indirect_files,
+                )
+            })
+            .collect::<Result<Vec<DiskFile>, _>>()?;
+
+        // Actually start the VM.
+        let crosvm_config = CrosvmConfig {
+            cid,
+            bootloader: maybe_clone_file(&config.bootloader)?,
+            kernel: maybe_clone_file(&config.kernel)?,
+            initrd: maybe_clone_file(&config.initrd)?,
+            disks,
+            params: config.params.to_owned(),
+            protected: *is_protected,
+            memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
+            cpus: config.numCpus.try_into().ok().and_then(NonZeroU32::new),
+            cpu_affinity: config.cpuAffinity.clone(),
+            task_profiles: config.taskProfiles.clone(),
+            console_fd,
+            log_fd,
+            indirect_files,
+            platform_version: parse_platform_version_req(&config.platformVersion)?,
+        };
+        let instance = Arc::new(
+            VmInstance::new(
+                crosvm_config,
+                temporary_directory,
+                requester_uid,
+                requester_sid,
+                requester_debug_pid,
+            )
+            .map_err(|e| {
+                error!("Failed to create VM with config {:?}: {}", config, e);
+                new_binder_exception(
+                    ExceptionCode::SERVICE_SPECIFIC,
+                    format!("Failed to create VM: {}", e),
+                )
+            })?,
+        );
+        state.add_vm(Arc::downgrade(&instance));
+        Ok(VirtualMachine::create(instance))
+    }
 }
 
 /// Write the stats of VMCreation to statsd
-fn write_vm_creation_stats(protected: bool, success: bool) {
-    match stats_write(Hypervisor::Pkvm, protected, success) {
+fn write_vm_creation_stats(is_protected: bool, creation_succeeded: bool, exception_code: i32) {
+    match stats_write(Hypervisor::Pkvm, is_protected, creation_succeeded, exception_code) {
         Err(e) => {
             warn!("statslog_rust failed with error: {}", e);
         }
@@ -577,6 +635,7 @@ fn load_app_config(
     vm_config.protectedVm = config.protectedVm;
     vm_config.numCpus = config.numCpus;
     vm_config.cpuAffinity = config.cpuAffinity.clone();
+    vm_config.taskProfiles = config.taskProfiles.clone();
 
     // Microdroid requires an additional payload disk image and the bootconfig partition.
     if os_name == "microdroid" {
@@ -920,6 +979,16 @@ fn vsock_stream_to_pfd(stream: VsockStream) -> ParcelFileDescriptor {
     // SAFETY: ownership is transferred from stream to f
     let f = unsafe { File::from_raw_fd(stream.into_raw_fd()) };
     ParcelFileDescriptor::new(f)
+}
+
+/// Parses the platform version requirement string.
+fn parse_platform_version_req(s: &str) -> Result<VersionReq, Status> {
+    VersionReq::parse(s).map_err(|e| {
+        new_binder_exception(
+            ExceptionCode::BAD_PARCELABLE,
+            format!("Invalid platform version requirement {}: {}", s, e),
+        )
+    })
 }
 
 /// Simple utility for referencing Borrowed or Owned. Similar to std::borrow::Cow, but

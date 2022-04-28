@@ -21,8 +21,12 @@ kernel_version = "5.10"
 kernel_stem = "kernel_prebuilts-" + kernel_version
 
 cc_test {
-    name: "VirtualizationTestCases",
-    test_suites: ["general-tests"],
+    // ".64" suffix is to work around cts-unit-test which is demanding that all
+    // executables in CTS should have both 32 and 64 ABIs.
+    name: "VirtualizationTestCases.64",
+    test_suites: [
+        "general-tests",
+    ],
     srcs: [
         "common.cc",
         "vsock_test.cc",
@@ -85,4 +89,12 @@ android_filesystem {
         "virt_test_vsock_guest",
     ],
     type: "cpio",
+}
+
+genrule {
+    name: "test-payload-metadata",
+    tools: ["mk_payload"],
+    cmd: "$(location mk_payload) --metadata-only $(in) $(out)",
+    srcs: ["test-payload-metadata-config.json"],
+    out: ["test-payload-metadata.img"],
 }

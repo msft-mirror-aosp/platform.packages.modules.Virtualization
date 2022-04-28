@@ -23,7 +23,7 @@ use anyhow::{bail, Result};
 use compos_aidl_interface::binder::Strong;
 use compos_common::compos_client::VmParameters;
 use compos_common::{
-    DEX2OAT_CPU_SET_PROP_NAME, DEX2OAT_THREADS_PROP_NAME, PENDING_INSTANCE_DIR,
+    CURRENT_INSTANCE_DIR, DEX2OAT_CPU_SET_PROP_NAME, DEX2OAT_THREADS_PROP_NAME,
     PREFER_STAGED_VM_CONFIG_PATH, TEST_INSTANCE_DIR,
 };
 use rustutils::system_properties;
@@ -31,6 +31,9 @@ use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, Weak};
 use virtualizationservice::IVirtualizationService::IVirtualizationService;
+
+// Enough memory to complete odrefresh in the VM.
+const VM_MEMORY_MIB: i32 = 1024;
 
 pub struct InstanceManager {
     service: Strong<dyn IVirtualizationService>,
@@ -42,15 +45,18 @@ impl InstanceManager {
         Self { service, state: Default::default() }
     }
 
-    pub fn start_pending_instance(&self) -> Result<Arc<CompOsInstance>> {
+    pub fn start_current_instance(&self) -> Result<Arc<CompOsInstance>> {
         let mut vm_parameters = new_vm_parameters()?;
         vm_parameters.config_path = Some(PREFER_STAGED_VM_CONFIG_PATH.to_owned());
-        self.start_instance(PENDING_INSTANCE_DIR, vm_parameters)
+        self.start_instance(CURRENT_INSTANCE_DIR, vm_parameters)
     }
 
-    pub fn start_test_instance(&self) -> Result<Arc<CompOsInstance>> {
+    pub fn start_test_instance(&self, prefer_staged: bool) -> Result<Arc<CompOsInstance>> {
         let mut vm_parameters = new_vm_parameters()?;
         vm_parameters.debug_mode = true;
+        if prefer_staged {
+            vm_parameters.config_path = Some(PREFER_STAGED_VM_CONFIG_PATH.to_owned());
+        }
         self.start_instance(TEST_INSTANCE_DIR, vm_parameters)
     }
 
@@ -77,7 +83,7 @@ impl InstanceManager {
     }
 
     fn try_start_instance(&self, instance_starter: InstanceStarter) -> Result<Arc<CompOsInstance>> {
-        let compos_instance = instance_starter.create_or_start_instance(&*self.service)?;
+        let compos_instance = instance_starter.start_new_instance(&*self.service)?;
         Ok(Arc::new(compos_instance))
     }
 }
@@ -92,7 +98,14 @@ fn new_vm_parameters() -> Result<VmParameters> {
         }
     };
     let cpu_set = system_properties::read(DEX2OAT_CPU_SET_PROP_NAME)?;
-    Ok(VmParameters { cpus, cpu_set, ..Default::default() })
+    let task_profiles = vec!["VMCompilationPerformance".to_string()];
+    Ok(VmParameters {
+        cpus,
+        cpu_set,
+        task_profiles,
+        memory_mib: Some(VM_MEMORY_MIB),
+        ..Default::default()
+    })
 }
 
 // Ensures we only run one instance at a time.
