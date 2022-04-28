@@ -22,6 +22,7 @@ import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -100,6 +101,13 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                 false);
     }
 
+    // Wait until logd-init starts. The service is one of the last services that are started in
+    // the microdroid boot procedure. Therefore, waiting for the service means that we wait for
+    // the boot to complete. TODO: we need a better marker eventually.
+    private void waitForLogdInit() {
+        tryRunOnMicrodroid("watch -e \"getprop init.svc.logd-reinit | grep '^$'\"");
+    }
+
     @Test
     public void testCreateVmRequiresPermission() throws Exception {
         // Revoke the MANAGE_VIRTUAL_MACHINE permission for the test app
@@ -145,7 +153,9 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         command.add(virtApexDir.getPath());
 
         CommandResult result = runUtil.runTimedCmd(
-                                    20 * 1000,
+                                    // sign_virt_apex is so slow on CI server that this often times
+                                    // out. Until we can make it fast, use 50s for timeout
+                                    50 * 1000,
                                     "/bin/bash",
                                     "-c",
                                     String.join(" ", command));
@@ -350,6 +360,41 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
     }
 
     @Test
+    public void testTombstonesAreBeingForwarded() throws Exception {
+        // Note this test relies on logcat values being printed by tombstone_transmit on
+        // and the reeceiver on host (virtualization_service)
+        final String configPath = "assets/vm_config.json"; // path inside the APK
+        final String cid =
+                startMicrodroid(
+                        getDevice(),
+                        getBuild(),
+                        APK_NAME,
+                        PACKAGE_NAME,
+                        configPath,
+                        /* debug */ true,
+                        minMemorySize(),
+                        Optional.of(NUM_VCPUS),
+                        Optional.of(CPU_AFFINITY));
+        adbConnectToMicrodroid(getDevice(), cid);
+        waitForLogdInit();
+        runOnMicrodroid("logcat -c");
+        // We need root permission to write to /data/tombstones/
+        rootMicrodroid();
+        // Write a test tombstone file in /data/tombstones
+        runOnMicrodroid("echo -n \'Test tombstone in VM with 34 bytes\'"
+                    + "> /data/tombstones/transmit.txt");
+        // check if the tombstone have been tranferred from VM
+        assertNotEquals(runOnMicrodroid("timeout 15s logcat | grep -m 1 "
+                            + "'tombstone_transmit.microdroid:.*data/tombstones/transmit.txt'"),
+                "");
+        // Confirm that tombstone is received (from host logcat)
+        assertNotEquals(runOnHost("adb", "-s", getDevice().getSerialNumber(),
+                            "logcat", "-d", "-e",
+                            "Received 34 bytes from guest & wrote to tombstone file.*"),
+                "");
+    }
+
+    @Test
     public void testMicrodroidBoots() throws Exception {
         final String configPath = "assets/vm_config.json"; // path inside the APK
         final String cid =
@@ -364,12 +409,7 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         Optional.of(NUM_VCPUS),
                         Optional.of(CPU_AFFINITY));
         adbConnectToMicrodroid(getDevice(), cid);
-
-        // Wait until logd-init starts. The service is one of the last services that are started in
-        // the microdroid boot procedure. Therefore, waiting for the service means that we wait for
-        // the boot to complete. TODO: we need a better marker eventually.
-        tryRunOnMicrodroid("watch -e \"getprop init.svc.logd-reinit | grep '^$'\"");
-
+        waitForLogdInit();
         // Test writing to /data partition
         runOnMicrodroid("echo MicrodroidTest > /data/local/tmp/test.txt");
         assertThat(runOnMicrodroid("cat /data/local/tmp/test.txt"), is("MicrodroidTest"));
