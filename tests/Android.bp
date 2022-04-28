@@ -25,7 +25,6 @@ cc_test {
     // executables in CTS should have both 32 and 64 ABIs.
     name: "VirtualizationTestCases.64",
     test_suites: [
-        "cts",
         "general-tests",
     ],
     srcs: [
@@ -90,4 +89,12 @@ android_filesystem {
         "virt_test_vsock_guest",
     ],
     type: "cpio",
+}
+
+genrule {
+    name: "test-payload-metadata",
+    tools: ["mk_payload"],
+    cmd: "$(location mk_payload) --metadata-only $(in) $(out)",
+    srcs: ["test-payload-metadata-config.json"],
+    out: ["test-payload-metadata.img"],
 }

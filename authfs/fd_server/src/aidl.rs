@@ -17,7 +17,7 @@
 use anyhow::Result;
 use log::error;
 use nix::{
-    dir::Dir, errno::Errno, fcntl::openat, fcntl::OFlag, sys::stat::fchmod, sys::stat::mkdirat,
+    errno::Errno, fcntl::openat, fcntl::OFlag, sys::stat::fchmod, sys::stat::mkdirat,
     sys::stat::mode_t, sys::stat::Mode, sys::statvfs::statvfs, sys::statvfs::Statvfs,
     unistd::unlinkat, unistd::UnlinkatFlags,
 };
@@ -29,8 +29,9 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
+use crate::common::OwnedFd;
 use crate::fsverity;
 use authfs_aidl_interface::aidl::com::android::virt::fs::IVirtFdService::{
     BnVirtFdService, FsStat::FsStat, IVirtFdService, MAX_REQUESTING_DATA,
@@ -63,21 +64,21 @@ pub enum FdConfig {
     ReadWrite(File),
 
     /// A read-only directory to serve by this server.
-    InputDir(Dir),
+    InputDir(OwnedFd),
 
     /// A writable directory to serve by this server.
-    OutputDir(Dir),
+    OutputDir(OwnedFd),
 }
 
 pub struct FdService {
     /// A pool of opened files and directories, which can be looked up by the FD number.
-    fd_pool: Arc<Mutex<BTreeMap<i32, FdConfig>>>,
+    fd_pool: Arc<RwLock<BTreeMap<i32, FdConfig>>>,
 }
 
 impl FdService {
     pub fn new_binder(fd_pool: BTreeMap<i32, FdConfig>) -> Strong<dyn IVirtFdService> {
         BnVirtFdService::new_binder(
-            FdService { fd_pool: Arc::new(Mutex::new(fd_pool)) },
+            FdService { fd_pool: Arc::new(RwLock::new(fd_pool)) },
             BinderFeatures::default(),
         )
     }
@@ -88,7 +89,7 @@ impl FdService {
     where
         F: FnOnce(&FdConfig) -> BinderResult<R>,
     {
-        let fd_pool = self.fd_pool.lock().unwrap();
+        let fd_pool = self.fd_pool.read().unwrap();
         let fd_config = fd_pool.get(&id).ok_or_else(|| new_errno_error(Errno::EBADF))?;
         handle_fn(fd_config)
     }
@@ -99,7 +100,7 @@ impl FdService {
     where
         F: FnOnce(&mut FdConfig) -> BinderResult<(i32, FdConfig)>,
     {
-        let mut fd_pool = self.fd_pool.lock().unwrap();
+        let mut fd_pool = self.fd_pool.write().unwrap();
         let fd_config = fd_pool.get_mut(&fd).ok_or_else(|| new_errno_error(Errno::EBADF))?;
         let (new_fd, new_fd_config) = create_fn(fd_config)?;
         if let btree_map::Entry::Vacant(entry) = fd_pool.entry(new_fd) {
@@ -174,7 +175,7 @@ impl IVirtFdService for FdService {
                     } else {
                         Err(new_binder_exception(
                             ExceptionCode::SERVICE_SPECIFIC,
-                            "metadata doesn't contain a signature".to_string(),
+                            "metadata doesn't contain a signature",
                         ))
                     }
                 } else {
@@ -290,8 +291,10 @@ impl IVirtFdService for FdService {
                 let new_fd = openat(
                     dir.as_raw_fd(),
                     basename,
-                    // TODO(205172873): handle the case when the file already exist, e.g. truncate
-                    // or fail, and possibly allow the client to specify. For now, always truncate.
+                    // This function is supposed to be only called when FUSE/authfs thinks the file
+                    // does not exist. However, if the file does exist from the view of fd_server
+                    // (where the execution context is considered untrusted), we prefer to honor
+                    // authfs and still allow the create to success. Therefore, always use O_TRUNC.
                     OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_TRUNC,
                     mode,
                 )
@@ -317,14 +320,12 @@ impl IVirtFdService for FdService {
             FdConfig::OutputDir(_) => {
                 let mode = validate_file_mode(mode)?;
                 mkdirat(dir_fd, basename, mode).map_err(new_errno_error)?;
-                let new_dir = Dir::openat(
-                    dir_fd,
-                    basename,
-                    OFlag::O_DIRECTORY | OFlag::O_RDONLY,
-                    Mode::empty(),
-                )
-                .map_err(new_errno_error)?;
-                Ok((new_dir.as_raw_fd(), FdConfig::OutputDir(new_dir)))
+                let new_dir_fd =
+                    openat(dir_fd, basename, OFlag::O_DIRECTORY | OFlag::O_RDONLY, Mode::empty())
+                        .map_err(new_errno_error)?;
+                // SAFETY: new_dir_fd is just created and not an error.
+                let fd_owner = unsafe { OwnedFd::from_raw_fd(new_dir_fd) };
+                Ok((new_dir_fd, FdConfig::OutputDir(fd_owner)))
             }
             _ => Err(new_errno_error(Errno::ENOTDIR)),
         })
@@ -334,7 +335,7 @@ impl IVirtFdService for FdService {
         validate_basename(basename)?;
 
         self.handle_fd(dir_fd, |config| match config {
-            FdConfig::OutputDir(_dir) => {
+            FdConfig::OutputDir(_) => {
                 unlinkat(Some(dir_fd), basename, UnlinkatFlags::NoRemoveDir)
                     .map_err(new_errno_error)?;
                 Ok(())
@@ -348,7 +349,7 @@ impl IVirtFdService for FdService {
         validate_basename(basename)?;
 
         self.handle_fd(dir_fd, |config| match config {
-            FdConfig::OutputDir(_dir) => {
+            FdConfig::OutputDir(_) => {
                 unlinkat(Some(dir_fd), basename, UnlinkatFlags::RemoveDir)
                     .map_err(new_errno_error)?;
                 Ok(())
