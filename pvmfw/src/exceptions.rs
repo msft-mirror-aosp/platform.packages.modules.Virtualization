@@ -14,61 +14,59 @@
 
 //! Exception handlers.
 
-use crate::console::emergency_write_str;
-use crate::eprintln;
-use crate::psci::system_reset;
 use core::arch::asm;
+use vmbase::{console::emergency_write_str, eprintln, power::reboot};
 
 #[no_mangle]
 extern "C" fn sync_exception_current() {
     emergency_write_str("sync_exception_current\n");
     print_esr();
-    system_reset();
+    reboot();
 }
 
 #[no_mangle]
 extern "C" fn irq_current() {
     emergency_write_str("irq_current\n");
-    system_reset();
+    reboot();
 }
 
 #[no_mangle]
 extern "C" fn fiq_current() {
     emergency_write_str("fiq_current\n");
-    system_reset();
+    reboot();
 }
 
 #[no_mangle]
 extern "C" fn serr_current() {
     emergency_write_str("serr_current\n");
     print_esr();
-    system_reset();
+    reboot();
 }
 
 #[no_mangle]
 extern "C" fn sync_lower() {
     emergency_write_str("sync_lower\n");
     print_esr();
-    system_reset();
+    reboot();
 }
 
 #[no_mangle]
 extern "C" fn irq_lower() {
     emergency_write_str("irq_lower\n");
-    system_reset();
+    reboot();
 }
 
 #[no_mangle]
 extern "C" fn fiq_lower() {
     emergency_write_str("fiq_lower\n");
-    system_reset();
+    reboot();
 }
 
 #[no_mangle]
 extern "C" fn serr_lower() {
     emergency_write_str("serr_lower\n");
     print_esr();
-    system_reset();
+    reboot();
 }
 
 #[inline]
