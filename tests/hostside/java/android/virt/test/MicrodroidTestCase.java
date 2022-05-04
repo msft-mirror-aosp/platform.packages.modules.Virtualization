@@ -105,11 +105,8 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                 false);
     }
 
-    // Wait until logd-init starts. The service is one of the last services that are started in
-    // the microdroid boot procedure. Therefore, waiting for the service means that we wait for
-    // the boot to complete. TODO: we need a better marker eventually.
-    private void waitForLogdInit() {
-        runOnMicrodroidForResult("watch -e \"getprop init.svc.logd-reinit | grep '^$'\"");
+    private void waitForBootComplete() {
+        runOnMicrodroidForResult("watch -e \"getprop dev.bootcomplete | grep '^0$'\"");
     }
 
     @Test
@@ -367,6 +364,10 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
 
     @Test
     public void testTombstonesAreBeingForwarded() throws Exception {
+        // This test requires rooting. Skip on user builds where rooting is impossible.
+        final String buildType = getDevice().getProperty("ro.build.type");
+        assumeTrue("userdebug".equals(buildType) || "eng".equals(buildType));
+
         // Note this test relies on logcat values being printed by tombstone_transmit on
         // and the reeceiver on host (virtualization_service)
         final String configPath = "assets/vm_config.json"; // path inside the APK
@@ -382,7 +383,7 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         Optional.of(NUM_VCPUS),
                         Optional.of(CPU_AFFINITY));
         adbConnectToMicrodroid(getDevice(), cid);
-        waitForLogdInit();
+        waitForBootComplete();
         runOnMicrodroid("logcat -c");
         // We need root permission to write to /data/tombstones/
         rootMicrodroid();
@@ -415,7 +416,7 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         Optional.of(NUM_VCPUS),
                         Optional.of(CPU_AFFINITY));
         adbConnectToMicrodroid(getDevice(), cid);
-        waitForLogdInit();
+        waitForBootComplete();
         // Test writing to /data partition
         runOnMicrodroid("echo MicrodroidTest > /data/local/tmp/test.txt");
         assertThat(runOnMicrodroid("cat /data/local/tmp/test.txt"), is("MicrodroidTest"));
