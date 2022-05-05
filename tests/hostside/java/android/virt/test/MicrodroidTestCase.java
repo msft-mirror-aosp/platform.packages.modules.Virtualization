@@ -66,6 +66,7 @@ import java.util.regex.Pattern;
 public class MicrodroidTestCase extends VirtualizationTestCaseBase {
     private static final String APK_NAME = "MicrodroidTestApp.apk";
     private static final String PACKAGE_NAME = "com.android.microdroid.test";
+    private static final String SHELL_PACKAGE_NAME = "com.android.shell";
 
     private static final int MIN_MEM_ARM64 = 145;
     private static final int MIN_MEM_X86_64 = 196;
@@ -105,11 +106,8 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                 false);
     }
 
-    // Wait until logd-init starts. The service is one of the last services that are started in
-    // the microdroid boot procedure. Therefore, waiting for the service means that we wait for
-    // the boot to complete. TODO: we need a better marker eventually.
-    private void waitForLogdInit() {
-        runOnMicrodroidForResult("watch -e \"getprop init.svc.logd-reinit | grep '^$'\"");
+    private void waitForBootComplete() {
+        runOnMicrodroidForResult("watch -e \"getprop dev.bootcomplete | grep '^0$'\"");
     }
 
     @Test
@@ -367,6 +365,10 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
 
     @Test
     public void testTombstonesAreBeingForwarded() throws Exception {
+        // This test requires rooting. Skip on user builds where rooting is impossible.
+        final String buildType = getDevice().getProperty("ro.build.type");
+        assumeTrue("userdebug".equals(buildType) || "eng".equals(buildType));
+
         // Note this test relies on logcat values being printed by tombstone_transmit on
         // and the reeceiver on host (virtualization_service)
         final String configPath = "assets/vm_config.json"; // path inside the APK
@@ -382,7 +384,7 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         Optional.of(NUM_VCPUS),
                         Optional.of(CPU_AFFINITY));
         adbConnectToMicrodroid(getDevice(), cid);
-        waitForLogdInit();
+        waitForBootComplete();
         runOnMicrodroid("logcat -c");
         // We need root permission to write to /data/tombstones/
         rootMicrodroid();
@@ -415,7 +417,7 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         Optional.of(NUM_VCPUS),
                         Optional.of(CPU_AFFINITY));
         adbConnectToMicrodroid(getDevice(), cid);
-        waitForLogdInit();
+        waitForBootComplete();
         // Test writing to /data partition
         runOnMicrodroid("echo MicrodroidTest > /data/local/tmp/test.txt");
         assertThat(runOnMicrodroid("cat /data/local/tmp/test.txt"), is("MicrodroidTest"));
@@ -473,6 +475,40 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         shutdownMicrodroid(getDevice(), cid);
     }
 
+    @Test
+    public void testCustomVirtualMachinePermission()
+            throws DeviceNotAvailableException, IOException, JSONException {
+        CommandRunner android = new CommandRunner(getDevice());
+
+        // Pull etc/microdroid.json
+        File virtApexDir = FileUtil.createTempDir("virt_apex");
+        File microdroidConfigFile = new File(virtApexDir, "microdroid.json");
+        assertTrue(getDevice().pullFile(VIRT_APEX + "etc/microdroid.json", microdroidConfigFile));
+        JSONObject config = new JSONObject(FileUtil.readStringFromFile(microdroidConfigFile));
+
+        // USE_CUSTOM_VIRTUAL_MACHINE is enforced only on protected mode
+        config.put("protected", true);
+
+        // Write updated config
+        final String configPath = TEST_ROOT + "raw_config.json";
+        getDevice().pushString(config.toString(), configPath);
+
+        // temporarily revoke the permission
+        android.run(
+                "pm",
+                "revoke",
+                SHELL_PACKAGE_NAME,
+                "android.permission.USE_CUSTOM_VIRTUAL_MACHINE");
+        final String ret =
+                android.runForResult(VIRT_APEX + "bin/vm run", configPath).getStderr().trim();
+
+        assertTrue(
+                "The test should fail with a permission error",
+                ret.contains(
+                        "does not have the android.permission.USE_CUSTOM_VIRTUAL_MACHINE"
+                            + " permission"));
+    }
+
     @Before
     public void setUp() throws Exception {
         testIfDeviceIsCapable(getDevice());
@@ -493,5 +529,9 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                 "vm.log-" + mTestName.getMethodName());
 
         getDevice().uninstallPackage(PACKAGE_NAME);
+
+        // testCustomVirtualMachinePermission revokes this permission. Grant it again as cleanup
+        new CommandRunner(getDevice()).tryRun(
+                "pm", "grant", SHELL_PACKAGE_NAME, "android.permission.USE_CUSTOM_VIRTUAL_MACHINE");
     }
 }
