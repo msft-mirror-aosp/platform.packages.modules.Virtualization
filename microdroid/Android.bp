@@ -59,7 +59,6 @@ android_system_image {
         "libstdc++",
         "logcat",
         "logd",
-        "run-as",
         "secilc",
 
         // "com.android.adbd" requires these,
@@ -71,27 +70,29 @@ android_system_image {
         "libartpalette-system",
 
         "apexd",
+        "atrace",
         "debuggerd",
         "diced.microdroid",
         "linker",
         "linkerconfig",
         "servicemanager.microdroid",
         "tombstoned",
+        "tombstone_transmit.microdroid",
         "cgroups.json",
+        "task_profiles.json",
         "public.libraries.android.txt",
 
-        "microdroid_plat_sepolicy_and_mapping.sha256",
+        "microdroid_compatibility_matrix",
+        "microdroid_event-log-tags",
         "microdroid_file_contexts",
+        "microdroid_manifest",
+        "microdroid_plat_sepolicy_and_mapping.sha256",
         "microdroid_property_contexts",
         "microdroid_service_contexts",
-        "microdroid_compatibility_matrix",
-        "microdroid_manifest",
 
-        // TODO(b/195425111) these four should be added automatically
-        "android.hardware.security.secureclock-V1-ndk",
-        "android.hardware.security.sharedsecret-V1-ndk",
-        "libcrypto",
-        "liblzma",
+        // TODO(b/195425111) these should be added automatically
+        "libcrypto", // used by many (init_second_stage, microdroid_manager, toybox, etc)
+        "liblzma", // used by init_second_stage
     ] + microdroid_shell_and_utilities,
     multilib: {
         common: {
@@ -110,9 +111,6 @@ android_system_image {
                 "authfs_service",
                 "microdroid_manager",
                 "zipfuse",
-
-                // TODO(b/184872979): Needed by authfs. Remove once the Rust API is created.
-                "libbinder_rpc_unstable",
             ],
         },
     },
@@ -121,6 +119,10 @@ android_system_image {
     dirs: microdroid_rootdirs,
     symlinks: microdroid_symlinks,
     file_contexts: ":microdroid_file_contexts.gen",
+    // For deterministic output, use fake_timestamp, hard-coded uuid
+    fake_timestamp: "1611569676",
+    // python -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, 'www.android.com/avf/microdroid/system'))"
+    uuid: "5fe079c6-f01a-52be-87d3-d415231a72ad",
 }
 
 prebuilt_etc {
@@ -155,16 +157,34 @@ prebuilt_root {
 
 genrule {
     name: "microdroid_build_prop_gen_x86_64",
-    srcs: ["build.prop"],
+    srcs: [
+        "build.prop",
+        ":buildinfo.prop",
+    ],
     out: ["build.prop.out"],
-    cmd: "cp $(in) $(out); echo ro.product.cpu.abilist=x86_64 >> $(out)",
+    cmd: "(echo '# build properties from buildinfo.prop module' && " +
+        "grep ro\\.build\\.version\\.codename= $(location :buildinfo.prop) && " +
+        "grep ro\\.build\\.version\\.release= $(location :buildinfo.prop) && " +
+        "grep ro\\.build\\.version\\.sdk= $(location :buildinfo.prop) && " +
+        "grep ro\\.build\\.version\\.security_patch= $(location :buildinfo.prop) && " +
+        "cat $(location build.prop) && " +
+        "echo ro.product.cpu.abilist=x86_64) > $(out)",
 }
 
 genrule {
     name: "microdroid_build_prop_gen_arm64",
-    srcs: ["build.prop"],
+    srcs: [
+        "build.prop",
+        ":buildinfo.prop",
+    ],
     out: ["build.prop.out"],
-    cmd: "cp $(in) $(out); echo ro.product.cpu.abilist=arm64-v8a >> $(out)",
+    cmd: "(echo '# build properties from buildinfo.prop module' && " +
+        "grep ro\\.build\\.version\\.codename= $(location :buildinfo.prop) && " +
+        "grep ro\\.build\\.version\\.release= $(location :buildinfo.prop) && " +
+        "grep ro\\.build\\.version\\.sdk= $(location :buildinfo.prop) && " +
+        "grep ro\\.build\\.version\\.security_patch= $(location :buildinfo.prop) && " +
+        "cat $(location build.prop) && " +
+        "echo ro.product.cpu.abilist=arm64-v8a) > $(out)",
 }
 
 android_filesystem {
@@ -191,6 +211,10 @@ android_filesystem {
     avb_private_key: ":microdroid_sign_key",
     avb_algorithm: "SHA256_RSA4096",
     file_contexts: ":microdroid_vendor_file_contexts.gen",
+    // For deterministic output, use fake_timestamp, hard-coded uuid
+    fake_timestamp: "1611569676",
+    // python -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, 'www.android.com/avf/microdroid/vendor'))"
+    uuid: "156d40d7-8d8e-5c99-8913-ec82de549a70",
 }
 
 logical_partition {
@@ -212,6 +236,7 @@ logical_partition {
 microdroid_boot_cmdline = [
     "panic=-1",
     "bootconfig",
+    "ioremap_guard",
 ]
 
 bootimg {
@@ -383,6 +408,9 @@ prebuilt_etc {
     filename: "microdroid_bootconfig.full_debuggable",
 }
 
+// python -c "import hashlib; print(hashlib.sha256(b'bootconfig').hexdigest())"
+bootconfig_salt = "e158851fbebb402e1f18ea9372ea2f76b4dea23eceb5c4b92e5b27ade8537f5b"
+
 // TODO(jiyong): make a new module type that does the avb signing
 genrule {
     name: "microdroid_bootconfig_normal_gen",
@@ -395,6 +423,7 @@ genrule {
     cmd: "cp $(location bootconfig.normal) $(out) && " +
         "$(location avbtool) add_hash_footer " +
         "--algorithm SHA256_RSA4096 " +
+        "--salt " + bootconfig_salt + " " +
         "--partition_name bootconfig " +
         "--key $(location :microdroid_sign_key) " +
         "--partition_size $$(( " + avb_hash_footer_kb + " * 1024 + ( $$(stat --format=%s $(out)) + 4096 - 1 ) / 4096 * 4096 )) " +
@@ -412,6 +441,7 @@ genrule {
     cmd: "cp $(location bootconfig.app_debuggable) $(out) && " +
         "$(location avbtool) add_hash_footer " +
         "--algorithm SHA256_RSA4096 " +
+        "--salt " + bootconfig_salt + " " +
         "--partition_name bootconfig " +
         "--key $(location :microdroid_sign_key) " +
         "--partition_size $$(( " + avb_hash_footer_kb + " * 1024 + ( $$(stat --format=%s $(out)) + 4096 - 1 ) / 4096 * 4096 )) " +
@@ -429,6 +459,7 @@ genrule {
     cmd: "cp $(location bootconfig.full_debuggable) $(out) && " +
         "$(location avbtool) add_hash_footer " +
         "--algorithm SHA256_RSA4096 " +
+        "--salt " + bootconfig_salt + " " +
         "--partition_name bootconfig " +
         "--key $(location :microdroid_sign_key) " +
         "--partition_size $$(( " + avb_hash_footer_kb + " * 1024 + ( $$(stat --format=%s $(out)) + 4096 - 1 ) / 4096 * 4096 )) " +
@@ -456,6 +487,9 @@ prebuilt_etc {
     filename: "microdroid_bootloader",
 }
 
+// python -c "import hashlib; print(hashlib.sha256(b'bootloader').hexdigest())"
+bootloader_salt = "3b4a12881d11f33cff968a24d7c53723a8232cde9a8d91e29fdbd6a95ae6adf0"
+
 genrule {
     name: "microdroid_bootloader_gen",
     tools: ["avbtool"],
@@ -474,6 +508,7 @@ genrule {
         "if [ $$(stat --format=%s $(out)) -gt 4096 ]; then " +
         "$(location avbtool) add_hash_footer " +
         "--algorithm SHA256_RSA4096 " +
+        "--salt " + bootloader_salt + " " +
         "--partition_name bootloader " +
         "--key $(location :microdroid_sign_key) " +
         "--partition_size $$(( " + avb_hash_footer_kb + " * 1024 + ( $$(stat --format=%s $(out)) + 4096 - 1 ) / 4096 * 4096 )) " +
@@ -527,10 +562,13 @@ prebuilt_etc {
     filename: "uboot_env.img",
 }
 
+// python -c "import hashlib; print(hashlib.sha256(b'uboot_env').hexdigest())"
+uboot_env_salt = "cbf2d76827ece5ca8d176a40c94ac6355edcf6511b4b887364a8c0e05850df10"
+
 genrule {
     name: "microdroid_uboot_env_gen",
     tools: [
-        "mkenvimage_host",
+        "mkenvimage_slim",
         "avbtool",
     ],
     srcs: [
@@ -538,9 +576,10 @@ genrule {
         ":microdroid_sign_key",
     ],
     out: ["output.img"],
-    cmd: "$(location mkenvimage_host) -s 4096 -o $(out) $(location uboot-env.txt) && " +
+    cmd: "$(location mkenvimage_slim) -output_path $(out) -input_path $(location uboot-env.txt) && " +
         "$(location avbtool) add_hash_footer " +
         "--algorithm SHA256_RSA4096 " +
+        "--salt " + uboot_env_salt + " " +
         "--partition_name uboot_env " +
         "--key $(location :microdroid_sign_key) " +
         "--partition_size $$(( " + avb_hash_footer_kb + " * 1024 + ( $$(stat --format=%s $(out)) + 4096 - 1 ) / 4096 * 4096 )) " +
@@ -602,5 +641,12 @@ prebuilt_etc {
     src: "microdroid_manifest.xml",
     filename: "manifest.xml",
     relative_install_path: "vintf",
+    installable: false,
+}
+
+prebuilt_etc {
+    name: "microdroid_event-log-tags",
+    src: "microdroid_event-log-tags",
+    filename: "event-log-tags",
     installable: false,
 }
