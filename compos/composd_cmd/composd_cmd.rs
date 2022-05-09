@@ -19,7 +19,10 @@
 use android_system_composd::{
     aidl::android::system::composd::{
         ICompilationTask::ICompilationTask,
-        ICompilationTaskCallback::{BnCompilationTaskCallback, ICompilationTaskCallback},
+        ICompilationTaskCallback::{
+            BnCompilationTaskCallback, FailureReason::FailureReason, ICompilationTaskCallback,
+        },
+        IIsolatedCompilationService::ApexSource::ApexSource,
         IIsolatedCompilationService::IIsolatedCompilationService,
     },
     binder::{
@@ -33,22 +36,25 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 fn main() -> Result<()> {
-    let app = clap::App::new("composd_cmd").arg(
-        clap::Arg::with_name("command")
-            .index(1)
-            .takes_value(true)
-            .required(true)
-            .possible_values(&["staged-apex-compile", "test-compile"]),
-    );
+    #[rustfmt::skip]
+    let app = clap::App::new("composd_cmd")
+        .subcommand(
+            clap::SubCommand::with_name("staged-apex-compile"))
+        .subcommand(
+            clap::SubCommand::with_name("test-compile")
+                .arg(clap::Arg::with_name("prefer-staged").long("prefer-staged")),
+        );
     let args = app.get_matches();
-    let command = args.value_of("command").unwrap();
 
     ProcessState::start_thread_pool();
 
-    match command {
-        "staged-apex-compile" => run_staged_apex_compile()?,
-        "test-compile" => run_test_compile()?,
-        _ => panic!("Unexpected command {}", command),
+    match args.subcommand() {
+        ("staged-apex-compile", _) => run_staged_apex_compile()?,
+        ("test-compile", Some(sub_matches)) => {
+            let prefer_staged = sub_matches.is_present("prefer-staged");
+            run_test_compile(prefer_staged)?;
+        }
+        _ => panic!("Unrecognized subcommand"),
     }
 
     println!("All Ok!");
@@ -64,10 +70,10 @@ struct State {
     completed: Condvar,
 }
 
-#[derive(Copy, Clone)]
 enum Outcome {
     Succeeded,
-    Failed,
+    Failed(FailureReason, String),
+    TaskDied,
 }
 
 impl Interface for Callback {}
@@ -78,8 +84,8 @@ impl ICompilationTaskCallback for Callback {
         Ok(())
     }
 
-    fn onFailure(&self) -> BinderResult<()> {
-        self.0.set_outcome(Outcome::Failed);
+    fn onFailure(&self, reason: FailureReason, message: &str) -> BinderResult<()> {
+        self.0.set_outcome(Outcome::Failed(reason, message.to_owned()));
         Ok(())
     }
 }
@@ -93,14 +99,14 @@ impl State {
     }
 
     fn wait(&self, duration: Duration) -> Result<Outcome> {
-        let (outcome, result) = self
+        let (mut outcome, result) = self
             .completed
             .wait_timeout_while(self.mutex.lock().unwrap(), duration, |outcome| outcome.is_none())
             .unwrap();
         if result.timed_out() {
             bail!("Timed out waiting for compilation")
         }
-        Ok(outcome.unwrap())
+        Ok(outcome.take().unwrap())
     }
 }
 
@@ -108,8 +114,9 @@ fn run_staged_apex_compile() -> Result<()> {
     run_async_compilation(|service, callback| service.startStagedApexCompile(callback))
 }
 
-fn run_test_compile() -> Result<()> {
-    run_async_compilation(|service, callback| service.startTestCompile(callback))
+fn run_test_compile(prefer_staged: bool) -> Result<()> {
+    let apex_source = if prefer_staged { ApexSource::PreferStaged } else { ApexSource::NoStaged };
+    run_async_compilation(|service, callback| service.startTestCompile(apex_source, callback))
 }
 
 fn run_async_compilation<F>(start_compile_fn: F) -> Result<()>
@@ -133,7 +140,7 @@ where
     let state_clone = state.clone();
     let mut death_recipient = DeathRecipient::new(move || {
         eprintln!("CompilationTask died");
-        state_clone.set_outcome(Outcome::Failed);
+        state_clone.set_outcome(Outcome::TaskDied);
     });
     // Note that dropping death_recipient cancels this, so we can't use a temporary here.
     task.as_binder().link_to_death(&mut death_recipient)?;
@@ -142,7 +149,10 @@ where
 
     match state.wait(timeouts()?.odrefresh_max_execution_time) {
         Ok(Outcome::Succeeded) => Ok(()),
-        Ok(Outcome::Failed) => bail!("Compilation failed"),
+        Ok(Outcome::TaskDied) => bail!("Compilation task died"),
+        Ok(Outcome::Failed(reason, message)) => {
+            bail!("Compilation failed: {:?}: {}", reason, message)
+        }
         Err(e) => {
             if let Err(e) = task.cancel() {
                 eprintln!("Failed to cancel compilation: {:?}", e);
