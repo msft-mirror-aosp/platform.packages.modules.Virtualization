@@ -14,6 +14,7 @@
 
 //! Android VM control tool.
 
+mod create_idsig;
 mod create_partition;
 mod run;
 mod sync;
@@ -24,6 +25,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
 };
 use android_system_virtualizationservice::binder::{wait_for_interface, ProcessState, Strong};
 use anyhow::{Context, Error};
+use create_idsig::command_create_idsig;
 use create_partition::command_create_partition;
 use run::{command_run, command_run_app};
 use rustutils::system_properties;
@@ -90,6 +92,10 @@ enum Opt {
         #[structopt(long)]
         cpu_affinity: Option<String>,
 
+        /// Comma separated list of task profile names to apply to the VM
+        #[structopt(long)]
+        task_profiles: Vec<String>,
+
         /// Paths to extra idsig files.
         #[structopt(long = "extra-idsig")]
         extra_idsigs: Vec<PathBuf>,
@@ -116,9 +122,17 @@ enum Opt {
         #[structopt(long)]
         cpu_affinity: Option<String>,
 
+        /// Comma separated list of task profile names to apply to the VM
+        #[structopt(long)]
+        task_profiles: Vec<String>,
+
         /// Path to file for VM console output.
         #[structopt(long)]
         console: Option<PathBuf>,
+
+        /// Path to file for VM log output.
+        #[structopt(long)]
+        log: Option<PathBuf>,
     },
     /// Stop a virtual machine running in the background
     Stop {
@@ -141,6 +155,15 @@ enum Opt {
         /// Type of the partition
         #[structopt(short="t", long="type", default_value="raw", parse(try_from_str=parse_partition_type))]
         partition_type: PartitionType,
+    },
+    /// Creates or update the idsig file by digesting the input APK file.
+    CreateIdsig {
+        /// Path to VM Payload APK
+        #[structopt(parse(from_os_str))]
+        apk: PathBuf,
+        /// Path to idsig of the APK
+        #[structopt(parse(from_os_str))]
+        path: PathBuf,
     },
 }
 
@@ -185,6 +208,7 @@ fn main() -> Result<(), Error> {
             mem,
             cpus,
             cpu_affinity,
+            task_profiles,
             extra_idsigs,
         } => command_run_app(
             service,
@@ -200,17 +224,20 @@ fn main() -> Result<(), Error> {
             mem,
             cpus,
             cpu_affinity,
+            task_profiles,
             &extra_idsigs,
         ),
-        Opt::Run { config, daemonize, cpus, cpu_affinity, console } => {
+        Opt::Run { config, daemonize, cpus, cpu_affinity, task_profiles, console, log } => {
             command_run(
                 service,
                 &config,
                 daemonize,
                 console.as_deref(),
+                log.as_deref(),
                 /* mem */ None,
                 cpus,
                 cpu_affinity,
+                task_profiles,
             )
         }
         Opt::Stop { cid } => command_stop(service, cid),
@@ -219,6 +246,7 @@ fn main() -> Result<(), Error> {
         Opt::CreatePartition { path, size, partition_type } => {
             command_create_partition(service, &path, size, partition_type)
         }
+        Opt::CreateIdsig { apk, path } => command_create_idsig(service, &apk, &path),
     }
 }
 
