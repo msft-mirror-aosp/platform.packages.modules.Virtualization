@@ -61,6 +61,8 @@ const EXTRA_IDSIG_PATH_PATTERN: &str = "/dev/block/by-name/extra-idsig-*";
 const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
 const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
 const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
+const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
+const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
 
 /// The CID representing the host VM
 const VMADDR_CID_HOST: u32 = 2;
@@ -144,17 +146,17 @@ fn try_main() -> Result<()> {
     }
 }
 
-fn dice_derivation(verified_data: MicrodroidData, payload_config_path: &str) -> Result<()> {
+fn dice_derivation(verified_data: &MicrodroidData, payload_config_path: &str) -> Result<()> {
     // Calculate compound digests of code and authorities
     let mut code_hash_ctx = digest::Context::new(&digest::SHA512);
     let mut authority_hash_ctx = digest::Context::new(&digest::SHA512);
     code_hash_ctx.update(verified_data.apk_data.root_hash.as_ref());
     authority_hash_ctx.update(verified_data.apk_data.pubkey.as_ref());
-    for extra_apk in verified_data.extra_apks_data {
+    for extra_apk in &verified_data.extra_apks_data {
         code_hash_ctx.update(extra_apk.root_hash.as_ref());
         authority_hash_ctx.update(extra_apk.pubkey.as_ref());
     }
-    for apex in verified_data.apex_data {
+    for apex in &verified_data.apex_data {
         code_hash_ctx.update(apex.root_digest.as_ref());
         authority_hash_ctx.update(apex.public_key.as_ref());
     }
@@ -187,10 +189,18 @@ fn dice_derivation(verified_data: MicrodroidData, payload_config_path: &str) -> 
             authorityHash: authority_hash,
             authorityDescriptor: None,
             mode: if app_debuggable { Mode::DEBUG } else { Mode::NORMAL },
-            hidden: verified_data.salt.try_into().unwrap(),
+            hidden: verified_data.salt.clone().try_into().unwrap(),
         }])
         .context("IDiceMaintenance::demoteSelf failed")?;
     Ok(())
+}
+
+fn is_strict_boot() -> bool {
+    Path::new(AVF_STRICT_BOOT).exists()
+}
+
+fn is_new_instance() -> bool {
+    Path::new(AVF_NEW_INSTANCE).exists()
 }
 
 fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
@@ -198,6 +208,21 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
 
     let mut instance = InstanceDisk::new().context("Failed to load instance.img")?;
     let saved_data = instance.read_microdroid_data().context("Failed to read identity data")?;
+
+    if is_strict_boot() {
+        // Provisioning must happen on the first boot and never again.
+        if is_new_instance() {
+            ensure!(
+                saved_data.is_none(),
+                MicrodroidError::InvalidConfig("Found instance data on first boot.".to_string())
+            );
+        } else {
+            ensure!(
+                saved_data.is_some(),
+                MicrodroidError::InvalidConfig("Instance data not found.".to_string())
+            );
+        };
+    }
 
     // Verify the payload before using it.
     let verified_data =
@@ -215,6 +240,10 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
         instance.write_microdroid_data(&verified_data).context("Failed to write identity data")?;
     }
 
+    // To minimize the exposure to untrusted data, derive dice profile as soon as possible.
+    info!("DICE derivation for payload");
+    dice_derivation(&verified_data, &metadata.payload_config_path)?;
+
     // Before reading a file from the APK, start zipfuse
     run_zipfuse(
         "fscontext=u:object_r:zipfusefs:s0,context=u:object_r:system_file:s0",
@@ -229,6 +258,13 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     );
 
     let config = load_config(Path::new(&metadata.payload_config_path))?;
+
+    // Start tombstone_transmit if enabled
+    if config.export_tombstones {
+        system_properties::write("ctl.start", "tombstone_transmit")
+            .context("Failed to start tombstone_transmit")?;
+    }
+
     if config.extra_apks.len() != verified_data.extra_apks_data.len() {
         return Err(anyhow!(
             "config expects {} extra apks, but found only {}",
@@ -237,9 +273,6 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
         ));
     }
     mount_extra_apks(&config)?;
-
-    info!("DICE derivation for payload");
-    dice_derivation(verified_data, &metadata.payload_config_path)?;
 
     // Wait until apex config is done. (e.g. linker configuration for apexes)
     // TODO(jooyung): wait until sys.boot_completed?
