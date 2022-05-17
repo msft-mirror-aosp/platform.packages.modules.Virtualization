@@ -362,6 +362,13 @@ impl VirtualizationService {
         is_protected: &mut bool,
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         check_manage_access()?;
+
+        if let VirtualMachineConfig::RawConfig(config) = config {
+            if config.protectedVm {
+                check_use_custom_virtual_machine()?;
+            }
+        }
+
         let state = &mut *self.state.lock().unwrap();
         let console_fd = console_fd.map(clone_file).transpose()?;
         let log_fd = log_fd.map(clone_file).transpose()?;
@@ -467,6 +474,7 @@ impl VirtualizationService {
             memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
             cpus: config.numCpus.try_into().ok().and_then(NonZeroU32::new),
             cpu_affinity: config.cpuAffinity.clone(),
+            task_profiles: config.taskProfiles.clone(),
             console_fd,
             log_fd,
             indirect_files,
@@ -634,6 +642,7 @@ fn load_app_config(
     vm_config.protectedVm = config.protectedVm;
     vm_config.numCpus = config.numCpus;
     vm_config.cpuAffinity = config.cpuAffinity.clone();
+    vm_config.taskProfiles = config.taskProfiles.clone();
 
     // Microdroid requires an additional payload disk image and the bootconfig partition.
     if os_name == "microdroid" {
@@ -725,6 +734,11 @@ fn check_debug_access() -> binder::Result<()> {
 /// Check whether the caller of the current Binder method is allowed to manage VMs
 fn check_manage_access() -> binder::Result<()> {
     check_permission("android.permission.MANAGE_VIRTUAL_MACHINE")
+}
+
+/// Check whether the caller of the current Binder method is allowed to create custom VMs
+fn check_use_custom_virtual_machine() -> binder::Result<()> {
+    check_permission("android.permission.USE_CUSTOM_VIRTUAL_MACHINE")
 }
 
 /// Check if a partition has selinux labels that are not allowed

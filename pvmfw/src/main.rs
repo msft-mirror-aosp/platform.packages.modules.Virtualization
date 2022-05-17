@@ -17,28 +17,17 @@
 #![no_main]
 #![no_std]
 
-mod console;
-mod psci;
-mod uart;
+mod exceptions;
 
-use console::emergency_write_str;
-use core::panic::PanicInfo;
-use psci::{system_off, system_reset};
+use vmbase::{main, println};
+
+main!(main);
 
 /// Entry point for pVM firmware.
-#[no_mangle]
-pub extern "C" fn main() -> ! {
-    console::init();
-    console::write_str("Hello world\n");
-
-    system_off();
-    #[allow(clippy::empty_loop)]
-    loop {}
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    emergency_write_str("panic\n");
-    system_reset();
-    loop {}
+pub fn main(fdt_address: u64, payload_start: u64, payload_size: u64, arg3: u64) {
+    println!("pVM firmware");
+    println!(
+        "fdt_address={:#010x}, payload_start={:#010x}, payload_size={:#010x}, x3={:#010x}",
+        fdt_address, payload_start, payload_size, arg3,
+    );
 }

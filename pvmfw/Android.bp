@@ -13,7 +13,7 @@ rust_ffi_static {
         "libcore.rust_sysroot",
     ],
     rustlibs: [
-        "libspin_nostd",
+        "libvmbase",
     ],
     enabled: false,
     target: {
@@ -25,21 +25,21 @@ rust_ffi_static {
 }
 
 cc_binary {
-    name: "pvmfw",
+    name: "pvmfw_elf",
+    stem: "pvmfw",
     srcs: [
-        "entry.S",
         "idmap.S",
     ],
     static_libs: [
         "libpvmfw",
+        "libvmbase_entry",
     ],
     static_executable: true,
-    no_libcrt: true,
     nocrt: true,
-    system_shared_libs: [],
-    ldflags: [
-        "-Tpackages/modules/Virtualization/pvmfw/image.ld",
-    ],
+    system_shared_libs: ["libc"],
+    stl: "none",
+    linker_scripts: ["image.ld"],
+    installable: false,
     enabled: false,
     target: {
         android_arm64: {
@@ -47,4 +47,16 @@ cc_binary {
         },
     },
     apex_available: ["com.android.virt"],
+}
+
+raw_binary {
+    name: "pvmfw",
+    src: ":pvmfw_elf",
+    stem: "pvmfw.bin",
+    enabled: false,
+    target: {
+        android_arm64: {
+            enabled: true,
+        },
+    },
 }
