@@ -43,6 +43,35 @@ fastboot oem pkvm enable
 fastboot reboot
 ```
 
+Due to a bug in Android 13 for these devices, pKVM may stop working after an
+[OTA update](https://source.android.com/devices/tech/ota). To prevent this, it
+is necessary to manually replicate the `pvmfw` partition across A/B slots:
+
+```shell
+adb root
+SLOT=$(adb shell getprop ro.boot.slot_suffix)
+adb pull /dev/block/by-name/pvmfw${SLOT} pvmfw.img
+adb reboot bootloader
+fastboot --slot other flash pvmfw pvmfw.img
+fastboot reboot
+```
+
+Otherwise, if an OTA has already made pKVM unusable, the working partition
+should be copied over from the "other" slot:
+
+```shell
+adb pull $(adb shell ls "/dev/block/by-name/pvmfw!(${SLOT})") pvmfw.img
+adb reboot bootloader
+fastboot flash pvmfw pvmfw.img
+fastboot reboot
+```
+
+Finally, if the `pvmfw` partition has been corrupted, both slots may be flashed
+using the [`pvmfw.img` pre-built](https://android.googlesource.com/platform/packages/modules/Virtualization/+/refs/heads/master/pvmfw/pvmfw.img)
+as long as the bootloader remains unlocked. Otherwise, a fresh install of
+Android 13 followed by the manual steps above for flashing the `other` slot
+should be used as a last resort.
+
 ## Running demo app
 
 The instruction is [here](../../demo/README.md).
@@ -119,7 +148,7 @@ guideline](https://source.android.com/setup/build/building-kernels).
 
 ```shell
 mkdir android-kernel && cd android-kernel
-repo init -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10
+repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.15
 repo sync
 FAST_BUILD=1 DIST_DIR=out/dist BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j80
 ```
@@ -130,7 +159,7 @@ for x86.
 Then copy the built kernel to the Android source tree.
 
 ```
-cp out/dist/Image <android_root>/kernel/prebuilts/5.10/arm64/kernel-5.10
+cp out/dist/Image <android_root>/kernel/prebuilts/5.15/arm64/kernel-5.15
 ```
 
 Finally rebuild the `com.android.virt` APEX and install it by following the
