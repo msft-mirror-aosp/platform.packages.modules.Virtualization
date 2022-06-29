@@ -27,12 +27,14 @@ import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemProperties;
 import android.sysprop.HypervisorProperties;
+import android.system.virtualizationservice.DeathReason;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineCallback;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineConfig.DebugLevel;
 import android.system.virtualmachine.VirtualMachineException;
 import android.system.virtualmachine.VirtualMachineManager;
+import android.util.Log;
 
 import androidx.annotation.CallSuper;
 import androidx.test.core.app.ApplicationProvider;
@@ -47,9 +49,13 @@ import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.util.List;
@@ -68,9 +74,26 @@ import co.nstant.in.cbor.model.MajorType;
 
 @RunWith(Parameterized.class)
 public class MicrodroidTests {
+    private static final String TAG = "MicrodroidTests";
+
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
 
     private static final String KERNEL_VERSION = SystemProperties.get("ro.kernel.version");
+
+    /** Copy output from the VM to logcat. This is helpful when things go wrong. */
+    private static void logVmOutput(InputStream vmOutputStream, String name) {
+        new Thread(() -> {
+            try {
+                BufferedReader reader = new BufferedReader(new InputStreamReader(vmOutputStream));
+                String line;
+                while ((line = reader.readLine()) != null && !Thread.interrupted()) {
+                    Log.i(TAG, name + ": " + line);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, name, e);
+            }
+        }).start();
+    }
 
     private static class Inner {
         public boolean mProtectedVm;
@@ -149,6 +172,8 @@ public class MicrodroidTests {
         void runToFinish(VirtualMachine vm) throws VirtualMachineException, InterruptedException {
             vm.setCallback(mExecutorService, this);
             vm.run();
+            logVmOutput(vm.getConsoleOutputStream(), "Console");
+            logVmOutput(vm.getLogOutputStream(), "Log");
             mExecutorService.awaitTermination(300, TimeUnit.SECONDS);
         }
 
@@ -238,6 +263,7 @@ public class MicrodroidTests {
 
                     @Override
                     public void onPayloadReady(VirtualMachine vm) {
+                        Log.i(TAG, "onPayloadReady");
                         payloadReady.complete(true);
                         testVMService(vm);
                         forceStop(vm);
@@ -245,7 +271,9 @@ public class MicrodroidTests {
 
                     @Override
                     public void onPayloadStarted(VirtualMachine vm, ParcelFileDescriptor stream) {
+                        Log.i(TAG, "onPayloadStarted");
                         payloadStarted.complete(true);
+                        logVmOutput(new FileInputStream(stream.getFileDescriptor()), "Payload");
                     }
                 };
         listener.runToFinish(mInner.mVm);
@@ -452,10 +480,21 @@ public class MicrodroidTests {
         file.writeByte(b ^ 1);
     }
 
-    private boolean tryBootVm(String vmName)
+    private static class BootResult {
+        public final boolean payloadStarted;
+        public final int deathReason;
+
+        BootResult(boolean payloadStarted, int deathReason) {
+            this.payloadStarted = payloadStarted;
+            this.deathReason = deathReason;
+        }
+    }
+
+    private BootResult tryBootVm(String vmName)
             throws VirtualMachineException, InterruptedException {
         mInner.mVm = mInner.mVmm.get(vmName); // re-load the vm before running tests
         final CompletableFuture<Boolean> payloadStarted = new CompletableFuture<>();
+        final CompletableFuture<Integer> deathReason = new CompletableFuture<>();
         VmEventListener listener =
                 new VmEventListener() {
                     @Override
@@ -463,9 +502,15 @@ public class MicrodroidTests {
                         payloadStarted.complete(true);
                         forceStop(vm);
                     }
+                    @Override
+                    public void onDied(VirtualMachine vm, int reason) {
+                        deathReason.complete(reason);
+                        super.onDied(vm, reason);
+                    }
                 };
         listener.runToFinish(mInner.mVm);
-        return payloadStarted.getNow(false);
+        return new BootResult(
+                payloadStarted.getNow(false), deathReason.getNow(DeathReason.INFRASTRUCTURE_ERROR));
     }
 
     private RandomAccessFile prepareInstanceImage(String vmName)
@@ -479,7 +524,7 @@ public class MicrodroidTests {
         oldVm.delete();
         mInner.mVmm.getOrCreate(vmName, config);
 
-        assertThat(tryBootVm(vmName)).isTrue();
+        assertThat(tryBootVm(vmName).payloadStarted).isTrue();
 
         File vmRoot = new File(mInner.mContext.getFilesDir(), "vm");
         File vmDir = new File(vmRoot, vmName);
@@ -503,7 +548,7 @@ public class MicrodroidTests {
         assertThat(offset.isPresent()).isTrue();
 
         flipBit(instanceFile, offset.getAsLong());
-        assertThat(tryBootVm("test_vm_integrity")).isFalse();
+        assertThat(tryBootVm("test_vm_integrity").payloadStarted).isFalse();
     }
 
     @Test
@@ -543,5 +588,23 @@ public class MicrodroidTests {
             // non-protected VM shouldn't have pvmfw data
             assertThatPartitionIsMissing(PVM_FW_PARTITION_UUID);
         }
+    }
+
+    @Test
+    public void bootFailsWhenConfigIsInvalid()
+            throws VirtualMachineException, InterruptedException, IOException {
+        VirtualMachine existingVm = mInner.mVmm.get("test_vm_invalid_config");
+        if (existingVm != null) {
+            existingVm.delete();
+        }
+
+        VirtualMachineConfig.Builder builder =
+                mInner.newVmConfigBuilder("assets/vm_config_no_task.json");
+        VirtualMachineConfig normalConfig = builder.debugLevel(DebugLevel.NONE).build();
+        mInner.mVmm.create("test_vm_invalid_config", normalConfig);
+
+        BootResult bootResult = tryBootVm("test_vm_invalid_config");
+        assertThat(bootResult.payloadStarted).isFalse();
+        assertThat(bootResult.deathReason).isEqualTo(DeathReason.MICRODROID_INVALID_PAYLOAD_CONFIG);
     }
 }

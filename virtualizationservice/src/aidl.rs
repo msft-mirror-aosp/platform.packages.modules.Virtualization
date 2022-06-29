@@ -210,6 +210,8 @@ impl IVirtualizationService for VirtualizationService {
         // TODO(b/193504400): do this only when (1) idsig_fd is empty or (2) the APK digest in
         // idsig_fd is different from APK digest in input_fd
 
+        check_manage_access()?;
+
         let mut input = clone_file(input_fd)?;
         let mut sig = V4Signature::create(&mut input, 4096, &[], HashAlgorithm::SHA256).unwrap();
 
@@ -479,6 +481,7 @@ impl VirtualizationService {
             log_fd,
             indirect_files,
             platform_version: parse_platform_version_req(&config.platformVersion)?,
+            detect_hangup: is_app_config,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -1090,7 +1093,7 @@ impl IVirtualMachineService for VirtualMachineService {
             vm.callbacks.notify_error(cid, error_code, message);
             Ok(())
         } else {
-            error!("notifyPayloadStarted is called from an unknown CID {}", cid);
+            error!("notifyError is called from an unknown CID {}", cid);
             Err(new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
                 format!("cannot find a VM with CID {}", cid),

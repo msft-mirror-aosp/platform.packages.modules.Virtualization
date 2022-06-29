@@ -7,12 +7,11 @@ rust_defaults {
     crate_name: "apexutil",
     host_supported: true,
     srcs: ["src/lib.rs"],
-    prefer_rlib: true,
     edition: "2018",
     rustlibs: [
-        "libavb_bindgen",
         "liblog_rust",
         "libthiserror",
+        "libvbmeta_rust",
         "libzip",
     ],
 }
@@ -25,6 +24,7 @@ rust_library {
 rust_test {
     name: "libapexutil_rust.test",
     defaults: ["libapexutil_rust.defaults"],
+    prefer_rlib: true,
     test_suites: ["general-tests"],
     data: ["tests/data/*"],
     target: {

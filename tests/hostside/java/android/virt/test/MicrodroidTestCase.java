@@ -16,7 +16,6 @@
 
 package android.virt.test;
 
-import static android.virt.test.CommandResultSubject.assertThat;
 import static android.virt.test.CommandResultSubject.command_results;
 
 import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
@@ -255,7 +254,7 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
 
         // Add partitions to the second disk
         final String vbmetaPath = TEST_ROOT + "etc/fs/microdroid_vbmeta_bootconfig.img";
-        final String bootconfigPath = TEST_ROOT + "etc/microdroid_bootconfig.full_debuggable";
+        final String bootconfigPath = TEST_ROOT + "etc/fs/microdroid_bootconfig.full_debuggable";
         disks.getJSONObject(1).getJSONArray("partitions")
                 .put(newPartition("vbmeta", vbmetaPath))
                 .put(newPartition("bootconfig", bootconfigPath))
@@ -385,13 +384,16 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         Optional.of(CPU_AFFINITY));
         adbConnectToMicrodroid(getDevice(), cid);
         waitForBootComplete();
-        runOnMicrodroid("logcat -c");
+        runOnMicrodroidRetryingOnFailure(MICRODROID_COMMAND_TIMEOUT_MILLIS,
+                        MICRODROID_ADB_CONNECT_MAX_ATTEMPTS,
+                        "logcat -c");
         // We need root permission to write to /data/tombstones/
         rootMicrodroid();
         // Write a test tombstone file in /data/tombstones
         runOnMicrodroid("echo -n \'Test tombstone in VM with 34 bytes\'"
                     + "> /data/tombstones/transmit.txt");
-        // check if the tombstone have been tranferred from VM
+        // check if the tombstone have been tranferred from VM. This is a bit flaky - increasing
+        // timeout to 30s can result in SIGKILL inside microdroid due to logcat memory issue
         assertNotEquals(runOnMicrodroid("timeout 15s logcat | grep -m 1 "
                             + "'tombstone_transmit.microdroid:.*data/tombstones/transmit.txt'"),
                 "");
@@ -478,6 +480,7 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
     @Test
     public void testCustomVirtualMachinePermission()
             throws DeviceNotAvailableException, IOException, JSONException {
+        assumeTrue(isProtectedVmSupported());
         CommandRunner android = new CommandRunner(getDevice());
 
         // Pull etc/microdroid.json
@@ -502,11 +505,8 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         final String ret =
                 android.runForResult(VIRT_APEX + "bin/vm run", configPath).getStderr().trim();
 
-        assertTrue(
-                "The test should fail with a permission error",
-                ret.contains(
-                        "does not have the android.permission.USE_CUSTOM_VIRTUAL_MACHINE"
-                            + " permission"));
+        assertThat(ret).contains("does not have the android.permission.USE_CUSTOM_VIRTUAL_MACHINE"
+                + " permission");
     }
 
     @Before

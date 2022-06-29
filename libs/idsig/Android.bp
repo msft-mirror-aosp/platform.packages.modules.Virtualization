@@ -10,9 +10,10 @@ rust_defaults {
     prefer_rlib: true,
     rustlibs: [
         "libanyhow",
+        "libapkverify",
         "libbyteorder",
-        "libring",
         "libnum_traits",
+        "libopenssl",
     ],
     proc_macros: ["libnum_derive"],
 }
