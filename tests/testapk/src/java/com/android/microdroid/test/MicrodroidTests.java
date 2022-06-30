@@ -262,11 +262,6 @@ public class MicrodroidTests {
     public void changingDebugLevelInvalidatesVmIdentity()
             throws VirtualMachineException, InterruptedException, IOException {
         assume()
-            .withMessage("Skip on Cuttlefish. b/195765441")
-            .that(android.os.Build.DEVICE)
-            .isNotEqualTo("vsoc_x86_64");
-
-        assume()
             .withMessage("SKip on 5.4 kernel. b/218303240")
             .that(KERNEL_VERSION)
             .isNotEqualTo("5.4");
@@ -344,11 +339,6 @@ public class MicrodroidTests {
     public void instancesOfSameVmHaveDifferentCdis()
             throws VirtualMachineException, InterruptedException {
         assume()
-            .withMessage("Skip on Cuttlefish. b/195765441")
-            .that(android.os.Build.DEVICE)
-            .isNotEqualTo("vsoc_x86_64");
-
-        assume()
             .withMessage("SKip on 5.4 kernel. b/218303240")
             .that(KERNEL_VERSION)
             .isNotEqualTo("5.4");
@@ -368,11 +358,6 @@ public class MicrodroidTests {
     public void sameInstanceKeepsSameCdis()
             throws VirtualMachineException, InterruptedException {
         assume()
-            .withMessage("Skip on Cuttlefish. b/195765441")
-            .that(android.os.Build.DEVICE)
-            .isNotEqualTo("vsoc_x86_64");
-
-        assume()
             .withMessage("SKip on 5.4 kernel. b/218303240")
             .that(KERNEL_VERSION)
             .isNotEqualTo("5.4");
@@ -388,11 +373,6 @@ public class MicrodroidTests {
     @Test
     public void bccIsSuperficiallyWellFormed()
             throws VirtualMachineException, InterruptedException, CborException {
-        assume()
-            .withMessage("Skip on Cuttlefish. b/195765441")
-            .that(android.os.Build.DEVICE)
-            .isNotEqualTo("vsoc_x86_64");
-
         assume()
             .withMessage("SKip on 5.4 kernel. b/218303240")
             .that(KERNEL_VERSION)
@@ -443,6 +423,8 @@ public class MicrodroidTests {
             UUID.fromString("7e8221e7-03e6-4969-948b-73a4c809a4f2");
     private static final UUID U_BOOT_ENV_PARTITION_UUID =
             UUID.fromString("0ab72d30-86ae-4d05-81b2-c1760be2b1f9");
+    private static final UUID PVM_FW_PARTITION_UUID =
+            UUID.fromString("90d2174a-038a-4bc6-adf3-824848fc5825");
     private static final long BLOCK_SIZE = 512;
 
     // Find the starting offset which holds the data of a partition having UUID.
@@ -486,42 +468,80 @@ public class MicrodroidTests {
         return payloadStarted.getNow(false);
     }
 
-    @Test
-    public void bootFailsWhenInstanceDiskIsCompromised()
+    private RandomAccessFile prepareInstanceImage(String vmName)
             throws VirtualMachineException, InterruptedException, IOException {
-        assume().withMessage("Skip on Cuttlefish. b/195765441")
-                .that(android.os.Build.DEVICE)
-                .isNotEqualTo("vsoc_x86_64");
-
         VirtualMachineConfig config = mInner.newVmConfigBuilder("assets/vm_config.json")
                 .debugLevel(DebugLevel.NONE)
                 .build();
 
         // Remove any existing VM so we can start from scratch
-        VirtualMachine oldVm = mInner.mVmm.getOrCreate("test_vm_integrity", config);
+        VirtualMachine oldVm = mInner.mVmm.getOrCreate(vmName, config);
         oldVm.delete();
-        mInner.mVmm.getOrCreate("test_vm_integrity", config);
+        mInner.mVmm.getOrCreate(vmName, config);
 
-        assertThat(tryBootVm("test_vm_integrity")).isTrue();
+        assertThat(tryBootVm(vmName)).isTrue();
 
-        // Launch the same VM after flipping a bit of the instance image.
-        // Flip actual data, as flipping trivial bits like the magic string isn't interesting.
         File vmRoot = new File(mInner.mContext.getFilesDir(), "vm");
-        File vmDir = new File(vmRoot, "test_vm_integrity");
+        File vmDir = new File(vmRoot, vmName);
         File instanceImgPath = new File(vmDir, "instance.img");
-        RandomAccessFile instanceFile = new RandomAccessFile(instanceImgPath, "rw");
+        return new RandomAccessFile(instanceImgPath, "rw");
 
-        // partitions may or may not exist
-        for (UUID uuid :
-                new UUID[] {
-                    MICRODROID_PARTITION_UUID, U_BOOT_AVB_PARTITION_UUID, U_BOOT_ENV_PARTITION_UUID
-                }) {
-            OptionalLong offset = findPartitionDataOffset(instanceFile, uuid);
-            if (!offset.isPresent()) continue;
+    }
 
-            flipBit(instanceFile, offset.getAsLong());
-            assertThat(tryBootVm("test_vm_integrity")).isFalse();
-            flipBit(instanceFile, offset.getAsLong());
+    private void assertThatPartitionIsMissing(UUID partitionUuid)
+            throws VirtualMachineException, InterruptedException, IOException {
+        RandomAccessFile instanceFile = prepareInstanceImage("test_vm_integrity");
+        assertThat(findPartitionDataOffset(instanceFile, partitionUuid).isPresent())
+                .isFalse();
+    }
+
+    // Flips a bit of given partition, and then see if boot fails.
+    private void assertThatBootFailsAfterCompromisingPartition(UUID partitionUuid)
+            throws VirtualMachineException, InterruptedException, IOException {
+        RandomAccessFile instanceFile = prepareInstanceImage("test_vm_integrity");
+        OptionalLong offset = findPartitionDataOffset(instanceFile, partitionUuid);
+        assertThat(offset.isPresent()).isTrue();
+
+        flipBit(instanceFile, offset.getAsLong());
+        assertThat(tryBootVm("test_vm_integrity")).isFalse();
+    }
+
+    @Test
+    public void bootFailsWhenMicrodroidDataIsCompromised()
+            throws VirtualMachineException, InterruptedException, IOException {
+        assertThatBootFailsAfterCompromisingPartition(MICRODROID_PARTITION_UUID);
+    }
+
+    @Test
+    public void bootFailsWhenUBootAvbDataIsCompromised()
+            throws VirtualMachineException, InterruptedException, IOException {
+        if (mProtectedVm) {
+            assertThatBootFailsAfterCompromisingPartition(U_BOOT_AVB_PARTITION_UUID);
+        } else {
+            // non-protected VM shouldn't have u-boot avb data
+            assertThatPartitionIsMissing(U_BOOT_AVB_PARTITION_UUID);
+        }
+    }
+
+    @Test
+    public void bootFailsWhenUBootEnvDataIsCompromised()
+            throws VirtualMachineException, InterruptedException, IOException {
+        if (mProtectedVm) {
+            assertThatBootFailsAfterCompromisingPartition(U_BOOT_ENV_PARTITION_UUID);
+        } else {
+            // non-protected VM shouldn't have u-boot env data
+            assertThatPartitionIsMissing(U_BOOT_ENV_PARTITION_UUID);
+        }
+    }
+
+    @Test
+    public void bootFailsWhenPvmFwDataIsCompromised()
+            throws VirtualMachineException, InterruptedException, IOException {
+        if (mProtectedVm) {
+            assertThatBootFailsAfterCompromisingPartition(PVM_FW_PARTITION_UUID);
+        } else {
+            // non-protected VM shouldn't have pvmfw data
+            assertThatPartitionIsMissing(PVM_FW_PARTITION_UUID);
         }
     }
 }
