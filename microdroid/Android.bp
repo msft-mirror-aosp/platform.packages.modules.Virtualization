@@ -102,6 +102,7 @@ android_system_image {
 
                 "microdroid_plat_sepolicy.cil",
                 "microdroid_plat_mapping_file",
+                "microdroid_crashdump_initrd",
             ],
         },
         lib64: {
@@ -109,6 +110,8 @@ android_system_image {
                 "apkdmverity",
                 "authfs",
                 "authfs_service",
+                "microdroid_crashdump_kernel",
+                "microdroid_kexec",
                 "microdroid_manager",
                 "zipfuse",
             ],
@@ -239,6 +242,8 @@ microdroid_boot_cmdline = [
     "panic=-1",
     "bootconfig",
     "ioremap_guard",
+    // TODO(b/237381762) do this only when ramdump is enabled. (bootloader shall append this)
+    "crashkernel=17M",
 ]
 
 bootimg {

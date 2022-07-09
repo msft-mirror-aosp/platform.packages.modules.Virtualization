@@ -391,7 +391,7 @@ impl VirtualizationService {
             // At this point, we do not know the protected status of Vm
             // setting it to false, though this may not be correct.
             error!(
-                "Failed to create temporary directory {:?} for VM files: {}",
+                "Failed to create temporary directory {:?} for VM files: {:?}",
                 temporary_directory, e
             );
             new_binder_exception(
@@ -408,7 +408,7 @@ impl VirtualizationService {
         let config = match config {
             VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
                 load_app_config(config, &temporary_directory).map_err(|e| {
-                    error!("Failed to load app config from {}: {}", &config.configPath, e);
+                    error!("Failed to load app config from {}: {:?}", &config.configPath, e);
                     *is_protected = config.protectedVm;
                     new_binder_exception(
                         ExceptionCode::SERVICE_SPECIFIC,
@@ -442,7 +442,7 @@ impl VirtualizationService {
 
         let zero_filler_path = temporary_directory.join("zero.img");
         write_zero_filler(&zero_filler_path).map_err(|e| {
-            error!("Failed to make composite image: {}", e);
+            error!("Failed to make composite image: {:?}", e);
             new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
                 format!("Failed to make composite image: {}", e),
@@ -464,6 +464,19 @@ impl VirtualizationService {
             })
             .collect::<Result<Vec<DiskFile>, _>>()?;
 
+        // Creating this ramdump file unconditionally is not harmful as ramdump will be created
+        // only when the VM is configured as such. `ramdump_write` is sent to crosvm and will
+        // be the backing store for the /dev/hvc1 where VM will emit ramdump to. `ramdump_read`
+        // will be sent back to the client (i.e. the VM owner) for readout.
+        let ramdump_path = temporary_directory.join("ramdump");
+        let ramdump = prepare_ramdump_file(&ramdump_path).map_err(|e| {
+            error!("Failed to prepare ramdump file: {}", e);
+            new_binder_exception(
+                ExceptionCode::SERVICE_SPECIFIC,
+                format!("Failed to prepare ramdump file: {}", e),
+            )
+        })?;
+
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -479,6 +492,7 @@ impl VirtualizationService {
             task_profiles: config.taskProfiles.clone(),
             console_fd,
             log_fd,
+            ramdump: Some(ramdump),
             indirect_files,
             platform_version: parse_platform_version_req(&config.platformVersion)?,
             detect_hangup: is_app_config,
@@ -492,7 +506,7 @@ impl VirtualizationService {
                 requester_debug_pid,
             )
             .map_err(|e| {
-                error!("Failed to create VM with config {:?}: {}", config, e);
+                error!("Failed to create VM with config {:?}: {:?}", config, e);
                 new_binder_exception(
                     ExceptionCode::SERVICE_SPECIFIC,
                     format!("Failed to create VM: {}", e),
@@ -558,6 +572,11 @@ fn format_as_android_vm_instance(part: &mut dyn Write) -> std::io::Result<()> {
     part.flush()
 }
 
+fn prepare_ramdump_file(ramdump_path: &Path) -> Result<File> {
+    File::create(&ramdump_path)
+        .context(format!("Failed to create ramdump file {:?}", &ramdump_path))
+}
+
 /// Given the configuration for a disk image, assembles the `DiskFile` to pass to crosvm.
 ///
 /// This may involve assembling a composite disk from a set of partition images.
@@ -587,7 +606,7 @@ fn assemble_disk_image(
             &composite_image_filenames.footer,
         )
         .map_err(|e| {
-            error!("Failed to make composite image with config {:?}: {}", disk, e);
+            error!("Failed to make composite image with config {:?}: {:?}", disk, e);
             new_binder_exception(
                 ExceptionCode::SERVICE_SPECIFIC,
                 format!("Failed to make composite image: {}", e),
@@ -838,7 +857,7 @@ impl VirtualMachineCallbacks {
         let pfd = stream.map(vsock_stream_to_pfd);
         for callback in callbacks {
             if let Err(e) = callback.onPayloadStarted(cid as i32, pfd.as_ref()) {
-                error!("Error notifying payload start event from VM CID {}: {}", cid, e);
+                error!("Error notifying payload start event from VM CID {}: {:?}", cid, e);
             }
         }
     }
@@ -848,7 +867,7 @@ impl VirtualMachineCallbacks {
         let callbacks = &*self.0.lock().unwrap();
         for callback in callbacks {
             if let Err(e) = callback.onPayloadReady(cid as i32) {
-                error!("Error notifying payload ready event from VM CID {}: {}", cid, e);
+                error!("Error notifying payload ready event from VM CID {}: {:?}", cid, e);
             }
         }
     }
@@ -858,7 +877,7 @@ impl VirtualMachineCallbacks {
         let callbacks = &*self.0.lock().unwrap();
         for callback in callbacks {
             if let Err(e) = callback.onPayloadFinished(cid as i32, exit_code) {
-                error!("Error notifying payload finish event from VM CID {}: {}", cid, e);
+                error!("Error notifying payload finish event from VM CID {}: {:?}", cid, e);
             }
         }
     }
@@ -868,7 +887,7 @@ impl VirtualMachineCallbacks {
         let callbacks = &*self.0.lock().unwrap();
         for callback in callbacks {
             if let Err(e) = callback.onError(cid as i32, error_code, message) {
-                error!("Error notifying error event from VM CID {}: {}", cid, e);
+                error!("Error notifying error event from VM CID {}: {:?}", cid, e);
             }
         }
     }
@@ -878,7 +897,18 @@ impl VirtualMachineCallbacks {
         let callbacks = &*self.0.lock().unwrap();
         for callback in callbacks {
             if let Err(e) = callback.onDied(cid as i32, reason) {
-                error!("Error notifying exit of VM CID {}: {}", cid, e);
+                error!("Error notifying exit of VM CID {}: {:?}", cid, e);
+            }
+        }
+    }
+
+    /// Call all registered callbacks to say that there was a ramdump to download.
+    pub fn callback_on_ramdump(&self, cid: Cid, ramdump: File) {
+        let callbacks = &*self.0.lock().unwrap();
+        let pfd = ParcelFileDescriptor::new(ramdump);
+        for callback in callbacks {
+            if let Err(e) = callback.onRamdump(cid as i32, &pfd) {
+                error!("Error notifying ramdump of VM CID {}: {}", cid, e);
             }
         }
     }
