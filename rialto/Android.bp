@@ -3,29 +3,29 @@ package {
 }
 
 rust_ffi_static {
-    name: "libvmbase_example",
-    defaults: ["vmbase_ffi_defaults"],
-    crate_name: "vmbase_example",
+    name: "librialto",
+    crate_name: "rialto",
     srcs: ["src/main.rs"],
     edition: "2021",
+    defaults: ["vmbase_ffi_defaults"],
     rustlibs: [
         "libaarch64_paging",
         "libbuddy_system_allocator",
-        "liblog_rust_nostd",
         "libvmbase",
     ],
     apex_available: ["com.android.virt"],
 }
 
 cc_binary {
-    name: "vmbase_example_elf",
-    stem: "vmbase_example",
+    name: "rialto_elf",
+    stem: "rialto",
     defaults: ["vmbase_elf_defaults"],
     srcs: [
         "idmap.S",
     ],
     static_libs: [
-        "libvmbase_example",
+        "librialto",
+        "libvmbase_entry",
     ],
     linker_scripts: [
         "image.ld",
@@ -35,8 +35,8 @@ cc_binary {
 }
 
 raw_binary {
-    name: "vmbase_example",
-    src: ":vmbase_example_elf",
+    name: "rialto",
+    src: ":rialto_elf",
     enabled: false,
     target: {
         android_arm64: {
@@ -46,21 +46,22 @@ raw_binary {
 }
 
 rust_test {
-    name: "vmbase_example.integration_test",
-    crate_name: "vmbase_example_test",
+    name: "rialto_test",
+    crate_name: "rialto_test",
     srcs: ["tests/test.rs"],
     prefer_rlib: true,
     edition: "2021",
     rustlibs: [
         "android.system.virtualizationservice-rust",
+        "libandroid_logger",
         "libanyhow",
-        "libenv_logger",
         "liblibc",
         "liblog_rust",
+        "libnix",
         "libvmclient",
     ],
     data: [
-        ":vmbase_example",
+        ":rialto",
     ],
     test_suites: ["general-tests"],
     enabled: false,
