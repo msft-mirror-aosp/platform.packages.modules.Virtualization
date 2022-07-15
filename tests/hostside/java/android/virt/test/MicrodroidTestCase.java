@@ -25,6 +25,7 @@ import static com.google.common.truth.Truth.assertWithMessage;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.nullValue;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThat;
@@ -362,6 +363,46 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         shutdownMicrodroid(getDevice(), cid);
     }
 
+    private boolean isTombstoneGeneratedWithConfig(String configPath) throws Exception {
+        // Note this test relies on logcat values being printed by tombstone_transmit on
+        // and the reeceiver on host (virtualization_service)
+        final String cid =
+                startMicrodroid(
+                        getDevice(),
+                        getBuild(),
+                        APK_NAME,
+                        PACKAGE_NAME,
+                        configPath,
+                        /* debug */ true,
+                        minMemorySize(),
+                        Optional.of(NUM_VCPUS),
+                        Optional.of(CPU_AFFINITY));
+        // check until microdroid is shut down
+        CommandRunner android = new CommandRunner(getDevice());
+        android.runWithTimeout(
+                15000,
+                "logcat",
+                "-m",
+                "1",
+                "-e",
+                "'crosvm has exited normally'");
+        // Check that tombstone is received (from host logcat)
+        String result = runOnHost("adb", "-s", getDevice().getSerialNumber(),
+                "logcat", "-d", "-e",
+                "Received [0-9]+ bytes from guest & wrote to tombstone file");
+        return !result.trim().isEmpty();
+    }
+
+    @Test
+    public void testTombstonesAreGeneratedUponCrash() throws Exception {
+        assertTrue(isTombstoneGeneratedWithConfig("assets/vm_config_crash.json"));
+    }
+
+    @Test
+    public void testTombstonesAreNotGeneratedIfNotExported() throws Exception {
+        assertFalse(isTombstoneGeneratedWithConfig("assets/vm_config_crash_no_tombstone.json"));
+    }
+
     @Test
     public void testTombstonesAreBeingForwarded() throws Exception {
         // This test requires rooting. Skip on user builds where rooting is impossible.
@@ -384,9 +425,8 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                         Optional.of(CPU_AFFINITY));
         adbConnectToMicrodroid(getDevice(), cid);
         waitForBootComplete();
-        runOnMicrodroidRetryingOnFailure(MICRODROID_COMMAND_TIMEOUT_MILLIS,
-                        MICRODROID_ADB_CONNECT_MAX_ATTEMPTS,
-                        "logcat -c");
+        runOnMicrodroidRetryingOnFailure(
+                MICRODROID_COMMAND_TIMEOUT_MILLIS, MICRODROID_ADB_CONNECT_MAX_ATTEMPTS, "true");
         // We need root permission to write to /data/tombstones/
         rootMicrodroid();
         // Write a test tombstone file in /data/tombstones
@@ -394,9 +434,15 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
                     + "> /data/tombstones/transmit.txt");
         // check if the tombstone have been tranferred from VM. This is a bit flaky - increasing
         // timeout to 30s can result in SIGKILL inside microdroid due to logcat memory issue
-        assertNotEquals(runOnMicrodroid("timeout 15s logcat | grep -m 1 "
-                            + "'tombstone_transmit.microdroid:.*data/tombstones/transmit.txt'"),
-                "");
+        CommandRunner android = new CommandRunner(getDevice());
+        android.runWithTimeout(
+                15000,
+                "grep",
+                "-m",
+                "1",
+                "'tombstone_transmit.microdroid:.*data/tombstones/transmit.txt'",
+                LOG_PATH);
+
         // Confirm that tombstone is received (from host logcat)
         assertNotEquals(runOnHost("adb", "-s", getDevice().getSerialNumber(),
                             "logcat", "-d", "-e",
@@ -441,7 +487,9 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         assertThat(runOnMicrodroid("ls", "-Z", testLib), is(label + " " + testLib));
 
         // Check that no denials have happened so far
-        assertThat(runOnMicrodroid("logcat -d -e 'avc:[[:space:]]{1,2}denied'"), is(""));
+        CommandRunner android = new CommandRunner(getDevice());
+        assertThat(android.tryRun("egrep", "'avc:[[:space:]]{1,2}denied'", LOG_PATH),
+                is(nullValue()));
 
         assertThat(runOnMicrodroid("cat /proc/cpuinfo | grep processor | wc -l"),
                 is(Integer.toString(NUM_VCPUS)));
