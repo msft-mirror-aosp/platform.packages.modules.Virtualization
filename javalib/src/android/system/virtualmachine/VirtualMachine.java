@@ -445,6 +445,11 @@ public class VirtualMachine {
                                 executeCallback((cb) -> cb.onDied(VirtualMachine.this, reason));
                             }
                         }
+                        @Override
+                        public void onRamdump(int cid, ParcelFileDescriptor ramdump) {
+                            executeCallback(
+                                    (cb) -> cb.onRamdump(VirtualMachine.this, ramdump));
+                        }
                     }
             );
             service.asBinder().linkToDeath(deathRecipient, 0);
@@ -479,8 +484,13 @@ public class VirtualMachine {
      * #run()}.
      */
     public void stop() throws VirtualMachineException {
-        // Dropping the IVirtualMachine handle stops the VM
-        mVirtualMachine = null;
+        if (mVirtualMachine == null) return;
+        try {
+            mVirtualMachine.stop();
+            mVirtualMachine = null;
+        } catch (RemoteException e) {
+            throw new VirtualMachineException(e);
+        }
     }
 
     /**

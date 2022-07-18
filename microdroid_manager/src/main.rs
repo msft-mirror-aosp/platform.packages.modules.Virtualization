@@ -69,7 +69,6 @@ const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-ins
 const VMADDR_CID_HOST: u32 = 2;
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
-const LOGD_ENABLED_PROP: &str = "ro.boot.logd.enabled";
 const APP_DEBUGGABLE_PROP: &str = "ro.boot.microdroid.app_debuggable";
 
 // SYNC WITH virtualizationservice/src/crosvm.rs
@@ -299,7 +298,9 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     dice_derivation(&verified_data, &metadata.payload_config_path)?;
 
     // Before reading a file from the APK, start zipfuse
+    let noexec = false;
     run_zipfuse(
+        noexec,
         "fscontext=u:object_r:zipfusefs:s0,context=u:object_r:system_file:s0",
         Path::new("/dev/block/mapper/microdroid-apk"),
         Path::new("/mnt/apk"),
@@ -313,12 +314,6 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
 
     let config = load_config(Path::new(&metadata.payload_config_path))?;
 
-    // Start tombstone_transmit if enabled
-    if config.export_tombstones {
-        system_properties::write("ctl.start", "tombstone_transmit")
-            .context("Failed to start tombstone_transmit")?;
-    }
-
     if config.extra_apks.len() != verified_data.extra_apks_data.len() {
         return Err(anyhow!(
             "config expects {} extra apks, but found only {}",
@@ -331,6 +326,14 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     // Wait until apex config is done. (e.g. linker configuration for apexes)
     // TODO(jooyung): wait until sys.boot_completed?
     wait_for_apex_config_done()?;
+
+    // Start tombstone_transmit if enabled
+    if config.export_tombstones {
+        system_properties::write("ctl.start", "tombstone_transmit")
+            .context("Failed to start tombstone_transmit")?;
+    } else {
+        system_properties::write("ctl.stop", "tombstoned").context("Failed to stop tombstoned")?;
+    }
 
     ensure!(
         config.task.is_some(),
@@ -364,9 +367,12 @@ fn run_apkdmverity(args: &[ApkDmverityArgument]) -> Result<Child> {
     cmd.spawn().context("Spawn apkdmverity")
 }
 
-fn run_zipfuse(option: &str, zip_path: &Path, mount_dir: &Path) -> Result<Child> {
-    Command::new(ZIPFUSE_BIN)
-        .arg("-o")
+fn run_zipfuse(noexec: bool, option: &str, zip_path: &Path, mount_dir: &Path) -> Result<Child> {
+    let mut cmd = Command::new(ZIPFUSE_BIN);
+    if noexec {
+        cmd.arg("--noexec");
+    }
+    cmd.arg("-o")
         .arg(option)
         .arg(zip_path)
         .arg(mount_dir)
@@ -537,7 +543,9 @@ fn mount_extra_apks(config: &VmPayloadConfig) -> Result<()> {
         create_dir(Path::new(&mount_dir)).context("Failed to create mount dir for extra apks")?;
 
         // don't wait, just detach
+        let noexec = true;
         run_zipfuse(
+            noexec,
             "fscontext=u:object_r:zipfusefs:s0,context=u:object_r:extra_apk_file:s0",
             Path::new(&format!("/dev/block/mapper/extra-apk-{}", i)),
             Path::new(&mount_dir),
@@ -591,12 +599,6 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
 
     info!("notifying payload started");
     service.notifyPayloadStarted()?;
-
-    // Start logging if enabled
-    // TODO(b/200914564) set filterspec if debug_level is app_only
-    if system_properties::read_bool(LOGD_ENABLED_PROP, false)? {
-        system_properties::write("ctl.start", "seriallogging")?;
-    }
 
     let exit_status = command.spawn()?.wait()?;
     exit_status.code().ok_or_else(|| anyhow!("Failed to get exit_code from the paylaod."))

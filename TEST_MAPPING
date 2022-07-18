@@ -22,6 +22,9 @@
   "postsubmit": [
     {
       "name": "odsign_e2e_tests_full"
+    },
+    {
+      "name": "MicrodroidBenchmarkApp"
     }
   ],
   "imports": [
@@ -39,6 +42,12 @@
     },
     {
       "path": "packages/modules/Virtualization/authfs"
+    },
+    {
+      "path": "packages/modules/Virtualization/rialto"
+    },
+    {
+      "path": "packages/modules/Virtualization/vmbase"
     },
     {
       "path": "packages/modules/Virtualization/zipfuse"
