@@ -17,7 +17,7 @@ use android_system_virtualizationservice::binder::StatusCode;
 use thiserror::Error;
 
 /// An error while waiting for a VM to do something.
-#[derive(Clone, Debug, Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum VmWaitError {
     /// Timed out waiting for the VM.
     #[error("Timed out waiting for VM.")]
@@ -33,9 +33,9 @@ pub enum VmWaitError {
     Finished,
 }
 
-/// An error connection to a VM RPC Binder service.
-#[derive(Clone, Debug, Error)]
-pub enum GetServiceError {
+/// An error connecting to a VM RPC Binder service.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum ConnectServiceError {
     /// The RPC binder connection failed.
     #[error("Vsock connection to RPC binder failed.")]
     ConnectionFailed,
