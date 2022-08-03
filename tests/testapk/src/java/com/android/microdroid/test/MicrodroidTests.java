@@ -32,7 +32,6 @@ import android.util.Log;
 
 import com.android.microdroid.testservice.ITestService;
 
-import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -75,11 +74,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Before
     public void setup() {
         prepareTestSetup(mProtectedVm);
-    }
-
-    @After
-    public void cleanup() throws VirtualMachineException {
-        cleanupTestSetup();
     }
 
     private static final int MIN_MEM_ARM64 = 150;
@@ -160,6 +154,26 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(testResults.mAppRunProp).isEqualTo("true");
         assertThat(testResults.mSublibRunProp).isEqualTo("true");
         assertThat(testResults.mExtraApkTestProp).isEqualTo("PASS");
+    }
+
+    @Test
+    public void bootFailsWhenLowMem() throws VirtualMachineException, InterruptedException {
+        VirtualMachineConfig lowMemConfig = mInner.newVmConfigBuilder("assets/vm_config.json")
+                .memoryMib(20)
+                .debugLevel(DebugLevel.NONE)
+                .build();
+        VirtualMachine vm = mInner.forceCreateNewVirtualMachine("low_mem", lowMemConfig);
+        final CompletableFuture<Integer> exception = new CompletableFuture<>();
+        VmEventListener listener =
+                new VmEventListener() {
+                    @Override
+                    public void onDied(VirtualMachine vm, @DeathReason int reason) {
+                        exception.complete(reason);
+                        super.onDied(vm, reason);
+                    }
+                };
+        listener.runToFinish(TAG, vm);
+        assertThat(exception.getNow(0)).isAnyOf(DeathReason.REBOOT, DeathReason.HANGUP);
     }
 
     @Test

@@ -31,7 +31,7 @@ use android_system_composd::{
     },
 };
 use anyhow::{bail, Context, Result};
-use compos_common::timeouts::timeouts;
+use compos_common::timeouts::TIMEOUTS;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -49,8 +49,8 @@ fn main() -> Result<()> {
     ProcessState::start_thread_pool();
 
     match args.subcommand() {
-        ("staged-apex-compile", _) => run_staged_apex_compile()?,
-        ("test-compile", Some(sub_matches)) => {
+        Some(("staged-apex-compile", _)) => run_staged_apex_compile()?,
+        Some(("test-compile", sub_matches)) => {
             let prefer_staged = sub_matches.is_present("prefer-staged");
             run_test_compile(prefer_staged)?;
         }
@@ -147,7 +147,7 @@ where
 
     println!("Waiting");
 
-    match state.wait(timeouts()?.odrefresh_max_execution_time) {
+    match state.wait(TIMEOUTS.odrefresh_max_execution_time) {
         Ok(Outcome::Succeeded) => Ok(()),
         Ok(Outcome::TaskDied) => bail!("Compilation task died"),
         Ok(Outcome::Failed(reason, message)) => {

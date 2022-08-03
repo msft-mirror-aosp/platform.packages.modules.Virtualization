@@ -14,10 +14,9 @@
  * limitations under the License.
  */
 
-package android.virt.test;
+package com.android.microdroid.test;
 
-import static android.virt.test.CommandResultSubject.command_results;
-
+import static com.android.microdroid.test.CommandResultSubject.command_results;
 import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
 
 import static com.google.common.truth.Truth.assertThat;
@@ -27,7 +26,6 @@ import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -41,6 +39,7 @@ import com.android.tradefed.testtype.junit4.DeviceTestRunOptions;
 import com.android.tradefed.util.CommandResult;
 import com.android.tradefed.util.FileUtil;
 import com.android.tradefed.util.RunUtil;
+import com.android.tradefed.util.xml.AbstractXmlParser;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -51,7 +50,10 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
+import org.xml.sax.Attributes;
+import org.xml.sax.helpers.DefaultHandler;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -63,7 +65,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @RunWith(DeviceJUnit4ClassRunner.class)
-public class MicrodroidTestCase extends VirtualizationTestCaseBase {
+public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
     private static final String APK_NAME = "MicrodroidTestApp.apk";
     private static final String PACKAGE_NAME = "com.android.microdroid.test";
     private static final String SHELL_PACKAGE_NAME = "com.android.shell";
@@ -77,16 +79,6 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
 
     @Rule public TestLogData mTestLogs = new TestLogData();
     @Rule public TestName mTestName = new TestName();
-
-    // TODO(b/176805428): remove this
-    private boolean isCuttlefish() throws Exception {
-        String productName = getDevice().getProperty("ro.product.name");
-        return (null != productName)
-                && (productName.startsWith("aosp_cf_x86")
-                        || productName.startsWith("aosp_cf_arm")
-                        || productName.startsWith("cf_x86")
-                        || productName.startsWith("cf_arm"));
-    }
 
     private int minMemorySize() throws DeviceNotAvailableException {
         CommandRunner android = new CommandRunner(getDevice());
@@ -187,9 +179,55 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         }
     }
 
+    static class ActiveApexInfo {
+        public String name;
+        public String path;
+        ActiveApexInfo(String name, String path) {
+            this.name = name;
+            this.path = path;
+        }
+    }
+
+    static class ActiveApexInfoList {
+        private List<ActiveApexInfo> mList;
+        ActiveApexInfoList(List<ActiveApexInfo> list) {
+            this.mList = list;
+        }
+        ActiveApexInfo get(String apexName) {
+            for (ActiveApexInfo info: mList) {
+                if (info.name.equals(apexName)) {
+                    return info;
+                }
+            }
+            return null;
+        }
+    }
+
+    private ActiveApexInfoList getActiveApexInfoList() throws Exception {
+        String apexInfoListXml = getDevice().pullFileContents("/apex/apex-info-list.xml");
+        List<ActiveApexInfo> list = new ArrayList<>();
+        new AbstractXmlParser() {
+            @Override
+            protected DefaultHandler createXmlHandler() {
+                return new DefaultHandler() {
+                    @Override
+                    public void startElement(String uri, String localName, String qName,
+                            Attributes attributes) {
+                        if (localName.equals("apex-info")
+                                && attributes.getValue("isActive").equals("true")) {
+                            list.add(new ActiveApexInfo(attributes.getValue("moduleName"),
+                                    attributes.getValue("modulePath")));
+                        }
+                    }
+                };
+            }
+        }.parse(new ByteArrayInputStream(apexInfoListXml.getBytes()));
+        return new ActiveApexInfoList(list);
+    }
+
     private String runMicrodroidWithResignedImages(File key, Map<String, File> keyOverrides,
             boolean isProtected, boolean daemonize, String consolePath)
-            throws DeviceNotAvailableException, IOException, JSONException {
+            throws Exception {
         CommandRunner android = new CommandRunner(getDevice());
 
         File virtApexDir = FileUtil.createTempDir("virt_apex");
@@ -219,11 +257,10 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
         final String payloadMetadataPath = TEST_ROOT + "payload-metadata.img";
         getDevice().pushFile(findTestFile("test-payload-metadata.img"), payloadMetadataPath);
 
-        // push APEXes required for the VM.
-        final String statsdApexPath = TEST_ROOT + "com.android.os.statsd.apex";
-        final String adbdApexPath = TEST_ROOT + "com.android.adbd.apex";
-        getDevice().pushFile(findTestFile("com.android.os.statsd.apex"), statsdApexPath);
-        getDevice().pushFile(findTestFile("com.android.adbd.apex"), adbdApexPath);
+        // get paths to the two APEXes required for the VM.
+        ActiveApexInfoList list = getActiveApexInfoList();
+        final String statsdApexPath = list.get("com.android.os.statsd").path;
+        final String adbdApexPath = list.get("com.android.adbd").path;
 
         // Since Java APP can't start a VM with a custom image, here, we start a VM using `vm run`
         // command with a VM Raw config which is equiv. to what virtualizationservice creates with
@@ -401,53 +438,6 @@ public class MicrodroidTestCase extends VirtualizationTestCaseBase {
     @Test
     public void testTombstonesAreNotGeneratedIfNotExported() throws Exception {
         assertFalse(isTombstoneGeneratedWithConfig("assets/vm_config_crash_no_tombstone.json"));
-    }
-
-    @Test
-    public void testTombstonesAreBeingForwarded() throws Exception {
-        // This test requires rooting. Skip on user builds where rooting is impossible.
-        final String buildType = getDevice().getProperty("ro.build.type");
-        assumeTrue("userdebug".equals(buildType) || "eng".equals(buildType));
-
-        // Note this test relies on logcat values being printed by tombstone_transmit on
-        // and the reeceiver on host (virtualization_service)
-        final String configPath = "assets/vm_config.json"; // path inside the APK
-        final String cid =
-                startMicrodroid(
-                        getDevice(),
-                        getBuild(),
-                        APK_NAME,
-                        PACKAGE_NAME,
-                        configPath,
-                        /* debug */ true,
-                        minMemorySize(),
-                        Optional.of(NUM_VCPUS),
-                        Optional.of(CPU_AFFINITY));
-        adbConnectToMicrodroid(getDevice(), cid);
-        waitForBootComplete();
-        runOnMicrodroidRetryingOnFailure(
-                MICRODROID_COMMAND_TIMEOUT_MILLIS, MICRODROID_ADB_CONNECT_MAX_ATTEMPTS, "true");
-        // We need root permission to write to /data/tombstones/
-        rootMicrodroid();
-        // Write a test tombstone file in /data/tombstones
-        runOnMicrodroid("echo -n \'Test tombstone in VM with 34 bytes\'"
-                    + "> /data/tombstones/transmit.txt");
-        // check if the tombstone have been tranferred from VM. This is a bit flaky - increasing
-        // timeout to 30s can result in SIGKILL inside microdroid due to logcat memory issue
-        CommandRunner android = new CommandRunner(getDevice());
-        android.runWithTimeout(
-                15000,
-                "grep",
-                "-m",
-                "1",
-                "'tombstone_transmit.microdroid:.*data/tombstones/transmit.txt'",
-                LOG_PATH);
-
-        // Confirm that tombstone is received (from host logcat)
-        assertNotEquals(runOnHost("adb", "-s", getDevice().getSerialNumber(),
-                            "logcat", "-d", "-e",
-                            "Received 34 bytes from guest & wrote to tombstone file.*"),
-                "");
     }
 
     @Test

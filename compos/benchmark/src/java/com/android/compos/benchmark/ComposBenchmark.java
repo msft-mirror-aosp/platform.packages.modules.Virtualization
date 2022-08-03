@@ -17,12 +17,16 @@ package com.android.compos.benchmark;
 
 import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentation;
 
+import static com.google.common.truth.TruthJUnit.assume;
+
 import static org.junit.Assert.assertTrue;
 
 import android.app.Instrumentation;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
+
+import com.android.microdroid.test.MicrodroidDeviceTestBase;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -42,7 +46,7 @@ import java.util.regex.Pattern;
 
 
 @RunWith(JUnit4.class)
-public class ComposBenchmark {
+public class ComposBenchmark extends MicrodroidDeviceTestBase {
     private static final String TAG = "ComposBenchmark";
     private static final int BUFFER_SIZE = 1024;
     private static final int ROUND_COUNT = 5;
@@ -119,6 +123,7 @@ public class ComposBenchmark {
 
     @Test
     public void testGuestCompileTime() throws InterruptedException, IOException {
+        assume().withMessage("Skip on CF; too slow").that(isCuttlefish()).isFalse();
 
         final String command = "/apex/com.android.compos/bin/composd_cmd test-compile";
 
