@@ -19,7 +19,6 @@
 //! actual compiler.
 
 use anyhow::{bail, Context, Result};
-use binder_common::new_binder_exception;
 use log::{error, info};
 use rustutils::system_properties;
 use std::default::Default;
@@ -31,11 +30,9 @@ use std::sync::RwLock;
 use crate::artifact_signer::ArtifactSigner;
 use crate::compilation::{odrefresh, OdrefreshContext};
 use crate::compos_key;
+use binder::{BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Status, Strong};
 use compos_aidl_interface::aidl::com::android::compos::ICompOsService::{
     BnCompOsService, CompilationMode::CompilationMode, ICompOsService,
-};
-use compos_aidl_interface::binder::{
-    BinderFeatures, ExceptionCode, Interface, Result as BinderResult, Strong,
 };
 use compos_common::binder::to_binder_result;
 use compos_common::odrefresh::{is_system_property_interesting, ODREFRESH_PATH};
@@ -67,28 +64,28 @@ impl ICompOsService for CompOsService {
     fn initializeSystemProperties(&self, names: &[String], values: &[String]) -> BinderResult<()> {
         let mut initialized = self.initialized.write().unwrap();
         if initialized.is_some() {
-            return Err(new_binder_exception(
+            return Err(Status::new_exception_str(
                 ExceptionCode::ILLEGAL_STATE,
-                format!("Already initialized: {:?}", initialized),
+                Some(format!("Already initialized: {:?}", initialized)),
             ));
         }
         *initialized = Some(false);
 
         if names.len() != values.len() {
-            return Err(new_binder_exception(
+            return Err(Status::new_exception_str(
                 ExceptionCode::ILLEGAL_ARGUMENT,
-                format!(
+                Some(format!(
                     "Received inconsistent number of keys ({}) and values ({})",
                     names.len(),
                     values.len()
-                ),
+                )),
             ));
         }
         for (name, value) in zip(names, values) {
             if !is_system_property_interesting(name) {
-                return Err(new_binder_exception(
+                return Err(Status::new_exception_str(
                     ExceptionCode::ILLEGAL_ARGUMENT,
-                    format!("Received invalid system property {}", &name),
+                    Some(format!("Received invalid system property {}", &name)),
                 ));
             }
             let result = system_properties::write(name, value);
@@ -113,9 +110,9 @@ impl ICompOsService for CompOsService {
     ) -> BinderResult<i8> {
         let initialized = *self.initialized.read().unwrap();
         if !initialized.unwrap_or(false) {
-            return Err(new_binder_exception(
+            return Err(Status::new_exception_str(
                 ExceptionCode::ILLEGAL_STATE,
-                "Service has not been initialized",
+                Some("Service has not been initialized"),
             ));
         }
 
@@ -129,7 +126,7 @@ impl ICompOsService for CompOsService {
             system_server_compiler_filter,
         ))?;
 
-        let authfs_service = authfs_aidl_interface::binder::get_interface(AUTHFS_SERVICE_NAME)?;
+        let authfs_service = binder::get_interface(AUTHFS_SERVICE_NAME)?;
         let exit_code = to_binder_result(
             odrefresh(&self.odrefresh_path, context, authfs_service, |output_dir| {
                 // authfs only shows us the files we created, so it's ok to just sign everything
