@@ -127,7 +127,7 @@ and writable data:
 ```ld
 MEMORY
 {
-	image		    : ORIGIN = 0x80200000, LENGTH = 2M
+	image		: ORIGIN = 0x80200000, LENGTH = 2M
 	writable_data	: ORIGIN = 0x80400000, LENGTH = 2M
 }
 ```
@@ -152,7 +152,10 @@ cc_binary {
     nocrt: true,
     system_shared_libs: ["libc"],
     stl: "none",
-    linker_scripts: ["image.ld"],
+    linker_scripts: [
+        "image.ld",
+        ":vmbase_sections",
+    ],
     installable: false,
     enabled: false,
     target: {
@@ -165,8 +168,9 @@ cc_binary {
 
 This takes your Rust library (`libvmbase_example`), the vmbase library entry point and exception
 vector (`libvmbase_entry`) and your initial idmap (`idmap.S`) and builds a static binary with your
-linker script (`image.ld`). This is an ELF binary, but to run it as a VM bootloader you need to
-`objcopy` it to a raw binary image instead, which you can do with a `raw_binary` rule:
+linker script (`image.ld`) and the one provided by vmbase ([`sections.ld`](sections.ld)). This is an
+ELF binary, but to run it as a VM bootloader you need to `objcopy` it to a raw binary image instead,
+which you can do with a `raw_binary` rule:
 
 ```soong
 raw_binary {

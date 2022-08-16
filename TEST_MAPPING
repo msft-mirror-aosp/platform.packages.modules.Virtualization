@@ -25,11 +25,17 @@
     },
     {
       "name": "MicrodroidBenchmarkApp"
+    },
+    {
+      "name": "ComposBenchmarkApp"
     }
   ],
   "imports": [
     {
       "path": "packages/modules/Virtualization/apkdmverity"
+    },
+    {
+      "path": "packages/modules/Virtualization/avmd"
     },
     {
       "path": "packages/modules/Virtualization/virtualizationservice"
@@ -42,6 +48,12 @@
     },
     {
       "path": "packages/modules/Virtualization/authfs"
+    },
+    {
+      "path": "packages/modules/Virtualization/rialto"
+    },
+    {
+      "path": "packages/modules/Virtualization/vmbase"
     },
     {
       "path": "packages/modules/Virtualization/zipfuse"

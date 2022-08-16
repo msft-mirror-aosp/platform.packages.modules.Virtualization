@@ -1,0 +1,22 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+java_library_static {
+    name: "VirtualizationTestHelper",
+    srcs: ["src/java/com/android/virt/**/*.java"],
+    host_supported: true,
+}
+
+java_library_static {
+    name: "MicroroidDeviceTestHelper",
+    srcs: ["src/java/com/android/microdroid/**/*.java"],
+    static_libs: [
+        "androidx.test.runner",
+        "androidx.test.ext.junit",
+        "VirtualizationTestHelper",
+        "truth-prebuilt",
+    ],
+    libs: ["android.system.virtualmachine"],
+    platform_apis: true,
+}

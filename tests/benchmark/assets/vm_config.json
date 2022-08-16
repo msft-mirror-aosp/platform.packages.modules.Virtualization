@@ -4,7 +4,10 @@
   },
   "task": {
     "type": "microdroid_launcher",
-    "command": "MicrodroidBenchmarkNativeLib.so"
+    "command": "MicrodroidBenchmarkNativeLib.so",
+    "args": [
+      "no_io"
+    ]
   },
   "export_tombstones": true
 }

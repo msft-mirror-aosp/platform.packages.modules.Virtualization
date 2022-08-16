@@ -1,0 +1,50 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_defaults {
+    name: "libavmd_defaults",
+    crate_name: "avmd",
+    host_supported: true,
+    srcs: ["src/lib.rs"],
+    prefer_rlib: true,
+    rustlibs: [
+        "libserde",
+        "libapexutil_rust", // TODO(b/239413416): Remove this after adding hex
+    ],
+}
+
+rust_library {
+    name: "libavmd",
+    defaults: ["libavmd_defaults"],
+}
+
+rust_binary {
+    name: "avmdtool",
+    srcs: ["src/main.rs"],
+    host_supported: true,
+    prefer_rlib: true,
+    rustlibs: [
+        "libanyhow",
+        "libapexutil_rust",
+        "libapkverify",
+        "libavmd",
+        "libclap",
+        "libserde",
+        "libserde_cbor",
+        "libvbmeta_rust",
+    ],
+}
+
+rust_test_host {
+    name: "avmdtool_tests",
+    srcs: ["tests/*_test.rs"],
+    test_suites: ["general-tests"],
+    prefer_rlib: true,
+    data: ["tests/data/*"],
+    data_bins: ["avmdtool"],
+    data_libs: [
+        "libcrypto",
+        "libz",
+    ],
+}

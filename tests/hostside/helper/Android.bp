@@ -3,11 +3,14 @@ package {
 }
 
 java_library_host {
-    name: "VirtualizationTestHelper",
+    name: "MicrodroidHostTestHelper",
     srcs: ["java/**/*.java"],
     libs: [
         "compatibility-tradefed",
         "tradefed",
         "truth-prebuilt",
+    ],
+    static_libs: [
+        "VirtualizationTestHelper",
     ],
 }

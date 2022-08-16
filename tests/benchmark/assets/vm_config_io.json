@@ -1,0 +1,18 @@
+{
+  "os": {
+    "name": "microdroid"
+  },
+  "task": {
+    "type": "microdroid_launcher",
+    "command": "MicrodroidBenchmarkNativeLib.so",
+    "args": [
+      "io"
+    ]
+  },
+  "apexes": [
+    {
+      "name": "com.android.virt"
+    }
+  ],
+  "export_tombstones": true
+}

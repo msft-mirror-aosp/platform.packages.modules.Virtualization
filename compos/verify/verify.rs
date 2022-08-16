@@ -19,7 +19,7 @@
 
 use android_logger::LogId;
 use anyhow::{bail, Context, Result};
-use compos_aidl_interface::binder::ProcessState;
+use binder::ProcessState;
 use compos_common::compos_client::{ComposClient, VmParameters};
 use compos_common::odrefresh::{
     CURRENT_ARTIFACTS_SUBDIR, ODREFRESH_OUTPUT_ROOT_DIR, PENDING_ARTIFACTS_SUBDIR,
@@ -106,11 +106,13 @@ fn try_main() -> Result<()> {
         &idsig_manifest_apk,
         &VmParameters { debug_mode, ..Default::default() },
     )?;
-    let service = vm_instance.get_service()?;
 
-    let public_key = service.getPublicKey().context("Getting public key")?;
+    let service = vm_instance.connect_service()?;
+    let public_key = service.getPublicKey().context("Getting public key");
 
-    if !compos_verify_native::verify(&public_key, &signature, &info) {
+    vm_instance.shutdown(service);
+
+    if !compos_verify_native::verify(&public_key?, &signature, &info) {
         bail!("Signature verification failed");
     }
 

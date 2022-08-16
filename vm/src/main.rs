@@ -22,8 +22,8 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualizationService::IVirtualizationService, PartitionType::PartitionType,
     VirtualMachineAppConfig::DebugLevel::DebugLevel,
 };
-use android_system_virtualizationservice::binder::ProcessState;
 use anyhow::{Context, Error};
+use binder::ProcessState;
 use create_idsig::command_create_idsig;
 use create_partition::command_create_partition;
 use run::{command_run, command_run_app};
@@ -66,6 +66,10 @@ enum Opt {
         /// Path to file for VM log output.
         #[structopt(long)]
         log: Option<PathBuf>,
+
+        /// Path to file where ramdump is recorded on kernel panic
+        #[structopt(long)]
+        ramdump: Option<PathBuf>,
 
         /// Debug level of the VM. Supported values: "none" (default), "app_only", and "full".
         #[structopt(long, default_value = "none", parse(try_from_str=parse_debug_level))]
@@ -198,6 +202,7 @@ fn main() -> Result<(), Error> {
             daemonize,
             console,
             log,
+            ramdump,
             debug,
             protected,
             mem,
@@ -214,6 +219,7 @@ fn main() -> Result<(), Error> {
             daemonize,
             console.as_deref(),
             log.as_deref(),
+            ramdump.as_deref(),
             debug,
             protected,
             mem,

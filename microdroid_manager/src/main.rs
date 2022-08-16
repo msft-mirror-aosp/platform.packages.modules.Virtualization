@@ -18,15 +18,15 @@ mod instance;
 mod ioutil;
 mod payload;
 
-use crate::instance::{ApkData, InstanceDisk, MicrodroidData, RootHash};
+use crate::instance::{ApexData, ApkData, InstanceDisk, MicrodroidData, RootHash};
 use android_hardware_security_dice::aidl::android::hardware::security::dice::{
     Config::Config, InputValues::InputValues, Mode::Mode,
 };
 use android_security_dice::aidl::android::security::dice::IDiceMaintenance::IDiceMaintenance;
 use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use apkverify::{get_public_key_der, verify};
-use binder::unstable_api::{new_spibinder, AIBinder};
-use binder::{wait_for_interface, FromIBinder, Strong};
+use binder::{wait_for_interface, Strong};
+use binder_common::rpc_client::connect_rpc_binder;
 use diced_utils::cbor::encode_header;
 use glob::glob;
 use idsig::V4Signature;
@@ -64,12 +64,13 @@ const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
 const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
 const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
+const DEBUG_MICRODROID_NO_VERIFIED_BOOT: &str =
+    "/sys/firmware/devicetree/base/virtualization/guest/debug-microdroid,no-verified-boot";
 
 /// The CID representing the host VM
 const VMADDR_CID_HOST: u32 = 2;
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
-const LOGD_ENABLED_PROP: &str = "ro.boot.logd.enabled";
 const APP_DEBUGGABLE_PROP: &str = "ro.boot.microdroid.app_debuggable";
 
 // SYNC WITH virtualizationservice/src/crosvm.rs
@@ -140,19 +141,8 @@ fn write_death_reason_to_serial(err: &Error) -> Result<()> {
 }
 
 fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
-    // SAFETY: AIBinder returned by RpcClient has correct reference count, and the ownership can be
-    // safely taken by new_spibinder.
-    let ibinder = unsafe {
-        new_spibinder(binder_rpc_unstable_bindgen::RpcClient(
-            VMADDR_CID_HOST,
-            VM_BINDER_SERVICE_PORT as u32,
-        ) as *mut AIBinder)
-    };
-    if let Some(ibinder) = ibinder {
-        <dyn IVirtualMachineService>::try_from(ibinder).context("Cannot connect to RPC service")
-    } else {
-        bail!("Invalid raw AIBinder")
-    }
+    connect_rpc_binder(VMADDR_CID_HOST, VM_BINDER_SERVICE_PORT as u32)
+        .context("Cannot connect to RPC service")
 }
 
 fn main() -> Result<()> {
@@ -191,7 +181,6 @@ fn try_main() -> Result<()> {
             Ok(())
         }
         Err(err) => {
-            error!("task terminated: {:?}", err);
             let (error_code, message) = translate_error(&err);
             service.notifyError(error_code, &message)?;
             Err(err)
@@ -256,6 +245,10 @@ fn is_new_instance() -> bool {
     Path::new(AVF_NEW_INSTANCE).exists()
 }
 
+fn is_verified_boot() -> bool {
+    !Path::new(DEBUG_MICRODROID_NO_VERIFIED_BOOT).exists()
+}
+
 fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
     let metadata = load_metadata().context("Failed to load payload metadata")?;
 
@@ -281,25 +274,38 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     let verified_data = verify_payload(&metadata, saved_data.as_ref())
         .context("Payload verification failed")
         .map_err(|e| MicrodroidError::PayloadVerificationFailed(e.to_string()))?;
-    if let Some(saved_data) = saved_data {
-        ensure!(
-            saved_data == verified_data,
-            MicrodroidError::PayloadChanged(String::from(
-                "Detected an update of the payload which isn't supported yet."
-            ))
-        );
-        info!("Saved data is verified.");
+
+    // In case identity is ignored (by debug policy), we should reuse existing payload data, even
+    // when the payload is changed. This is to keep the derived secret same as before.
+    let verified_data = if let Some(saved_data) = saved_data {
+        if !is_verified_boot() {
+            if saved_data != verified_data {
+                info!("Detected an update of the payload, but continue (regarding debug policy)")
+            }
+        } else {
+            ensure!(
+                saved_data == verified_data,
+                MicrodroidError::PayloadChanged(String::from(
+                    "Detected an update of the payload which isn't supported yet."
+                ))
+            );
+            info!("Saved data is verified.");
+        }
+        saved_data
     } else {
         info!("Saving verified data.");
         instance.write_microdroid_data(&verified_data).context("Failed to write identity data")?;
-    }
+        verified_data
+    };
 
     // To minimize the exposure to untrusted data, derive dice profile as soon as possible.
     info!("DICE derivation for payload");
     dice_derivation(&verified_data, &metadata.payload_config_path)?;
 
     // Before reading a file from the APK, start zipfuse
+    let noexec = false;
     run_zipfuse(
+        noexec,
         "fscontext=u:object_r:zipfusefs:s0,context=u:object_r:system_file:s0",
         Path::new("/dev/block/mapper/microdroid-apk"),
         Path::new("/mnt/apk"),
@@ -313,12 +319,6 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
 
     let config = load_config(Path::new(&metadata.payload_config_path))?;
 
-    // Start tombstone_transmit if enabled
-    if config.export_tombstones {
-        system_properties::write("ctl.start", "tombstone_transmit")
-            .context("Failed to start tombstone_transmit")?;
-    }
-
     if config.extra_apks.len() != verified_data.extra_apks_data.len() {
         return Err(anyhow!(
             "config expects {} extra apks, but found only {}",
@@ -331,6 +331,14 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     // Wait until apex config is done. (e.g. linker configuration for apexes)
     // TODO(jooyung): wait until sys.boot_completed?
     wait_for_apex_config_done()?;
+
+    // Start tombstone_transmit if enabled
+    if config.export_tombstones {
+        system_properties::write("ctl.start", "tombstone_transmit")
+            .context("Failed to start tombstone_transmit")?;
+    } else {
+        system_properties::write("ctl.stop", "tombstoned").context("Failed to stop tombstoned")?;
+    }
 
     ensure!(
         config.task.is_some(),
@@ -364,9 +372,12 @@ fn run_apkdmverity(args: &[ApkDmverityArgument]) -> Result<Child> {
     cmd.spawn().context("Spawn apkdmverity")
 }
 
-fn run_zipfuse(option: &str, zip_path: &Path, mount_dir: &Path) -> Result<Child> {
-    Command::new(ZIPFUSE_BIN)
-        .arg("-o")
+fn run_zipfuse(noexec: bool, option: &str, zip_path: &Path, mount_dir: &Path) -> Result<Child> {
+    let mut cmd = Command::new(ZIPFUSE_BIN);
+    if noexec {
+        cmd.arg("--noexec");
+    }
+    cmd.arg("-o")
         .arg(option)
         .arg(zip_path)
         .arg(mount_dir)
@@ -375,6 +386,29 @@ fn run_zipfuse(option: &str, zip_path: &Path, mount_dir: &Path) -> Result<Child>
         .stderr(Stdio::null())
         .spawn()
         .context("Spawn zipfuse")
+}
+
+fn write_apex_payload_data(
+    saved_data: Option<&MicrodroidData>,
+    apex_data_from_payload: &[ApexData],
+) -> Result<()> {
+    if let Some(saved_apex_data) = saved_data.map(|d| &d.apex_data) {
+        // We don't support APEX updates. (assuming that update will change root digest)
+        ensure!(
+            saved_apex_data == apex_data_from_payload,
+            MicrodroidError::PayloadChanged(String::from("APEXes have changed."))
+        );
+        let apex_metadata = to_metadata(apex_data_from_payload);
+        // Pass metadata(with public keys and root digests) to apexd so that it uses the passed
+        // metadata instead of the default one (/dev/block/by-name/payload-metadata)
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open("/apex/vm-payload-metadata")
+            .context("Failed to open /apex/vm-payload-metadata")
+            .and_then(|f| write_metadata(&apex_metadata, f))?;
+    }
+    Ok(())
 }
 
 // Verify payload before executing it. For APK payload, Full verification (which is slow) is done
@@ -471,22 +505,13 @@ fn verify_payload(
     // While waiting for apkdmverity to mount APK, gathers public keys and root digests from
     // APEX payload.
     let apex_data_from_payload = get_apex_data_from_payload(metadata)?;
-    if let Some(saved_data) = saved_data.map(|d| &d.apex_data) {
-        // We don't support APEX updates. (assuming that update will change root digest)
-        ensure!(
-            saved_data == &apex_data_from_payload,
-            MicrodroidError::PayloadChanged(String::from("APEXes have changed."))
-        );
-        let apex_metadata = to_metadata(&apex_data_from_payload);
-        // Pass metadata(with public keys and root digests) to apexd so that it uses the passed
-        // metadata instead of the default one (/dev/block/by-name/payload-metadata)
-        OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open("/apex/vm-payload-metadata")
-            .context("Failed to open /apex/vm-payload-metadata")
-            .and_then(|f| write_metadata(&apex_metadata, f))?;
+
+    // Writing /apex/vm-payload-metadata is to verify that the payload isn't changed.
+    // Skip writing it if the debug policy ignoring identity is on
+    if is_verified_boot() {
+        write_apex_payload_data(saved_data, &apex_data_from_payload)?;
     }
+
     // Start apexd to activate APEXes
     system_properties::write("ctl.start", "apexd-vm")?;
 
@@ -537,7 +562,9 @@ fn mount_extra_apks(config: &VmPayloadConfig) -> Result<()> {
         create_dir(Path::new(&mount_dir)).context("Failed to create mount dir for extra apks")?;
 
         // don't wait, just detach
+        let noexec = true;
         run_zipfuse(
+            noexec,
             "fscontext=u:object_r:zipfusefs:s0,context=u:object_r:extra_apk_file:s0",
             Path::new(&format!("/dev/block/mapper/extra-apk-{}", i)),
             Path::new(&mount_dir),
@@ -591,12 +618,6 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
 
     info!("notifying payload started");
     service.notifyPayloadStarted()?;
-
-    // Start logging if enabled
-    // TODO(b/200914564) set filterspec if debug_level is app_only
-    if system_properties::read_bool(LOGD_ENABLED_PROP, false)? {
-        system_properties::write("ctl.start", "seriallogging")?;
-    }
 
     let exit_status = command.spawn()?.wait()?;
     exit_status.code().ok_or_else(|| anyhow!("Failed to get exit_code from the paylaod."))

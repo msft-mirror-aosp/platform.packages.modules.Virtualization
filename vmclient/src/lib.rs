@@ -16,12 +16,11 @@
 
 mod death_reason;
 mod errors;
-mod rpc_binder;
 mod sync;
 
 pub use crate::death_reason::DeathReason;
-pub use crate::errors::{GetServiceError, VmWaitError};
-use crate::{rpc_binder::VsockFactory, sync::Monitor};
+pub use crate::errors::VmWaitError;
+use crate::sync::Monitor;
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::{
         DeathReason::DeathReason as AidlDeathReason,
@@ -36,10 +35,12 @@ use android_system_virtualizationservice::{
         ParcelFileDescriptor, Result as BinderResult, StatusCode, Strong,
     },
 };
+use binder_common::rpc_client::connect_preconnected_rpc_binder;
 use log::warn;
 use std::{
     fmt::{self, Debug, Formatter},
     fs::File,
+    os::unix::io::IntoRawFd,
     sync::Arc,
     time::Duration,
 };
@@ -63,6 +64,32 @@ pub struct VmInstance {
     _death_recipient: DeathRecipient,
 }
 
+/// A trait to be implemented by clients to handle notification of significant changes to the VM
+/// state. Default implementations of all functions are provided so clients only need to handle the
+/// notifications they are interested in.
+#[allow(unused_variables)]
+pub trait VmCallback {
+    /// Called when the payload has been started within the VM. If present, `stream` is connected
+    /// to the stdin/stdout of the payload.
+    fn on_payload_started(&self, cid: i32, stream: Option<&File>) {}
+
+    /// Callend when the payload has notified Virtualization Service that it is ready to serve
+    /// clients.
+    fn on_payload_ready(&self, cid: i32) {}
+
+    /// Called when the payload has exited in the VM. `exit_code` is the exit code of the payload
+    /// process.
+    fn on_payload_finished(&self, cid: i32, exit_code: i32) {}
+
+    /// Called when an error has occurred in the VM. The `error_code` and `message` may give
+    /// further details.
+    fn on_error(&self, cid: i32, error_code: i32, message: &str) {}
+
+    /// Called when the VM has exited, all resources have been freed, and any logs have been
+    /// written. `death_reason` gives an indication why the VM exited.
+    fn on_died(&self, cid: i32, death_reason: DeathReason) {}
+}
+
 impl VmInstance {
     /// Creates (but doesn't start) a new VM with the given configuration.
     pub fn create(
@@ -70,6 +97,7 @@ impl VmInstance {
         config: &VirtualMachineConfig,
         console: Option<File>,
         log: Option<File>,
+        callback: Option<Box<dyn VmCallback + Send + Sync>>,
     ) -> BinderResult<Self> {
         let console = console.map(ParcelFileDescriptor::new);
         let log = log.map(ParcelFileDescriptor::new);
@@ -81,7 +109,7 @@ impl VmInstance {
         // Register callback before starting VM, in case it dies immediately.
         let state = Arc::new(Monitor::new(VmState::default()));
         let callback = BnVirtualMachineCallback::new_binder(
-            VirtualMachineCallback { state: state.clone() },
+            VirtualMachineCallback { state: state.clone(), client_callback: callback },
             BinderFeatures::default(),
         );
         vm.registerCallback(&callback)?;
@@ -111,6 +139,15 @@ impl VmInstance {
         self.state.wait_while(|state| state.death_reason.is_none()).unwrap().death_reason.unwrap()
     }
 
+    /// Blocks until the VM or the VirtualizationService itself dies, or the given timeout expires.
+    /// Returns the reason why it died if it did so.
+    pub fn wait_for_death_with_timeout(&self, timeout: Duration) -> Option<DeathReason> {
+        let (state, _timeout_result) =
+            self.state.wait_timeout_while(timeout, |state| state.death_reason.is_none()).unwrap();
+        // We don't care if it timed out - we just return the reason if there now is one
+        state.death_reason
+    }
+
     /// Waits until the VM reports that it is ready.
     ///
     /// Returns an error if the VM dies first, or the `timeout` elapses before the VM is ready.
@@ -133,15 +170,27 @@ impl VmInstance {
     }
 
     /// Tries to connect to an RPC Binder service provided by the VM on the given vsock port.
-    pub fn get_service<T: FromIBinder + ?Sized>(
+    pub fn connect_service<T: FromIBinder + ?Sized>(
         &self,
         port: u32,
-    ) -> Result<Strong<T>, GetServiceError> {
-        let mut vsock_factory = VsockFactory::new(&*self.vm, port);
+    ) -> Result<Strong<T>, StatusCode> {
+        connect_preconnected_rpc_binder(|| {
+            match self.vm.connectVsock(port as i32) {
+                Ok(vsock) => {
+                    // Ownership of the fd is transferred to binder
+                    Some(vsock.into_raw_fd())
+                }
+                Err(e) => {
+                    warn!("Vsock connection failed: {}", e);
+                    None
+                }
+            }
+        })
+    }
 
-        let ibinder = vsock_factory.connect_rpc_client()?;
-
-        FromIBinder::try_from(ibinder).map_err(GetServiceError::WrongServiceType)
+    /// Get ramdump
+    pub fn get_ramdump(&self) -> Option<File> {
+        self.state.get_ramdump()
     }
 }
 
@@ -170,6 +219,7 @@ fn wait_for_binder_death(
 struct VmState {
     death_reason: Option<DeathReason>,
     reported_state: VirtualMachineState,
+    ramdump: Option<File>,
 }
 
 impl Monitor<VmState> {
@@ -186,11 +236,31 @@ impl Monitor<VmState> {
         self.state.lock().unwrap().reported_state = state;
         self.cv.notify_all();
     }
+
+    fn set_ramdump(&self, ramdump: File) {
+        self.state.lock().unwrap().ramdump = Some(ramdump);
+    }
+
+    fn get_ramdump(&self) -> Option<File> {
+        self.state.lock().unwrap().ramdump.as_ref().and_then(|f| f.try_clone().ok())
+    }
 }
 
-#[derive(Debug)]
 struct VirtualMachineCallback {
     state: Arc<Monitor<VmState>>,
+    client_callback: Option<Box<dyn VmCallback + Send + Sync>>,
+}
+
+impl Debug for VirtualMachineCallback {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("VirtualMachineCallback")
+            .field("state", &self.state)
+            .field(
+                "client_callback",
+                &if self.client_callback.is_some() { "Some(...)" } else { "None" },
+            )
+            .finish()
+    }
 }
 
 impl Interface for VirtualMachineCallback {}
@@ -198,30 +268,52 @@ impl Interface for VirtualMachineCallback {}
 impl IVirtualMachineCallback for VirtualMachineCallback {
     fn onPayloadStarted(
         &self,
-        _cid: i32,
-        _stream: Option<&ParcelFileDescriptor>,
+        cid: i32,
+        stream: Option<&ParcelFileDescriptor>,
     ) -> BinderResult<()> {
         self.state.notify_state(VirtualMachineState::STARTED);
+        if let Some(ref callback) = self.client_callback {
+            callback.on_payload_started(cid, stream.map(ParcelFileDescriptor::as_ref));
+        }
         Ok(())
     }
 
-    fn onPayloadReady(&self, _cid: i32) -> BinderResult<()> {
+    fn onPayloadReady(&self, cid: i32) -> BinderResult<()> {
         self.state.notify_state(VirtualMachineState::READY);
+        if let Some(ref callback) = self.client_callback {
+            callback.on_payload_ready(cid);
+        }
         Ok(())
     }
 
-    fn onPayloadFinished(&self, _cid: i32, _exit_code: i32) -> BinderResult<()> {
+    fn onPayloadFinished(&self, cid: i32, exit_code: i32) -> BinderResult<()> {
         self.state.notify_state(VirtualMachineState::FINISHED);
+        if let Some(ref callback) = self.client_callback {
+            callback.on_payload_finished(cid, exit_code);
+        }
         Ok(())
     }
 
-    fn onError(&self, _cid: i32, _error_code: i32, _message: &str) -> BinderResult<()> {
+    fn onError(&self, cid: i32, error_code: i32, message: &str) -> BinderResult<()> {
         self.state.notify_state(VirtualMachineState::FINISHED);
+        if let Some(ref callback) = self.client_callback {
+            callback.on_error(cid, error_code, message);
+        }
         Ok(())
     }
 
-    fn onDied(&self, _cid: i32, reason: AidlDeathReason) -> BinderResult<()> {
-        self.state.notify_death(reason.into());
+    fn onRamdump(&self, _cid: i32, ramdump: &ParcelFileDescriptor) -> BinderResult<()> {
+        let ramdump: File = ramdump.as_ref().try_clone().unwrap();
+        self.state.set_ramdump(ramdump);
+        Ok(())
+    }
+
+    fn onDied(&self, cid: i32, reason: AidlDeathReason) -> BinderResult<()> {
+        let reason = reason.into();
+        self.state.notify_death(reason);
+        if let Some(ref callback) = self.client_callback {
+            callback.on_died(cid, reason);
+        }
         Ok(())
     }
 }
