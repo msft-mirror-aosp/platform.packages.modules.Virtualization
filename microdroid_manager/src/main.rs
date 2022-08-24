@@ -26,7 +26,6 @@ use android_security_dice::aidl::android::security::dice::IDiceMaintenance::IDic
 use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use apkverify::{get_public_key_der, verify};
 use binder::{wait_for_interface, Strong};
-use binder_common::rpc_client::connect_rpc_binder;
 use diced_utils::cbor::encode_header;
 use glob::glob;
 use idsig::V4Signature;
@@ -37,6 +36,7 @@ use microdroid_payload_config::{Task, TaskType, VmPayloadConfig};
 use openssl::sha::Sha512;
 use payload::{get_apex_data_from_payload, load_metadata, to_metadata};
 use rand::Fill;
+use rpcbinder::get_vsock_rpc_interface;
 use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
 use std::convert::TryInto;
@@ -141,7 +141,7 @@ fn write_death_reason_to_serial(err: &Error) -> Result<()> {
 }
 
 fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
-    connect_rpc_binder(VMADDR_CID_HOST, VM_BINDER_SERVICE_PORT as u32)
+    get_vsock_rpc_interface(VMADDR_CID_HOST, VM_BINDER_SERVICE_PORT as u32)
         .context("Cannot connect to RPC service")
 }
 
@@ -165,6 +165,8 @@ fn main() -> Result<()> {
 fn try_main() -> Result<()> {
     let _ = kernlog::init();
     info!("started.");
+
+    load_crashkernel_if_supported().context("Failed to load crashkernel")?;
 
     let service = get_vms_rpc_binder()
         .context("cannot connect to VirtualMachineService")
@@ -608,6 +610,20 @@ fn load_config(path: &Path) -> Result<VmPayloadConfig> {
     info!("loading config from {:?}...", path);
     let file = ioutil::wait_for_file(path, WAIT_TIMEOUT)?;
     Ok(serde_json::from_reader(file)?)
+}
+
+/// Loads the crashkernel into memory using kexec if the VM is loaded with `crashkernel=' parameter
+/// in the cmdline.
+fn load_crashkernel_if_supported() -> Result<()> {
+    let supported = std::fs::read_to_string("/proc/cmdline")?.contains(" crashkernel=");
+    info!("ramdump supported: {}", supported);
+    if supported {
+        let status = Command::new("/system/bin/kexec_load").status()?;
+        if !status.success() {
+            return Err(anyhow!("Failed to load crashkernel: {:?}", status));
+        }
+    }
+    Ok(())
 }
 
 /// Executes the given task. Stdout of the task is piped into the vsock stream to the
