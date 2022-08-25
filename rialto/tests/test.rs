@@ -54,6 +54,7 @@ fn test_boots() -> Result<(), Error> {
     let log = android_log_fd()?;
 
     let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
+        name: String::from("RialtoTest"),
         kernel: None,
         initrd: None,
         params: None,
@@ -66,7 +67,7 @@ fn test_boots() -> Result<(), Error> {
         platformVersion: "~1.0".to_string(),
         taskProfiles: vec![],
     });
-    let vm = VmInstance::create(service.as_ref(), &config, Some(console), Some(log))
+    let vm = VmInstance::create(service.as_ref(), &config, Some(console), Some(log), None)
         .context("Failed to create VM")?;
 
     vm.start().context("Failed to start VM")?;

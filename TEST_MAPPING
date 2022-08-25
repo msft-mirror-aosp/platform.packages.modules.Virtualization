@@ -1,5 +1,5 @@
 {
-  "presubmit": [
+  "avf-presubmit": [
     {
       "name": "MicrodroidHostTestCases"
     },
@@ -19,7 +19,7 @@
       "name": "compos_key_tests"
     }
   ],
-  "postsubmit": [
+  "avf-postsubmit": [
     {
       "name": "odsign_e2e_tests_full"
     },
@@ -33,6 +33,9 @@
   "imports": [
     {
       "path": "packages/modules/Virtualization/apkdmverity"
+    },
+    {
+      "path": "packages/modules/Virtualization/avmd"
     },
     {
       "path": "packages/modules/Virtualization/virtualizationservice"

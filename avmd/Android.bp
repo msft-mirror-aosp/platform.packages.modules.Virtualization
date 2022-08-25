@@ -22,7 +22,6 @@ rust_library {
 rust_binary {
     name: "avmdtool",
     srcs: ["src/main.rs"],
-    required: ["avbtool"],
     host_supported: true,
     prefer_rlib: true,
     rustlibs: [
@@ -35,4 +34,13 @@ rust_binary {
         "libserde_cbor",
         "libvbmeta_rust",
     ],
+}
+
+rust_test {
+    name: "avmdtool_tests",
+    srcs: ["tests/*_test.rs"],
+    test_suites: ["general-tests"],
+    compile_multilib: "first",
+    data_bins: ["avmdtool"],
+    data: ["tests/data/*"],
 }

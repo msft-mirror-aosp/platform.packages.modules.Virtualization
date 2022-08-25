@@ -48,7 +48,9 @@ fn test_run_example_vm() -> Result<(), Error> {
         File::open(VMBASE_EXAMPLE_PATH)
             .with_context(|| format!("Failed to open VM image {}", VMBASE_EXAMPLE_PATH))?,
     );
+
     let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
+        name: String::from("VmBaseTest"),
         kernel: None,
         initrd: None,
         params: None,
@@ -63,7 +65,7 @@ fn test_run_example_vm() -> Result<(), Error> {
     });
     let console = duplicate_stdout()?;
     let log = duplicate_stdout()?;
-    let vm = VmInstance::create(service.as_ref(), &config, Some(console), Some(log))
+    let vm = VmInstance::create(service.as_ref(), &config, Some(console), Some(log), None)
         .context("Failed to create VM")?;
     vm.start().context("Failed to start VM")?;
     info!("Started example VM.");

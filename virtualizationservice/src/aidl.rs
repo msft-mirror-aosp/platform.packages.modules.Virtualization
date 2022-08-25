@@ -14,6 +14,7 @@
 
 //! Implementation of the AIDL interface of the VirtualizationService.
 
+use crate::atom::{write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmInstance, VmState};
 use crate::payload::add_microdroid_images;
@@ -34,9 +35,9 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     VirtualMachineRawConfig::VirtualMachineRawConfig,
     VirtualMachineState::VirtualMachineState,
 };
-use android_system_virtualizationservice::binder::{
-    self, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor, SpIBinder, Status,
-    StatusCode, Strong, ThreadState,
+use binder::{
+    self, BinderFeatures, ExceptionCode, Interface, LazyServiceGuard, ParcelFileDescriptor,
+    SpIBinder, Status, StatusCode, Strong, ThreadState,
 };
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::{
     IVirtualMachineService::{
@@ -45,14 +46,13 @@ use android_system_virtualmachineservice::aidl::android::system::virtualmachines
     },
 };
 use anyhow::{anyhow, bail, Context, Result};
-use binder_common::{lazy_service::LazyServiceGuard, new_binder_exception, rpc_server::run_rpc_server_with_factory};
+use rpcbinder::run_rpc_server_with_factory;
 use disk::QcowFile;
 use idsig::{HashAlgorithm, V4Signature};
-use log::{debug, error, info, warn, trace};
+use log::{debug, error, info, warn};
 use microdroid_payload_config::VmPayloadConfig;
 use rustutils::system_properties;
 use semver::VersionReq;
-use statslog_virtualization_rust::vm_creation_requested::{stats_write, Hypervisor};
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fs::{create_dir, File, OpenOptions};
@@ -131,23 +131,7 @@ impl IVirtualizationService for VirtualizationService {
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         let mut is_protected = false;
         let ret = self.create_vm_internal(config, console_fd, log_fd, &mut is_protected);
-        match ret {
-            Ok(_) => {
-                let ok_status = Status::ok();
-                write_vm_creation_stats(
-                    is_protected,
-                    /*creation_succeeded*/ true,
-                    ok_status.exception_code() as i32,
-                );
-            }
-            Err(ref e) => {
-                write_vm_creation_stats(
-                    is_protected,
-                    /*creation_succeeded*/ false,
-                    e.exception_code() as i32,
-                );
-            }
-        }
+        write_vm_creation_stats(config, is_protected, &ret);
         ret
     }
 
@@ -160,23 +144,23 @@ impl IVirtualizationService for VirtualizationService {
     ) -> binder::Result<()> {
         check_manage_access()?;
         let size = size.try_into().map_err(|e| {
-            new_binder_exception(
+            Status::new_exception_str(
                 ExceptionCode::ILLEGAL_ARGUMENT,
-                format!("Invalid size {}: {}", size, e),
+                Some(format!("Invalid size {}: {}", size, e)),
             )
         })?;
         let image = clone_file(image_fd)?;
         // initialize the file. Any data in the file will be erased.
         image.set_len(0).map_err(|e| {
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("Failed to reset a file: {}", e),
+            Status::new_service_specific_error_str(
+                -1,
+                Some(format!("Failed to reset a file: {}", e)),
             )
         })?;
         let mut part = QcowFile::new(image, size).map_err(|e| {
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("Failed to create QCOW2 image: {}", e),
+            Status::new_service_specific_error_str(
+                -1,
+                Some(format!("Failed to create QCOW2 image: {}", e)),
             )
         })?;
 
@@ -189,9 +173,9 @@ impl IVirtualizationService for VirtualizationService {
             )),
         }
         .map_err(|e| {
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("Failed to initialize partition as {:?}: {}", partition_type, e),
+            Status::new_service_specific_error_str(
+                -1,
+                Some(format!("Failed to initialize partition as {:?}: {}", partition_type, e)),
             )
         })?;
 
@@ -379,12 +363,12 @@ impl VirtualizationService {
                 "Failed to create temporary directory {:?} for VM files: {:?}",
                 temporary_directory, e
             );
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!(
+            Status::new_service_specific_error_str(
+                -1,
+                Some(format!(
                     "Failed to create temporary directory {:?} for VM files: {}",
                     temporary_directory, e
-                ),
+                )),
             )
         })?;
 
@@ -395,9 +379,12 @@ impl VirtualizationService {
                 load_app_config(config, &temporary_directory).map_err(|e| {
                     error!("Failed to load app config from {}: {:?}", &config.configPath, e);
                     *is_protected = config.protectedVm;
-                    new_binder_exception(
-                        ExceptionCode::SERVICE_SPECIFIC,
-                        format!("Failed to load app config from {}: {}", &config.configPath, e),
+                    Status::new_service_specific_error_str(
+                        -1,
+                        Some(format!(
+                            "Failed to load app config from {}: {}",
+                            &config.configPath, e
+                        )),
                     )
                 })?,
             ),
@@ -423,14 +410,14 @@ impl VirtualizationService {
                 }
             })
             .try_for_each(check_label_for_partition)
-            .map_err(|e| new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, e.to_string()))?;
+            .map_err(|e| Status::new_service_specific_error_str(-1, Some(e.to_string())))?;
 
         let zero_filler_path = temporary_directory.join("zero.img");
         write_zero_filler(&zero_filler_path).map_err(|e| {
             error!("Failed to make composite image: {:?}", e);
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("Failed to make composite image: {}", e),
+            Status::new_service_specific_error_str(
+                -1,
+                Some(format!("Failed to make composite image: {}", e)),
             )
         })?;
 
@@ -456,15 +443,16 @@ impl VirtualizationService {
         let ramdump_path = temporary_directory.join("ramdump");
         let ramdump = prepare_ramdump_file(&ramdump_path).map_err(|e| {
             error!("Failed to prepare ramdump file: {}", e);
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("Failed to prepare ramdump file: {}", e),
+            Status::new_service_specific_error_str(
+                -1,
+                Some(format!("Failed to prepare ramdump file: {}", e)),
             )
         })?;
 
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
+            name: config.name.clone(),
             bootloader: maybe_clone_file(&config.bootloader)?,
             kernel: maybe_clone_file(&config.kernel)?,
             initrd: maybe_clone_file(&config.initrd)?,
@@ -492,24 +480,14 @@ impl VirtualizationService {
             )
             .map_err(|e| {
                 error!("Failed to create VM with config {:?}: {:?}", config, e);
-                new_binder_exception(
-                    ExceptionCode::SERVICE_SPECIFIC,
-                    format!("Failed to create VM: {}", e),
+                Status::new_service_specific_error_str(
+                    -1,
+                    Some(format!("Failed to create VM: {}", e)),
                 )
             })?,
         );
         state.add_vm(Arc::downgrade(&instance));
         Ok(VirtualMachine::create(instance))
-    }
-}
-
-/// Write the stats of VMCreation to statsd
-fn write_vm_creation_stats(is_protected: bool, creation_succeeded: bool, exception_code: i32) {
-    match stats_write(Hypervisor::Pkvm, is_protected, creation_succeeded, exception_code) {
-        Err(e) => {
-            warn!("statslog_rust failed with error: {}", e);
-        }
-        Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
     }
 }
 
@@ -575,9 +553,9 @@ fn assemble_disk_image(
     let image = if !disk.partitions.is_empty() {
         if disk.image.is_some() {
             warn!("DiskImage {:?} contains both image and partitions.", disk);
-            return Err(new_binder_exception(
+            return Err(Status::new_exception_str(
                 ExceptionCode::ILLEGAL_ARGUMENT,
-                "DiskImage contains both image and partitions.",
+                Some("DiskImage contains both image and partitions."),
             ));
         }
 
@@ -592,9 +570,9 @@ fn assemble_disk_image(
         )
         .map_err(|e| {
             error!("Failed to make composite image with config {:?}: {:?}", disk, e);
-            new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("Failed to make composite image: {}", e),
+            Status::new_service_specific_error_str(
+                -1,
+                Some(format!("Failed to make composite image: {}", e)),
             )
         })?;
 
@@ -607,9 +585,9 @@ fn assemble_disk_image(
         clone_file(image)?
     } else {
         warn!("DiskImage {:?} didn't contain image or partitions.", disk);
-        return Err(new_binder_exception(
+        return Err(Status::new_exception_str(
             ExceptionCode::ILLEGAL_ARGUMENT,
-            "DiskImage didn't contain image or partitions.",
+            Some("DiskImage didn't contain image or partitions."),
         ));
     };
 
@@ -646,6 +624,7 @@ fn load_app_config(
         vm_config.memoryMib = config.memoryMib;
     }
 
+    vm_config.name = config.name.clone();
     vm_config.protectedVm = config.protectedVm;
     vm_config.numCpus = config.numCpus;
     vm_config.cpuAffinity = config.cpuAffinity.clone();
@@ -700,15 +679,15 @@ fn get_calling_sid() -> Result<String, Status> {
                 Ok(sid) => Ok(sid.to_owned()),
                 Err(e) => {
                     error!("SID was not valid UTF-8: {}", e);
-                    Err(new_binder_exception(
+                    Err(Status::new_exception_str(
                         ExceptionCode::ILLEGAL_ARGUMENT,
-                        format!("SID was not valid UTF-8: {}", e),
+                        Some(format!("SID was not valid UTF-8: {}", e)),
                     ))
                 }
             }
         } else {
             error!("Missing SID on createVm");
-            Err(new_binder_exception(ExceptionCode::SECURITY, "Missing SID on createVm"))
+            Err(Status::new_exception_str(ExceptionCode::SECURITY, Some("Missing SID on createVm")))
         }
     })
 }
@@ -726,9 +705,9 @@ fn check_permission(perm: &str) -> binder::Result<()> {
     if perm_svc.checkPermission(perm, calling_pid, calling_uid as i32)? {
         Ok(())
     } else {
-        Err(new_binder_exception(
+        Err(Status::new_exception_str(
             ExceptionCode::SECURITY,
-            format!("does not have the {} permission", perm),
+            Some(format!("does not have the {} permission", perm)),
         ))
     }
 }
@@ -804,26 +783,26 @@ impl IVirtualMachine for VirtualMachine {
     fn start(&self) -> binder::Result<()> {
         self.instance.start().map_err(|e| {
             error!("Error starting VM with CID {}: {:?}", self.instance.cid, e);
-            new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, e.to_string())
+            Status::new_service_specific_error_str(-1, Some(e.to_string()))
         })
     }
 
     fn stop(&self) -> binder::Result<()> {
         self.instance.kill().map_err(|e| {
             error!("Error stopping VM with CID {}: {:?}", self.instance.cid, e);
-            new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, e.to_string())
+            Status::new_service_specific_error_str(-1, Some(e.to_string()))
         })
     }
 
     fn connectVsock(&self, port: i32) -> binder::Result<ParcelFileDescriptor> {
         if !matches!(&*self.instance.vm_state.lock().unwrap(), VmState::Running { .. }) {
-            return Err(new_binder_exception(ExceptionCode::SERVICE_SPECIFIC, "VM is not running"));
+            return Err(Status::new_service_specific_error_str(-1, Some("VM is not running")));
         }
         let stream =
             VsockStream::connect_with_cid_port(self.instance.cid, port as u32).map_err(|e| {
-                new_binder_exception(
-                    ExceptionCode::SERVICE_SPECIFIC,
-                    format!("Failed to connect: {}", e),
+                Status::new_service_specific_error_str(
+                    -1,
+                    Some(format!("Failed to connect: {}", e)),
                 )
             })?;
         Ok(vsock_stream_to_pfd(stream))
@@ -1000,11 +979,11 @@ fn get_state(instance: &VmInstance) -> VirtualMachineState {
 }
 
 /// Converts a `&ParcelFileDescriptor` to a `File` by cloning the file.
-fn clone_file(file: &ParcelFileDescriptor) -> Result<File, Status> {
+pub fn clone_file(file: &ParcelFileDescriptor) -> Result<File, Status> {
     file.as_ref().try_clone().map_err(|e| {
-        new_binder_exception(
+        Status::new_exception_str(
             ExceptionCode::BAD_PARCELABLE,
-            format!("Failed to clone File from ParcelFileDescriptor: {}", e),
+            Some(format!("Failed to clone File from ParcelFileDescriptor: {}", e)),
         )
     })
 }
@@ -1024,9 +1003,9 @@ fn vsock_stream_to_pfd(stream: VsockStream) -> ParcelFileDescriptor {
 /// Parses the platform version requirement string.
 fn parse_platform_version_req(s: &str) -> Result<VersionReq, Status> {
     VersionReq::parse(s).map_err(|e| {
-        new_binder_exception(
+        Status::new_exception_str(
             ExceptionCode::BAD_PARCELABLE,
-            format!("Invalid platform version requirement {}: {}", s, e),
+            Some(format!("Invalid platform version requirement {}: {}", s, e)),
         )
     })
 }
@@ -1061,16 +1040,19 @@ impl IVirtualMachineService for VirtualMachineService {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
             info!("VM having CID {} started payload", cid);
-            vm.update_payload_state(PayloadState::Started)
-                .map_err(|e| new_binder_exception(ExceptionCode::ILLEGAL_STATE, e.to_string()))?;
+            vm.update_payload_state(PayloadState::Started).map_err(|e| {
+                Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
+            })?;
             let stream = vm.stream.lock().unwrap().take();
             vm.callbacks.notify_payload_started(cid, stream);
+
+            write_vm_booted_stats(vm.requester_uid as i32, &vm.name);
             Ok(())
         } else {
             error!("notifyPayloadStarted is called from an unknown CID {}", cid);
-            Err(new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("cannot find a VM with CID {}", cid),
+            Err(Status::new_service_specific_error_str(
+                -1,
+                Some(format!("cannot find a VM with CID {}", cid)),
             ))
         }
     }
@@ -1079,15 +1061,16 @@ impl IVirtualMachineService for VirtualMachineService {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
             info!("VM having CID {} payload is ready", cid);
-            vm.update_payload_state(PayloadState::Ready)
-                .map_err(|e| new_binder_exception(ExceptionCode::ILLEGAL_STATE, e.to_string()))?;
+            vm.update_payload_state(PayloadState::Ready).map_err(|e| {
+                Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
+            })?;
             vm.callbacks.notify_payload_ready(cid);
             Ok(())
         } else {
             error!("notifyPayloadReady is called from an unknown CID {}", cid);
-            Err(new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("cannot find a VM with CID {}", cid),
+            Err(Status::new_service_specific_error_str(
+                -1,
+                Some(format!("cannot find a VM with CID {}", cid)),
             ))
         }
     }
@@ -1096,15 +1079,16 @@ impl IVirtualMachineService for VirtualMachineService {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
             info!("VM having CID {} finished payload", cid);
-            vm.update_payload_state(PayloadState::Finished)
-                .map_err(|e| new_binder_exception(ExceptionCode::ILLEGAL_STATE, e.to_string()))?;
+            vm.update_payload_state(PayloadState::Finished).map_err(|e| {
+                Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
+            })?;
             vm.callbacks.notify_payload_finished(cid, exit_code);
             Ok(())
         } else {
             error!("notifyPayloadFinished is called from an unknown CID {}", cid);
-            Err(new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("cannot find a VM with CID {}", cid),
+            Err(Status::new_service_specific_error_str(
+                -1,
+                Some(format!("cannot find a VM with CID {}", cid)),
             ))
         }
     }
@@ -1113,15 +1097,16 @@ impl IVirtualMachineService for VirtualMachineService {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
             info!("VM having CID {} encountered an error", cid);
-            vm.update_payload_state(PayloadState::Finished)
-                .map_err(|e| new_binder_exception(ExceptionCode::ILLEGAL_STATE, e.to_string()))?;
+            vm.update_payload_state(PayloadState::Finished).map_err(|e| {
+                Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
+            })?;
             vm.callbacks.notify_error(cid, error_code, message);
             Ok(())
         } else {
             error!("notifyError is called from an unknown CID {}", cid);
-            Err(new_binder_exception(
-                ExceptionCode::SERVICE_SPECIFIC,
-                format!("cannot find a VM with CID {}", cid),
+            Err(Status::new_service_specific_error_str(
+                -1,
+                Some(format!("cannot find a VM with CID {}", cid)),
             ))
         }
     }
