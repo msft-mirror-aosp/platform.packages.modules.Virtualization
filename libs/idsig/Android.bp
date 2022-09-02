@@ -6,13 +6,14 @@ rust_defaults {
     name: "libidsig.defaults",
     crate_name: "idsig",
     srcs: ["src/lib.rs"],
-    edition: "2018",
+    edition: "2021",
     prefer_rlib: true,
     rustlibs: [
         "libanyhow",
+        "libapkverify",
         "libbyteorder",
-        "libring",
         "libnum_traits",
+        "libopenssl",
     ],
     proc_macros: ["libnum_derive"],
 }

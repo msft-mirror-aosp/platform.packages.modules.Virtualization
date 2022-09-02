@@ -62,6 +62,13 @@ on init
     start vendor.dice-microdroid
     start diced
 
+on init && property:ro.boot.logd.enabled=1
+    # Start logd before any other services run to ensure we capture all of their logs.
+    # TODO(b/217796229) set filterspec if debug_level is app_only
+    start logd
+    start seriallogging
+
+on init
     mkdir /mnt/apk 0755 system system
     mkdir /mnt/extra-apk 0755 root root
     # Microdroid_manager starts apkdmverity/zipfuse/apexd
@@ -81,13 +88,13 @@ on init
 
     setprop ro.debuggable ${ro.boot.microdroid.debuggable:-0}
 
+on property:dev.bootcomplete=1
+    # Stop ueventd to save memory
+    stop ueventd
+
 on init && property:ro.boot.microdroid.debuggable=1
     # Mount tracefs (with GID=AID_READTRACEFS)
     mount tracefs tracefs /sys/kernel/tracing gid=3012
-
-on init && property:ro.boot.logd.enabled=1
-    # Start logd before any other services run to ensure we capture all of their logs.
-    start logd
 
 on init && property:ro.boot.adb.enabled=1
     start adbd
@@ -172,6 +179,11 @@ on post-fs-data
     # Do not place files or directories in /data/local/tmp
     mkdir /data/local 0751 root root
     mkdir /data/local/tmp 0771 shell shell
+
+service tombstone_transmit /system/bin/tombstone_transmit.microdroid -cid 2 -port 2000 -remove_tombstones_after_transmitting
+    user root
+    group system
+    shutdown critical
 
 service apexd-vm /system/bin/apexd --vm
     user root

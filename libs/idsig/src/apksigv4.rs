@@ -15,6 +15,7 @@
  */
 
 use anyhow::{anyhow, bail, Context, Result};
+use apkverify::pick_v4_apk_digest;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
@@ -74,7 +75,7 @@ pub struct SigningInfo {
 }
 
 /// Version of the idsig file format
-#[derive(Debug, PartialEq, FromPrimitive, ToPrimitive)]
+#[derive(Debug, PartialEq, Eq, FromPrimitive, ToPrimitive)]
 #[repr(u32)]
 pub enum Version {
     /// Version 2, the only supported version.
@@ -94,7 +95,7 @@ impl Default for Version {
 }
 
 /// Hash algorithm that can be used for idsig file.
-#[derive(Debug, PartialEq, FromPrimitive, ToPrimitive)]
+#[derive(Debug, PartialEq, Eq, FromPrimitive, ToPrimitive)]
 #[repr(u32)]
 pub enum HashAlgorithm {
     /// SHA2-256
@@ -114,7 +115,7 @@ impl Default for HashAlgorithm {
 }
 
 /// Signature algorithm that can be used for idsig file
-#[derive(Debug, PartialEq, FromPrimitive, ToPrimitive)]
+#[derive(Debug, PartialEq, Eq, FromPrimitive, ToPrimitive)]
 #[allow(non_camel_case_types)]
 #[repr(u32)]
 pub enum SignatureAlgorithmId {
@@ -175,7 +176,7 @@ impl<R: Read + Seek> V4Signature<R> {
 
         // Create hash tree (and root hash)
         let algorithm = match algorithm {
-            HashAlgorithm::SHA256 => &ring::digest::SHA256,
+            HashAlgorithm::SHA256 => openssl::hash::MessageDigest::sha256(),
         };
         let hash_tree = HashTree::from(&mut apk, size, salt, block_size, algorithm)?;
 
@@ -190,9 +191,12 @@ impl<R: Read + Seek> V4Signature<R> {
         ret.hashing_info.raw_root_hash = hash_tree.root_hash.into_boxed_slice();
         ret.hashing_info.log2_blocksize = log2(block_size);
 
-        // TODO(jiyong): fill the signing_info struct by reading the APK file. The information,
-        // especially `apk_digest` is needed to check if `V4Signature` is outdated, in which case
-        // it needs to be created from the updated APK.
+        apk.seek(SeekFrom::Start(start))?;
+        let (signature_algorithm_id, apk_digest) = pick_v4_apk_digest(apk)?;
+        ret.signing_info.signature_algorithm_id =
+            SignatureAlgorithmId::from(signature_algorithm_id)?;
+        ret.signing_info.apk_digest = apk_digest;
+        // TODO(jiyong): add a signature to the signing_info struct
 
         Ok(ret)
     }

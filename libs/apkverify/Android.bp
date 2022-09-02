@@ -7,14 +7,13 @@ rust_defaults {
     crate_name: "apkverify",
     srcs: ["src/lib.rs"],
     prefer_rlib: true,
-    edition: "2018",
+    edition: "2021",
     rustlibs: [
         "libanyhow",
         "libbyteorder",
         "libbytes",
         "liblog_rust",
-        "libring",
-        "libx509_parser",
+        "libopenssl",
         "libzip",
     ],
 }
@@ -22,6 +21,9 @@ rust_defaults {
 rust_library {
     name: "libapkverify",
     defaults: ["libapkverify.defaults"],
+    // TODO(b/204562227): move to host_supported to the defaults to include tests
+    host_supported: true,
+    apex_available: ["com.android.virt"],
 }
 
 rust_test {
@@ -35,7 +37,7 @@ rust_test {
     crate_name: "apkverify_test",
     srcs: ["tests/*_test.rs"],
     prefer_rlib: true,
-    edition: "2018",
+    edition: "2021",
     test_suites: ["general-tests"],
     rustlibs: [
         "libapkverify",

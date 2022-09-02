@@ -16,7 +16,7 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-kernel_version = "5.10"
+kernel_version = "5.15"
 
 kernel_stem = "kernel_prebuilts-" + kernel_version
 
@@ -41,7 +41,7 @@ cc_test {
         // The existence of the library in the system partition is not guaranteed.
         // Let's have our own copy of it.
         "android.system.virtualizationservice-cpp",
-        "PlatformProperties",
+        "libPlatformProperties",
     ],
     shared_libs: [
         "libbase",
@@ -89,12 +89,4 @@ android_filesystem {
         "virt_test_vsock_guest",
     ],
     type: "cpio",
-}
-
-genrule {
-    name: "test-payload-metadata",
-    tools: ["mk_payload"],
-    cmd: "$(location mk_payload) --metadata-only $(in) $(out)",
-    srcs: ["test-payload-metadata-config.json"],
-    out: ["test-payload-metadata.img"],
 }

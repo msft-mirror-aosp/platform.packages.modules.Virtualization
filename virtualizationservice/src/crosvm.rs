@@ -15,26 +15,31 @@
 //! Functions for running instances of `crosvm`.
 
 use crate::aidl::VirtualMachineCallbacks;
+use crate::atom::write_vm_exited_stats;
 use crate::Cid;
-use anyhow::{bail, Error};
+use anyhow::{anyhow, bail, Context, Error};
 use command_fds::CommandFdExt;
+use lazy_static::lazy_static;
 use log::{debug, error, info};
 use semver::{Version, VersionReq};
 use nix::{fcntl::OFlag, unistd::pipe2};
 use shared_child::SharedChild;
+use std::borrow::Cow;
 use std::fs::{remove_dir_all, File};
 use std::io::{self, Read};
 use std::mem;
 use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, RawFd, FromRawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, SystemTime};
 use std::thread;
 use vsock::VsockStream;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::DeathReason::DeathReason;
-use android_system_virtualmachineservice::binder::Strong;
+use binder::Strong;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
+use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
 
 const CROSVM_PATH: &str = "/apex/com.android.virt/bin/crosvm";
 
@@ -51,10 +56,22 @@ const CROSVM_REBOOT_STATUS: i32 = 32;
 /// The exit status which crosvm returns when it crashes due to an error.
 const CROSVM_CRASH_STATUS: i32 = 33;
 
+lazy_static! {
+    /// If the VM doesn't move to the Started state within this amount time, a hang-up error is
+    /// triggered.
+    static ref BOOT_HANGUP_TIMEOUT: Duration = if nested_virt::is_nested_virtualization().unwrap() {
+        // Nested virtualization is slow, so we need a longer timeout.
+        Duration::from_secs(100)
+    } else {
+        Duration::from_secs(10)
+    };
+}
+
 /// Configuration for a VM to run with crosvm.
 #[derive(Debug)]
 pub struct CrosvmConfig {
     pub cid: Cid,
+    pub name: String,
     pub bootloader: Option<File>,
     pub kernel: Option<File>,
     pub initrd: Option<File>,
@@ -64,10 +81,13 @@ pub struct CrosvmConfig {
     pub memory_mib: Option<NonZeroU32>,
     pub cpus: Option<NonZeroU32>,
     pub cpu_affinity: Option<String>,
+    pub task_profiles: Vec<String>,
     pub console_fd: Option<File>,
     pub log_fd: Option<File>,
+    pub ramdump: Option<File>,
     pub indirect_files: Vec<File>,
     pub platform_version: VersionReq,
+    pub detect_hangup: bool,
 }
 
 /// A disk image to pass to crosvm for a VM.
@@ -87,6 +107,7 @@ pub enum PayloadState {
     Started,
     Ready,
     Finished,
+    Hangup, // Hasn't reached to Ready before timeout expires
 }
 
 /// The current state of the VM itself.
@@ -115,15 +136,24 @@ impl VmState {
     fn start(&mut self, instance: Arc<VmInstance>) -> Result<(), Error> {
         let state = mem::replace(self, VmState::Failed);
         if let VmState::NotStarted { config } = state {
+            let detect_hangup = config.detect_hangup;
             let (failure_pipe_read, failure_pipe_write) = create_pipe()?;
 
             // If this fails and returns an error, `self` will be left in the `Failed` state.
             let child = Arc::new(run_vm(config, failure_pipe_write)?);
 
             let child_clone = child.clone();
+            let instance_clone = instance.clone();
             thread::spawn(move || {
-                instance.monitor(child_clone, failure_pipe_read);
+                instance_clone.monitor_vm_exit(child_clone, failure_pipe_read);
             });
+
+            if detect_hangup {
+                let child_clone = child.clone();
+                thread::spawn(move || {
+                    instance.monitor_payload_hangup(child_clone);
+                });
+            }
 
             // If it started correctly, update the state.
             *self = VmState::Running { child };
@@ -142,6 +172,8 @@ pub struct VmInstance {
     pub vm_state: Mutex<VmState>,
     /// The CID assigned to the VM for vsock communication.
     pub cid: Cid,
+    /// The name of the VM.
+    pub name: String,
     /// Whether the VM is a protected VM.
     pub protected: bool,
     /// Directory of temporary files used by the VM while it is running.
@@ -159,8 +191,12 @@ pub struct VmInstance {
     pub stream: Mutex<Option<VsockStream>>,
     /// VirtualMachineService binder object for the VM.
     pub vm_service: Mutex<Option<Strong<dyn IVirtualMachineService>>>,
+    /// Recorded timestamp when the VM is started.
+    pub vm_start_timestamp: Mutex<Option<SystemTime>>,
     /// The latest lifecycle state which the payload reported itself to be in.
     payload_state: Mutex<PayloadState>,
+    /// Represents the condition that payload_state was updated
+    payload_state_updated: Condvar,
 }
 
 impl VmInstance {
@@ -174,10 +210,12 @@ impl VmInstance {
     ) -> Result<VmInstance, Error> {
         validate_config(&config)?;
         let cid = config.cid;
+        let name = config.name.clone();
         let protected = config.protected;
         Ok(VmInstance {
             vm_state: Mutex::new(VmState::NotStarted { config }),
             cid,
+            name,
             protected,
             temporary_directory,
             requester_uid,
@@ -186,22 +224,23 @@ impl VmInstance {
             callbacks: Default::default(),
             stream: Mutex::new(None),
             vm_service: Mutex::new(None),
+            vm_start_timestamp: Mutex::new(None),
             payload_state: Mutex::new(PayloadState::Starting),
+            payload_state_updated: Condvar::new(),
         })
     }
 
     /// Starts an instance of `crosvm` to manage the VM. The `crosvm` instance will be killed when
     /// the `VmInstance` is dropped.
     pub fn start(self: &Arc<Self>) -> Result<(), Error> {
+        *self.vm_start_timestamp.lock().unwrap() = Some(SystemTime::now());
         self.vm_state.lock().unwrap().start(self.clone())
     }
 
-    /// Waits for the crosvm child process to finish, then marks the VM as no longer running and
-    /// calls any callbacks.
-    ///
-    /// This takes a separate reference to the `SharedChild` rather than using the one in
-    /// `self.vm_state` to avoid holding the lock on `vm_state` while it is running.
-    fn monitor(&self, child: Arc<SharedChild>, mut failure_pipe_read: File) {
+    /// Monitors the exit of the VM (i.e. termination of the `child` process). When that happens,
+    /// handles the event by updating the state, noityfing the event to clients by calling
+    /// callbacks, and removing temporary files for the VM.
+    fn monitor_vm_exit(&self, child: Arc<SharedChild>, mut failure_pipe_read: File) {
         let result = child.wait();
         match &result {
             Err(e) => error!("Error waiting for crosvm({}) instance to die: {}", child.id(), e),
@@ -213,20 +252,64 @@ impl VmInstance {
         // Ensure that the mutex is released before calling the callbacks.
         drop(vm_state);
 
-        let mut failure_string = String::new();
-        let failure_read_result = failure_pipe_read.read_to_string(&mut failure_string);
-        if let Err(e) = &failure_read_result {
-            error!("Error reading VM failure reason from pipe: {}", e);
-        }
-        if !failure_string.is_empty() {
-            info!("VM returned failure reason '{}'", failure_string);
-        }
+        // Read the pipe to see if any failure reason is written
+        let mut failure_reason = String::new();
+        match failure_pipe_read.read_to_string(&mut failure_reason) {
+            Err(e) => error!("Error reading VM failure reason from pipe: {}", e),
+            Ok(len) if len > 0 => info!("VM returned failure reason '{}'", &failure_reason),
+            _ => (),
+        };
 
-        self.callbacks.callback_on_died(self.cid, death_reason(&result, &failure_string));
+        // In case of hangup, the pipe doesn't give us any information because the hangup can't be
+        // detected on the VM side (otherwise, it isn't a hangup), but in the
+        // monitor_payload_hangup function below which updates the payload state to Hangup.
+        let failure_reason =
+            if failure_reason.is_empty() && self.payload_state() == PayloadState::Hangup {
+                Cow::from("HANGUP")
+            } else {
+                Cow::from(failure_reason)
+            };
+
+        self.handle_ramdump().unwrap_or_else(|e| error!("Error handling ramdump: {}", e));
+
+        let death_reason = death_reason(&result, &failure_reason);
+        self.callbacks.callback_on_died(self.cid, death_reason);
+
+        let vm_start_timestamp = self.vm_start_timestamp.lock().unwrap();
+        write_vm_exited_stats(
+            self.requester_uid as i32,
+            &self.name,
+            death_reason,
+            *vm_start_timestamp,
+        );
 
         // Delete temporary files.
         if let Err(e) = remove_dir_all(&self.temporary_directory) {
             error!("Error removing temporary directory {:?}: {}", self.temporary_directory, e);
+        }
+    }
+
+    /// Waits until payload is started, or timeout expires. When timeout occurs, kill
+    /// the VM to prevent indefinite hangup and update the payload_state accordingly.
+    fn monitor_payload_hangup(&self, child: Arc<SharedChild>) {
+        debug!("Starting to monitor hangup for Microdroid({})", child.id());
+        let (_, result) = self
+            .payload_state_updated
+            .wait_timeout_while(self.payload_state.lock().unwrap(), *BOOT_HANGUP_TIMEOUT, |s| {
+                *s < PayloadState::Started
+            })
+            .unwrap();
+        let child_still_running = child.try_wait().ok() == Some(None);
+        if result.timed_out() && child_still_running {
+            error!(
+                "Microdroid({}) failed to start payload within {} secs timeout. Shutting down.",
+                child.id(),
+                BOOT_HANGUP_TIMEOUT.as_secs()
+            );
+            self.update_payload_state(PayloadState::Hangup).unwrap();
+            if let Err(e) = self.kill() {
+                error!("Error stopping timed-out VM with CID {}: {:?}", child.id(), e);
+            }
         }
     }
 
@@ -242,6 +325,7 @@ impl VmInstance {
         // the other direction.
         if new_state > *state_locked {
             *state_locked = new_state;
+            self.payload_state_updated.notify_all();
             Ok(())
         } else {
             bail!("Invalid payload state transition from {:?} to {:?}", *state_locked, new_state)
@@ -249,16 +333,53 @@ impl VmInstance {
     }
 
     /// Kills the crosvm instance, if it is running.
-    pub fn kill(&self) {
+    pub fn kill(&self) -> Result<(), Error> {
         let vm_state = &*self.vm_state.lock().unwrap();
         if let VmState::Running { child } = vm_state {
             let id = child.id();
             debug!("Killing crosvm({})", id);
             // TODO: Talk to crosvm to shutdown cleanly.
             if let Err(e) = child.kill() {
-                error!("Error killing crosvm({}) instance: {}", id, e);
+                bail!("Error killing crosvm({}) instance: {}", id, e);
+            } else {
+                Ok(())
             }
+        } else {
+            bail!("VM is not running")
         }
+    }
+
+    /// Checks if ramdump has been created. If so, send a notification to the user with the handle
+    /// to read the ramdump.
+    fn handle_ramdump(&self) -> Result<(), Error> {
+        let ramdump_path = self.temporary_directory.join("ramdump");
+        if std::fs::metadata(&ramdump_path)?.len() > 0 {
+            let ramdump = File::open(&ramdump_path)
+                .context(format!("Failed to open ramdump {:?} for reading", &ramdump_path))?;
+            self.callbacks.callback_on_ramdump(self.cid, ramdump);
+
+            Self::send_ramdump_to_tombstoned(&ramdump_path)?;
+        }
+        Ok(())
+    }
+
+    fn send_ramdump_to_tombstoned(ramdump_path: &Path) -> Result<(), Error> {
+        let mut input = File::open(ramdump_path)
+            .context(format!("Failed to open raudmp {:?} for reading", ramdump_path))?;
+
+        let pid = std::process::id() as i32;
+        let conn = TombstonedConnection::connect(pid, DebuggerdDumpType::Tombstone)
+            .context("Failed to connect to tombstoned")?;
+        let mut output = conn
+            .text_output
+            .as_ref()
+            .ok_or_else(|| anyhow!("Could not get file to write the tombstones on"))?;
+
+        std::io::copy(&mut input, &mut output).context("Failed to send ramdump to tombstoned")?;
+        info!("Ramdump {:?} sent to tombstoned", ramdump_path);
+
+        conn.notify_completion()?;
+        Ok(())
     }
 }
 
@@ -275,6 +396,20 @@ fn death_reason(result: &Result<ExitStatus, io::Error>, failure_reason: &str) ->
             "BOOTLOADER_INSTANCE_IMAGE_CHANGED" => {
                 return DeathReason::BOOTLOADER_INSTANCE_IMAGE_CHANGED
             }
+            "MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE" => {
+                return DeathReason::MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE
+            }
+            "MICRODROID_PAYLOAD_HAS_CHANGED" => return DeathReason::MICRODROID_PAYLOAD_HAS_CHANGED,
+            "MICRODROID_PAYLOAD_VERIFICATION_FAILED" => {
+                return DeathReason::MICRODROID_PAYLOAD_VERIFICATION_FAILED
+            }
+            "MICRODROID_INVALID_PAYLOAD_CONFIG" => {
+                return DeathReason::MICRODROID_INVALID_PAYLOAD_CONFIG
+            }
+            "MICRODROID_UNKNOWN_RUNTIME_ERROR" => {
+                return DeathReason::MICRODROID_UNKNOWN_RUNTIME_ERROR
+            }
+            "HANGUP" => return DeathReason::HANGUP,
             _ => {}
         }
         match status.code() {
@@ -326,6 +461,10 @@ fn run_vm(config: CrosvmConfig, failure_pipe_write: File) -> Result<SharedChild,
         command.arg("--cpu-affinity").arg(cpu_affinity);
     }
 
+    if !config.task_profiles.is_empty() {
+        command.arg("--task-profiles").arg(config.task_profiles.join(","));
+    }
+
     // Keep track of what file descriptors should be mapped to the crosvm process.
     let mut preserved_fds = config.indirect_files.iter().map(|file| file.as_raw_fd()).collect();
 
@@ -333,7 +472,7 @@ fn run_vm(config: CrosvmConfig, failure_pipe_write: File) -> Result<SharedChild,
     // 1. uart device: used as the output device by bootloaders and as early console by linux
     // 2. uart device: used to report the reason for the VM failing.
     // 3. virtio-console device: used as the console device where kmsg is redirected to
-    // 4. virtio-console device: used as the androidboot.console device (not used currently)
+    // 4. virtio-console device: used as the ramdump output
     // 5. virtio-console device: used as the logcat output
     //
     // When [console|log]_fd is not specified, the devices are attached to sink, which means what's
@@ -341,6 +480,7 @@ fn run_vm(config: CrosvmConfig, failure_pipe_write: File) -> Result<SharedChild,
     let console_arg = format_serial_arg(&mut preserved_fds, &config.console_fd);
     let log_arg = format_serial_arg(&mut preserved_fds, &config.log_fd);
     let failure_serial_path = add_preserved_fd(&mut preserved_fds, &failure_pipe_write);
+    let ramdump_arg = format_serial_arg(&mut preserved_fds, &config.ramdump);
 
     // Warning: Adding more serial devices requires you to shift the PCI device ID of the boot
     // disks in bootconfig.x86_64. This is because x86 crosvm puts serial devices and the block
@@ -352,8 +492,8 @@ fn run_vm(config: CrosvmConfig, failure_pipe_write: File) -> Result<SharedChild,
     command.arg(format!("--serial=type=file,path={},hardware=serial,num=2", &failure_serial_path));
     // /dev/hvc0
     command.arg(format!("--serial={},hardware=virtio-console,num=1", &console_arg));
-    // /dev/hvc1 (not used currently)
-    command.arg("--serial=type=sink,hardware=virtio-console,num=2");
+    // /dev/hvc1
+    command.arg(format!("--serial={},hardware=virtio-console,num=2", &ramdump_arg));
     // /dev/hvc2
     command.arg(format!("--serial={},hardware=virtio-console,num=3", &log_arg));
 

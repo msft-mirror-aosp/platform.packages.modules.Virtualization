@@ -1,6 +1,6 @@
 drops {
   android_build_drop {
-    build_id: "8231605"
+    build_id: "8966862"
     target: "u-boot_pvmfw"
     source_file: "pvmfw.img"
   }
@@ -9,4 +9,5 @@ drops {
   version_group: ""
   git_project: "platform/packages/modules/Virtualization"
   git_branch: "master"
+  transform: TRANSFORM_NONE
 }

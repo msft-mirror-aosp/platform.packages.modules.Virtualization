@@ -23,13 +23,12 @@
 //! client can then request the content of file 9 by offset and size.
 
 mod aidl;
-mod common;
 mod fsverity;
 
 use anyhow::{bail, Result};
-use binder_common::rpc_server::run_rpc_server;
 use log::debug;
 use nix::sys::stat::{umask, Mode};
+use rpcbinder::run_rpc_server;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::os::unix::io::FromRawFd;

@@ -1,0 +1,43 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_ffi_static {
+    name: "libpvmfw",
+    crate_name: "pvmfw",
+    defaults: ["vmbase_ffi_defaults"],
+    srcs: ["src/main.rs"],
+    edition: "2021",
+    rustlibs: [
+        "libvmbase",
+    ],
+    apex_available: ["com.android.virt"],
+}
+
+cc_binary {
+    name: "pvmfw_elf",
+    stem: "pvmfw",
+    defaults: ["vmbase_elf_defaults"],
+    srcs: [
+        "idmap.S",
+    ],
+    static_libs: [
+        "libpvmfw",
+    ],
+    linker_scripts: [
+        "image.ld",
+        ":vmbase_sections",
+    ],
+    apex_available: ["com.android.virt"],
+}
+
+raw_binary {
+    name: "pvmfw",
+    src: ":pvmfw_elf",
+    enabled: false,
+    target: {
+        android_arm64: {
+            enabled: true,
+        },
+    },
+}

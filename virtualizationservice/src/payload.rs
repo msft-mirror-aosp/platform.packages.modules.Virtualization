@@ -19,9 +19,8 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     VirtualMachineAppConfig::VirtualMachineAppConfig,
     VirtualMachineRawConfig::VirtualMachineRawConfig,
 };
-use android_system_virtualizationservice::binder::ParcelFileDescriptor;
 use anyhow::{anyhow, bail, Context, Result};
-use binder::wait_for_interface;
+use binder::{wait_for_interface, ParcelFileDescriptor};
 use log::{info, warn};
 use microdroid_metadata::{ApexPayload, ApkPayload, Metadata};
 use microdroid_payload_config::{ApexConfig, VmPayloadConfig};
@@ -134,10 +133,13 @@ impl PackageManager {
             let pm =
                 wait_for_interface::<dyn IPackageManagerNative>(PACKAGE_MANAGER_NATIVE_SERVICE)
                     .context("Failed to get service when prefer_staged is set.")?;
-            let staged = pm.getStagedApexModuleNames()?;
+            let staged =
+                pm.getStagedApexModuleNames().context("getStagedApexModuleNames failed")?;
             for apex_info in list.list.iter_mut() {
                 if staged.contains(&apex_info.name) {
-                    if let Some(staged_apex_info) = pm.getStagedApexInfo(&apex_info.name)? {
+                    if let Some(staged_apex_info) =
+                        pm.getStagedApexInfo(&apex_info.name).context("getStagedApexInfo failed")?
+                    {
                         apex_info.path = PathBuf::from(staged_apex_info.diskImagePath);
                         apex_info.has_classpath_jar = staged_apex_info.hasClassPathJars;
                         let metadata = metadata(&apex_info.path)?;
@@ -199,7 +201,7 @@ fn make_metadata_file(
 }
 
 /// Creates a DiskImage with partitions:
-///   metadata: metadata
+///   payload-metadata: metadata
 ///   microdroid-apex-0: apex 0
 ///   microdroid-apex-1: apex 1
 ///   ..
@@ -365,7 +367,7 @@ pub fn add_microdroid_images(
         )?),
         writable: false,
     });
-    let bootconfig_image = "/apex/com.android.virt/etc/microdroid_bootconfig.".to_owned()
+    let bootconfig_image = "/apex/com.android.virt/etc/fs/microdroid_bootconfig.".to_owned()
         + match config.debugLevel {
             DebugLevel::NONE => "normal",
             DebugLevel::APP_ONLY => "app_debuggable",

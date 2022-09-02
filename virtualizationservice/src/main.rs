@@ -15,6 +15,7 @@
 //! Android VirtualizationService
 
 mod aidl;
+mod atom;
 mod composite;
 mod crosvm;
 mod payload;
@@ -22,7 +23,7 @@ mod selinux;
 
 use crate::aidl::{VirtualizationService, BINDER_SERVICE_IDENTIFIER, TEMPORARY_DIRECTORY};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::IVirtualizationService::BnVirtualizationService;
-use android_system_virtualizationservice::binder::{register_lazy_service, BinderFeatures, ProcessState};
+use binder::{register_lazy_service, BinderFeatures, ProcessState};
 use anyhow::Error;
 use log::{info, Level};
 use std::fs::{remove_dir_all, remove_file, read_dir};
@@ -70,13 +71,4 @@ fn clear_temporary_files() -> Result<(), Error> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    /// We need to have at least one test to avoid errors running the test suite, so this is a
-    /// placeholder until we have real tests.
-    #[test]
-    #[ignore]
-    fn placeholder() {}
 }

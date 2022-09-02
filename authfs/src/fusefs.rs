@@ -149,7 +149,7 @@ pub struct DirEntriesSnapshotIterator {
     prev_offset: usize,
 }
 
-impl<'a> DirectoryIterator for DirEntriesSnapshotIterator {
+impl DirectoryIterator for DirEntriesSnapshotIterator {
     fn next(&mut self) -> Option<DirEntry> {
         // This iterator should not be the only reference to the snapshot. The snapshot should
         // still be hold in `dir_handle_table`, i.e. when the FD is not yet closed.
@@ -184,10 +184,9 @@ impl<'a> DirectoryIterator for DirEntriesSnapshotIterator {
 
 type DirHandleTable = BTreeMap<Handle, Arc<DirEntriesSnapshot>>;
 
-// AuthFS needs to be `Sync` to be accepted by fuse::worker::start_message_loop as a `FileSystem`.
+// AuthFS needs to be `Sync` to be used with the `fuse` crate.
 pub struct AuthFs {
-    /// Table for `Inode` to `InodeState` lookup. This needs to be `Sync` to be used in
-    /// `fuse::worker::start_message_loop`.
+    /// Table for `Inode` to `InodeState` lookup.
     inode_table: RwLock<BTreeMap<Inode, InodeState>>,
 
     /// The next available inode number.

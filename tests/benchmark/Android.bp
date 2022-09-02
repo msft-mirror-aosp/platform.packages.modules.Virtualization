@@ -2,22 +2,49 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-cc_binary {
-    name: "fs_benchmark",
-    static_executable: true,
-    static_libs: ["libbase"],
-    srcs: ["fs_benchmark.cpp"],
+android_test {
+    name: "MicrodroidBenchmarkApp",
+    test_suites: [
+        "general-tests",
+    ],
+    srcs: ["src/java/**/*.java"],
+    static_libs: [
+        "MicrodroidDeviceTestHelper",
+        "MicrodroidTestHelper",
+        "androidx.test.runner",
+        "androidx.test.ext.junit",
+        "com.android.microdroid.testservice-java",
+        "truth-prebuilt",
+    ],
+    libs: ["android.system.virtualmachine"],
+    jni_libs: [
+        "MicrodroidBenchmarkNativeLib",
+        "libiovsock_host_jni",
+    ],
+    platform_apis: true,
+    use_embedded_native_libs: true,
+    compile_multilib: "64",
 }
 
 cc_library_shared {
-    name: "empty_payload",
-    srcs: ["empty_payload.cpp"],
+    name: "MicrodroidBenchmarkNativeLib",
+    srcs: ["src/native/benchmarkbinary.cpp"],
+    static_libs: ["libiovsock_vm"],
+    shared_libs: [
+        "android.system.virtualmachineservice-ndk",
+        "com.android.microdroid.testservice-ndk",
+        "libbase",
+        "libbinder_ndk",
+        "libbinder_rpc_unstable",
+        "liblog",
+    ],
 }
 
-android_app {
-    name: "MicrodroidFilesystemBenchmarkApp",
-    srcs: [],
-    jni_libs: ["empty_payload"],
-    platform_apis: true,
-    use_embedded_native_libs: true,
+cc_library {
+    name: "libiovsock_vm",
+    srcs: ["src/native/io_vsock.cpp"],
+    export_include_dirs: ["src/native/include"],
+    shared_libs: [
+        "libbase",
+    ],
 }

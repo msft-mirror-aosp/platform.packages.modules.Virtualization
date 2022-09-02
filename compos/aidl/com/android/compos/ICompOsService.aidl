@@ -19,6 +19,18 @@ package com.android.compos;
 /** {@hide} */
 interface ICompOsService {
     /**
+     * Initializes system properties. ART expects interesting properties that have to be passed from
+     * Android. The API client should call this method once with all desired properties, since once
+     * the call completes, the service is considered initialized and cannot be re-initialized again.
+     *
+     * <p>If the initialization failed, Microdroid may already have some properties set. It is up to
+     * the service to reject further calls by the client.
+     *
+     * <p>The service may reject unrecognized names, but it does not interpret values.
+     */
+    void initializeSystemProperties(in String[] names, in String[] values);
+
+    /**
      * What type of compilation to perform.
      */
     @Backing(type="int")
@@ -55,4 +67,17 @@ interface ICompOsService {
      * (https://datatracker.ietf.org/doc/html/rfc8032#section-5.1.5).
      */
     byte[] getPublicKey();
+
+    /**
+     * Returns the attestation certificate chain of the current VM. The result is in the form of a
+     * CBOR encoded Boot Certificate Chain (BCC) as defined in
+     * hardware/interfaces/security/dice/aidl/android/hardware/security/dice/Bcc.aidl.
+     */
+    byte[] getAttestationChain();
+
+    /**
+     * Request the service to exit, triggering the termination of the VM. This may cause any
+     * requests in flight to fail.
+     */
+    oneway void quit();
 }

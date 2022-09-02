@@ -6,11 +6,12 @@ rust_binary {
     name: "vm",
     crate_name: "vm",
     srcs: ["src/main.rs"],
-    edition: "2018",
+    edition: "2021",
     prefer_rlib: true,
     rustlibs: [
         "android.system.virtualizationservice-rust",
         "libanyhow",
+        "libbinder_rs",
         "libenv_logger",
         "liblibc",
         "liblog_rust",
@@ -20,9 +21,15 @@ rust_binary {
         "libserde",
         "libstructopt",
         "libvmconfig",
+        "libvmclient",
         "libzip",
     ],
     apex_available: [
         "com.android.virt",
     ],
+}
+
+sh_binary_host {
+    name: "vm_shell",
+    src: "vm_shell.sh",
 }

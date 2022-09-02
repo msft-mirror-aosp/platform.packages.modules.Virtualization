@@ -15,33 +15,28 @@
 //! Command to run a VM.
 
 use crate::create_partition::command_create_partition;
-use crate::sync::AtomicFlag;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    DeathReason::DeathReason, IVirtualMachine::IVirtualMachine,
-    IVirtualMachineCallback::BnVirtualMachineCallback,
-    IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService, PartitionType::PartitionType,
     VirtualMachineAppConfig::DebugLevel::DebugLevel,
     VirtualMachineAppConfig::VirtualMachineAppConfig, VirtualMachineConfig::VirtualMachineConfig,
     VirtualMachineState::VirtualMachineState,
 };
-use android_system_virtualizationservice::binder::{
-    BinderFeatures, DeathRecipient, IBinder, ParcelFileDescriptor, Strong,
-};
-use android_system_virtualizationservice::binder::{Interface, Result as BinderResult};
 use anyhow::{bail, Context, Error};
+use binder::ParcelFileDescriptor;
 use microdroid_payload_config::VmPayloadConfig;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
+use vmclient::VmInstance;
 use vmconfig::{open_parcel_file, VmConfig};
 use zip::ZipArchive;
 
 /// Run a VM from the given APK, idsig, and config.
 #[allow(clippy::too_many_arguments)]
 pub fn command_run_app(
-    service: Strong<dyn IVirtualizationService>,
+    name: Option<String>,
+    service: &dyn IVirtualizationService,
     apk: &Path,
     idsig: &Path,
     instance: &Path,
@@ -49,11 +44,13 @@ pub fn command_run_app(
     daemonize: bool,
     console_path: Option<&Path>,
     log_path: Option<&Path>,
+    ramdump_path: Option<&Path>,
     debug_level: DebugLevel,
     protected: bool,
     mem: Option<u32>,
     cpus: Option<u32>,
     cpu_affinity: Option<String>,
+    task_profiles: Vec<String>,
     extra_idsigs: &[PathBuf],
 ) -> Result<(), Error> {
     let extra_apks = parse_extra_apk_list(apk, config_path)?;
@@ -84,7 +81,7 @@ pub fn command_run_app(
     if !instance.exists() {
         const INSTANCE_FILE_SIZE: u64 = 10 * 1024 * 1024;
         command_create_partition(
-            service.clone(),
+            service,
             instance,
             INSTANCE_FILE_SIZE,
             PartitionType::ANDROID_VM_INSTANCE,
@@ -95,6 +92,7 @@ pub fn command_run_app(
     let extra_idsig_fds = extra_idsig_files?.into_iter().map(ParcelFileDescriptor::new).collect();
 
     let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
+        name: name.unwrap_or_else(|| String::from("VmRunApp")),
         apk: apk_fd.into(),
         idsig: idsig_fd.into(),
         extraIdsigs: extra_idsig_fds,
@@ -105,6 +103,7 @@ pub fn command_run_app(
         memoryMib: mem.unwrap_or(0) as i32, // 0 means use the VM default
         numCpus: cpus.unwrap_or(1) as i32,
         cpuAffinity: cpu_affinity,
+        taskProfiles: task_profiles,
     });
     run(
         service,
@@ -113,13 +112,15 @@ pub fn command_run_app(
         daemonize,
         console_path,
         log_path,
+        ramdump_path,
     )
 }
 
 /// Run a VM from the given configuration file.
 #[allow(clippy::too_many_arguments)]
 pub fn command_run(
-    service: Strong<dyn IVirtualizationService>,
+    name: Option<String>,
+    service: &dyn IVirtualizationService,
     config_path: &Path,
     daemonize: bool,
     console_path: Option<&Path>,
@@ -127,6 +128,7 @@ pub fn command_run(
     mem: Option<u32>,
     cpus: Option<u32>,
     cpu_affinity: Option<String>,
+    task_profiles: Vec<String>,
 ) -> Result<(), Error> {
     let config_file = File::open(config_path).context("Failed to open config file")?;
     let mut config =
@@ -137,7 +139,13 @@ pub fn command_run(
     if let Some(cpus) = cpus {
         config.numCpus = cpus as i32;
     }
+    if let Some(name) = name {
+        config.name = name;
+    } else {
+        config.name = String::from("VmRun");
+    }
     config.cpuAffinity = cpu_affinity;
+    config.taskProfiles = task_profiles;
     run(
         service,
         &VirtualMachineConfig::RawConfig(config),
@@ -145,6 +153,7 @@ pub fn command_run(
         daemonize,
         console_path,
         log_path,
+        /* ramdump_path */ None,
     )
 }
 
@@ -161,84 +170,74 @@ fn state_to_str(vm_state: VirtualMachineState) -> &'static str {
 }
 
 fn run(
-    service: Strong<dyn IVirtualizationService>,
+    service: &dyn IVirtualizationService,
     config: &VirtualMachineConfig,
     config_path: &str,
     daemonize: bool,
     console_path: Option<&Path>,
     log_path: Option<&Path>,
+    ramdump_path: Option<&Path>,
 ) -> Result<(), Error> {
     let console = if let Some(console_path) = console_path {
-        Some(ParcelFileDescriptor::new(
+        Some(
             File::create(console_path)
                 .with_context(|| format!("Failed to open console file {:?}", console_path))?,
-        ))
+        )
     } else if daemonize {
         None
     } else {
-        Some(ParcelFileDescriptor::new(duplicate_stdout()?))
+        Some(duplicate_stdout()?)
     };
     let log = if let Some(log_path) = log_path {
-        Some(ParcelFileDescriptor::new(
+        Some(
             File::create(log_path)
                 .with_context(|| format!("Failed to open log file {:?}", log_path))?,
-        ))
+        )
     } else if daemonize {
         None
     } else {
-        Some(ParcelFileDescriptor::new(duplicate_stdout()?))
+        Some(duplicate_stdout()?)
     };
 
-    let vm =
-        service.createVm(config, console.as_ref(), log.as_ref()).context("Failed to create VM")?;
+    let callback = Box::new(Callback {});
+    let vm = VmInstance::create(service, config, console, log, Some(callback))
+        .context("Failed to create VM")?;
+    vm.start().context("Failed to start VM")?;
 
-    let cid = vm.getCid().context("Failed to get CID")?;
     println!(
         "Created VM from {} with CID {}, state is {}.",
         config_path,
-        cid,
-        state_to_str(vm.getState()?)
+        vm.cid(),
+        state_to_str(vm.state()?)
     );
-    vm.start()?;
-    println!("Started VM, state now {}.", state_to_str(vm.getState()?));
 
     if daemonize {
         // Pass the VM reference back to VirtualizationService and have it hold it in the
         // background.
-        service.debugHoldVmRef(&vm).context("Failed to pass VM to VirtualizationService")
+        service.debugHoldVmRef(&vm.vm).context("Failed to pass VM to VirtualizationService")?;
     } else {
         // Wait until the VM or VirtualizationService dies. If we just returned immediately then the
         // IVirtualMachine Binder object would be dropped and the VM would be killed.
-        wait_for_vm(vm)
-    }
-}
+        let death_reason = vm.wait_for_death();
 
-/// Wait until the given VM or the VirtualizationService itself dies.
-fn wait_for_vm(vm: Strong<dyn IVirtualMachine>) -> Result<(), Error> {
-    let dead = AtomicFlag::default();
-    let callback = BnVirtualMachineCallback::new_binder(
-        VirtualMachineCallback { dead: dead.clone() },
-        BinderFeatures::default(),
-    );
-    vm.registerCallback(&callback)?;
-    let death_recipient = wait_for_death(&mut vm.as_binder(), dead.clone())?;
-    dead.wait();
-    // Ensure that death_recipient isn't dropped before we wait on the flag, as it is removed
-    // from the Binder when it's dropped.
-    drop(death_recipient);
+        if let Some(path) = ramdump_path {
+            save_ramdump_if_available(path, &vm)?;
+        }
+        println!("{}", death_reason);
+    }
+
     Ok(())
 }
 
-/// Raise the given flag when the given Binder object dies.
-///
-/// If the returned DeathRecipient is dropped then this will no longer do anything.
-fn wait_for_death(binder: &mut impl IBinder, dead: AtomicFlag) -> Result<DeathRecipient, Error> {
-    let mut death_recipient = DeathRecipient::new(move || {
-        eprintln!("VirtualizationService unexpectedly died");
-        dead.raise();
-    });
-    binder.link_to_death(&mut death_recipient)?;
-    Ok(death_recipient)
+fn save_ramdump_if_available(path: &Path, vm: &VmInstance) -> Result<(), Error> {
+    if let Some(mut ramdump) = vm.get_ramdump() {
+        let mut file =
+            File::create(path).context(format!("Failed to create ramdump file {:?}", path))?;
+        let size = std::io::copy(&mut ramdump, &mut file)
+            .context(format!("Failed to save ramdump to file {:?}", path))?;
+        eprintln!("Ramdump ({} bytes) saved to {:?}", size, path);
+    }
+    Ok(())
 }
 
 fn parse_extra_apk_list(apk: &Path, config_path: &str) -> Result<Vec<String>, Error> {
@@ -248,22 +247,13 @@ fn parse_extra_apk_list(apk: &Path, config_path: &str) -> Result<Vec<String>, Er
     Ok(config.extra_apks.into_iter().map(|x| x.path).collect())
 }
 
-#[derive(Debug)]
-struct VirtualMachineCallback {
-    dead: AtomicFlag,
-}
+struct Callback {}
 
-impl Interface for VirtualMachineCallback {}
-
-impl IVirtualMachineCallback for VirtualMachineCallback {
-    fn onPayloadStarted(
-        &self,
-        _cid: i32,
-        stream: Option<&ParcelFileDescriptor>,
-    ) -> BinderResult<()> {
+impl vmclient::VmCallback for Callback {
+    fn on_payload_started(&self, _cid: i32, stream: Option<&File>) {
         // Show the output of the payload
         if let Some(stream) = stream {
-            let mut reader = BufReader::new(stream.as_ref());
+            let mut reader = BufReader::new(stream);
             loop {
                 let mut s = String::new();
                 match reader.read_line(&mut s) {
@@ -273,38 +263,18 @@ impl IVirtualMachineCallback for VirtualMachineCallback {
                 };
             }
         }
-        Ok(())
     }
 
-    fn onPayloadReady(&self, _cid: i32) -> BinderResult<()> {
+    fn on_payload_ready(&self, _cid: i32) {
         eprintln!("payload is ready");
-        Ok(())
     }
 
-    fn onPayloadFinished(&self, _cid: i32, exit_code: i32) -> BinderResult<()> {
+    fn on_payload_finished(&self, _cid: i32, exit_code: i32) {
         eprintln!("payload finished with exit code {}", exit_code);
-        Ok(())
     }
 
-    fn onError(&self, _cid: i32, error_code: i32, message: &str) -> BinderResult<()> {
+    fn on_error(&self, _cid: i32, error_code: i32, message: &str) {
         eprintln!("VM encountered an error: code={}, message={}", error_code, message);
-        Ok(())
-    }
-
-    fn onDied(&self, _cid: i32, reason: DeathReason) -> BinderResult<()> {
-        self.dead.raise();
-
-        match reason {
-            DeathReason::INFRASTRUCTURE_ERROR => println!("Error waiting for VM to finish."),
-            DeathReason::KILLED => println!("VM was killed."),
-            DeathReason::UNKNOWN => println!("VM died for an unknown reason."),
-            DeathReason::SHUTDOWN => println!("VM shutdown cleanly."),
-            DeathReason::ERROR => println!("Error starting VM."),
-            DeathReason::REBOOT => println!("VM tried to reboot, possibly due to a kernel panic."),
-            DeathReason::CRASH => println!("VM crashed."),
-            _ => println!("VM died for an unrecognised reason."),
-        }
-        Ok(())
     }
 }
 

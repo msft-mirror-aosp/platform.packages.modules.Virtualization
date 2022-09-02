@@ -17,14 +17,13 @@
 mod create_idsig;
 mod create_partition;
 mod run;
-mod sync;
 
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     IVirtualizationService::IVirtualizationService, PartitionType::PartitionType,
     VirtualMachineAppConfig::DebugLevel::DebugLevel,
 };
-use android_system_virtualizationservice::binder::{wait_for_interface, ProcessState, Strong};
 use anyhow::{Context, Error};
+use binder::ProcessState;
 use create_idsig::command_create_idsig;
 use create_partition::command_create_partition;
 use run::{command_run, command_run_app};
@@ -32,9 +31,6 @@ use rustutils::system_properties;
 use std::path::{Path, PathBuf};
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
-
-const VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER: &str =
-    "android.system.virtualizationservice";
 
 #[derive(Debug)]
 struct Idsigs(Vec<PathBuf>);
@@ -44,6 +40,10 @@ struct Idsigs(Vec<PathBuf>);
 enum Opt {
     /// Run a virtual machine with a config in APK
     RunApp {
+        /// Name of VM
+        #[structopt(long)]
+        name: Option<String>,
+
         /// Path to VM Payload APK
         #[structopt(parse(from_os_str))]
         apk: PathBuf,
@@ -71,6 +71,10 @@ enum Opt {
         #[structopt(long)]
         log: Option<PathBuf>,
 
+        /// Path to file where ramdump is recorded on kernel panic
+        #[structopt(long)]
+        ramdump: Option<PathBuf>,
+
         /// Debug level of the VM. Supported values: "none" (default), "app_only", and "full".
         #[structopt(long, default_value = "none", parse(try_from_str=parse_debug_level))]
         debug: DebugLevel,
@@ -92,12 +96,20 @@ enum Opt {
         #[structopt(long)]
         cpu_affinity: Option<String>,
 
+        /// Comma separated list of task profile names to apply to the VM
+        #[structopt(long)]
+        task_profiles: Vec<String>,
+
         /// Paths to extra idsig files.
         #[structopt(long = "extra-idsig")]
         extra_idsigs: Vec<PathBuf>,
     },
     /// Run a virtual machine
     Run {
+        /// Name of VM
+        #[structopt(long)]
+        name: Option<String>,
+
         /// Path to VM config JSON
         #[structopt(parse(from_os_str))]
         config: PathBuf,
@@ -117,6 +129,10 @@ enum Opt {
         /// CPU 0 and so on.
         #[structopt(long)]
         cpu_affinity: Option<String>,
+
+        /// Comma separated list of task profile names to apply to the VM
+        #[structopt(long)]
+        task_profiles: Vec<String>,
 
         /// Path to file for VM console output.
         #[structopt(long)]
@@ -183,11 +199,11 @@ fn main() -> Result<(), Error> {
     // We need to start the thread pool for Binder to work properly, especially link_to_death.
     ProcessState::start_thread_pool();
 
-    let service = wait_for_interface(VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER)
-        .context("Failed to find VirtualizationService")?;
+    let service = vmclient::connect().context("Failed to find VirtualizationService")?;
 
     match opt {
         Opt::RunApp {
+            name,
             apk,
             idsig,
             instance,
@@ -195,14 +211,17 @@ fn main() -> Result<(), Error> {
             daemonize,
             console,
             log,
+            ramdump,
             debug,
             protected,
             mem,
             cpus,
             cpu_affinity,
+            task_profiles,
             extra_idsigs,
         } => command_run_app(
-            service,
+            name,
+            service.as_ref(),
             &apk,
             &idsig,
             &instance,
@@ -210,16 +229,19 @@ fn main() -> Result<(), Error> {
             daemonize,
             console.as_deref(),
             log.as_deref(),
+            ramdump.as_deref(),
             debug,
             protected,
             mem,
             cpus,
             cpu_affinity,
+            task_profiles,
             &extra_idsigs,
         ),
-        Opt::Run { config, daemonize, cpus, cpu_affinity, console, log } => {
+        Opt::Run { name, config, daemonize, cpus, cpu_affinity, task_profiles, console, log } => {
             command_run(
-                service,
+                name,
+                service.as_ref(),
                 &config,
                 daemonize,
                 console.as_deref(),
@@ -227,20 +249,21 @@ fn main() -> Result<(), Error> {
                 /* mem */ None,
                 cpus,
                 cpu_affinity,
+                task_profiles,
             )
         }
-        Opt::Stop { cid } => command_stop(service, cid),
-        Opt::List => command_list(service),
+        Opt::Stop { cid } => command_stop(service.as_ref(), cid),
+        Opt::List => command_list(service.as_ref()),
         Opt::Info => command_info(),
         Opt::CreatePartition { path, size, partition_type } => {
-            command_create_partition(service, &path, size, partition_type)
+            command_create_partition(service.as_ref(), &path, size, partition_type)
         }
-        Opt::CreateIdsig { apk, path } => command_create_idsig(service, &apk, &path),
+        Opt::CreateIdsig { apk, path } => command_create_idsig(service.as_ref(), &apk, &path),
     }
 }
 
 /// Retrieve reference to a previously daemonized VM and stop it.
-fn command_stop(service: Strong<dyn IVirtualizationService>, cid: u32) -> Result<(), Error> {
+fn command_stop(service: &dyn IVirtualizationService, cid: u32) -> Result<(), Error> {
     service
         .debugDropVmRef(cid as i32)
         .context("Failed to get VM from VirtualizationService")?
@@ -249,7 +272,7 @@ fn command_stop(service: Strong<dyn IVirtualizationService>, cid: u32) -> Result
 }
 
 /// List the VMs currently running.
-fn command_list(service: Strong<dyn IVirtualizationService>) -> Result<(), Error> {
+fn command_list(service: &dyn IVirtualizationService) -> Result<(), Error> {
     let vms = service.debugListVms().context("Failed to get list of VMs")?;
     println!("Running VMs: {:#?}", vms);
     Ok(())

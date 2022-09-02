@@ -11,10 +11,11 @@ java_test_host {
         "compatibility-host-util",
     ],
     static_libs: [
-        "VirtualizationTestHelper",
+        "MicrodroidHostTestHelper",
     ],
     test_suites: ["general-tests"],
-    data_device_bins: ["open_then_run"],
+    //TODO(b/235263148) use data_device_bins_64
+    data_device_bins_first: ["open_then_run"],
     per_testcase_directory: true,
     data: [
         ":authfs_test_files",
@@ -26,14 +27,14 @@ rust_test {
     name: "open_then_run",
     crate_name: "open_then_run",
     srcs: ["open_then_run.rs"],
-    edition: "2018",
+    edition: "2021",
     rustlibs: [
         "libandroid_logger",
         "libanyhow",
         "libclap",
         "libcommand_fds",
+        "liblibc",
         "liblog_rust",
-        "libnix",
     ],
     test_suites: ["general-tests"],
     test_harness: false,

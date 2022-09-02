@@ -19,17 +19,17 @@
 // TODO(jooyung) remove this
 #![allow(dead_code)]
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
-use ring::signature::{
-    UnparsedPublicKey, VerificationAlgorithm, ECDSA_P256_SHA256_ASN1, RSA_PKCS1_2048_8192_SHA256,
-    RSA_PKCS1_2048_8192_SHA512, RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA512,
-};
+use openssl::hash::MessageDigest;
+use openssl::pkey::{self, PKey};
+use openssl::rsa::Padding;
+use openssl::sign::Verifier;
+use openssl::x509::X509;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::ops::Range;
 use std::path::Path;
-use x509_parser::{parse_x509_certificate, prelude::FromDer, x509::SubjectPublicKeyInfo};
 
 use crate::bytes_ext::{BytesExt, LengthPrefixed, ReadFromBytes};
 use crate::sigutil::*;
@@ -87,7 +87,7 @@ type X509Certificate = Bytes;
 type AdditionalAttributes = Bytes;
 
 /// Verifies APK Signature Scheme v3 signatures of the provided APK and returns the public key
-/// associated with the signer.
+/// associated with the signer in DER format.
 pub fn verify<P: AsRef<Path>>(path: P) -> Result<Box<[u8]>> {
     let f = File::open(path.as_ref())?;
     let mut sections = ApkSections::new(f)?;
@@ -128,21 +128,48 @@ pub fn get_public_key_der<P: AsRef<Path>>(path: P) -> Result<Box<[u8]>> {
     })
 }
 
+/// Gets the APK digest.
+pub fn pick_v4_apk_digest<R: Read + Seek>(apk: R) -> Result<(u32, Box<[u8]>)> {
+    let mut sections = ApkSections::new(apk)?;
+    let mut block = sections.find_signature(APK_SIGNATURE_SCHEME_V3_BLOCK_ID)?;
+    let signers = block.read::<Signers>()?;
+    if signers.len() != 1 {
+        bail!("should only have one signer");
+    }
+    signers[0].pick_v4_apk_digest()
+}
+
 impl Signer {
-    fn verify<R: Read + Seek>(&self, sections: &mut ApkSections<R>) -> Result<Box<[u8]>> {
-        // 1. Choose the strongest supported signature algorithm ID from signatures. The strength
-        //    ordering is up to each implementation/platform version.
-        let strongest: &Signature = self
+    /// Select the signature that uses the strongest algorithm according to the preferences of the
+    /// v4 signing scheme.
+    fn strongest_signature(&self) -> Result<&Signature> {
+        Ok(self
             .signatures
             .iter()
             .filter(|sig| is_supported_signature_algorithm(sig.signature_algorithm_id))
             .max_by_key(|sig| rank_signature_algorithm(sig.signature_algorithm_id).unwrap())
-            .ok_or_else(|| anyhow!("No supported signatures found"))?;
+            .ok_or_else(|| anyhow!("No supported signatures found"))?)
+    }
+
+    fn pick_v4_apk_digest(&self) -> Result<(u32, Box<[u8]>)> {
+        let strongest = self.strongest_signature()?;
+        let signed_data: SignedData = self.signed_data.slice(..).read()?;
+        let digest = signed_data
+            .digests
+            .iter()
+            .find(|&dig| dig.signature_algorithm_id == strongest.signature_algorithm_id)
+            .ok_or_else(|| anyhow!("Digest not found"))?;
+        Ok((digest.signature_algorithm_id, digest.digest.as_ref().to_vec().into_boxed_slice()))
+    }
+
+    fn verify<R: Read + Seek>(&self, sections: &mut ApkSections<R>) -> Result<Box<[u8]>> {
+        // 1. Choose the strongest supported signature algorithm ID from signatures.
+        let strongest = self.strongest_signature()?;
 
         // 2. Verify the corresponding signature from signatures against signed data using public key.
         //    (It is now safe to parse signed data.)
-        let (_, key_info) = SubjectPublicKeyInfo::from_der(self.public_key.as_ref())?;
-        verify_signed_data(&self.signed_data, strongest, &key_info)?;
+        let public_key = PKey::public_key_from_der(self.public_key.as_ref())?;
+        verify_signed_data(&self.signed_data, strongest, &public_key)?;
 
         // It is now safe to parse signed data.
         let signed_data: SignedData = self.signed_data.slice(..).read()?;
@@ -182,11 +209,11 @@ impl Signer {
             );
         }
 
-        // 7. Verify that SubjectPublicKeyInfo of the first certificate of certificates is identical
+        // 7. Verify that public key of the first certificate of certificates is identical
         //    to public key.
         let cert = signed_data.certificates.first().context("No certificates listed")?;
-        let (_, cert) = parse_x509_certificate(cert.as_ref())?;
-        if cert.tbs_certificate.subject_pki != key_info {
+        let cert = X509::from_der(cert.as_ref())?;
+        if !cert.public_key()?.public_eq(&public_key) {
             bail!("Public key mismatch between certificate and signature record");
         }
 
@@ -195,19 +222,23 @@ impl Signer {
     }
 }
 
-fn verify_signed_data(
-    data: &Bytes,
-    signature: &Signature,
-    key_info: &SubjectPublicKeyInfo,
-) -> Result<()> {
-    let verification_alg: &dyn VerificationAlgorithm = match signature.signature_algorithm_id {
-        SIGNATURE_RSA_PSS_WITH_SHA256 => &RSA_PSS_2048_8192_SHA256,
-        SIGNATURE_RSA_PSS_WITH_SHA512 => &RSA_PSS_2048_8192_SHA512,
-        SIGNATURE_RSA_PKCS1_V1_5_WITH_SHA256 | SIGNATURE_VERITY_RSA_PKCS1_V1_5_WITH_SHA256 => {
-            &RSA_PKCS1_2048_8192_SHA256
+fn verify_signed_data(data: &Bytes, signature: &Signature, key: &PKey<pkey::Public>) -> Result<()> {
+    let (pkey_id, padding, digest) = match signature.signature_algorithm_id {
+        SIGNATURE_RSA_PSS_WITH_SHA256 => {
+            (pkey::Id::RSA, Padding::PKCS1_PSS, MessageDigest::sha256())
         }
-        SIGNATURE_RSA_PKCS1_V1_5_WITH_SHA512 => &RSA_PKCS1_2048_8192_SHA512,
-        SIGNATURE_ECDSA_WITH_SHA256 | SIGNATURE_VERITY_ECDSA_WITH_SHA256 => &ECDSA_P256_SHA256_ASN1,
+        SIGNATURE_RSA_PSS_WITH_SHA512 => {
+            (pkey::Id::RSA, Padding::PKCS1_PSS, MessageDigest::sha512())
+        }
+        SIGNATURE_RSA_PKCS1_V1_5_WITH_SHA256 | SIGNATURE_VERITY_RSA_PKCS1_V1_5_WITH_SHA256 => {
+            (pkey::Id::RSA, Padding::PKCS1, MessageDigest::sha256())
+        }
+        SIGNATURE_RSA_PKCS1_V1_5_WITH_SHA512 => {
+            (pkey::Id::RSA, Padding::PKCS1, MessageDigest::sha512())
+        }
+        SIGNATURE_ECDSA_WITH_SHA256 | SIGNATURE_VERITY_ECDSA_WITH_SHA256 => {
+            (pkey::Id::EC, Padding::NONE, MessageDigest::sha256())
+        }
         // TODO(b/190343842) not implemented signature algorithm
         SIGNATURE_ECDSA_WITH_SHA512
         | SIGNATURE_DSA_WITH_SHA256
@@ -219,8 +250,14 @@ fn verify_signed_data(
         }
         _ => bail!("Unsupported signature algorithm: {:#x}", signature.signature_algorithm_id),
     };
-    let key = UnparsedPublicKey::new(verification_alg, &key_info.subject_public_key);
-    key.verify(data.as_ref(), signature.signature.as_ref())?;
+    ensure!(key.id() == pkey_id, "Public key has the wrong ID");
+    let mut verifier = Verifier::new(digest, key)?;
+    if pkey_id == pkey::Id::RSA {
+        verifier.set_rsa_padding(padding)?;
+    }
+    verifier.update(data)?;
+    let verified = verifier.verify(&signature.signature)?;
+    ensure!(verified, "Signature is invalid ");
     Ok(())
 }
 
