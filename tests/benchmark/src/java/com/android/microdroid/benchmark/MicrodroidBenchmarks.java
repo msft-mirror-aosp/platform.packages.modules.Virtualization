@@ -24,13 +24,15 @@ import static com.google.common.truth.TruthJUnit.assume;
 import android.app.Instrumentation;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
+import android.os.RemoteException;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineConfig.DebugLevel;
 import android.system.virtualmachine.VirtualMachineException;
 import android.util.Log;
 
-import com.android.microdroid.test.MicrodroidDeviceTestBase;
+import com.android.microdroid.test.common.MetricsProcessor;
+import com.android.microdroid.test.device.MicrodroidDeviceTestBase;
 import com.android.microdroid.testservice.IBenchmarkService;
 
 import org.junit.Before;
@@ -45,6 +47,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 @RunWith(Parameterized.class)
@@ -66,6 +69,8 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     }
 
     @Parameterized.Parameter public boolean mProtectedVm;
+
+    private final MetricsProcessor mMetricsProcessor = new MetricsProcessor(METRIC_NAME_PREFIX);
 
     private Instrumentation mInstrumentation;
 
@@ -152,11 +157,11 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
             userspaceBootTimeMetrics.add(result.getUserspaceElapsedNanoTime() / nanoToMilli);
         }
 
-        reportMetrics(vmStartingTimeMetrics, "vm_starting_time_", "_ms");
-        reportMetrics(bootTimeMetrics, "boot_time_", "_ms");
-        reportMetrics(bootloaderTimeMetrics, "bootloader_time_", "_ms");
-        reportMetrics(kernelBootTimeMetrics, "kernel_boot_time_", "_ms");
-        reportMetrics(userspaceBootTimeMetrics, "userspace_boot_time_", "_ms");
+        reportMetrics(vmStartingTimeMetrics, "vm_starting_time", "ms");
+        reportMetrics(bootTimeMetrics, "boot_time", "ms");
+        reportMetrics(bootloaderTimeMetrics, "bootloader_time", "ms");
+        reportMetrics(kernelBootTimeMetrics, "kernel_boot_time", "ms");
+        reportMetrics(userspaceBootTimeMetrics, "userspace_boot_time", "ms");
     }
 
     @Test
@@ -186,17 +191,16 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                 mInner.newVmConfigBuilder("assets/vm_config_io.json")
                         .debugLevel(DebugLevel.FULL)
                         .build();
-        List<Double> transferRates = new ArrayList<>();
+        List<Double> transferRates = new ArrayList<>(IO_TEST_TRIAL_COUNT);
 
         for (int i = 0; i < IO_TEST_TRIAL_COUNT; ++i) {
             int port = (mProtectedVm ? 5666 : 6666) + i;
             String vmName = "test_vm_io_" + i;
             mInner.forceCreateNewVirtualMachine(vmName, config);
             VirtualMachine vm = mInner.getVirtualMachineManager().get(vmName);
-            VsockVmEventListener listener = new VsockVmEventListener(transferRates, port);
-            listener.runToFinish(TAG, vm);
+            BenchmarkVmListener.create(new VsockListener(transferRates, port)).runToFinish(TAG, vm);
         }
-        reportMetrics(transferRates, "vsock/transfer_host_to_vm_", "_mb_per_sec");
+        reportMetrics(transferRates, "vsock/transfer_host_to_vm", "mb_per_sec");
     }
 
     @Test
@@ -214,7 +218,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                 mInner.newVmConfigBuilder("assets/vm_config_io.json")
                         .debugLevel(DebugLevel.FULL)
                         .build();
-        List<Double> readRates = new ArrayList<>();
+        List<Double> readRates = new ArrayList<>(IO_TEST_TRIAL_COUNT);
 
         for (int i = 0; i < IO_TEST_TRIAL_COUNT + 1; ++i) {
             if (i == 1) {
@@ -226,48 +230,30 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
             String vmName = "test_vm_io_" + i;
             mInner.forceCreateNewVirtualMachine(vmName, config);
             VirtualMachine vm = mInner.getVirtualMachineManager().get(vmName);
-            VirtioBlkVmEventListener listener = new VirtioBlkVmEventListener(readRates, isRand);
-            listener.runToFinish(TAG, vm);
+            BenchmarkVmListener.create(new VirtioBlkListener(readRates, isRand))
+                    .runToFinish(TAG, vm);
         }
         reportMetrics(
-                readRates,
-                isRand ? "virtio-blk/rand_read_" : "virtio-blk/seq_read_",
-                "_mb_per_sec");
+                readRates, isRand ? "virtio-blk/rand_read" : "virtio-blk/seq_read", "mb_per_sec");
     }
 
-    private void reportMetrics(List<Double> data, String base, String suffix) {
-        double sum = 0;
-        double min = Double.MAX_VALUE;
-        double max = Double.MIN_VALUE;
-        for (double d : data) {
-            sum += d;
-            if (min > d) min = d;
-            if (max < d) max = d;
-        }
-        double avg = sum / data.size();
-        double sqSum = 0;
-        for (double d : data) {
-            sqSum += (d - avg) * (d - avg);
-        }
-        double stdDev = Math.sqrt(sqSum / (data.size() - 1));
-
+    private void reportMetrics(List<Double> metrics, String name, String unit) {
+        Map<String, Double> stats = mMetricsProcessor.computeStats(metrics, name, unit);
         Bundle bundle = new Bundle();
-        String prefix = METRIC_NAME_PREFIX + base;
-        bundle.putDouble(prefix + "min" + suffix, min);
-        bundle.putDouble(prefix + "max" + suffix, max);
-        bundle.putDouble(prefix + "average" + suffix, avg);
-        bundle.putDouble(prefix + "stdev" + suffix, stdDev);
+        for (Map.Entry<String, Double> entry : stats.entrySet()) {
+            bundle.putDouble(entry.getKey(), entry.getValue());
+        }
         mInstrumentation.sendStatus(0, bundle);
     }
 
-    private static class VirtioBlkVmEventListener extends VmEventListener {
+    private static class VirtioBlkListener implements BenchmarkVmListener.InnerListener {
         private static final String FILENAME = APEX_ETC_FS + "microdroid_super.img";
 
         private final long mFileSizeBytes;
         private final List<Double> mReadRates;
         private final boolean mIsRand;
 
-        VirtioBlkVmEventListener(List<Double> readRates, boolean isRand) {
+        VirtioBlkListener(List<Double> readRates, boolean isRand) {
             File file = new File(FILENAME);
             try {
                 mFileSizeBytes = Files.size(file.toPath());
@@ -280,32 +266,26 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         }
 
         @Override
-        public void onPayloadReady(VirtualMachine vm) {
-            try {
-                IBenchmarkService benchmarkService =
-                        IBenchmarkService.Stub.asInterface(
-                                vm.connectToVsockServer(IBenchmarkService.SERVICE_PORT).get());
-                double elapsedSeconds =
-                        benchmarkService.readFile(FILENAME, mFileSizeBytes, mIsRand);
-                double fileSizeMb = mFileSizeBytes / SIZE_MB;
-                mReadRates.add(fileSizeMb / elapsedSeconds);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-            forceStop(vm);
+        public void onPayloadReady(VirtualMachine vm, IBenchmarkService benchmarkService)
+                throws RemoteException {
+            double elapsedSeconds = benchmarkService.readFile(FILENAME, mFileSizeBytes, mIsRand);
+            double fileSizeMb = mFileSizeBytes / SIZE_MB;
+            mReadRates.add(fileSizeMb / elapsedSeconds);
         }
     }
 
     @Test
     public void testMemoryUsage() throws Exception {
         final String vmName = "test_vm_mem_usage";
-        VirtualMachineConfig.Builder builder = mInner.newVmConfigBuilder(
-                "assets/vm_config_io.json");
-        VirtualMachineConfig config = builder.debugLevel(DebugLevel.NONE).memoryMib(256).build();
+        VirtualMachineConfig config =
+                mInner.newVmConfigBuilder("assets/vm_config_io.json")
+                        .debugLevel(DebugLevel.NONE)
+                        .memoryMib(256)
+                        .build();
         mInner.forceCreateNewVirtualMachine(vmName, config);
         VirtualMachine vm = mInner.getVirtualMachineManager().get(vmName);
         MemoryUsageListener listener = new MemoryUsageListener();
-        listener.runToFinish(TAG, vm);
+        BenchmarkVmListener.create(listener).runToFinish(TAG, vm);
 
         double mem_overall = 256.0;
         double mem_total = (double) listener.mMemTotal / 1024.0;
@@ -329,7 +309,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         mInstrumentation.sendStatus(0, bundle);
     }
 
-    private static class MemoryUsageListener extends VmEventListener {
+    private static class MemoryUsageListener implements BenchmarkVmListener.InnerListener {
         public long mMemTotal;
         public long mMemFree;
         public long mMemAvailable;
@@ -338,55 +318,38 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         public long mSlab;
 
         @Override
-        public void onPayloadReady(VirtualMachine vm) {
-            try {
-                IBenchmarkService service =
-                        IBenchmarkService.Stub.asInterface(
-                                vm.connectToVsockServer(IBenchmarkService.SERVICE_PORT).get());
-
-                mMemTotal = service.getMemInfoEntry("MemTotal");
-                mMemFree = service.getMemInfoEntry("MemFree");
-                mMemAvailable = service.getMemInfoEntry("MemAvailable");
-                mBuffers = service.getMemInfoEntry("Buffers");
-                mCached = service.getMemInfoEntry("Cached");
-                mSlab = service.getMemInfoEntry("Slab");
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-            forceStop(vm);
+        public void onPayloadReady(VirtualMachine vm, IBenchmarkService service)
+                throws RemoteException {
+            mMemTotal = service.getMemInfoEntry("MemTotal");
+            mMemFree = service.getMemInfoEntry("MemFree");
+            mMemAvailable = service.getMemInfoEntry("MemAvailable");
+            mBuffers = service.getMemInfoEntry("Buffers");
+            mCached = service.getMemInfoEntry("Cached");
+            mSlab = service.getMemInfoEntry("Slab");
         }
     }
 
-    private static class VsockVmEventListener extends VmEventListener {
+    private static class VsockListener implements BenchmarkVmListener.InnerListener {
         private static final int NUM_BYTES_TO_TRANSFER = 48 * 1024 * 1024;
 
         private final List<Double> mReadRates;
         private final int mPort;
 
-        VsockVmEventListener(List<Double> readRates, int port) {
+        VsockListener(List<Double> readRates, int port) {
             mReadRates = readRates;
             mPort = port;
         }
 
         @Override
-        public void onPayloadReady(VirtualMachine vm) {
-            try {
-                IBenchmarkService benchmarkService =
-                        IBenchmarkService.Stub.asInterface(
-                                vm.connectToVsockServer(IBenchmarkService.SERVICE_PORT).get());
-                assertThat(benchmarkService).isNotNull();
-                AtomicReference<Double> sendRate = new AtomicReference();
+        public void onPayloadReady(VirtualMachine vm, IBenchmarkService benchmarkService)
+                throws RemoteException {
+            AtomicReference<Double> sendRate = new AtomicReference();
 
-                int serverFd = benchmarkService.initVsockServer(mPort);
-                new Thread(() -> sendRate.set(runVsockClientAndSendData(vm))).start();
-                benchmarkService.runVsockServerAndReceiveData(serverFd, NUM_BYTES_TO_TRANSFER);
+            int serverFd = benchmarkService.initVsockServer(mPort);
+            new Thread(() -> sendRate.set(runVsockClientAndSendData(vm))).start();
+            benchmarkService.runVsockServerAndReceiveData(serverFd, NUM_BYTES_TO_TRANSFER);
 
-                mReadRates.add(sendRate.get());
-            } catch (Exception e) {
-                Log.e(TAG, "Test failed in VM:" + e);
-                throw new RuntimeException(e);
-            }
-            forceStop(vm);
+            mReadRates.add(sendRate.get());
         }
 
         private double runVsockClientAndSendData(VirtualMachine vm) {
