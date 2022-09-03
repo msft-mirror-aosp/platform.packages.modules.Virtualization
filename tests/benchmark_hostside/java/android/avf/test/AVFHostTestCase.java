@@ -16,15 +16,18 @@
 
 package android.avf.test;
 
-import android.platform.test.annotations.RootPermissionTest;
-
 import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestMetrics;
 
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 
-import com.android.microdroid.test.CommandRunner;
-import com.android.microdroid.test.MicrodroidHostTestCaseBase;
+import static org.junit.Assume.assumeTrue;
+
+import android.platform.test.annotations.RootPermissionTest;
+
+import com.android.microdroid.test.common.MetricsProcessor;
+import com.android.microdroid.test.host.CommandRunner;
+import com.android.microdroid.test.host.MicrodroidHostTestCaseBase;
 import com.android.tradefed.log.LogUtil.CLog;
 import com.android.tradefed.testtype.DeviceJUnit4ClassRunner;
 import com.android.tradefed.util.CommandResult;
@@ -34,6 +37,9 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -57,7 +63,9 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     private static final int BOOT_COMPLETE_TIMEOUT_MS = 10 * 60 * 1000;
     private static final double NANOS_IN_SEC = 1_000_000_000.0;
     private static final int ROUND_COUNT = 5;
-    private static final String METRIC_PREFIX = "avf_perf/compos/";
+    private static final String METRIC_PREFIX = "avf_perf/hostside/";
+
+    private final MetricsProcessor mMetricsProcessor = new MetricsProcessor(METRIC_PREFIX);
 
     @Before
     public void setUp() throws Exception {
@@ -66,8 +74,9 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
 
     @After
     public void tearDown() throws Exception {
-        // Reboot to prevent previous staged session.
-        rebootAndWaitBootCompleted();
+        // Set PKVM enable and reboot to prevent previous staged session.
+        setPKVMStatusWithRebootToBootloader(true);
+        rebootFromBootloaderAndWaitBootCompleted();
 
         CommandRunner android = new CommandRunner(getDevice());
 
@@ -76,67 +85,126 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     }
 
     @Test
+    public void testBootEnableAndDisablePKVM() throws Exception {
+        testPKVMStatusSwitchSupported();
+
+        List<Double> bootWithPKVMEnableTime = new ArrayList<>(ROUND_COUNT);
+        List<Double> bootWithoutPKVMEnableTime = new ArrayList<>(ROUND_COUNT);
+
+        for (int round = 0; round < ROUND_COUNT; ++round) {
+
+            setPKVMStatusWithRebootToBootloader(true);
+            long start = System.nanoTime();
+            rebootFromBootloaderAndWaitBootCompleted();
+            long elapsedWithPKVMEnable = System.nanoTime() - start;
+            double elapsedSec = elapsedWithPKVMEnable / NANOS_IN_SEC;
+            bootWithPKVMEnableTime.add(elapsedSec);
+            CLog.i("Boot time with PKVM enable took " + elapsedSec + "s");
+
+            setPKVMStatusWithRebootToBootloader(false);
+            start = System.nanoTime();
+            rebootFromBootloaderAndWaitBootCompleted();
+            long elapsedWithoutPKVMEnable = System.nanoTime() - start;
+            elapsedSec = elapsedWithoutPKVMEnable / NANOS_IN_SEC;
+            bootWithoutPKVMEnableTime.add(elapsedSec);
+            CLog.i("Boot time with PKVM disable took " + elapsedSec + "s");
+        }
+
+        reportMetric(bootWithPKVMEnableTime, "boot_time_with_pkvm_enable", "s");
+        reportMetric(bootWithoutPKVMEnableTime, "boot_time_with_pkvm_disable", "s");
+    }
+
+    @Test
     public void testBootWithAndWithoutCompOS() throws Exception {
         assume().withMessage("Skip on CF; too slow").that(isCuttlefish()).isFalse();
 
-        double[] bootWithCompOsTime = new double[ROUND_COUNT];
-        double[] bootWithoutCompOsTime = new double[ROUND_COUNT];
+        List<Double> bootWithCompOsTime = new ArrayList<>(ROUND_COUNT);
+        List<Double> bootWithoutCompOsTime = new ArrayList<>(ROUND_COUNT);
 
         for (int round = 0; round < ROUND_COUNT; ++round) {
 
             // Boot time with compilation OS test.
             reInstallApex(REINSTALL_APEX_TIMEOUT_SEC);
             compileStagedApex(COMPILE_STAGED_APEX_TIMEOUT_SEC);
+            getDevice().nonBlockingReboot();
             long start = System.nanoTime();
-            rebootAndWaitBootCompleted();
+            waitForBootCompleted();
             long elapsedWithCompOS = System.nanoTime() - start;
             double elapsedSec = elapsedWithCompOS / NANOS_IN_SEC;
-            bootWithCompOsTime[round] = elapsedSec;
+            bootWithCompOsTime.add(elapsedSec);
             CLog.i("Boot time with compilation OS took " + elapsedSec + "s");
 
             // Boot time without compilation OS test.
             reInstallApex(REINSTALL_APEX_TIMEOUT_SEC);
+            getDevice().nonBlockingReboot();
             start = System.nanoTime();
-            rebootAndWaitBootCompleted();
+            waitForBootCompleted();
             long elapsedWithoutCompOS = System.nanoTime() - start;
             elapsedSec = elapsedWithoutCompOS / NANOS_IN_SEC;
-            bootWithoutCompOsTime[round] = elapsedSec;
+            bootWithoutCompOsTime.add(elapsedSec);
             CLog.i("Boot time without compilation OS took " + elapsedSec + "s");
         }
 
-        reportMetric("boot_time_with_compos", "s", bootWithCompOsTime);
-        reportMetric("boot_time_without_compos", "s", bootWithoutCompOsTime);
+        reportMetric(bootWithCompOsTime, "boot_time_with_compos", "s");
+        reportMetric(bootWithoutCompOsTime, "boot_time_without_compos", "s");
     }
 
-    private void reportMetric(String name, String unit, double[] values) {
-        double sum = 0;
-        double min = Double.MAX_VALUE;
-        double max = Double.MIN_VALUE;
-
-        for (double val : values) {
-            sum += val;
-            min = val < min ? val : min;
-            max = val > max ? val : max;
+    private void testPKVMStatusSwitchSupported() throws Exception {
+        if (!getDevice().isStateBootloaderOrFastbootd()) {
+            getDevice().rebootIntoBootloader();
         }
+        getDevice().waitForDeviceBootloader();
 
-        double average = sum / values.length;
+        CommandResult result;
+        result = getDevice().executeFastbootCommand("oem", "pkvm", "status");
+        rebootFromBootloaderAndWaitBootCompleted();
+        assumeTrue(!result.getStderr().contains("Invalid oem command"));
+    }
 
-        double variance = 0;
-        for (double val : values) {
-            final double tmp = val - average;
-            variance += tmp * tmp;
-        }
-        double stdev = Math.sqrt(variance / (double) (values.length - 1));
-
+    private void reportMetric(List<Double> data, String name, String unit) {
+        Map<String, Double> stats = mMetricsProcessor.computeStats(data, name, unit);
         TestMetrics metrics = new TestMetrics();
-        metrics.addTestMetric(METRIC_PREFIX + name + "_average_" + unit, Double.toString(average));
-        metrics.addTestMetric(METRIC_PREFIX + name + "_min_" + unit, Double.toString(min));
-        metrics.addTestMetric(METRIC_PREFIX + name + "_max_" + unit, Double.toString(max));
-        metrics.addTestMetric(METRIC_PREFIX + name + "_stdev_" + unit, Double.toString(stdev));
+        for (Map.Entry<String, Double> entry : stats.entrySet()) {
+            metrics.addTestMetric(entry.getKey(), Double.toString(entry.getValue()));
+        }
     }
 
-    private void rebootAndWaitBootCompleted() throws Exception {
-        getDevice().nonBlockingReboot();
+    private void setPKVMStatusWithRebootToBootloader(boolean isEnable) throws Exception {
+
+        if (!getDevice().isStateBootloaderOrFastbootd()) {
+            getDevice().rebootIntoBootloader();
+        }
+        getDevice().waitForDeviceBootloader();
+
+        CommandResult result;
+        if (isEnable) {
+            result = getDevice().executeFastbootCommand("oem", "pkvm", "enable");
+        } else {
+            result = getDevice().executeFastbootCommand("oem", "pkvm", "disable");
+        }
+
+        result = getDevice().executeFastbootCommand("oem", "pkvm", "status");
+        CLog.i("Gets PKVM status : " + result);
+
+        String expectedOutput = "";
+
+        if (isEnable) {
+            expectedOutput = "pkvm is enabled";
+        } else {
+            expectedOutput = "pkvm is disabled";
+        }
+        assertWithMessage("Failed to set PKVM status. Reason: " + result)
+            .that(result.toString()).ignoringCase().contains(expectedOutput);
+    }
+
+    private void rebootFromBootloaderAndWaitBootCompleted() throws Exception {
+        getDevice().executeFastbootCommand("reboot");
+        getDevice().waitForDeviceOnline(BOOT_COMPLETE_TIMEOUT_MS);
+        getDevice().waitForBootComplete(BOOT_COMPLETE_TIMEOUT_MS);
+        getDevice().enableAdbRoot();
+    }
+
+    private void waitForBootCompleted() throws Exception {
         getDevice().waitForDeviceOnline(BOOT_COMPLETE_TIMEOUT_MS);
         getDevice().waitForBootComplete(BOOT_COMPLETE_TIMEOUT_MS);
         getDevice().enableAdbRoot();
