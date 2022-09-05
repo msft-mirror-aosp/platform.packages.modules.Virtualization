@@ -10,7 +10,7 @@ android_test {
     ],
     srcs: ["src/java/**/*.java"],
     static_libs: [
-        "MicroroidDeviceTestHelper",
+        "MicrodroidDeviceTestHelper",
         "androidx.test.runner",
         "androidx.test.ext.junit",
         "authfs_test_apk_assets",
@@ -28,7 +28,6 @@ android_test {
     min_sdk_version: "33",
 }
 
-// TODO(jiyong): make this a binary, not a shared library
 cc_library_shared {
     name: "MicrodroidTestNativeLib",
     srcs: ["src/native/testbinary.cpp"],
