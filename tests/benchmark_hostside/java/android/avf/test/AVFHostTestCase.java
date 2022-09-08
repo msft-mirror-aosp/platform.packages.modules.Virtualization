@@ -34,6 +34,7 @@ import com.android.tradefed.util.CommandResult;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -66,6 +67,7 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     private static final String METRIC_PREFIX = "avf_perf/hostside/";
 
     private final MetricsProcessor mMetricsProcessor = new MetricsProcessor(METRIC_PREFIX);
+    @Rule public TestMetrics mMetrics = new TestMetrics();
 
     @Before
     public void setUp() throws Exception {
@@ -86,7 +88,7 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
 
     @Test
     public void testBootEnableAndDisablePKVM() throws Exception {
-        testPKVMStatusSwitchSupported();
+        skipIfPKVMStatusSwitchNotSupported();
 
         List<Double> bootWithPKVMEnableTime = new ArrayList<>(ROUND_COUNT);
         List<Double> bootWithoutPKVMEnableTime = new ArrayList<>(ROUND_COUNT);
@@ -149,7 +151,7 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
         reportMetric(bootWithoutCompOsTime, "boot_time_without_compos", "s");
     }
 
-    private void testPKVMStatusSwitchSupported() throws Exception {
+    private void skipIfPKVMStatusSwitchNotSupported() throws Exception {
         if (!getDevice().isStateBootloaderOrFastbootd()) {
             getDevice().rebootIntoBootloader();
         }
@@ -159,13 +161,15 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
         result = getDevice().executeFastbootCommand("oem", "pkvm", "status");
         rebootFromBootloaderAndWaitBootCompleted();
         assumeTrue(!result.getStderr().contains("Invalid oem command"));
+        // Skip the test if running on a build with pkvm_enabler. Disabling pKVM
+        // for such builds results in a bootloop.
+        assumeTrue(result.getStderr().contains("misc=auto"));
     }
 
     private void reportMetric(List<Double> data, String name, String unit) {
         Map<String, Double> stats = mMetricsProcessor.computeStats(data, name, unit);
-        TestMetrics metrics = new TestMetrics();
         for (Map.Entry<String, Double> entry : stats.entrySet()) {
-            metrics.addTestMetric(entry.getKey(), Double.toString(entry.getValue()));
+            mMetrics.addTestMetric(entry.getKey(), entry.getValue().toString());
         }
     }
 

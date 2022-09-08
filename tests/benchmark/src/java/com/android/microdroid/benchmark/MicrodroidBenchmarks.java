@@ -31,8 +31,8 @@ import android.system.virtualmachine.VirtualMachineConfig.DebugLevel;
 import android.system.virtualmachine.VirtualMachineException;
 import android.util.Log;
 
-import com.android.microdroid.test.MicrodroidDeviceTestBase;
 import com.android.microdroid.test.common.MetricsProcessor;
+import com.android.microdroid.test.device.MicrodroidDeviceTestBase;
 import com.android.microdroid.testservice.IBenchmarkService;
 
 import org.junit.Before;
@@ -268,9 +268,8 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         @Override
         public void onPayloadReady(VirtualMachine vm, IBenchmarkService benchmarkService)
                 throws RemoteException {
-            double elapsedSeconds = benchmarkService.readFile(FILENAME, mFileSizeBytes, mIsRand);
-            double fileSizeMb = mFileSizeBytes / SIZE_MB;
-            mReadRates.add(fileSizeMb / elapsedSeconds);
+            double readRate = benchmarkService.measureReadRate(FILENAME, mFileSizeBytes, mIsRand);
+            mReadRates.add(readRate);
         }
     }
 
