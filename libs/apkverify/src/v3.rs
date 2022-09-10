@@ -15,9 +15,8 @@
  */
 
 //! Verifies APK Signature Scheme V3
-
-// TODO(jooyung) remove this
-#![allow(dead_code)]
+//!
+//! [v3 verification]: https://source.android.com/security/apksigning/v3#verification
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
@@ -38,9 +37,6 @@ pub const APK_SIGNATURE_SCHEME_V3_BLOCK_ID: u32 = 0xf05368c0;
 
 // TODO(jooyung): get "ro.build.version.sdk"
 const SDK_INT: u32 = 31;
-
-/// Data model for Signature Scheme V3
-/// https://source.android.com/security/apksigning/v3#verification
 
 type Signers = LengthPrefixed<Vec<LengthPrefixed<Signer>>>;
 
@@ -63,6 +59,7 @@ struct SignedData {
     certificates: LengthPrefixed<Vec<LengthPrefixed<X509Certificate>>>,
     min_sdk: u32,
     max_sdk: u32,
+    #[allow(dead_code)]
     additional_attributes: LengthPrefixed<Vec<LengthPrefixed<AdditionalAttributes>>>,
 }
 
@@ -128,14 +125,14 @@ pub fn get_public_key_der<P: AsRef<Path>>(path: P) -> Result<Box<[u8]>> {
     })
 }
 
-/// Gets the APK digest.
+/// Gets the v4 [apk_digest].
+///
+/// [apk_digest]: https://source.android.com/docs/security/apksigning/v4#apk-digest
 pub fn pick_v4_apk_digest<R: Read + Seek>(apk: R) -> Result<(u32, Box<[u8]>)> {
     let mut sections = ApkSections::new(apk)?;
     let mut block = sections.find_signature(APK_SIGNATURE_SCHEME_V3_BLOCK_ID)?;
     let signers = block.read::<Signers>()?;
-    if signers.len() != 1 {
-        bail!("should only have one signer");
-    }
+    ensure!(signers.len() == 1, "should only have one signer");
     signers[0].pick_v4_apk_digest()
 }
 
@@ -147,7 +144,7 @@ impl Signer {
             .signatures
             .iter()
             .filter(|sig| is_supported_signature_algorithm(sig.signature_algorithm_id))
-            .max_by_key(|sig| rank_signature_algorithm(sig.signature_algorithm_id).unwrap())
+            .max_by_key(|sig| get_signature_algorithm_rank(sig.signature_algorithm_id).unwrap())
             .ok_or_else(|| anyhow!("No supported signatures found"))?)
     }
 
@@ -162,6 +159,7 @@ impl Signer {
         Ok((digest.signature_algorithm_id, digest.digest.as_ref().to_vec().into_boxed_slice()))
     }
 
+    /// The steps in this method implements APK Signature Scheme v3 verification step 3.
     fn verify<R: Read + Seek>(&self, sections: &mut ApkSections<R>) -> Result<Box<[u8]>> {
         // 1. Choose the strongest supported signature algorithm ID from signatures.
         let strongest = self.strongest_signature()?;
@@ -301,6 +299,39 @@ impl ReadFromBytes for Digest {
 }
 
 #[inline]
-fn to_hex_string(buf: &[u8]) -> String {
+pub(crate) fn to_hex_string(buf: &[u8]) -> String {
     buf.iter().map(|b| format!("{:02X}", b)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+
+    #[test]
+    fn test_pick_v4_apk_digest_only_with_v3_dsa_sha256() {
+        check_v4_apk_digest(
+            "tests/data/v3-only-with-dsa-sha256-1024.apk",
+            SIGNATURE_DSA_WITH_SHA256,
+            "0DF2426EA33AEDAF495D88E5BE0C6A1663FF0A81C5ED12D5B2929AE4B4300F2F",
+        );
+    }
+
+    #[test]
+    fn test_pick_v4_apk_digest_only_with_v3_pkcs1_sha512() {
+        check_v4_apk_digest(
+            "tests/data/v3-only-with-rsa-pkcs1-sha512-1024.apk",
+            SIGNATURE_RSA_PKCS1_V1_5_WITH_SHA512,
+            "9B9AE02DA60B18999BF541790F00D380006FDF0655C3C482AA0BB0AF17CF7A42\
+             ECF56B973518546C9080B2FEF83027E895ED2882BFC88EA19790BBAB29AF53B3",
+        );
+    }
+
+    fn check_v4_apk_digest(apk_filename: &str, expected_algorithm: u32, expected_digest: &str) {
+        let apk_file = File::open(apk_filename).unwrap();
+        let (signature_algorithm_id, apk_digest) = pick_v4_apk_digest(apk_file).unwrap();
+
+        assert_eq!(expected_algorithm, signature_algorithm_id);
+        assert_eq!(expected_digest, to_hex_string(apk_digest.as_ref()));
+    }
 }
