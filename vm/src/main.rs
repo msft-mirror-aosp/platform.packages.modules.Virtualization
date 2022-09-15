@@ -24,122 +24,104 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
 };
 use anyhow::{Context, Error};
 use binder::ProcessState;
+use clap::Parser;
 use create_idsig::command_create_idsig;
 use create_partition::command_create_partition;
 use run::{command_run, command_run_app};
 use rustutils::system_properties;
 use std::path::{Path, PathBuf};
-use structopt::clap::AppSettings;
-use structopt::StructOpt;
 
 #[derive(Debug)]
 struct Idsigs(Vec<PathBuf>);
 
-#[derive(StructOpt)]
-#[structopt(no_version, global_settings = &[AppSettings::DisableVersion])]
+#[derive(Parser)]
 enum Opt {
     /// Run a virtual machine with a config in APK
     RunApp {
-        /// Name of VM
-        #[structopt(long)]
-        name: Option<String>,
-
         /// Path to VM Payload APK
-        #[structopt(parse(from_os_str))]
         apk: PathBuf,
 
         /// Path to idsig of the APK
-        #[structopt(parse(from_os_str))]
         idsig: PathBuf,
 
         /// Path to the instance image. Created if not exists.
-        #[structopt(parse(from_os_str))]
         instance: PathBuf,
 
         /// Path to VM config JSON within APK (e.g. assets/vm_config.json)
         config_path: String,
 
+        /// Name of VM
+        #[clap(long)]
+        name: Option<String>,
+
         /// Detach VM from the terminal and run in the background
-        #[structopt(short, long)]
+        #[clap(short, long)]
         daemonize: bool,
 
         /// Path to file for VM console output.
-        #[structopt(long)]
+        #[clap(long)]
         console: Option<PathBuf>,
 
         /// Path to file for VM log output.
-        #[structopt(long)]
+        #[clap(long)]
         log: Option<PathBuf>,
 
         /// Path to file where ramdump is recorded on kernel panic
-        #[structopt(long)]
+        #[clap(long)]
         ramdump: Option<PathBuf>,
 
         /// Debug level of the VM. Supported values: "none" (default), "app_only", and "full".
-        #[structopt(long, default_value = "none", parse(try_from_str=parse_debug_level))]
+        #[clap(long, default_value = "none", value_parser = parse_debug_level)]
         debug: DebugLevel,
 
         /// Run VM in protected mode.
-        #[structopt(short, long)]
+        #[clap(short, long)]
         protected: bool,
 
         /// Memory size (in MiB) of the VM. If unspecified, defaults to the value of `memory_mib`
         /// in the VM config file.
-        #[structopt(short, long)]
+        #[clap(short, long)]
         mem: Option<u32>,
 
         /// Number of vCPUs in the VM. If unspecified, defaults to 1.
-        #[structopt(long)]
+        #[clap(long)]
         cpus: Option<u32>,
 
-        /// Host CPUs where vCPUs are run on. If unspecified, vCPU runs on any host CPU.
-        #[structopt(long)]
-        cpu_affinity: Option<String>,
-
         /// Comma separated list of task profile names to apply to the VM
-        #[structopt(long)]
+        #[clap(long)]
         task_profiles: Vec<String>,
 
         /// Paths to extra idsig files.
-        #[structopt(long = "extra-idsig")]
+        #[clap(long = "extra-idsig")]
         extra_idsigs: Vec<PathBuf>,
     },
     /// Run a virtual machine
     Run {
-        /// Name of VM
-        #[structopt(long)]
-        name: Option<String>,
-
         /// Path to VM config JSON
-        #[structopt(parse(from_os_str))]
         config: PathBuf,
 
+        /// Name of VM
+        #[clap(long)]
+        name: Option<String>,
+
         /// Detach VM from the terminal and run in the background
-        #[structopt(short, long)]
+        #[clap(short, long)]
         daemonize: bool,
 
         /// Number of vCPUs in the VM. If unspecified, defaults to 1.
-        #[structopt(long)]
+        #[clap(long)]
         cpus: Option<u32>,
 
-        /// Host CPUs where vCPUs are run on. If unspecified, vCPU runs on any host CPU. The format
-        /// can be either a comma-separated list of CPUs or CPU ranges to run vCPUs on (e.g.
-        /// "0,1-3,5" to choose host CPUs 0, 1, 2, 3, and 5, or a colon-separated list of
-        /// assignments of vCPU-to-host-CPU assignments e.g. "0=0:1=1:2=2" to map vCPU 0 to host
-        /// CPU 0 and so on.
-        #[structopt(long)]
-        cpu_affinity: Option<String>,
-
         /// Comma separated list of task profile names to apply to the VM
-        #[structopt(long)]
+        #[clap(long)]
         task_profiles: Vec<String>,
 
         /// Path to file for VM console output.
-        #[structopt(long)]
+        #[clap(long)]
         console: Option<PathBuf>,
 
         /// Path to file for VM log output.
-        #[structopt(long)]
+        #[clap(long)]
         log: Option<PathBuf>,
     },
     /// Stop a virtual machine running in the background
@@ -154,23 +136,22 @@ enum Opt {
     /// Create a new empty partition to be used as a writable partition for a VM
     CreatePartition {
         /// Path at which to create the image file
-        #[structopt(parse(from_os_str))]
         path: PathBuf,
 
         /// The desired size of the partition, in bytes.
         size: u64,
 
         /// Type of the partition
-        #[structopt(short="t", long="type", default_value="raw", parse(try_from_str=parse_partition_type))]
+        #[clap(short = 't', long = "type", default_value = "raw",
+               value_parser = parse_partition_type)]
         partition_type: PartitionType,
     },
     /// Creates or update the idsig file by digesting the input APK file.
     CreateIdsig {
         /// Path to VM Payload APK
-        #[structopt(parse(from_os_str))]
         apk: PathBuf,
+
         /// Path to idsig of the APK
-        #[structopt(parse(from_os_str))]
         path: PathBuf,
     },
 }
@@ -194,7 +175,7 @@ fn parse_partition_type(s: &str) -> Result<PartitionType, String> {
 
 fn main() -> Result<(), Error> {
     env_logger::init();
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     // We need to start the thread pool for Binder to work properly, especially link_to_death.
     ProcessState::start_thread_pool();
@@ -216,7 +197,6 @@ fn main() -> Result<(), Error> {
             protected,
             mem,
             cpus,
-            cpu_affinity,
             task_profiles,
             extra_idsigs,
         } => command_run_app(
@@ -234,11 +214,10 @@ fn main() -> Result<(), Error> {
             protected,
             mem,
             cpus,
-            cpu_affinity,
             task_profiles,
             &extra_idsigs,
         ),
-        Opt::Run { name, config, daemonize, cpus, cpu_affinity, task_profiles, console, log } => {
+        Opt::Run { name, config, daemonize, cpus, task_profiles, console, log } => {
             command_run(
                 name,
                 service.as_ref(),
@@ -248,7 +227,6 @@ fn main() -> Result<(), Error> {
                 log.as_deref(),
                 /* mem */ None,
                 cpus,
-                cpu_affinity,
                 task_profiles,
             )
         }
