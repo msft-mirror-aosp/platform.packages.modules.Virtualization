@@ -16,6 +16,7 @@
 
 //! Verifies APK/APEX signing with v2/v3 scheme
 
+mod algorithms;
 mod bytes_ext;
 mod sigutil;
 #[allow(dead_code)]
@@ -23,5 +24,5 @@ pub mod testing;
 mod v3;
 mod ziputil;
 
-// TODO(jooyung) fallback to v2 when v3 not found
+// TODO(b/197052981) fallback to v2 when v3 not found
 pub use v3::{get_public_key_der, pick_v4_apk_digest, verify};

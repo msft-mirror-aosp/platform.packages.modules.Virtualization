@@ -18,24 +18,23 @@
 //!
 //! [v3 verification]: https://source.android.com/security/apksigning/v3#verification
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use bytes::Bytes;
-use openssl::hash::MessageDigest;
+use num_traits::FromPrimitive;
 use openssl::pkey::{self, PKey};
-use openssl::rsa::Padding;
-use openssl::sign::Verifier;
 use openssl::x509::X509;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::ops::Range;
 use std::path::Path;
 
+use crate::algorithms::SignatureAlgorithmID;
 use crate::bytes_ext::{BytesExt, LengthPrefixed, ReadFromBytes};
 use crate::sigutil::*;
 
 pub const APK_SIGNATURE_SCHEME_V3_BLOCK_ID: u32 = 0xf05368c0;
 
-// TODO(jooyung): get "ro.build.version.sdk"
+// TODO(b/190343842): get "ro.build.version.sdk"
 const SDK_INT: u32 = 31;
 
 type Signers = LengthPrefixed<Vec<LengthPrefixed<Signer>>>;
@@ -71,6 +70,7 @@ impl SignedData {
 
 #[derive(Debug)]
 struct Signature {
+    /// TODO(b/246254355): Change the type of signature_algorithm_id to SignatureAlgorithmID
     signature_algorithm_id: u32,
     signature: LengthPrefixed<Bytes>,
 }
@@ -105,12 +105,11 @@ where
     let supported = signers.iter().filter(|s| s.sdk_range().contains(&SDK_INT)).collect::<Vec<_>>();
 
     // there should be exactly one
-    if supported.len() != 1 {
-        bail!(
-            "APK Signature Scheme V3 only supports one signer: {} signers found.",
-            supported.len()
-        )
-    }
+    ensure!(
+        supported.len() == 1,
+        "APK Signature Scheme V3 only supports one signer: {} signers found.",
+        supported.len()
+    );
 
     // Call the supplied function
     f((supported[0], sections))
@@ -143,9 +142,9 @@ impl Signer {
         Ok(self
             .signatures
             .iter()
-            .filter(|sig| is_supported_signature_algorithm(sig.signature_algorithm_id))
-            .max_by_key(|sig| get_signature_algorithm_rank(sig.signature_algorithm_id).unwrap())
-            .ok_or_else(|| anyhow!("No supported signatures found"))?)
+            .filter(|sig| SignatureAlgorithmID::from_u32(sig.signature_algorithm_id).is_some())
+            .max_by_key(|sig| SignatureAlgorithmID::from_u32(sig.signature_algorithm_id).unwrap())
+            .context("No supported signatures found")?)
     }
 
     fn pick_v4_apk_digest(&self) -> Result<(u32, Box<[u8]>)> {
@@ -155,7 +154,7 @@ impl Signer {
             .digests
             .iter()
             .find(|&dig| dig.signature_algorithm_id == strongest.signature_algorithm_id)
-            .ok_or_else(|| anyhow!("Digest not found"))?;
+            .context("Digest not found")?;
         Ok((digest.signature_algorithm_id, digest.digest.as_ref().to_vec().into_boxed_slice()))
     }
 
@@ -174,20 +173,20 @@ impl Signer {
 
         // 3. Verify the min and max SDK versions in the signed data match those specified for the
         //    signer.
-        if self.sdk_range() != signed_data.sdk_range() {
-            bail!("SDK versions mismatch between signed and unsigned in v3 signer block.");
-        }
+        ensure!(
+            self.sdk_range() == signed_data.sdk_range(),
+            "SDK versions mismatch between signed and unsigned in v3 signer block."
+        );
 
         // 4. Verify that the ordered list of signature algorithm IDs in digests and signatures is
         //    identical. (This is to prevent signature stripping/addition.)
-        if !self
-            .signatures
-            .iter()
-            .map(|sig| sig.signature_algorithm_id)
-            .eq(signed_data.digests.iter().map(|dig| dig.signature_algorithm_id))
-        {
-            bail!("Signature algorithms don't match between digests and signatures records");
-        }
+        ensure!(
+            self.signatures
+                .iter()
+                .map(|sig| sig.signature_algorithm_id)
+                .eq(signed_data.digests.iter().map(|dig| dig.signature_algorithm_id)),
+            "Signature algorithms don't match between digests and signatures records"
+        );
 
         // 5. Compute the digest of APK contents using the same digest algorithm as the digest
         //    algorithm used by the signature algorithm.
@@ -199,60 +198,37 @@ impl Signer {
         let computed = sections.compute_digest(digest.signature_algorithm_id)?;
 
         // 6. Verify that the computed digest is identical to the corresponding digest from digests.
-        if computed != digest.digest.as_ref() {
-            bail!(
-                "Digest mismatch: computed={:?} vs expected={:?}",
-                to_hex_string(&computed),
-                to_hex_string(&digest.digest),
-            );
-        }
+        ensure!(
+            computed == digest.digest.as_ref(),
+            "Digest mismatch: computed={:?} vs expected={:?}",
+            to_hex_string(&computed),
+            to_hex_string(&digest.digest),
+        );
 
         // 7. Verify that public key of the first certificate of certificates is identical
         //    to public key.
         let cert = signed_data.certificates.first().context("No certificates listed")?;
         let cert = X509::from_der(cert.as_ref())?;
-        if !cert.public_key()?.public_eq(&public_key) {
-            bail!("Public key mismatch between certificate and signature record");
-        }
+        ensure!(
+            cert.public_key()?.public_eq(&public_key),
+            "Public key mismatch between certificate and signature record"
+        );
 
-        // TODO(jooyung) 8. If the proof-of-rotation attribute exists for the signer verify that the struct is valid and this signer is the last certificate in the list.
+        // TODO(b/245914104)
+        // 8. If the proof-of-rotation attribute exists for the signer verify that the
+        // struct is valid and this signer is the last certificate in the list.
         Ok(self.public_key.to_vec().into_boxed_slice())
     }
 }
 
-fn verify_signed_data(data: &Bytes, signature: &Signature, key: &PKey<pkey::Public>) -> Result<()> {
-    let (pkey_id, padding, digest) = match signature.signature_algorithm_id {
-        SIGNATURE_RSA_PSS_WITH_SHA256 => {
-            (pkey::Id::RSA, Padding::PKCS1_PSS, MessageDigest::sha256())
-        }
-        SIGNATURE_RSA_PSS_WITH_SHA512 => {
-            (pkey::Id::RSA, Padding::PKCS1_PSS, MessageDigest::sha512())
-        }
-        SIGNATURE_RSA_PKCS1_V1_5_WITH_SHA256 | SIGNATURE_VERITY_RSA_PKCS1_V1_5_WITH_SHA256 => {
-            (pkey::Id::RSA, Padding::PKCS1, MessageDigest::sha256())
-        }
-        SIGNATURE_RSA_PKCS1_V1_5_WITH_SHA512 => {
-            (pkey::Id::RSA, Padding::PKCS1, MessageDigest::sha512())
-        }
-        SIGNATURE_ECDSA_WITH_SHA256 | SIGNATURE_VERITY_ECDSA_WITH_SHA256 => {
-            (pkey::Id::EC, Padding::NONE, MessageDigest::sha256())
-        }
-        // TODO(b/190343842) not implemented signature algorithm
-        SIGNATURE_ECDSA_WITH_SHA512
-        | SIGNATURE_DSA_WITH_SHA256
-        | SIGNATURE_VERITY_DSA_WITH_SHA256 => {
-            bail!(
-                "TODO(b/190343842) not implemented signature algorithm: {:#x}",
-                signature.signature_algorithm_id
-            );
-        }
-        _ => bail!("Unsupported signature algorithm: {:#x}", signature.signature_algorithm_id),
-    };
-    ensure!(key.id() == pkey_id, "Public key has the wrong ID");
-    let mut verifier = Verifier::new(digest, key)?;
-    if pkey_id == pkey::Id::RSA {
-        verifier.set_rsa_padding(padding)?;
-    }
+fn verify_signed_data(
+    data: &Bytes,
+    signature: &Signature,
+    public_key: &PKey<pkey::Public>,
+) -> Result<()> {
+    let mut verifier = SignatureAlgorithmID::from_u32(signature.signature_algorithm_id)
+        .context("Unsupported algorithm")?
+        .new_verifier(public_key)?;
     verifier.update(data)?;
     let verified = verifier.verify(&signature.signature)?;
     ensure!(verified, "Signature is invalid ");
@@ -260,7 +236,7 @@ fn verify_signed_data(data: &Bytes, signature: &Signature, key: &PKey<pkey::Publ
 }
 
 // ReadFromBytes implementations
-// TODO(jooyung): add derive macro: #[derive(ReadFromBytes)]
+// TODO(b/190343842): add derive macro: #[derive(ReadFromBytes)]
 
 impl ReadFromBytes for Signer {
     fn read_from_bytes(buf: &mut Bytes) -> Result<Self> {
