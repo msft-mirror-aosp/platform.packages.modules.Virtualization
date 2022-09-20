@@ -17,48 +17,62 @@
 //! Algorithms used for APK Signature Scheme.
 
 use anyhow::{ensure, Result};
-use num_derive::FromPrimitive;
+use num_derive::{FromPrimitive, ToPrimitive};
 use openssl::hash::MessageDigest;
 use openssl::pkey::{self, PKey};
 use openssl::rsa::Padding;
 use openssl::sign::Verifier;
-use std::cmp::Ordering;
 
 /// [Signature Algorithm IDs]: https://source.android.com/docs/security/apksigning/v2#signature-algorithm-ids
+/// [SignatureAlgorithm.java]: (tools/apksig/src/main/java/com/android/apksig/internal/apk/SignatureAlgorithm.java)
 ///
 /// Some of the algorithms are not implemented. See b/197052981.
-#[derive(Clone, Debug, Eq, FromPrimitive)]
+#[derive(Clone, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive)]
 #[repr(u32)]
 pub enum SignatureAlgorithmID {
+    /// RSASSA-PSS with SHA2-256 digest, SHA2-256 MGF1, 32 bytes of salt, trailer: 0xbc, content
+    /// digested using SHA2-256 in 1 MB chunks.
     RsaPssWithSha256 = 0x0101,
+
+    /// RSASSA-PSS with SHA2-512 digest, SHA2-512 MGF1, 64 bytes of salt, trailer: 0xbc, content
+    /// digested using SHA2-512 in 1 MB chunks.
     RsaPssWithSha512 = 0x0102,
+
+    /// RSASSA-PKCS1-v1_5 with SHA2-256 digest, content digested using SHA2-256 in 1 MB chunks.
     RsaPkcs1V15WithSha256 = 0x0103,
+
+    /// RSASSA-PKCS1-v1_5 with SHA2-512 digest, content digested using SHA2-512 in 1 MB chunks.
     RsaPkcs1V15WithSha512 = 0x0104,
+
+    /// ECDSA with SHA2-256 digest, content digested using SHA2-256 in 1 MB chunks.
     EcdsaWithSha256 = 0x0201,
+
+    /// ECDSA with SHA2-512 digest, content digested using SHA2-512 in 1 MB chunks.
     EcdsaWithSha512 = 0x0202,
+
+    /// DSA with SHA2-256 digest, content digested using SHA2-256 in 1 MB chunks.
+    /// Signing is done deterministically according to RFC 6979.
     DsaWithSha256 = 0x0301,
+
+    /// RSASSA-PKCS1-v1_5 with SHA2-256 digest, content digested using SHA2-256 in 4 KB
+    /// chunks, in the same way fsverity operates. This digest and the content length
+    /// (before digestion, 8 bytes in little endian) construct the final digest.
     VerityRsaPkcs1V15WithSha256 = 0x0421,
+
+    /// ECDSA with SHA2-256 digest, content digested using SHA2-256 in 4 KB chunks, in the
+    /// same way fsverity operates. This digest and the content length (before digestion,
+    /// 8 bytes in little endian) construct the final digest.
     VerityEcdsaWithSha256 = 0x0423,
+
+    /// DSA with SHA2-256 digest, content digested using SHA2-256 in 4 KB chunks, in the
+    /// same way fsverity operates. This digest and the content length (before digestion,
+    /// 8 bytes in little endian) construct the final digest.
     VerityDsaWithSha256 = 0x0425,
 }
 
-impl Ord for SignatureAlgorithmID {
-    /// Ranks the signature algorithm according to the corresponding content
-    /// digest algorithm's rank.
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.to_content_digest_algorithm().cmp(&other.to_content_digest_algorithm())
-    }
-}
-
-impl PartialOrd for SignatureAlgorithmID {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for SignatureAlgorithmID {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
+impl Default for SignatureAlgorithmID {
+    fn default() -> Self {
+        SignatureAlgorithmID::DsaWithSha256
     }
 }
 
@@ -132,7 +146,7 @@ impl SignatureAlgorithmID {
         }
     }
 
-    fn to_content_digest_algorithm(&self) -> ContentDigestAlgorithm {
+    pub(crate) fn to_content_digest_algorithm(&self) -> ContentDigestAlgorithm {
         match self {
             SignatureAlgorithmID::RsaPssWithSha256
             | SignatureAlgorithmID::RsaPkcs1V15WithSha256
@@ -160,7 +174,7 @@ impl SignatureAlgorithmID {
 /// [apk digest]: https://source.android.com/docs/security/features/apksigning/v4#apk-digest
 /// [v3 verification]: https://source.android.com/docs/security/apksigning/v3#v3-verification
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum ContentDigestAlgorithm {
+pub(crate) enum ContentDigestAlgorithm {
     ChunkedSha256 = 1,
     VerityChunkedSha256,
     ChunkedSha512,
