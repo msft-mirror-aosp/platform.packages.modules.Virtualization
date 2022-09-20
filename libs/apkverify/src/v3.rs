@@ -85,9 +85,9 @@ type AdditionalAttributes = Bytes;
 
 /// Verifies APK Signature Scheme v3 signatures of the provided APK and returns the public key
 /// associated with the signer in DER format.
-pub fn verify<P: AsRef<Path>>(path: P) -> Result<Box<[u8]>> {
-    let f = File::open(path.as_ref())?;
-    let mut sections = ApkSections::new(f)?;
+pub fn verify<P: AsRef<Path>>(apk_path: P) -> Result<Box<[u8]>> {
+    let apk = File::open(apk_path.as_ref())?;
+    let mut sections = ApkSections::new(apk)?;
     find_signer_and_then(&mut sections, |(signer, sections)| signer.verify(sections))
 }
 
@@ -116,9 +116,9 @@ where
 }
 
 /// Gets the public key (in DER format) that was used to sign the given APK/APEX file
-pub fn get_public_key_der<P: AsRef<Path>>(path: P) -> Result<Box<[u8]>> {
-    let f = File::open(path.as_ref())?;
-    let mut sections = ApkSections::new(f)?;
+pub fn get_public_key_der<P: AsRef<Path>>(apk_path: P) -> Result<Box<[u8]>> {
+    let apk = File::open(apk_path.as_ref())?;
+    let mut sections = ApkSections::new(apk)?;
     find_signer_and_then(&mut sections, |(signer, _)| {
         Ok(signer.public_key.to_vec().into_boxed_slice())
     })
@@ -143,7 +143,11 @@ impl Signer {
             .signatures
             .iter()
             .filter(|sig| SignatureAlgorithmID::from_u32(sig.signature_algorithm_id).is_some())
-            .max_by_key(|sig| SignatureAlgorithmID::from_u32(sig.signature_algorithm_id).unwrap())
+            .max_by_key(|sig| {
+                SignatureAlgorithmID::from_u32(sig.signature_algorithm_id)
+                    .unwrap()
+                    .to_content_digest_algorithm()
+            })
             .context("No supported signatures found")?)
     }
 
@@ -195,7 +199,12 @@ impl Signer {
             .iter()
             .find(|&dig| dig.signature_algorithm_id == strongest.signature_algorithm_id)
             .unwrap(); // ok to unwrap since we check if two lists are the same above
-        let computed = sections.compute_digest(digest.signature_algorithm_id)?;
+        let computed = sections.compute_digest(
+            // TODO(b/246254355): Removes the conversion once Digest contains the enum
+            // SignatureAlgorithmID.
+            SignatureAlgorithmID::from_u32(digest.signature_algorithm_id)
+                .context("Unsupported algorithm")?,
+        )?;
 
         // 6. Verify that the computed digest is identical to the corresponding digest from digests.
         ensure!(
