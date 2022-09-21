@@ -20,7 +20,6 @@
 
 use anyhow::{ensure, Context, Result};
 use bytes::Bytes;
-use num_traits::FromPrimitive;
 use openssl::pkey::{self, PKey};
 use openssl::x509::X509;
 use std::fs::File;
@@ -44,7 +43,7 @@ struct Signer {
     min_sdk: u32,
     max_sdk: u32,
     signatures: LengthPrefixed<Vec<LengthPrefixed<Signature>>>,
-    public_key: LengthPrefixed<Bytes>,
+    public_key: PKey<pkey::Public>,
 }
 
 impl Signer {
@@ -66,17 +65,25 @@ impl SignedData {
     fn sdk_range(&self) -> Range<u32> {
         self.min_sdk..self.max_sdk
     }
+
+    fn find_digest_by_algorithm(&self, algorithm_id: SignatureAlgorithmID) -> Result<&Digest> {
+        Ok(self
+            .digests
+            .iter()
+            .find(|&dig| dig.signature_algorithm_id == Some(algorithm_id))
+            .context(format!("Digest not found for algorithm: {:?}", algorithm_id))?)
+    }
 }
 
 #[derive(Debug)]
 struct Signature {
-    /// TODO(b/246254355): Change the type of signature_algorithm_id to SignatureAlgorithmID
-    signature_algorithm_id: u32,
+    /// Option is used here to allow us to ignore unsupported algorithm.
+    signature_algorithm_id: Option<SignatureAlgorithmID>,
     signature: LengthPrefixed<Bytes>,
 }
 
 struct Digest {
-    signature_algorithm_id: u32,
+    signature_algorithm_id: Option<SignatureAlgorithmID>,
     digest: LengthPrefixed<Bytes>,
 }
 
@@ -87,52 +94,42 @@ type AdditionalAttributes = Bytes;
 /// associated with the signer in DER format.
 pub fn verify<P: AsRef<Path>>(apk_path: P) -> Result<Box<[u8]>> {
     let apk = File::open(apk_path.as_ref())?;
-    let mut sections = ApkSections::new(apk)?;
-    find_signer_and_then(&mut sections, |(signer, sections)| signer.verify(sections))
-}
-
-/// Finds the supported signer and execute a function on it.
-fn find_signer_and_then<R, U, F>(sections: &mut ApkSections<R>, f: F) -> Result<U>
-where
-    R: Read + Seek,
-    F: FnOnce((&Signer, &mut ApkSections<R>)) -> Result<U>,
-{
-    let mut block = sections.find_signature(APK_SIGNATURE_SCHEME_V3_BLOCK_ID)?;
-    // parse v3 scheme block
-    let signers = block.read::<Signers>()?;
-
-    // find supported by platform
-    let supported = signers.iter().filter(|s| s.sdk_range().contains(&SDK_INT)).collect::<Vec<_>>();
-
-    // there should be exactly one
-    ensure!(
-        supported.len() == 1,
-        "APK Signature Scheme V3 only supports one signer: {} signers found.",
-        supported.len()
-    );
-
-    // Call the supplied function
-    f((supported[0], sections))
+    let (signer, mut sections) = extract_signer_and_apk_sections(apk)?;
+    signer.verify(&mut sections)
 }
 
 /// Gets the public key (in DER format) that was used to sign the given APK/APEX file
 pub fn get_public_key_der<P: AsRef<Path>>(apk_path: P) -> Result<Box<[u8]>> {
     let apk = File::open(apk_path.as_ref())?;
-    let mut sections = ApkSections::new(apk)?;
-    find_signer_and_then(&mut sections, |(signer, _)| {
-        Ok(signer.public_key.to_vec().into_boxed_slice())
-    })
+    let (signer, _) = extract_signer_and_apk_sections(apk)?;
+    Ok(signer.public_key.public_key_to_der()?.into_boxed_slice())
 }
 
 /// Gets the v4 [apk_digest].
 ///
 /// [apk_digest]: https://source.android.com/docs/security/apksigning/v4#apk-digest
-pub fn pick_v4_apk_digest<R: Read + Seek>(apk: R) -> Result<(u32, Box<[u8]>)> {
+pub fn pick_v4_apk_digest<R: Read + Seek>(apk: R) -> Result<(SignatureAlgorithmID, Box<[u8]>)> {
+    let (signer, _) = extract_signer_and_apk_sections(apk)?;
+    signer.pick_v4_apk_digest()
+}
+
+fn extract_signer_and_apk_sections<R: Read + Seek>(apk: R) -> Result<(Signer, ApkSections<R>)> {
     let mut sections = ApkSections::new(apk)?;
-    let mut block = sections.find_signature(APK_SIGNATURE_SCHEME_V3_BLOCK_ID)?;
-    let signers = block.read::<Signers>()?;
-    ensure!(signers.len() == 1, "should only have one signer");
-    signers[0].pick_v4_apk_digest()
+    let mut block = sections.find_signature(APK_SIGNATURE_SCHEME_V3_BLOCK_ID).context(
+        "Fallback to v2 when v3 block not found is not yet implemented. See b/197052981.",
+    )?;
+    let mut supported = block
+        .read::<Signers>()?
+        .into_inner()
+        .into_iter()
+        .filter(|s| s.sdk_range().contains(&SDK_INT))
+        .collect::<Vec<_>>();
+    ensure!(
+        supported.len() == 1,
+        "APK Signature Scheme V3 only supports one signer: {} signers found.",
+        supported.len()
+    );
+    Ok((supported.pop().unwrap().into_inner(), sections))
 }
 
 impl Signer {
@@ -142,24 +139,32 @@ impl Signer {
         Ok(self
             .signatures
             .iter()
-            .filter(|sig| SignatureAlgorithmID::from_u32(sig.signature_algorithm_id).is_some())
-            .max_by_key(|sig| {
-                SignatureAlgorithmID::from_u32(sig.signature_algorithm_id)
-                    .unwrap()
-                    .to_content_digest_algorithm()
-            })
+            .filter(|sig| sig.signature_algorithm_id.map_or(false, |algo| algo.is_supported()))
+            .max_by_key(|sig| sig.signature_algorithm_id.unwrap().content_digest_algorithm())
             .context("No supported signatures found")?)
     }
 
-    fn pick_v4_apk_digest(&self) -> Result<(u32, Box<[u8]>)> {
-        let strongest = self.strongest_signature()?;
+    fn pick_v4_apk_digest(&self) -> Result<(SignatureAlgorithmID, Box<[u8]>)> {
+        let strongest_algorithm_id = self
+            .strongest_signature()?
+            .signature_algorithm_id
+            .context("Strongest signature should contain a valid signature algorithm.")?;
         let signed_data: SignedData = self.signed_data.slice(..).read()?;
-        let digest = signed_data
-            .digests
-            .iter()
-            .find(|&dig| dig.signature_algorithm_id == strongest.signature_algorithm_id)
-            .context("Digest not found")?;
-        Ok((digest.signature_algorithm_id, digest.digest.as_ref().to_vec().into_boxed_slice()))
+        let digest = signed_data.find_digest_by_algorithm(strongest_algorithm_id)?;
+        Ok((strongest_algorithm_id, digest.digest.as_ref().to_vec().into_boxed_slice()))
+    }
+
+    /// Verifies the strongest signature from signatures against signed data using public key.
+    /// Returns the verified signed data.
+    fn verify_signature(&self, strongest: &Signature) -> Result<SignedData> {
+        let mut verifier = strongest
+            .signature_algorithm_id
+            .context("Unsupported algorithm")?
+            .new_verifier(&self.public_key)?;
+        verifier.update(&self.signed_data)?;
+        ensure!(verifier.verify(&strongest.signature)?, "Signature is invalid.");
+        // It is now safe to parse signed data.
+        self.signed_data.slice(..).read()
     }
 
     /// The steps in this method implements APK Signature Scheme v3 verification step 3.
@@ -168,17 +173,12 @@ impl Signer {
         let strongest = self.strongest_signature()?;
 
         // 2. Verify the corresponding signature from signatures against signed data using public key.
-        //    (It is now safe to parse signed data.)
-        let public_key = PKey::public_key_from_der(self.public_key.as_ref())?;
-        verify_signed_data(&self.signed_data, strongest, &public_key)?;
-
-        // It is now safe to parse signed data.
-        let signed_data: SignedData = self.signed_data.slice(..).read()?;
+        let verified_signed_data = self.verify_signature(strongest)?;
 
         // 3. Verify the min and max SDK versions in the signed data match those specified for the
         //    signer.
         ensure!(
-            self.sdk_range() == signed_data.sdk_range(),
+            self.sdk_range() == verified_signed_data.sdk_range(),
             "SDK versions mismatch between signed and unsigned in v3 signer block."
         );
 
@@ -188,23 +188,16 @@ impl Signer {
             self.signatures
                 .iter()
                 .map(|sig| sig.signature_algorithm_id)
-                .eq(signed_data.digests.iter().map(|dig| dig.signature_algorithm_id)),
+                .eq(verified_signed_data.digests.iter().map(|dig| dig.signature_algorithm_id)),
             "Signature algorithms don't match between digests and signatures records"
         );
 
         // 5. Compute the digest of APK contents using the same digest algorithm as the digest
         //    algorithm used by the signature algorithm.
-        let digest = signed_data
-            .digests
-            .iter()
-            .find(|&dig| dig.signature_algorithm_id == strongest.signature_algorithm_id)
-            .unwrap(); // ok to unwrap since we check if two lists are the same above
-        let computed = sections.compute_digest(
-            // TODO(b/246254355): Removes the conversion once Digest contains the enum
-            // SignatureAlgorithmID.
-            SignatureAlgorithmID::from_u32(digest.signature_algorithm_id)
-                .context("Unsupported algorithm")?,
+        let digest = verified_signed_data.find_digest_by_algorithm(
+            strongest.signature_algorithm_id.context("Unsupported algorithm")?,
         )?;
+        let computed = sections.compute_digest(digest.signature_algorithm_id.unwrap())?;
 
         // 6. Verify that the computed digest is identical to the corresponding digest from digests.
         ensure!(
@@ -216,32 +209,18 @@ impl Signer {
 
         // 7. Verify that public key of the first certificate of certificates is identical
         //    to public key.
-        let cert = signed_data.certificates.first().context("No certificates listed")?;
+        let cert = verified_signed_data.certificates.first().context("No certificates listed")?;
         let cert = X509::from_der(cert.as_ref())?;
         ensure!(
-            cert.public_key()?.public_eq(&public_key),
+            cert.public_key()?.public_eq(&self.public_key),
             "Public key mismatch between certificate and signature record"
         );
 
         // TODO(b/245914104)
         // 8. If the proof-of-rotation attribute exists for the signer verify that the
         // struct is valid and this signer is the last certificate in the list.
-        Ok(self.public_key.to_vec().into_boxed_slice())
+        Ok(self.public_key.public_key_to_der()?.into_boxed_slice())
     }
-}
-
-fn verify_signed_data(
-    data: &Bytes,
-    signature: &Signature,
-    public_key: &PKey<pkey::Public>,
-) -> Result<()> {
-    let mut verifier = SignatureAlgorithmID::from_u32(signature.signature_algorithm_id)
-        .context("Unsupported algorithm")?
-        .new_verifier(public_key)?;
-    verifier.update(data)?;
-    let verified = verifier.verify(&signature.signature)?;
-    ensure!(verified, "Signature is invalid ");
-    Ok(())
 }
 
 // ReadFromBytes implementations
@@ -283,40 +262,14 @@ impl ReadFromBytes for Digest {
     }
 }
 
+impl ReadFromBytes for PKey<pkey::Public> {
+    fn read_from_bytes(buf: &mut Bytes) -> Result<Self> {
+        let raw_public_key = buf.read::<LengthPrefixed<Bytes>>()?;
+        Ok(PKey::public_key_from_der(raw_public_key.as_ref())?)
+    }
+}
+
 #[inline]
 pub(crate) fn to_hex_string(buf: &[u8]) -> String {
     buf.iter().map(|b| format!("{:02X}", b)).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs::File;
-
-    #[test]
-    fn test_pick_v4_apk_digest_only_with_v3_dsa_sha256() {
-        check_v4_apk_digest(
-            "tests/data/v3-only-with-dsa-sha256-1024.apk",
-            SIGNATURE_DSA_WITH_SHA256,
-            "0DF2426EA33AEDAF495D88E5BE0C6A1663FF0A81C5ED12D5B2929AE4B4300F2F",
-        );
-    }
-
-    #[test]
-    fn test_pick_v4_apk_digest_only_with_v3_pkcs1_sha512() {
-        check_v4_apk_digest(
-            "tests/data/v3-only-with-rsa-pkcs1-sha512-1024.apk",
-            SIGNATURE_RSA_PKCS1_V1_5_WITH_SHA512,
-            "9B9AE02DA60B18999BF541790F00D380006FDF0655C3C482AA0BB0AF17CF7A42\
-             ECF56B973518546C9080B2FEF83027E895ED2882BFC88EA19790BBAB29AF53B3",
-        );
-    }
-
-    fn check_v4_apk_digest(apk_filename: &str, expected_algorithm: u32, expected_digest: &str) {
-        let apk_file = File::open(apk_filename).unwrap();
-        let (signature_algorithm_id, apk_digest) = pick_v4_apk_digest(apk_file).unwrap();
-
-        assert_eq!(expected_algorithm, signature_algorithm_id);
-        assert_eq!(expected_digest, to_hex_string(apk_digest.as_ref()));
-    }
 }
