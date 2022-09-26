@@ -97,10 +97,7 @@ fn test_verify_v3_sig_does_not_verify() {
     for path in path_list.iter() {
         let res = verify(path);
         assert!(res.is_err());
-        let error_msg = &res.unwrap_err().to_string();
-        assert!(
-            error_msg.contains("Signature is invalid") || error_msg.contains("not implemented")
-        );
+        assert_contains(&res.unwrap_err().to_string(), "Signature is invalid");
     }
 }
 

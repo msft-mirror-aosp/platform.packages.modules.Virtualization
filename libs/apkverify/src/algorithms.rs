@@ -77,7 +77,7 @@ pub enum SignatureAlgorithmID {
 
 impl Default for SignatureAlgorithmID {
     fn default() -> Self {
-        SignatureAlgorithmID::DsaWithSha256
+        SignatureAlgorithmID::RsaPssWithSha256
     }
 }
 
@@ -97,6 +97,14 @@ impl SignatureAlgorithmID {
         &self,
         public_key: &'a PKey<pkey::Public>,
     ) -> Result<Verifier<'a>> {
+        ensure!(
+            !matches!(
+                self,
+                SignatureAlgorithmID::DsaWithSha256 | SignatureAlgorithmID::VerityDsaWithSha256
+            ),
+            "Algorithm '{:?}' is not supported in openssl to build this verifier (b/197052981).",
+            self
+        );
         ensure!(public_key.id() == self.pkey_id(), "Public key has the wrong ID");
         let mut verifier = Verifier::new(self.new_message_digest(), public_key)?;
         if public_key.id() == pkey::Id::RSA {
