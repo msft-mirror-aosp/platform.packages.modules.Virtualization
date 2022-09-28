@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,17 +14,46 @@
  * limitations under the License.
  */
 
-use anyhow::{anyhow, bail, Context, Result};
-use apkverify::{pick_v4_apk_digest, SignatureAlgorithmID};
+//! API for APK Signature Scheme [v4].
+//!
+//! [v4]: https://source.android.com/security/apksigning/v4
+
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
+use std::fs;
 use std::io::{copy, Cursor, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
+use crate::algorithms::SignatureAlgorithmID;
 use crate::hashtree::*;
+use crate::v3::extract_signer_and_apk_sections;
 
-// `apksigv4` module provides routines to decode and encode the idsig file as defined in [APK
-// signature scheme v4] (https://source.android.com/security/apksigning/v4).
+/// Gets the v4 [apk_digest]. If `verify` is true, we verify that digest computed
+/// with the extracted algorithm is equal to the digest extracted directly from apk.
+/// Otherwise, the extracted digest will be returned directly.
+///
+/// [apk_digest]: https://source.android.com/docs/security/apksigning/v4#apk-digest
+pub fn get_apk_digest<R: Read + Seek>(
+    apk: R,
+    verify: bool,
+) -> Result<(SignatureAlgorithmID, Box<[u8]>)> {
+    let (signer, mut sections) = extract_signer_and_apk_sections(apk)?;
+    let strongest_algorithm_id = signer
+        .strongest_signature()?
+        .signature_algorithm_id
+        .context("Strongest signature should contain a valid signature algorithm.")?;
+    let extracted_digest = signer.find_digest_by_algorithm(strongest_algorithm_id)?;
+    if verify {
+        let computed_digest = sections.compute_digest(strongest_algorithm_id)?;
+        ensure!(
+            computed_digest == extracted_digest.as_ref(),
+            "Computed digest does not match the extracted digest."
+        );
+    }
+    Ok((strongest_algorithm_id, extracted_digest))
+}
 
 /// `V4Signature` provides access to the various fields in an idsig file.
 #[derive(Default)]
@@ -114,9 +143,17 @@ impl Default for HashAlgorithm {
     }
 }
 
+impl V4Signature<fs::File> {
+    /// Creates a `V4Signature` struct from the given idsig path.
+    pub fn from_idsig_path<P: AsRef<Path>>(idsig_path: P) -> Result<Self> {
+        let idsig = fs::File::open(idsig_path).context("Cannot find idsig file")?;
+        Self::from_idsig(idsig)
+    }
+}
+
 impl<R: Read + Seek> V4Signature<R> {
     /// Consumes a stream for an idsig file into a `V4Signature` struct.
-    pub fn from(mut r: R) -> Result<V4Signature<R>> {
+    pub fn from_idsig(mut r: R) -> Result<V4Signature<R>> {
         Ok(V4Signature {
             version: Version::from(r.read_u32::<LittleEndian>()?)?,
             hashing_info: HashingInfo::from(&mut r)?,
@@ -158,7 +195,7 @@ impl<R: Read + Seek> V4Signature<R> {
         ret.hashing_info.log2_blocksize = log2(block_size);
 
         apk.seek(SeekFrom::Start(start))?;
-        let (signature_algorithm_id, apk_digest) = pick_v4_apk_digest(apk)?;
+        let (signature_algorithm_id, apk_digest) = get_apk_digest(apk, /*verify=*/ false)?;
         ret.signing_info.signature_algorithm_id = signature_algorithm_id;
         ret.signing_info.apk_digest = apk_digest;
         // TODO(jiyong): add a signature to the signing_info struct
@@ -293,14 +330,15 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    const TEST_APK_PATH: &str = "tests/data/v4-digest-v3-Sha256withEC.apk";
+
     fn hexstring_from(s: &[u8]) -> String {
         s.iter().map(|byte| format!("{:02x}", byte)).reduce(|i, j| i + &j).unwrap_or_default()
     }
 
     #[test]
     fn parse_idsig_file() {
-        let idsig = Cursor::new(include_bytes!("../testdata/v4-digest-v3-Sha256withEC.apk.idsig"));
-        let parsed = V4Signature::from(idsig).unwrap();
+        let parsed = V4Signature::from_idsig_path(format!("{}.idsig", TEST_APK_PATH)).unwrap();
 
         assert_eq!(Version::V2, parsed.version);
 
@@ -334,25 +372,24 @@ mod tests {
     /// the input file.
     #[test]
     fn parse_and_compose() {
-        let input = Cursor::new(include_bytes!("../testdata/v4-digest-v3-Sha256withEC.apk.idsig"));
-        let mut parsed = V4Signature::from(input.clone()).unwrap();
+        let idsig_path = format!("{}.idsig", TEST_APK_PATH);
+        let mut v4_signature = V4Signature::from_idsig_path(&idsig_path).unwrap();
 
         let mut output = Cursor::new(Vec::new());
-        parsed.write_into(&mut output).unwrap();
+        v4_signature.write_into(&mut output).unwrap();
 
-        assert_eq!(input.get_ref().as_ref(), output.get_ref().as_slice());
+        assert_eq!(fs::read(&idsig_path).unwrap(), output.get_ref().as_slice());
     }
 
     /// Create V4Signature by hashing an APK. Merkle tree and the root hash should be the same
     /// as those in the idsig file created by the signapk tool.
     #[test]
     fn digest_from_apk() {
-        let mut input = Cursor::new(include_bytes!("../testdata/v4-digest-v3-Sha256withEC.apk"));
+        let mut input = Cursor::new(include_bytes!("../tests/data/v4-digest-v3-Sha256withEC.apk"));
         let mut created =
             V4Signature::create(&mut input, 4096, &[], HashAlgorithm::SHA256).unwrap();
 
-        let golden = Cursor::new(include_bytes!("../testdata/v4-digest-v3-Sha256withEC.apk.idsig"));
-        let mut golden = V4Signature::from(golden).unwrap();
+        let mut golden = V4Signature::from_idsig_path(format!("{}.idsig", TEST_APK_PATH)).unwrap();
 
         // Compare the root hash
         assert_eq!(

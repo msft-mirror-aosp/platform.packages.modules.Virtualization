@@ -38,6 +38,7 @@ import android.cts.statsdatom.lib.ConfigUtils;
 import android.cts.statsdatom.lib.ReportUtils;
 
 import com.android.compatibility.common.util.CddTest;
+import com.android.microdroid.test.common.ProcessUtil;
 import com.android.microdroid.test.host.CommandRunner;
 import com.android.microdroid.test.host.MicrodroidHostTestCaseBase;
 import com.android.os.AtomsProto;
@@ -92,6 +93,8 @@ public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
     @Rule public TestLogData mTestLogs = new TestLogData();
     @Rule public TestName mTestName = new TestName();
     @Rule public TestMetrics mMetrics = new TestMetrics();
+
+    private String mMetricPrefix;
 
     private int minMemorySize() throws DeviceNotAvailableException {
         CommandRunner android = new CommandRunner(getDevice());
@@ -698,20 +701,11 @@ public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
         shutdownMicrodroid(getDevice(), cid);
     }
 
-    private static class ProcessInfo {
-        public final String mName;
-        public final int mPid;
-
-        ProcessInfo(String name, int pid) {
-            mName = name;
-            mPid = pid;
-        }
-    }
-
-    // TODO(b/6184548): to be replaced by ProcessUtil
     /**
-    * @deprecated use ProcessUtil instead.
-    */
+     * TODO(b/249409434): to be replaced by ProcessUtil
+     *
+     * @deprecated use ProcessUtil instead.
+     */
     @Deprecated
     private Map<String, Long> parseMemInfo(String file) {
         Map<String, Long> stats = new HashMap<>();
@@ -725,52 +719,14 @@ public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
         return stats;
     }
 
-    // TODO(b/6184548): to be replaced by ProcessUtil
     /**
-    * @deprecated use ProcessUtil instead.
-    */
-    @Deprecated
-    private String skipFirstLine(String str) {
-        int index = str.indexOf("\n");
-        return (index < 0) ? "" : str.substring(index + 1);
-    }
-
-    // TODO(b/6184548): to be replaced by ProcessUtil
-    /**
-    * @deprecated use ProcessUtil instead.
-    */
-    @Deprecated
-    private List<ProcessInfo> getRunningProcessesList() {
-        List<ProcessInfo> list = new ArrayList<ProcessInfo>();
-        skipFirstLine(runOnMicrodroid("ps", "-Ao", "PID,NAME")).lines().forEach(ps -> {
-            // Each line is '  <pid> <name>'.
-            ps = ps.trim();
-            int space = ps.indexOf(" ");
-            list.add(new ProcessInfo(
-                    ps.substring(space + 1),
-                    Integer.parseInt(ps.substring(0, space))));
-        });
-
-        return list;
-    }
-
-    // TODO(b/6184548): to be replaced by ProcessUtil
-    /**
-    * @deprecated use ProcessUtil instead.
-    */
+     * TODO(b/249409434): to be replaced by ProcessUtil
+     *
+     * @deprecated use ProcessUtil instead.
+     */
     @Deprecated
     private Map<String, Long> getProcMemInfo() {
         return parseMemInfo(runOnMicrodroid("cat", "/proc/meminfo"));
-    }
-
-    // TODO(b/6184548): to be replaced by ProcessUtil
-    /**
-    * @deprecated use ProcessUtil instead.
-    */
-    @Deprecated
-    private Map<String, Long> getProcSmapsRollup(int pid) {
-        String path = "/proc/" + pid + "/smaps_rollup";
-        return  parseMemInfo(skipFirstLine(runOnMicrodroid("cat", path, "||", "true")));
     }
 
     @Test
@@ -792,15 +748,18 @@ public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
 
         for (Map.Entry<String, Long> stat : getProcMemInfo().entrySet()) {
             mMetrics.addTestMetric(
-                    "avf_perf/microdroid/meminfo/" + stat.getKey().toLowerCase(),
+                    mMetricPrefix + "meminfo/" + stat.getKey().toLowerCase(),
                     stat.getValue().toString());
         }
 
-        for (ProcessInfo proc : getRunningProcessesList()) {
-            for (Map.Entry<String, Long> stat : getProcSmapsRollup(proc.mPid).entrySet()) {
+        for (Map.Entry<Integer, String> proc :
+                ProcessUtil.getProcessMap(cmd -> runOnMicrodroid(cmd)).entrySet()) {
+            for (Map.Entry<String, Long> stat :
+                    ProcessUtil.getProcessSmapsRollup(proc.getKey(), cmd -> runOnMicrodroid(cmd))
+                            .entrySet()) {
                 String name = stat.getKey().toLowerCase();
                 mMetrics.addTestMetric(
-                        "avf_perf/microdroid/smaps/" + name + "/" + proc.mName,
+                        mMetricPrefix + "smaps/" + name + "/" + proc.getValue(),
                         stat.getValue().toString());
             }
         }
@@ -845,6 +804,7 @@ public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
     @Before
     public void setUp() throws Exception {
         testIfDeviceIsCapable(getDevice());
+        mMetricPrefix = getMetricPrefix() + "microdroid/";
 
         prepareVirtualizationTestSetup(getDevice());
 

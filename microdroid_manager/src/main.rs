@@ -28,11 +28,10 @@ use android_system_virtualmachineservice::aidl::android::system::virtualmachines
     VM_BINDER_SERVICE_PORT, VM_STREAM_SERVICE_PORT, IVirtualMachineService,
 };
 use anyhow::{anyhow, bail, ensure, Context, Error, Result};
-use apkverify::{get_public_key_der, verify};
+use apkverify::{get_public_key_der, verify, V4Signature};
 use binder::{wait_for_interface, Strong};
 use diced_utils::cbor::encode_header;
 use glob::glob;
-use idsig::V4Signature;
 use itertools::sorted;
 use log::{error, info};
 use microdroid_metadata::{write_metadata, Metadata};
@@ -323,6 +322,11 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
 
     let config = load_config(Path::new(&metadata.payload_config_path))?;
 
+    let task = config
+        .task
+        .as_ref()
+        .ok_or_else(|| MicrodroidError::InvalidConfig("No task in VM config".to_string()))?;
+
     if config.extra_apks.len() != verified_data.extra_apks_data.len() {
         return Err(anyhow!(
             "config expects {} extra apks, but found only {}",
@@ -338,18 +342,23 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
 
     // Start tombstone_transmit if enabled
     if config.export_tombstones {
-        system_properties::write("ctl.start", "tombstone_transmit")
-            .context("Failed to start tombstone_transmit")?;
+        control_service("start", "tombstone_transmit")?;
     } else {
-        system_properties::write("ctl.stop", "tombstoned").context("Failed to stop tombstoned")?;
+        control_service("stop", "tombstoned")?;
     }
 
-    ensure!(
-        config.task.is_some(),
-        MicrodroidError::InvalidConfig("No task in VM config".to_string())
-    );
+    // Start authfs if enabled
+    if config.enable_authfs {
+        control_service("start", "authfs_service")?;
+    }
+
     system_properties::write("dev.bootcomplete", "1").context("set dev.bootcomplete")?;
-    exec_task(&config.task.unwrap(), service)
+    exec_task(task, service)
+}
+
+fn control_service(action: &str, service: &str) -> Result<()> {
+    system_properties::write(&format!("ctl.{}", action), service)
+        .with_context(|| format!("Failed to {} {}", action, service))
 }
 
 struct ApkDmverityArgument<'a> {
@@ -471,7 +480,7 @@ fn verify_payload(
         .map(|(i, extra_idsig)| {
             (
                 format!("extra-apk-{}", i),
-                get_apk_root_hash_from_idsig(extra_idsig.to_str().unwrap())
+                get_apk_root_hash_from_idsig(extra_idsig)
                     .expect("Can't find root hash from extra idsig"),
             )
         })
@@ -591,10 +600,8 @@ fn wait_for_apex_config_done() -> Result<()> {
     Ok(())
 }
 
-fn get_apk_root_hash_from_idsig(path: &str) -> Result<Box<RootHash>> {
-    let mut idsig = File::open(path)?;
-    let idsig = V4Signature::from(&mut idsig)?;
-    Ok(idsig.hashing_info.raw_root_hash)
+fn get_apk_root_hash_from_idsig<P: AsRef<Path>>(idsig_path: P) -> Result<Box<RootHash>> {
+    Ok(V4Signature::from_idsig_path(idsig_path)?.hashing_info.raw_root_hash)
 }
 
 fn get_public_key_from_apk(apk: &str, root_hash_trustful: bool) -> Result<Box<[u8]>> {
