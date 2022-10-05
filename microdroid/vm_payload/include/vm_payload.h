@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,18 +14,16 @@
  * limitations under the License.
  */
 
-//! Verifies APK/APEX signing with v2/v3 scheme
+#pragma once
 
-mod algorithms;
-mod bytes_ext;
-mod hashtree;
-mod sigutil;
-#[allow(dead_code)]
-pub mod testing;
-mod v3;
-mod v4;
-mod ziputil;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-pub use algorithms::{HashAlgorithm, SignatureAlgorithmID};
-pub use v3::{get_public_key_der, verify};
-pub use v4::{get_apk_digest, V4Signature};
+/// Notifies the host that the payload is ready.
+/// Returns true if the notification succeeds else false.
+bool notify_payload_ready();
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
