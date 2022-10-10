@@ -18,13 +18,36 @@
 #![no_std]
 
 mod exceptions;
+mod helpers;
+mod smccc;
 
-use vmbase::{main, println};
+use core::fmt;
+use helpers::checked_page_of;
 
-main!(main);
+use vmbase::{console, main, power::reboot, println};
 
-/// Entry point for pVM firmware.
-pub fn main(fdt_address: u64, payload_start: u64, payload_size: u64, arg3: u64) {
+#[derive(Debug, Clone)]
+enum Error {
+    /// Failed to configure the UART; no logs available.
+    FailedUartSetup,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let msg = match self {
+            Self::FailedUartSetup => "Failed to configure the UART",
+        };
+        write!(f, "{}", msg)
+    }
+}
+
+fn main(fdt_address: u64, payload_start: u64, payload_size: u64, arg3: u64) -> Result<(), Error> {
+    // We need to inform the hypervisor that the MMIO page containing the UART may be shared back.
+    let uart = console::BASE_ADDRESS as u64;
+    let mmio_granule = smccc::mmio_guard_info().map_err(|_| Error::FailedUartSetup)?;
+    let uart_page = checked_page_of(uart, mmio_granule).ok_or(Error::FailedUartSetup)?;
+    smccc::mmio_guard_map(uart_page).map_err(|_| Error::FailedUartSetup)?;
+
     println!("pVM firmware");
     println!(
         "fdt_address={:#018x}, payload_start={:#018x}, payload_size={:#018x}, x3={:#018x}",
@@ -32,6 +55,24 @@ pub fn main(fdt_address: u64, payload_start: u64, payload_size: u64, arg3: u64) 
     );
 
     println!("Starting payload...");
+
+    Ok(())
+}
+
+main!(main_wrapper);
+
+/// Entry point for pVM firmware.
+pub fn main_wrapper(fdt_address: u64, payload_start: u64, payload_size: u64, arg3: u64) {
+    match main(fdt_address, payload_start, payload_size, arg3) {
+        Ok(()) => jump_to_payload(fdt_address, payload_start),
+        Err(e) => {
+            println!("Boot rejected: {}", e);
+        }
+    }
+    reboot()
+}
+
+fn jump_to_payload(fdt_address: u64, payload_start: u64) {
     // Safe because this is a function we have implemented in assembly that matches its signature
     // here.
     unsafe {
