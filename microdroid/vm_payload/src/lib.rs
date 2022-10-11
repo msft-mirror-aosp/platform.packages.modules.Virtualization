@@ -16,4 +16,7 @@
 
 mod vm_service;
 
-pub use vm_service::notify_payload_ready;
+pub use vm_service::{
+    get_dice_attestation_cdi, get_dice_attestation_chain, get_vm_instance_secret,
+    notify_payload_ready,
+};
