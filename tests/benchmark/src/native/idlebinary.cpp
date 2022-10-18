@@ -15,8 +15,9 @@
  */
 
 #include <unistd.h>
+#include <vm_main.h>
 
-extern "C" int android_native_main(int /* argc */, char* /* argv */[]) {
+extern "C" int AVmPayload_main() {
     // do nothing; just leave it alive. good night.
     for (;;) {
         sleep(1000);
