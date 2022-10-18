@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 The Android Open Source Project
+ * Copyright 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,10 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.android.virt;
 
-public abstract class VirtualizationTestHelper {
-    public static boolean isCuttlefish(String vendorDeviceName) {
-        return vendorDeviceName != null && vendorDeviceName.startsWith("vsoc_");
-    }
+#pragma once
+
+#ifdef __cplusplus
+extern "C" {
+typedef int AVmPayload_main_t();
+AVmPayload_main_t AVmPayload_main;
 }
+#else
+typedef int AVmPayload_main_t(void);
+extern int AVmPayload_main(void);
+#endif

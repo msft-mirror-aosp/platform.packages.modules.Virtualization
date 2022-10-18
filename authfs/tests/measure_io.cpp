@@ -15,6 +15,8 @@
  */
 
 #include <android-base/unique_fd.h>
+#include <assert.h>
+#include <err.h>
 #include <fcntl.h>
 #include <string.h>
 #include <time.h>
@@ -31,12 +33,13 @@ constexpr int kBlockSizeBytes = 4096;
 constexpr int kNumBytesPerMB = 1024 * 1024;
 
 int main(int argc, const char *argv[]) {
-    if (argc != 4 || !(strcmp(argv[3], "rand") == 0 || strcmp(argv[3], "seq") == 0)) {
-        std::cerr << "Usage: " << argv[0] << " <filename> <file_size_mb> <rand|seq>" << std::endl;
-        return EXIT_FAILURE;
+    if (argc != 5 || !(strcmp(argv[3], "rand") == 0 || strcmp(argv[3], "seq") == 0) ||
+        !(strcmp(argv[4], "r") == 0 || strcmp(argv[4], "w") == 0)) {
+        errx(EXIT_FAILURE, "Usage: %s <filename> <file_size_mb> <rand|seq> <r|w>", argv[0]);
     }
     int file_size_mb = std::stoi(argv[2]);
     bool is_rand = (strcmp(argv[3], "rand") == 0);
+    bool is_read = (strcmp(argv[4], "r") == 0);
     const int block_count = file_size_mb * kNumBytesPerMB / kBlockSizeBytes;
     std::vector<int> offsets(block_count);
     for (auto i = 0; i < block_count; ++i) {
@@ -46,23 +49,25 @@ int main(int argc, const char *argv[]) {
         std::mt19937 rd{std::random_device{}()};
         std::shuffle(offsets.begin(), offsets.end(), rd);
     }
-    unique_fd fd(open(argv[1], O_RDONLY | O_CLOEXEC));
+    unique_fd fd(open(argv[1], (is_read ? O_RDONLY : O_WRONLY) | O_CLOEXEC));
     if (fd.get() == -1) {
-        std::cerr << "failed to open file: " << argv[1] << std::endl;
-        return EXIT_FAILURE;
+        errx(EXIT_FAILURE, "failed to open file: %s", argv[1]);
     }
 
     char buf[kBlockSizeBytes];
     clock_t start = clock();
     for (auto i = 0; i < block_count; ++i) {
-        auto bytes = pread(fd, buf, kBlockSizeBytes, offsets[i]);
+        auto bytes = is_read ? pread(fd, buf, kBlockSizeBytes, offsets[i])
+                             : pwrite(fd, buf, kBlockSizeBytes, offsets[i]);
         if (bytes == 0) {
-            std::cerr << "unexpected end of file" << std::endl;
-            return EXIT_FAILURE;
+            errx(EXIT_FAILURE, "unexpected end of file");
         } else if (bytes == -1) {
-            std::cerr << "failed to read" << std::endl;
-            return EXIT_FAILURE;
+            errx(EXIT_FAILURE, "failed to read");
         }
+    }
+    if (!is_read) {
+        // Writes all the buffered modifications to the open file.
+        assert(syncfs(fd) == 0);
     }
     double elapsed_seconds = ((double)clock() - start) / CLOCKS_PER_SEC;
     double rate = (double)file_size_mb / elapsed_seconds;
