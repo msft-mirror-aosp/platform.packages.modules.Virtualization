@@ -109,10 +109,6 @@ public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
         return 0;
     }
 
-    private boolean isProtectedVmSupported() throws DeviceNotAvailableException {
-        return getDevice().getBooleanProperty("ro.boot.hypervisor.protected_vm.supported", false);
-    }
-
     private void waitForBootComplete() {
         runOnMicrodroidForResult("watch -e \"getprop dev.bootcomplete | grep '^0$'\"");
     }
@@ -135,10 +131,9 @@ public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
         Map<TestDescription, TestResult> results = getLastDeviceRunResults().getTestResults();
         assertThat(results).hasSize(1);
         TestResult result = results.values().toArray(new TestResult[0])[0];
-        assertTrue(
-                "The test should fail with a permission error",
-                result.getStackTrace()
-                        .contains("android.permission.MANAGE_VIRTUAL_MACHINE permission"));
+        assertWithMessage("The test should fail with a permission error")
+                .that(result.getStackTrace())
+                .contains("android.permission.MANAGE_VIRTUAL_MACHINE permission");
     }
 
     private static JSONObject newPartition(String label, String path) {
@@ -426,6 +421,7 @@ public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
     }
 
     @Test
+    @Ignore("b/245081929")
     @CddTest(requirements = {"9.17/C-2-1", "9.17/C-2-2", "9.17/C-2-6"})
     public void testBootFailsWhenProtectedVmStartsWithImagesSignedWithDifferentKey()
             throws Exception {
@@ -604,7 +600,8 @@ public class MicrodroidTestCase extends MicrodroidHostTestCaseBase {
         // Check UID and elapsed_time by comparing each other.
         assertEquals(atomVmCreationRequested.getUid(), atomVmBooted.getUid());
         assertEquals(atomVmCreationRequested.getUid(), atomVmExited.getUid());
-        assertTrue(atomVmBooted.getElapsedTimeMillis() < atomVmExited.getElapsedTimeMillis());
+        assertThat(atomVmBooted.getElapsedTimeMillis())
+                .isLessThan(atomVmExited.getElapsedTimeMillis());
     }
 
     @Test

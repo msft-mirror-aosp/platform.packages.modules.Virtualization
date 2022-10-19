@@ -56,16 +56,16 @@ public class AuthFsTestRule extends TestLogData {
     private static final String VM_CONFIG_PATH_IN_APK = "assets/vm_config.json";
 
     /** Test directory on Android where data are located */
-    private static final String TEST_DIR = "/data/local/tmp/authfs";
+    static final String TEST_DIR = "/data/local/tmp/authfs";
 
     /** File name of the test APK */
     private static final String TEST_APK_NAME = "MicrodroidTestApp.apk";
 
     /** Output directory where the test can generate output on Android */
-    private static final String TEST_OUTPUT_DIR = "/data/local/tmp/authfs/output_dir";
+    static final String TEST_OUTPUT_DIR = "/data/local/tmp/authfs/output_dir";
 
     /** Mount point of authfs on Microdroid during the test */
-    private static final String MOUNT_DIR = "/data/local/tmp";
+    static final String MOUNT_DIR = "/data/local/tmp/mnt";
 
     /** VM's log file */
     private static final String LOG_PATH = TEST_OUTPUT_DIR + "/log.txt";
@@ -82,13 +82,16 @@ public class AuthFsTestRule extends TestLogData {
     /** Plenty of time for authfs to get ready */
     private static final int AUTHFS_INIT_TIMEOUT_MS = 3000;
 
+    private static final int VMADDR_CID_HOST = 2;
+
     private static TestInformation sTestInfo;
+    private static ITestDevice sMicrodroidDevice;
     private static CommandRunner sAndroid;
     private static CommandRunner sMicrodroid;
 
     private final ExecutorService mThreadPool = Executors.newCachedThreadPool();
 
-    static void setUpClass(TestInformation testInfo) throws Exception {
+    static void setUpAndroid(TestInformation testInfo) throws Exception {
         assertNotNull(testInfo.getDevice());
         if (!(testInfo.getDevice() instanceof TestDevice)) {
             CLog.w("Unexpected type of ITestDevice. Skipping.");
@@ -105,32 +108,9 @@ public class AuthFsTestRule extends TestLogData {
             CLog.i("Microdroid not supported. Skipping.");
             return;
         }
-
-        // For each test case, boot and adb connect to a new Microdroid
-        CLog.i("Starting the shared VM");
-        ITestDevice microdroidDevice =
-                MicrodroidBuilder.fromFile(
-                                findTestApk(testInfo.getBuildInfo()), VM_CONFIG_PATH_IN_APK)
-                        .debugLevel("full")
-                        .build((TestDevice) androidDevice);
-
-        // From this point on, we need to tear down the Microdroid instance
-        sMicrodroid = new CommandRunner(microdroidDevice);
-
-        // Root because authfs (started from shell in this test) currently require root to open
-        // /dev/fuse and mount the FUSE.
-        assertThat(microdroidDevice.enableAdbRoot()).isTrue();
     }
 
-    static void tearDownClass(TestInformation testInfo) throws DeviceNotAvailableException {
-        assertNotNull(sAndroid);
-
-        if (sMicrodroid != null) {
-            CLog.i("Shutting down shared VM");
-            ((TestDevice) testInfo.getDevice()).shutdownMicrodroid(sMicrodroid.getDevice());
-            sMicrodroid = null;
-        }
-
+    static void tearDownAndroid() {
         sAndroid = null;
     }
 
@@ -144,6 +124,38 @@ public class AuthFsTestRule extends TestLogData {
     static CommandRunner getMicrodroid() {
         assertThat(sMicrodroid).isNotNull();
         return sMicrodroid;
+    }
+
+    static ITestDevice getMicrodroidDevice() {
+        assertThat(sMicrodroidDevice).isNotNull();
+        return sMicrodroidDevice;
+    }
+
+    static void startMicrodroid() throws DeviceNotAvailableException {
+        CLog.i("Starting the shared VM");
+        assertThat(sMicrodroidDevice).isNull();
+        sMicrodroidDevice =
+                MicrodroidBuilder.fromFile(
+                                findTestFile(sTestInfo.getBuildInfo(), TEST_APK_NAME),
+                                VM_CONFIG_PATH_IN_APK)
+                        .debugLevel("full")
+                        .build(getDevice());
+
+        // From this point on, we need to tear down the Microdroid instance
+        sMicrodroid = new CommandRunner(sMicrodroidDevice);
+
+        sMicrodroid.runForResult("mkdir -p " + MOUNT_DIR);
+
+        // Root because authfs (started from shell in this test) currently require root to open
+        // /dev/fuse and mount the FUSE.
+        assertThat(sMicrodroidDevice.enableAdbRoot()).isTrue();
+    }
+
+    static void shutdownMicrodroid() throws DeviceNotAvailableException {
+        assertNotNull(sMicrodroidDevice);
+        getDevice().shutdownMicrodroid(sMicrodroidDevice);
+        sMicrodroidDevice = null;
+        sMicrodroid = null;
     }
 
     @Override
@@ -177,7 +189,7 @@ public class AuthFsTestRule extends TestLogData {
     }
 
     void runAuthFsOnMicrodroid(String flags) {
-        String cmd = AUTHFS_BIN + " " + MOUNT_DIR + " " + flags;
+        String cmd = AUTHFS_BIN + " " + MOUNT_DIR + " " + flags + " --cid " + VMADDR_CID_HOST;
 
         AtomicBoolean starting = new AtomicBoolean(true);
         Future<?> unusedFuture =
@@ -203,11 +215,11 @@ public class AuthFsTestRule extends TestLogData {
         }
     }
 
-    private static File findTestApk(IBuildInfo buildInfo) {
+    static File findTestFile(IBuildInfo buildInfo, String fileName) {
         try {
-            return (new CompatibilityBuildHelper(buildInfo)).getTestFile(TEST_APK_NAME);
+            return (new CompatibilityBuildHelper(buildInfo)).getTestFile(fileName);
         } catch (FileNotFoundException e) {
-            fail("Missing test file: " + TEST_APK_NAME);
+            fail("Missing test file: " + fileName);
             return null;
         }
     }

@@ -58,6 +58,8 @@ const CROSVM_ERROR_STATUS: i32 = 1;
 const CROSVM_REBOOT_STATUS: i32 = 32;
 /// The exit status which crosvm returns when it crashes due to an error.
 const CROSVM_CRASH_STATUS: i32 = 33;
+/// The exit status which crosvm returns when vcpu is stalled.
+const CROSVM_WATCHDOG_REBOOT_STATUS: i32 = 36;
 
 lazy_static! {
     /// If the VM doesn't move to the Started state within this amount time, a hang-up error is
@@ -183,8 +185,6 @@ pub struct VmInstance {
     pub temporary_directory: PathBuf,
     /// The UID of the process which requested the VM.
     pub requester_uid: u32,
-    /// The SID of the process which requested the VM.
-    pub requester_sid: String,
     /// The PID of the process which requested the VM. Note that this process may no longer exist
     /// and the PID may have been reused for a different process, so this should not be trusted.
     pub requester_debug_pid: i32,
@@ -208,7 +208,6 @@ impl VmInstance {
         config: CrosvmConfig,
         temporary_directory: PathBuf,
         requester_uid: u32,
-        requester_sid: String,
         requester_debug_pid: i32,
     ) -> Result<VmInstance, Error> {
         validate_config(&config)?;
@@ -222,7 +221,6 @@ impl VmInstance {
             protected,
             temporary_directory,
             requester_uid,
-            requester_sid,
             requester_debug_pid,
             callbacks: Default::default(),
             stream: Mutex::new(None),
@@ -247,7 +245,14 @@ impl VmInstance {
         let result = child.wait();
         match &result {
             Err(e) => error!("Error waiting for crosvm({}) instance to die: {}", child.id(), e),
-            Ok(status) => info!("crosvm({}) exited with status {}", child.id(), status),
+            Ok(status) => {
+                info!("crosvm({}) exited with status {}", child.id(), status);
+                if let Some(exit_status_code) = status.code() {
+                    if exit_status_code == CROSVM_WATCHDOG_REBOOT_STATUS {
+                        info!("detected vcpu stall on crosvm");
+                    }
+                }
+            }
         }
 
         let mut vm_state = self.vm_state.lock().unwrap();
@@ -386,7 +391,12 @@ impl VmInstance {
     }
 }
 
-fn death_reason(result: &Result<ExitStatus, io::Error>, failure_reason: &str) -> DeathReason {
+fn death_reason(result: &Result<ExitStatus, io::Error>, mut failure_reason: &str) -> DeathReason {
+    if let Some(position) = failure_reason.find('|') {
+        // Separator indicates extra context information is present after the failure name.
+        error!("Failure info: {}", &failure_reason[(position + 1)..]);
+        failure_reason = &failure_reason[..position];
+    }
     if let Ok(status) = result {
         match failure_reason {
             "PVM_FIRMWARE_PUBLIC_KEY_MISMATCH" => {
@@ -421,6 +431,7 @@ fn death_reason(result: &Result<ExitStatus, io::Error>, failure_reason: &str) ->
             Some(CROSVM_ERROR_STATUS) => DeathReason::ERROR,
             Some(CROSVM_REBOOT_STATUS) => DeathReason::REBOOT,
             Some(CROSVM_CRASH_STATUS) => DeathReason::CRASH,
+            Some(CROSVM_WATCHDOG_REBOOT_STATUS) => DeathReason::WATCHDOG_REBOOT,
             Some(_) => DeathReason::UNKNOWN,
         }
     } else {

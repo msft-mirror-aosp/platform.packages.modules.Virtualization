@@ -49,7 +49,8 @@ import java.util.concurrent.TimeUnit;
 
 public abstract class MicrodroidDeviceTestBase {
     public static boolean isCuttlefish() {
-        return VirtualizationTestHelper.isCuttlefish(SystemProperties.get("ro.product.name"));
+        return VirtualizationTestHelper.isCuttlefish(
+                SystemProperties.get("ro.product.vendor.device"));
     }
 
     public static String getMetricPrefix() {
@@ -115,28 +116,19 @@ public abstract class MicrodroidDeviceTestBase {
             assumeNoException(e);
             return;
         }
-        if (protectedVm) {
-            assume().withMessage("Skip where protected VMs aren't supported")
-                    .that(hypervisor_protected_vm_supported())
-                    .isTrue();
-        } else {
-            assume().withMessage("Skip where VMs aren't supported")
-                    .that(hypervisor_vm_supported())
-                    .isTrue();
-        }
         Context context = ApplicationProvider.getApplicationContext();
         mInner = new Inner(context, protectedVm, VirtualMachineManager.getInstance(context));
-    }
 
-    // These are inlined from android.sysprop.HypervisorProperties which isn't @SystemApi.
-    // TODO(b/243642678): Move to using a proper Java API for this.
-
-    private boolean hypervisor_vm_supported() {
-        return SystemProperties.getBoolean("ro.boot.hypervisor.vm.supported", false);
-    }
-
-    private boolean hypervisor_protected_vm_supported() {
-        return SystemProperties.getBoolean("ro.boot.hypervisor.protected_vm.supported", false);
+        int capabilities = mInner.getVirtualMachineManager().getCapabilities();
+        if (protectedVm) {
+            assume().withMessage("Skip where protected VMs aren't supported")
+                    .that(capabilities & VirtualMachineManager.CAPABILITY_PROTECTED_VM)
+                    .isNotEqualTo(0);
+        } else {
+            assume().withMessage("Skip where VMs aren't supported")
+                    .that(capabilities & VirtualMachineManager.CAPABILITY_NON_PROTECTED_VM)
+                    .isNotEqualTo(0);
+        }
     }
 
     public abstract static class VmEventListener implements VirtualMachineCallback {
@@ -150,7 +142,7 @@ public abstract class MicrodroidDeviceTestBase {
             if (!mVcpuStartedNanoTime.isPresent()) {
                 mVcpuStartedNanoTime = OptionalLong.of(System.nanoTime());
             }
-            if (log.contains("Starting kernel") && !mKernelStartedNanoTime.isPresent()) {
+            if (log.contains("Starting payload...") && !mKernelStartedNanoTime.isPresent()) {
                 mKernelStartedNanoTime = OptionalLong.of(System.nanoTime());
             }
             if (log.contains("Run /init as init process") && !mInitStartedNanoTime.isPresent()) {

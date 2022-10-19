@@ -20,6 +20,7 @@
 #include <vm_payload.h>
 
 #include <string_view>
+#include <vector>
 
 #include "compos_key.h"
 
@@ -29,22 +30,24 @@ using android::base::Result;
 using android::base::WriteFully;
 using namespace std::literals;
 using compos_key::Ed25519KeyPair;
+using compos_key::Seed;
 
 namespace {
-Result<Ed25519KeyPair> deriveKeyFromDice() {
-    uint8_t cdi_seal[64];
-    size_t cdi_size = get_dice_sealing_cdi(cdi_seal, sizeof(cdi_seal));
-    if (cdi_size == 0) {
-        return Error() << "Failed to get sealing CDI";
-    }
 
-    // We use the sealing CDI because we want stability - the key needs to be the same
-    // for any instance of the "same" VM.
-    return compos_key::deriveKeyFromSecret(cdi_seal, cdi_size);
+constexpr const char* kSigningKeySeedIdentifier = "CompOS signing key seed";
+
+Result<Ed25519KeyPair> getSigningKey() {
+    Seed seed;
+    if (!AVmPayload_getVmInstanceSecret(kSigningKeySeedIdentifier,
+                                        strlen(kSigningKeySeedIdentifier), seed.data(),
+                                        seed.size())) {
+        return Error() << "Failed to get signing key seed";
+    }
+    return compos_key::keyFromSeed(seed);
 }
 
 int write_public_key() {
-    auto key_pair = deriveKeyFromDice();
+    auto key_pair = getSigningKey();
     if (!key_pair.ok()) {
         LOG(ERROR) << key_pair.error();
         return 1;
@@ -57,14 +60,18 @@ int write_public_key() {
 }
 
 int write_bcc() {
-    uint8_t bcc[2048];
-    size_t bcc_size = get_dice_attestation_chain(bcc, sizeof(bcc));
-    if (bcc_size == 0) {
+    size_t bcc_size;
+    if (!AVmPayload_getDiceAttestationChain(nullptr, 0, &bcc_size)) {
+        LOG(ERROR) << "Failed to measure attestation chain";
+        return 1;
+    }
+    std::vector<uint8_t> bcc(bcc_size);
+    if (!AVmPayload_getDiceAttestationChain(bcc.data(), bcc.size(), &bcc_size)) {
         LOG(ERROR) << "Failed to get attestation chain";
         return 1;
     }
 
-    if (!WriteFully(STDOUT_FILENO, bcc, bcc_size)) {
+    if (!WriteFully(STDOUT_FILENO, bcc.data(), bcc.size())) {
         PLOG(ERROR) << "Write failed";
         return 1;
     }
@@ -79,7 +86,7 @@ int sign_input() {
         return 1;
     }
 
-    auto key_pair = deriveKeyFromDice();
+    auto key_pair = getSigningKey();
     if (!key_pair.ok()) {
         LOG(ERROR) << key_pair.error();
         return 1;

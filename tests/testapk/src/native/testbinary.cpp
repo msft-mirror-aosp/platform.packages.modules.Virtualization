@@ -27,6 +27,7 @@
 #include <sys/ioctl.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
+#include <vm_main.h>
 #include <vm_payload.h>
 
 #include <binder_rpc_unstable.hpp>
@@ -73,43 +74,50 @@ Result<void> start_test_service() {
             return ndk::ScopedAStatus::ok();
         }
 
-        ndk::ScopedAStatus insecurelyExposeSealingCdi(std::vector<uint8_t>* out) override {
-            uint8_t cdi[64];
-            size_t cdi_size = get_dice_sealing_cdi(cdi, sizeof(cdi));
-            if (cdi_size == 0) {
+        ndk::ScopedAStatus insecurelyExposeVmInstanceSecret(std::vector<uint8_t>* out) override {
+            const uint8_t identifier[] = {1, 2, 3, 4};
+            out->resize(32);
+            if (!AVmPayload_getVmInstanceSecret(identifier, sizeof(identifier), out->data(),
+                                                out->size())) {
                 return ndk::ScopedAStatus::
-                        fromServiceSpecificErrorWithMessage(0, "Failed to get sealing cdi");
+                        fromServiceSpecificErrorWithMessage(0, "Failed to VM instance secret");
             }
-            *out = {cdi, cdi + cdi_size};
             return ndk::ScopedAStatus::ok();
         }
 
         ndk::ScopedAStatus insecurelyExposeAttestationCdi(std::vector<uint8_t>* out) override {
-            uint8_t cdi[64];
-            size_t cdi_size = get_dice_attestation_cdi(cdi, sizeof(cdi));
-            if (cdi_size == 0) {
+            size_t cdi_size;
+            if (!AVmPayload_getDiceAttestationCdi(nullptr, 0, &cdi_size)) {
+                return ndk::ScopedAStatus::
+                        fromServiceSpecificErrorWithMessage(0, "Failed to measure attestation cdi");
+            }
+            out->resize(cdi_size);
+            if (!AVmPayload_getDiceAttestationCdi(out->data(), out->size(), &cdi_size)) {
                 return ndk::ScopedAStatus::
                         fromServiceSpecificErrorWithMessage(0, "Failed to get attestation cdi");
             }
-            *out = {cdi, cdi + cdi_size};
             return ndk::ScopedAStatus::ok();
         }
 
         ndk::ScopedAStatus getBcc(std::vector<uint8_t>* out) override {
-            uint8_t bcc[2048];
-            size_t bcc_size = get_dice_attestation_chain(bcc, sizeof(bcc));
-            if (bcc_size == 0) {
+            size_t bcc_size;
+            if (!AVmPayload_getDiceAttestationChain(nullptr, 0, &bcc_size)) {
+                return ndk::ScopedAStatus::
+                        fromServiceSpecificErrorWithMessage(0,
+                                                            "Failed to measure attestation chain");
+            }
+            out->resize(bcc_size);
+            if (!AVmPayload_getDiceAttestationChain(out->data(), out->size(), &bcc_size)) {
                 return ndk::ScopedAStatus::
                         fromServiceSpecificErrorWithMessage(0, "Failed to get attestation chain");
             }
-            *out = {bcc, bcc + bcc_size};
             return ndk::ScopedAStatus::ok();
         }
     };
     auto testService = ndk::SharedRefBase::make<TestService>();
 
     auto callback = []([[maybe_unused]] void* param) {
-        if (!notify_payload_ready()) {
+        if (!AVmPayload_notifyPayloadReady()) {
             std::cerr << "failed to notify payload ready to virtualizationservice" << std::endl;
             abort();
         }
@@ -139,20 +147,13 @@ Result<void> verify_apk() {
 
 } // Anonymous namespace
 
-extern "C" int android_native_main(int argc, char* argv[]) {
+extern "C" int AVmPayload_main() {
     // disable buffering to communicate seamlessly
     setvbuf(stdin, nullptr, _IONBF, 0);
     setvbuf(stdout, nullptr, _IONBF, 0);
     setvbuf(stderr, nullptr, _IONBF, 0);
 
-    printf("Hello Microdroid ");
-    for (int i = 0; i < argc; i++) {
-        printf("%s", argv[i]);
-        bool last = i == (argc - 1);
-        if (!last) {
-            printf(" ");
-        }
-    }
+    printf("Hello Microdroid");
     testlib_sub();
     printf("\n");
 

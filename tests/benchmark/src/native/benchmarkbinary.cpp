@@ -26,6 +26,8 @@
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
+#include <vm_main.h>
+#include <vm_payload.h>
 
 #include <binder_rpc_unstable.hpp>
 #include <fstream>
@@ -157,19 +159,8 @@ private:
 Result<void> run_io_benchmark_tests() {
     auto test_service = ndk::SharedRefBase::make<IOBenchmarkService>();
     auto callback = []([[maybe_unused]] void* param) {
-        // Tell microdroid_manager that we're ready.
-        // If we can't, abort in order to fail fast - the host won't proceed without
-        // receiving the onReady signal.
-        ndk::SpAIBinder binder(
-                RpcClient(VMADDR_CID_HOST, IVirtualMachineService::VM_BINDER_SERVICE_PORT));
-        auto vm_service = IVirtualMachineService::fromBinder(binder);
-        if (vm_service == nullptr) {
-            LOG(ERROR) << "failed to connect VirtualMachineService\n";
-            abort();
-        }
-        if (auto status = vm_service->notifyPayloadReady(); !status.isOk()) {
-            LOG(ERROR) << "failed to notify payload ready to virtualizationservice: "
-                       << status.getDescription();
+        if (!AVmPayload_notifyPayloadReady()) {
+            LOG(ERROR) << "failed to notify payload ready to virtualizationservice";
             abort();
         }
     };
@@ -182,7 +173,7 @@ Result<void> run_io_benchmark_tests() {
 }
 } // Anonymous namespace
 
-extern "C" int android_native_main(int /* argc */, char* /* argv */[]) {
+extern "C" int AVmPayload_main() {
     if (auto res = run_io_benchmark_tests(); !res.ok()) {
         LOG(ERROR) << "IO benchmark test failed: " << res.error() << "\n";
         return EXIT_FAILURE;

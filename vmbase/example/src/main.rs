@@ -24,7 +24,8 @@ mod layout;
 extern crate alloc;
 
 use crate::layout::{
-    dtb_range, print_addresses, rodata_range, text_range, writable_region, DEVICE_REGION,
+    bionic_tls, dtb_range, print_addresses, rodata_range, stack_chk_guard, text_range,
+    writable_region, DEVICE_REGION,
 };
 use aarch64_paging::{idmap::IdMap, paging::Attributes};
 use alloc::{vec, vec::Vec};
@@ -55,6 +56,7 @@ pub fn main(arg0: u64, arg1: u64, arg2: u64, arg3: u64) {
     print_addresses();
     assert_eq!(arg0, dtb_range().start.0 as u64);
     check_data();
+    check_stack_guard();
 
     unsafe {
         HEAP_ALLOCATOR.lock().init(&mut HEAP as *mut u8 as usize, HEAP.len());
@@ -92,6 +94,14 @@ pub fn main(arg0: u64, arg1: u64, arg2: u64, arg3: u64) {
     info!("Activated.");
 
     check_data();
+    check_dice();
+}
+
+fn check_stack_guard() {
+    const BIONIC_TLS_STACK_GRD_OFF: usize = 40;
+
+    info!("Testing stack guard");
+    assert_eq!(bionic_tls(BIONIC_TLS_STACK_GRD_OFF), stack_chk_guard());
 }
 
 fn check_data() {
@@ -138,4 +148,19 @@ fn check_alloc() {
     vector[2] = 42;
     assert_eq!(vector[2], 42);
     info!("Vec seems to work.");
+}
+
+fn check_dice() {
+    info!("Testing DICE integration...");
+    let hash = dice::hash("hello world".as_bytes()).expect("DiceHash failed");
+    assert_eq!(
+        hash,
+        [
+            0x30, 0x9e, 0xcc, 0x48, 0x9c, 0x12, 0xd6, 0xeb, 0x4c, 0xc4, 0x0f, 0x50, 0xc9, 0x02,
+            0xf2, 0xb4, 0xd0, 0xed, 0x77, 0xee, 0x51, 0x1a, 0x7c, 0x7a, 0x9b, 0xcd, 0x3c, 0xa8,
+            0x6d, 0x4c, 0xd8, 0x6f, 0x98, 0x9d, 0xd3, 0x5b, 0xc5, 0xff, 0x49, 0x96, 0x70, 0xda,
+            0x34, 0x25, 0x5b, 0x45, 0xb0, 0xcf, 0xd8, 0x30, 0xe8, 0x1f, 0x60, 0x5d, 0xcf, 0x7d,
+            0xc5, 0x54, 0x2e, 0x93, 0xae, 0x9c, 0xd7, 0x6f
+        ]
+    );
 }

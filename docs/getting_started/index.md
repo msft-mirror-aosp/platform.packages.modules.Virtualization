@@ -33,7 +33,7 @@ acloud create --local-instance --local-image
 ### Pixel 6 and 6 Pro
 
 If the device is running Android 12, join the [Android Beta
-Program](https://www.google.com/android/beta) to uprade to Android 13 Beta.
+Program](https://www.google.com/android/beta) to upgrade to Android 13 Beta.
 
 Once upgraded to Android 13, execute the following command to enable pKVM.
 
@@ -66,10 +66,18 @@ fastboot reboot
 ```
 
 Finally, if the `pvmfw` partition has been corrupted, both slots may be flashed
-using the [`pvmfw.img` pre-built](https://android.googlesource.com/platform/packages/modules/Virtualization/+/refs/heads/master/pvmfw/pvmfw.img)
+using the [`pvmfw.img` pre-built](https://android.googlesource.com/platform/packages/modules/Virtualization/+/08deac98acefd62e222edfa374d5292458cf97eb%5E/pvmfw/pvmfw.img)
 as long as the bootloader remains unlocked. Otherwise, a fresh install of
 Android 13 followed by the manual steps above for flashing the `other` slot
 should be used as a last resort.
+
+Starting in Android 14, `pvmfw.img` can be built using the Android Build system:
+```
+lunch <target>  # where PRODUCT_BUILD_PVMFW_IMAGE=true
+m pvmfwimage    # partition image under ${ANDROID_PRODUCT_OUT}/pvmfw.img
+```
+Note that the result is not intended to be used in Android 13 as not
+backward-compatibility is guaranteed.
 
 ## Running demo app
 

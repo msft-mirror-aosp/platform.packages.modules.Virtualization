@@ -95,7 +95,8 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
     }
 
     protected boolean isCuttlefish() throws Exception {
-        return VirtualizationTestHelper.isCuttlefish(getDevice().getProperty("ro.product.name"));
+        return VirtualizationTestHelper.isCuttlefish(
+            getDevice().getProperty("ro.product.vendor.device"));
     }
 
     protected String getMetricPrefix() throws Exception {
@@ -387,6 +388,9 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         long timeoutMillis = MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES * 60 * 1000;
         long elapsed = 0;
 
+        // In case there is a stale connection...
+        tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
+
         final String serial = androidDevice.getSerialNumber();
         final String from = "tcp:" + TEST_VM_ADB_PORT;
         final String to = "vsock:" + cid + ":5555";
@@ -423,5 +427,9 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         assertThat(runOnMicrodroidForResult("getprop", "ro.hardware"))
                 .stdoutTrimmed()
                 .isEqualTo("microdroid");
+    }
+
+    public boolean isProtectedVmSupported() throws DeviceNotAvailableException {
+        return getDevice().getBooleanProperty("ro.boot.hypervisor.protected_vm.supported", false);
     }
 }

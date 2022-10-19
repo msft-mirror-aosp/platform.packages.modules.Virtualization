@@ -16,37 +16,62 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "vm_main.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /**
  * Notifies the host that the payload is ready.
- * Returns true if the notification succeeds else false.
+ *
+ * \return true if the notification succeeds else false.
  */
-bool notify_payload_ready();
+bool AVmPayload_notifyPayloadReady(void);
 
 /**
- * Get the VM's attestation chain.
- * Returns the size of data or 0 on failure.
+ * Get a secret that is uniquely bound to this VM instance. The secrets are 32-byte values and the
+ * value associated with an identifier will not change over the lifetime of the VM instance.
+ *
+ * \param identifier identifier of the secret to return.
+ * \param identifier_size size of the secret identifier.
+ * \param secret pointer to size bytes where the secret is written.
+ * \param size number of bytes of the secret to get, up to the secret size.
+ *
+ * \return true on success and false on failure.
+ */
+bool AVmPayload_getVmInstanceSecret(const void *identifier, size_t identifier_size, void *secret,
+                                    size_t size);
+
+/**
+ * Get the VM's DICE attestation chain.
+ *
  * TODO: don't expose the contained privacy breaking identifiers to the payload
  * TODO: keep the DICE chain as an internal detail for as long as possible
+ *
+ * \param data pointer to size bytes where the chain is written.
+ * \param size number of bytes that can be written to data.
+ * \param total outputs the total size of the chain if the function succeeds
+ *
+ * \return true on success and false on failure.
  */
-size_t get_dice_attestation_chain(void *data, size_t size);
+bool AVmPayload_getDiceAttestationChain(void *data, size_t size, size_t *total);
 
 /**
- * Get the VM's attestation CDI.
- * Returns the size of data or 0 on failure.
+ * Get the VM's DICE attestation CDI.
+ *
  * TODO: don't expose the raw CDI, only derived values
+ *
+ * \param data pointer to size bytes where the CDI is written.
+ * \param size number of bytes that can be written to data.
+ * \param total outputs the total size of the CDI if the function succeeds
+ *
+ * \return true on success and false on failure.
  */
-size_t get_dice_attestation_cdi(void *data, size_t size);
-
-/**
- * Get the VM's sealing CDI.
- * Returns the size of data or 0 on failure.
- * TODO: don't expose the raw CDI, only derived values
- */
-size_t get_dice_sealing_cdi(void *data, size_t size);
+bool AVmPayload_getDiceAttestationCdi(void *data, size_t size, size_t *total);
 
 #ifdef __cplusplus
 } // extern "C"

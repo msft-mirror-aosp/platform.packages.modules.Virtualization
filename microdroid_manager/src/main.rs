@@ -18,14 +18,20 @@ mod dice;
 mod instance;
 mod ioutil;
 mod payload;
+mod procutil;
+mod swap;
 mod vm_payload_service;
 
 use crate::dice::{DiceContext, DiceDriver};
 use crate::instance::{ApexData, ApkData, InstanceDisk, MicrodroidData, RootHash};
 use crate::vm_payload_service::register_vm_payload_service;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::ErrorCode::ErrorCode;
-use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
-    VM_BINDER_SERVICE_PORT, VM_STREAM_SERVICE_PORT, IVirtualMachineService,
+use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::{
+    IVirtualMachineService::{
+        IVirtualMachineService, VM_BINDER_SERVICE_PORT, VM_STREAM_SERVICE_PORT,
+    },
+    VirtualMachineCpuStatus::VirtualMachineCpuStatus,
+    VirtualMachineMemStatus::VirtualMachineMemStatus,
 };
 use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use apkverify::{get_public_key_der, verify, V4Signature};
@@ -35,13 +41,15 @@ use glob::glob;
 use itertools::sorted;
 use log::{error, info};
 use microdroid_metadata::{write_metadata, Metadata, PayloadMetadata};
-use microdroid_payload_config::{Task, TaskType, VmPayloadConfig, OsConfig};
+use microdroid_payload_config::{OsConfig, Task, TaskType, VmPayloadConfig};
 use openssl::sha::Sha512;
 use payload::{get_apex_data_from_payload, load_metadata, to_metadata};
+use procutil::{get_cpu_time, get_mem_info};
 use rand::Fill;
 use rpcbinder::get_vsock_rpc_interface;
 use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
+use std::borrow::Cow::{Borrowed, Owned};
 use std::convert::TryInto;
 use std::fs::{self, create_dir, File, OpenOptions};
 use std::io::Write;
@@ -49,6 +57,7 @@ use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::str;
+use std::thread;
 use std::time::{Duration, SystemTime};
 use vsock::VsockStream;
 
@@ -88,6 +97,42 @@ enum MicrodroidError {
     InvalidConfig(String),
 }
 
+fn send_vm_status() -> Result<()> {
+    let service = get_vms_rpc_binder()
+        .context("cannot connect to VirtualMachineService")
+        .map_err(|e| MicrodroidError::FailedToConnectToVirtualizationService(e.to_string()))?;
+
+    let one_second = Duration::from_millis(1000);
+    loop {
+        // Collect VM CPU time information and creating VmCpuStatus atom for metrics.
+        let cpu_time = get_cpu_time()?;
+        let vm_cpu_status = VirtualMachineCpuStatus {
+            cpu_time_user: cpu_time.user,
+            cpu_time_nice: cpu_time.nice,
+            cpu_time_sys: cpu_time.sys,
+            cpu_time_idle: cpu_time.idle,
+        };
+        service
+            .notifyCpuStatus(&vm_cpu_status)
+            .expect("Can't send information about VM CPU status");
+
+        // Collect VM memory information and creating VmMemStatus atom for metrics.
+        let mem_info = get_mem_info()?;
+        let vm_mem_status = VirtualMachineMemStatus {
+            mem_total: mem_info.total,
+            mem_free: mem_info.free,
+            mem_available: mem_info.available,
+            mem_buffer: mem_info.buffer,
+            mem_cached: mem_info.cached,
+        };
+        service
+            .notifyMemStatus(&vm_mem_status)
+            .expect("Can't send information about VM memory status");
+
+        thread::sleep(one_second);
+    }
+}
+
 fn translate_error(err: &Error) -> (ErrorCode, String) {
     if let Some(e) = err.downcast_ref::<MicrodroidError>() {
         match e {
@@ -111,7 +156,7 @@ fn translate_error(err: &Error) -> (ErrorCode, String) {
 
 fn write_death_reason_to_serial(err: &Error) -> Result<()> {
     let death_reason = if let Some(e) = err.downcast_ref::<MicrodroidError>() {
-        match e {
+        Borrowed(match e {
             MicrodroidError::FailedToConnectToVirtualizationService(_) => {
                 "MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE"
             }
@@ -120,9 +165,12 @@ fn write_death_reason_to_serial(err: &Error) -> Result<()> {
                 "MICRODROID_PAYLOAD_VERIFICATION_FAILED"
             }
             MicrodroidError::InvalidConfig(_) => "MICRODROID_INVALID_PAYLOAD_CONFIG",
-        }
+        })
     } else {
-        "MICRODROID_UNKNOWN_RUNTIME_ERROR"
+        // Send context information back after a separator, to ease diagnosis.
+        // These errors occur before the payload runs, so this should not leak sensitive
+        // information.
+        Owned(format!("MICRODROID_UNKNOWN_RUNTIME_ERROR|{:?}", err))
     };
 
     let death_reason_bytes = death_reason.as_bytes();
@@ -170,9 +218,19 @@ fn try_main() -> Result<()> {
 
     load_crashkernel_if_supported().context("Failed to load crashkernel")?;
 
+    swap::init_swap().context("Failed to initialise swap")?;
+    info!("swap enabled.");
+
     let service = get_vms_rpc_binder()
         .context("cannot connect to VirtualMachineService")
         .map_err(|e| MicrodroidError::FailedToConnectToVirtualizationService(e.to_string()))?;
+
+    thread::spawn(move || {
+        if let Err(e) = send_vm_status() {
+            error!("failed to get virtual machine status: {:?}", e);
+        }
+    });
+
     match try_run_payload(&service) {
         Ok(code) => {
             info!("notifying payload finished");
@@ -220,7 +278,6 @@ fn dice_derivation(
     // }
     // PayloadConfig = {
     //   1: tstr // payload_binary_path
-    //   // TODO(b/249064104 Either include args, or deprecate them
     // }
 
     let mut config_desc = vec![
@@ -347,7 +404,7 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     )
     .context("Failed to run zipfuse")?;
 
-    let config = load_config(payload_metadata)?;
+    let config = load_config(payload_metadata).context("Failed to load payload metadata")?;
 
     let task = config
         .task
@@ -382,10 +439,12 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     // Wait until zipfuse has mounted the APK so we can access the payload
     wait_for_property_true(APK_MOUNT_DONE_PROP).context("Failed waiting for APK mount done")?;
 
-    system_properties::write("dev.bootcomplete", "1").context("set dev.bootcomplete")?;
     register_vm_payload_service(service.clone(), dice)?;
     ProcessState::start_thread_pool();
-    exec_task(task, service)
+
+    system_properties::write("dev.bootcomplete", "1").context("set dev.bootcomplete")?;
+
+    exec_task(task, service).context("Failed to run payload")
 }
 
 fn control_service(action: &str, service: &str) -> Result<()> {
@@ -670,14 +729,14 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
         PayloadMetadata::config_path(path) => {
             let path = Path::new(&path);
             info!("loading config from {:?}...", path);
-            let file = ioutil::wait_for_file(path, WAIT_TIMEOUT)?;
+            let file = ioutil::wait_for_file(path, WAIT_TIMEOUT)
+                .with_context(|| format!("Failed to read {:?}", path))?;
             Ok(serde_json::from_reader(file)?)
         }
         PayloadMetadata::config(payload_config) => {
             let task = Task {
                 type_: TaskType::MicrodroidLauncher,
                 command: payload_config.payload_binary_path,
-                args: payload_config.args.into_vec(),
             };
             Ok(VmPayloadConfig {
                 os: OsConfig { name: "microdroid".to_owned() },
@@ -723,14 +782,10 @@ fn build_command(task: &Task) -> Result<Command> {
     const VMADDR_CID_HOST: u32 = 2;
 
     let mut command = match task.type_ {
-        TaskType::Executable => {
-            let mut command = Command::new(&task.command);
-            command.args(&task.args);
-            command
-        }
+        TaskType::Executable => Command::new(&task.command),
         TaskType::MicrodroidLauncher => {
             let mut command = Command::new("/system/bin/microdroid_launcher");
-            command.arg(find_library_path(&task.command)?).args(&task.args);
+            command.arg(find_library_path(&task.command)?);
             command
         }
     };
@@ -765,7 +820,7 @@ fn find_library_path(name: &str) -> Result<String> {
     let abi = value.split(',').next().ok_or_else(|| anyhow!("no abilist"))?;
     let path = format!("/mnt/apk/lib/{}/{}", abi, name);
 
-    let metadata = fs::metadata(&path)?;
+    let metadata = fs::metadata(&path).with_context(|| format!("Unable to access {}", path))?;
     if !metadata.is_file() {
         bail!("{} is not a file", &path);
     }

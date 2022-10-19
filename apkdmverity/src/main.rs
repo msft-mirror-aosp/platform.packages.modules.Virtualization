@@ -21,13 +21,12 @@
 //! system managed by the host Android which is assumed to be compromisable, it is important to
 //! keep the integrity of the file "inside" Microdroid.
 
-mod dm;
-mod loopdevice;
-mod util;
-
 use anyhow::{bail, Context, Result};
 use apkverify::{HashAlgorithm, V4Signature};
 use clap::{App, Arg};
+use dm::loopdevice;
+use dm::util;
+use dm::verity::{DmVerityHashAlgorithm, DmVerityTargetBuilder};
 use itertools::Itertools;
 use std::fmt::Debug;
 use std::fs;
@@ -94,7 +93,7 @@ fn enable_verity<P: AsRef<Path> + Debug>(
             bail!("The size of {:?} is not multiple of {}.", &apk, BLOCK_SIZE)
         }
         (
-            loopdevice::attach(&apk, 0, apk_size, /*direct_io*/ true)
+            loopdevice::attach(&apk, 0, apk_size, /*direct_io*/ true, /*writable*/ false)
                 .context("Failed to attach APK to a loop device")?,
             apk_size,
         )
@@ -109,12 +108,13 @@ fn enable_verity<P: AsRef<Path> + Debug>(
     // Due to unknown reason(b/191344832), we can't enable "direct IO" for the IDSIG file (backing
     // the hash). For now we don't use "direct IO" but it seems OK since the IDSIG file is very
     // small and the benefit of direct-IO would be negliable.
-    let hash_device = loopdevice::attach(&idsig, offset, size, /*direct_io*/ false)
-        .context("Failed to attach idsig to a loop device")?;
+    let hash_device =
+        loopdevice::attach(&idsig, offset, size, /*direct_io*/ false, /*writable*/ false)
+            .context("Failed to attach idsig to a loop device")?;
 
     // Build a dm-verity target spec from the information from the idsig file. The apk and the
     // idsig files are used as the data device and the hash device, respectively.
-    let target = dm::DmVerityTargetBuilder::default()
+    let target = DmVerityTargetBuilder::default()
         .data_device(&data_device, apk_size)
         .hash_device(&hash_device)
         .root_digest(if let Some(roothash) = roothash {
@@ -123,7 +123,7 @@ fn enable_verity<P: AsRef<Path> + Debug>(
             &sig.hashing_info.raw_root_hash
         })
         .hash_algorithm(match sig.hashing_info.hash_algorithm {
-            HashAlgorithm::SHA256 => dm::DmVerityHashAlgorithm::SHA256,
+            HashAlgorithm::SHA256 => DmVerityHashAlgorithm::SHA256,
         })
         .salt(&sig.hashing_info.salt)
         .build()
@@ -132,7 +132,7 @@ fn enable_verity<P: AsRef<Path> + Debug>(
     // Actually create a dm-verity block device using the spec.
     let dm = dm::DeviceMapper::new()?;
     let mapper_device =
-        dm.create_device(name, &target).context("Failed to create dm-verity device")?;
+        dm.create_verity_device(name, &target).context("Failed to create dm-verity device")?;
 
     Ok(VerityResult { data_device, hash_device, mapper_device })
 }
@@ -325,9 +325,19 @@ mod tests {
         // already a block device, `enable_verity` uses the block device as it is. The detatching
         // of the data device is done in the scopeguard for the return value of `enable_verity`
         // below. Only the idsig_loop_device needs detatching.
-        let apk_loop_device = loopdevice::attach(&apk_path, 0, apk_size, true).unwrap();
+        let apk_loop_device = loopdevice::attach(
+            &apk_path, 0, apk_size, /*direct_io*/ true, /*writable*/ false,
+        )
+        .unwrap();
         let idsig_loop_device = scopeguard::guard(
-            loopdevice::attach(&idsig_path, 0, idsig_size, false).unwrap(),
+            loopdevice::attach(
+                &idsig_path,
+                0,
+                idsig_size,
+                /*direct_io*/ false,
+                /*writable*/ false,
+            )
+            .unwrap(),
             |dev| loopdevice::detach(dev).unwrap(),
         );
 

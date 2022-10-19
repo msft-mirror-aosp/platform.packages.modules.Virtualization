@@ -15,6 +15,7 @@
 //! Memory layout.
 
 use aarch64_paging::paging::{MemoryRegion, VirtualAddress};
+use core::arch::asm;
 use core::ops::Range;
 use vmbase::println;
 
@@ -80,6 +81,10 @@ fn data_load_address() -> VirtualAddress {
     unsafe { VirtualAddress(&data_lma as *const u8 as usize) }
 }
 
+fn binary_end() -> VirtualAddress {
+    unsafe { VirtualAddress(&bin_end as *const u8 as usize) }
+}
+
 pub fn print_addresses() {
     let dtb = dtb_range();
     println!("dtb:        {}..{} ({} bytes)", dtb.start, dtb.end, dtb.end - dtb.start);
@@ -87,6 +92,7 @@ pub fn print_addresses() {
     println!("text:       {}..{} ({} bytes)", text.start, text.end, text.end - text.start);
     let rodata = rodata_range();
     println!("rodata:     {}..{} ({} bytes)", rodata.start, rodata.end, rodata.end - rodata.start);
+    println!("binary end: {}", binary_end());
     let data = data_range();
     println!(
         "data:       {}..{} ({} bytes, loaded at {})",
@@ -106,6 +112,21 @@ pub fn print_addresses() {
     );
 }
 
+/// Bionic-compatible thread-local storage entry, at the given offset from TPIDR_EL0.
+pub fn bionic_tls(off: usize) -> u64 {
+    let mut base: usize;
+    unsafe {
+        asm!("mrs {base}, tpidr_el0", base = out(reg) base);
+        let ptr = (base + off) as *const u64;
+        *ptr
+    }
+}
+
+/// Value of __stack_chk_guard.
+pub fn stack_chk_guard() -> u64 {
+    unsafe { __stack_chk_guard }
+}
+
 extern "C" {
     static dtb_begin: u8;
     static dtb_end: u8;
@@ -116,8 +137,10 @@ extern "C" {
     static data_begin: u8;
     static data_end: u8;
     static data_lma: u8;
+    static bin_end: u8;
     static bss_begin: u8;
     static bss_end: u8;
     static boot_stack_begin: u8;
     static boot_stack_end: u8;
+    static __stack_chk_guard: u64;
 }
