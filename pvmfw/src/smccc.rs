@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use core::fmt;
+use core::{fmt, result};
 
 // TODO(b/245889995): use psci-0.1.1 crate
 #[inline(always)]
@@ -69,20 +69,22 @@ impl fmt::Display for Error {
             Self::NotSupported => write!(f, "SMCCC call not supported"),
             Self::NotRequired => write!(f, "SMCCC call not required"),
             Self::InvalidParameter => write!(f, "SMCCC call received non-supported value"),
-            Self::Unexpected(v) => write!(f, "Unexpected SMCCC return value '{}'", v),
-            Self::Unknown(e) => write!(f, "Unknown SMCCC return value '{}'", e),
+            Self::Unexpected(v) => write!(f, "Unexpected SMCCC return value {} ({0:#x})", v),
+            Self::Unknown(e) => write!(f, "Unknown SMCCC return value {} ({0:#x})", e),
         }
     }
 }
 
-fn check_smccc_err(ret: i64) -> Result<(), Error> {
+type Result<T> = result::Result<T, Error>;
+
+fn check_smccc_err(ret: i64) -> Result<()> {
     match check_smccc_value(ret)? {
         0 => Ok(()),
         v => Err(Error::Unexpected(v)),
     }
 }
 
-fn check_smccc_value(ret: i64) -> Result<u64, Error> {
+fn check_smccc_value(ret: i64) -> Result<u64> {
     match ret {
         x if x >= 0 => Ok(ret as u64),
         -1 => Err(Error::NotSupported),
@@ -96,7 +98,7 @@ const VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID: u32 = 0xc6000005;
 const VENDOR_HYP_KVM_MMIO_GUARD_MAP_FUNC_ID: u32 = 0xc6000007;
 
 /// Issue pKVM-specific MMIO_GUARD_INFO HVC64.
-pub fn mmio_guard_info() -> Result<u64, Error> {
+pub fn mmio_guard_info() -> Result<u64> {
     let args = [0u64; 17];
 
     let res = hvc64(VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID, args);
@@ -105,7 +107,7 @@ pub fn mmio_guard_info() -> Result<u64, Error> {
 }
 
 /// Issue pKVM-specific MMIO_GUARD_MAP HVC64.
-pub fn mmio_guard_map(ipa: u64) -> Result<(), Error> {
+pub fn mmio_guard_map(ipa: u64) -> Result<()> {
     let mut args = [0u64; 17];
     args[0] = ipa;
 
