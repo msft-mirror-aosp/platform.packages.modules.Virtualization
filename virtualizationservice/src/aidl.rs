@@ -340,10 +340,18 @@ impl VirtualizationService {
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         check_manage_access()?;
 
-        if let VirtualMachineConfig::RawConfig(config) = config {
-            if config.protectedVm {
-                check_use_custom_virtual_machine()?;
+        let is_custom = match config {
+            VirtualMachineConfig::RawConfig(_) => true,
+            VirtualMachineConfig::AppConfig(config) => {
+                // Some features are reserved for platform apps only, even when using
+                // VirtualMachineAppConfig:
+                // - controlling CPUs;
+                // - specifying a config file in the APK.
+                !config.taskProfiles.is_empty() || matches!(config.payload, Payload::ConfigPath(_))
             }
+        };
+        if is_custom {
+            check_use_custom_virtual_machine()?;
         }
 
         let state = &mut *self.state.lock().unwrap();
@@ -377,18 +385,17 @@ impl VirtualizationService {
             )
         })?;
 
-        let is_app_config = matches!(config, VirtualMachineConfig::AppConfig(_));
-
-        let config = match config {
-            VirtualMachineConfig::AppConfig(config) => BorrowedOrOwned::Owned(
-                load_app_config(config, &temporary_directory).map_err(|e| {
+        let (is_app_config, config) = match config {
+            VirtualMachineConfig::RawConfig(config) => (false, BorrowedOrOwned::Borrowed(config)),
+            VirtualMachineConfig::AppConfig(config) => {
+                let config = load_app_config(config, &temporary_directory).map_err(|e| {
                     *is_protected = config.protectedVm;
                     let message = format!("Failed to load app config: {:?}", e);
                     error!("{}", message);
                     Status::new_service_specific_error_str(-1, Some(message))
-                })?,
-            ),
-            VirtualMachineConfig::RawConfig(config) => BorrowedOrOwned::Borrowed(config),
+                })?;
+                (true, BorrowedOrOwned::Owned(config))
+            }
         };
         let config = config.as_ref();
         *is_protected = config.protectedVm;
@@ -590,12 +597,6 @@ fn load_app_config(
     config: &VirtualMachineAppConfig,
     temporary_directory: &Path,
 ) -> Result<VirtualMachineRawConfig> {
-    // Controlling CPUs is reserved for platform apps only, even when using
-    // VirtualMachineAppConfig.
-    if !config.taskProfiles.is_empty() {
-        check_use_custom_virtual_machine()?
-    }
-
     let apk_file = clone_file(config.apk.as_ref().unwrap())?;
     let idsig_file = clone_file(config.idsig.as_ref().unwrap())?;
     let instance_file = clone_file(config.instanceImage.as_ref().unwrap())?;
@@ -1069,7 +1070,7 @@ impl IVirtualMachineService for VirtualMachineService {
     fn notifyPayloadStarted(&self) -> binder::Result<()> {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
-            info!("VM having CID {} started payload", cid);
+            info!("VM with CID {} started payload", cid);
             vm.update_payload_state(PayloadState::Started).map_err(|e| {
                 Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
             })?;
@@ -1091,7 +1092,7 @@ impl IVirtualMachineService for VirtualMachineService {
     fn notifyPayloadReady(&self) -> binder::Result<()> {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
-            info!("VM having CID {} payload is ready", cid);
+            info!("VM with CID {} reported payload is ready", cid);
             vm.update_payload_state(PayloadState::Ready).map_err(|e| {
                 Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
             })?;
@@ -1109,7 +1110,7 @@ impl IVirtualMachineService for VirtualMachineService {
     fn notifyPayloadFinished(&self, exit_code: i32) -> binder::Result<()> {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
-            info!("VM having CID {} finished payload", cid);
+            info!("VM with CID {} finished payload", cid);
             vm.update_payload_state(PayloadState::Finished).map_err(|e| {
                 Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
             })?;
@@ -1127,7 +1128,7 @@ impl IVirtualMachineService for VirtualMachineService {
     fn notifyError(&self, error_code: ErrorCode, message: &str) -> binder::Result<()> {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
-            info!("VM having CID {} encountered an error", cid);
+            info!("VM with CID {} encountered an error", cid);
             vm.update_payload_state(PayloadState::Finished).map_err(|e| {
                 Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
             })?;
@@ -1145,7 +1146,7 @@ impl IVirtualMachineService for VirtualMachineService {
     fn notifyCpuStatus(&self, status: &VirtualMachineCpuStatus) -> binder::Result<()> {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
-            info!("VM having CID {} encountered an error", cid);
+            info!("VM with CID {} reported its CPU status", cid);
             write_vm_cpu_status_stats(vm.requester_uid as i32, &vm.name, status);
             Ok(())
         } else {
@@ -1160,7 +1161,7 @@ impl IVirtualMachineService for VirtualMachineService {
     fn notifyMemStatus(&self, status: &VirtualMachineMemStatus) -> binder::Result<()> {
         let cid = self.cid;
         if let Some(vm) = self.state.lock().unwrap().get_vm(cid) {
-            info!("VM having CID {} encountered an error", cid);
+            info!("VM with CID {} reported its memory status", cid);
             write_vm_mem_status_stats(vm.requester_uid as i32, &vm.name, status);
             Ok(())
         } else {
