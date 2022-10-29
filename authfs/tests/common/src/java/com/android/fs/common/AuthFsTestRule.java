@@ -99,14 +99,6 @@ public class AuthFsTestRule extends TestLogData {
         sTestInfo = testInfo;
         TestDevice androidDevice = getDevice();
         sAndroid = new CommandRunner(androidDevice);
-
-        // NB: We can't use assumeTrue because the assumption exception is NOT handled by the test
-        // infra when it is thrown from a class method (see b/37502066). We need to skip both here
-        // and in setUp.
-        if (!androidDevice.supportsMicrodroid()) {
-            CLog.i("Microdroid not supported. Skipping.");
-            return;
-        }
     }
 
     public static void tearDownAndroid() {
@@ -245,8 +237,10 @@ public class AuthFsTestRule extends TestLogData {
         return FUSE_SUPER_MAGIC_HEX.equals(fs_type);
     }
 
-    private void setUpTest() throws Exception {
-        sAndroid.run("mkdir -p " + TEST_OUTPUT_DIR);
+    public void setUpTest() throws Exception {
+        if (sAndroid != null) {
+            sAndroid.run("mkdir -p " + TEST_OUTPUT_DIR);
+        }
     }
 
     private void tearDownTest(String testName) throws Exception {
