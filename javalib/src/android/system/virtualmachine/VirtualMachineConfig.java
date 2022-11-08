@@ -39,6 +39,7 @@ import java.io.OutputStream;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.Objects;
+
 /**
  * Represents a configuration of a virtual machine. A configuration consists of hardware
  * configurations like the number of CPUs and the size of RAM, and software configurations like the
@@ -370,7 +371,7 @@ public final class VirtualMachineConfig {
             }
 
             if (!mProtectedVmSet) {
-                throw new IllegalStateException("setProtectedVm must be called explicitly");
+                throw new IllegalStateException("setProtectedVm(t/f) must be called explicitly");
             }
 
             if (mProtectedVm

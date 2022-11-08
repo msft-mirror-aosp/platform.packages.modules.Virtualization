@@ -45,10 +45,10 @@ import org.junit.runner.RunWith;
 public final class AuthFsHostTest extends BaseHostJUnit4Test {
 
     /** Test directory on Android where data are located */
-    private static final String TEST_DIR = AuthFsTestRule.TEST_DIR;
+    private static final String TEST_DIR = "/data/local/tmp/authfs";
 
     /** Output directory where the test can generate output on Android */
-    private static final String TEST_OUTPUT_DIR = AuthFsTestRule.TEST_OUTPUT_DIR;
+    private static final String TEST_OUTPUT_DIR = "/data/local/tmp/authfs/output_dir";
 
     /** Path to fsverity on Android */
     private static final String FSVERITY_BIN = "/data/local/tmp/fsverity";
