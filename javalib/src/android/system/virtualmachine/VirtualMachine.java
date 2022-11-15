@@ -282,14 +282,7 @@ public class VirtualMachine implements AutoCloseable {
     @GuardedBy("sCreateLock")
     @NonNull
     private static Map<String, WeakReference<VirtualMachine>> getInstancesMap(Context context) {
-        Map<String, WeakReference<VirtualMachine>> instancesMap;
-        if (sInstances.containsKey(context)) {
-            instancesMap = sInstances.get(context);
-        } else {
-            instancesMap = new HashMap<>();
-            sInstances.put(context, instancesMap);
-        }
-        return instancesMap;
+        return sInstances.computeIfAbsent(context, unused -> new HashMap<>());
     }
 
     @NonNull
@@ -729,7 +722,7 @@ public class VirtualMachine implements AutoCloseable {
      * @hide
      */
     @NonNull
-    public InputStream getConsoleOutputStream() throws VirtualMachineException {
+    public InputStream getConsoleOutput() throws VirtualMachineException {
         synchronized (mLock) {
             createVmPipes();
             return new FileInputStream(mConsoleReader.getFileDescriptor());
@@ -743,7 +736,7 @@ public class VirtualMachine implements AutoCloseable {
      * @hide
      */
     @NonNull
-    public InputStream getLogOutputStream() throws VirtualMachineException {
+    public InputStream getLogOutput() throws VirtualMachineException {
         synchronized (mLock) {
             createVmPipes();
             return new FileInputStream(mLogReader.getFileDescriptor());
