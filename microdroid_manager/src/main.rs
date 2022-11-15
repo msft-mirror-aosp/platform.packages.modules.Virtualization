@@ -39,6 +39,7 @@ use libc::VMADDR_CID_HOST;
 use log::{error, info};
 use microdroid_metadata::{write_metadata, Metadata, PayloadMetadata};
 use microdroid_payload_config::{OsConfig, Task, TaskType, VmPayloadConfig};
+use nix::sys::signal::Signal;
 use openssl::sha::Sha512;
 use payload::{get_apex_data_from_payload, load_metadata, to_metadata};
 use rand::Fill;
@@ -47,9 +48,11 @@ use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
 use std::borrow::Cow::{Borrowed, Owned};
 use std::convert::TryInto;
+use std::env;
 use std::fs::{self, create_dir, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::io::{FromRawFd, IntoRawFd};
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::str;
@@ -152,6 +155,11 @@ fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
 }
 
 fn main() -> Result<()> {
+    // If debuggable, print full backtrace to console log with stdio_to_kmsg
+    if system_properties::read_bool(APP_DEBUGGABLE_PROP, true)? {
+        env::set_var("RUST_BACKTRACE", "full");
+    }
+
     scopeguard::defer! {
         info!("Shutting down...");
         if let Err(e) = system_properties::write("sys.powerctl", "shutdown") {
@@ -730,7 +738,17 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
     service.notifyPayloadStarted()?;
 
     let exit_status = command.spawn()?.wait()?;
-    exit_status.code().ok_or_else(|| anyhow!("Failed to get exit_code from the paylaod."))
+    match exit_status.code() {
+        Some(exit_code) => Ok(exit_code),
+        None => Err(match exit_status.signal() {
+            Some(signal) => anyhow!(
+                "Payload exited due to signal: {} ({})",
+                signal,
+                Signal::try_from(signal).map_or("unknown", |s| s.as_str())
+            ),
+            None => anyhow!("Payload has neither exit code nor signal"),
+        }),
+    }
 }
 
 fn build_command(task: &Task) -> Result<Command> {
