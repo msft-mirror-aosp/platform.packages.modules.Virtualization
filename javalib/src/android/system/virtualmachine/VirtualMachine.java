@@ -69,7 +69,6 @@ import com.android.internal.annotations.GuardedBy;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -319,13 +318,7 @@ public class VirtualMachine implements AutoCloseable {
 
         try {
             VirtualMachine vm = new VirtualMachine(context, name, config);
-
-            try (FileOutputStream output = new FileOutputStream(vm.mConfigFilePath)) {
-                config.serialize(output);
-            } catch (IOException e) {
-                throw new VirtualMachineException("failed to write VM config", e);
-            }
-
+            config.serialize(vm.mConfigFilePath);
             try {
                 vm.mInstanceFilePath.createNewFile();
             } catch (IOException e) {
@@ -643,9 +636,14 @@ public class VirtualMachine implements AutoCloseable {
                 mVirtualMachine.registerCallback(
                         new IVirtualMachineCallback.Stub() {
                             @Override
-                            public void onPayloadStarted(int cid, ParcelFileDescriptor stream) {
+                            public void onPayloadStarted(int cid) {
+                                executeCallback((cb) -> cb.onPayloadStarted(VirtualMachine.this));
+                            }
+
+                            @Override
+                            public void onPayloadStdio(int cid, ParcelFileDescriptor stream) {
                                 executeCallback(
-                                        (cb) -> cb.onPayloadStarted(VirtualMachine.this, stream));
+                                        (cb) -> cb.onPayloadStdio(VirtualMachine.this, stream));
                             }
 
                             @Override
@@ -656,16 +654,20 @@ public class VirtualMachine implements AutoCloseable {
                             @Override
                             public void onPayloadFinished(int cid, int exitCode) {
                                 executeCallback(
-                                        (cb) -> cb.onPayloadFinished(VirtualMachine.this,
-                                                exitCode));
+                                        (cb) ->
+                                                cb.onPayloadFinished(
+                                                        VirtualMachine.this, exitCode));
                             }
 
                             @Override
                             public void onError(int cid, int errorCode, String message) {
                                 int translatedError = getTranslatedError(errorCode);
                                 executeCallback(
-                                        (cb) -> cb.onError(VirtualMachine.this, translatedError,
-                                                message));
+                                        (cb) ->
+                                                cb.onError(
+                                                        VirtualMachine.this,
+                                                        translatedError,
+                                                        message));
                             }
 
                             @Override
@@ -674,18 +676,17 @@ public class VirtualMachine implements AutoCloseable {
                                 int translatedReason = getTranslatedReason(reason);
                                 if (onDiedCalled.compareAndSet(false, true)) {
                                     executeCallback(
-                                            (cb) -> cb.onStopped(VirtualMachine.this,
-                                                    translatedReason));
+                                            (cb) ->
+                                                    cb.onStopped(
+                                                            VirtualMachine.this, translatedReason));
                                 }
                             }
 
                             @Override
                             public void onRamdump(int cid, ParcelFileDescriptor ramdump) {
-                                executeCallback(
-                                        (cb) -> cb.onRamdump(VirtualMachine.this, ramdump));
+                                executeCallback((cb) -> cb.onRamdump(VirtualMachine.this, ramdump));
                             }
-                        }
-                );
+                        });
                 service.asBinder().linkToDeath(deathRecipient, 0);
                 mVirtualMachine.start();
             } catch (IOException | IllegalStateException | ServiceSpecificException e) {
@@ -838,14 +839,7 @@ public class VirtualMachine implements AutoCloseable {
                 throw new VirtualMachineException("incompatible config");
             }
             checkStopped();
-
-            try {
-                FileOutputStream output = new FileOutputStream(mConfigFilePath);
-                newConfig.serialize(output);
-                output.close();
-            } catch (IOException e) {
-                throw new VirtualMachineException("Failed to persist config", e);
-            }
+            newConfig.serialize(mConfigFilePath);
             mConfig = newConfig;
             return oldConfig;
         }
@@ -895,22 +889,22 @@ public class VirtualMachine implements AutoCloseable {
     }
 
     /**
-     * Captures the current state of the VM in a {@link ParcelVirtualMachine} instance.
-     * The VM needs to be stopped to avoid inconsistency in its state representation.
+     * Captures the current state of the VM in a {@link VirtualMachineDescriptor} instance. The VM
+     * needs to be stopped to avoid inconsistency in its state representation.
      *
-     * @return a {@link ParcelVirtualMachine} instance that represents the VM's state.
+     * @return a {@link VirtualMachineDescriptor} instance that represents the VM's state.
      * @throws VirtualMachineException if the virtual machine is not stopped, or the state could not
      *     be captured.
      */
     @NonNull
-    public ParcelVirtualMachine toParcelVirtualMachine() throws VirtualMachineException {
+    public VirtualMachineDescriptor toDescriptor() throws VirtualMachineException {
         synchronized (mLock) {
             checkStopped();
         }
         try {
-            return new ParcelVirtualMachine(
-                ParcelFileDescriptor.open(mConfigFilePath, MODE_READ_ONLY),
-                ParcelFileDescriptor.open(mInstanceFilePath, MODE_READ_ONLY));
+            return new VirtualMachineDescriptor(
+                    ParcelFileDescriptor.open(mConfigFilePath, MODE_READ_ONLY),
+                    ParcelFileDescriptor.open(mInstanceFilePath, MODE_READ_ONLY));
         } catch (IOException e) {
             throw new VirtualMachineException(e);
         }

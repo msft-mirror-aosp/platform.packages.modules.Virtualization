@@ -30,10 +30,10 @@ import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.ServiceSpecificException;
 import android.os.SystemProperties;
-import android.system.virtualmachine.ParcelVirtualMachine;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineCallback;
 import android.system.virtualmachine.VirtualMachineConfig;
+import android.system.virtualmachine.VirtualMachineDescriptor;
 import android.system.virtualmachine.VirtualMachineException;
 import android.system.virtualmachine.VirtualMachineManager;
 import android.util.Log;
@@ -600,7 +600,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    public void vmConvertsToValidParcelVm() throws Exception {
+    public void vmConvertsToValidDescriptor() throws Exception {
         // Arrange
         VirtualMachineConfig config =
                 mInner.newVmConfigBuilder()
@@ -611,11 +611,11 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachine vm = mInner.forceCreateNewVirtualMachine(vmName, config);
 
         // Action
-        ParcelVirtualMachine parcelVm = vm.toParcelVirtualMachine();
+        VirtualMachineDescriptor descriptor = vm.toDescriptor();
 
         // Asserts
-        assertFileContentsAreEqual(parcelVm.getConfigFd(), vmName, "config.xml");
-        assertFileContentsAreEqual(parcelVm.getInstanceImgFd(), vmName, "instance.img");
+        assertFileContentsAreEqual(descriptor.getConfigFd(), vmName, "config.xml");
+        assertFileContentsAreEqual(descriptor.getInstanceImgFd(), vmName, "instance.img");
     }
 
     private void assertFileContentsAreEqual(
@@ -671,8 +671,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 new VmEventListener() {
                     private void testVMService(VirtualMachine vm) {
                         try {
-                            ITestService testService = ITestService.Stub.asInterface(
-                                    vm.connectToVsockServer(ITestService.SERVICE_PORT));
+                            ITestService testService =
+                                    ITestService.Stub.asInterface(
+                                            vm.connectToVsockServer(ITestService.SERVICE_PORT));
                             testResults.mAddInteger = testService.addInteger(123, 456);
                             testResults.mAppRunProp =
                                     testService.readProperty("debug.microdroid.app.run");
@@ -695,11 +696,16 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                     }
 
                     @Override
-                    public void onPayloadStarted(VirtualMachine vm, ParcelFileDescriptor stream) {
+                    public void onPayloadStarted(VirtualMachine vm) {
                         Log.i(TAG, "onPayloadStarted");
                         payloadStarted.complete(true);
-                        logVmOutput(TAG, new FileInputStream(stream.getFileDescriptor()),
-                                "Payload");
+                    }
+
+                    @Override
+                    public void onPayloadStdio(VirtualMachine vm, ParcelFileDescriptor stream) {
+                        Log.i(TAG, "onPayloadStdio");
+                        logVmOutput(
+                                TAG, new FileInputStream(stream.getFileDescriptor()), "Payload");
                     }
                 };
         listener.runToFinish(TAG, vm);
