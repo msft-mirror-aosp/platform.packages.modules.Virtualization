@@ -23,8 +23,6 @@ import android.os.Parcel;
 import android.os.ParcelFileDescriptor;
 import android.os.Parcelable;
 
-import com.android.internal.annotations.VisibleForTesting;
-
 /**
  * A VM descriptor that captures the state of a Virtual Machine.
  *
@@ -35,8 +33,8 @@ import com.android.internal.annotations.VisibleForTesting;
  * @hide
  */
 public final class VirtualMachineDescriptor implements Parcelable {
-    private final @NonNull ParcelFileDescriptor mConfigFd;
-    private final @NonNull ParcelFileDescriptor mInstanceImgFd;
+    @NonNull private final ParcelFileDescriptor mConfigFd;
+    @NonNull private final ParcelFileDescriptor mInstanceImgFd;
     // TODO(b/243129654): Add trusted storage fd once it is available.
 
     @Override
@@ -45,13 +43,14 @@ public final class VirtualMachineDescriptor implements Parcelable {
     }
 
     @Override
-    public void writeToParcel(Parcel out, int flags) {
+    public void writeToParcel(@NonNull Parcel out, int flags) {
         mConfigFd.writeToParcel(out, flags);
         mInstanceImgFd.writeToParcel(out, flags);
     }
 
+    @NonNull
     public static final Parcelable.Creator<VirtualMachineDescriptor> CREATOR =
-            new Parcelable.Creator<VirtualMachineDescriptor>() {
+            new Parcelable.Creator<>() {
                 public VirtualMachineDescriptor createFromParcel(Parcel in) {
                     return new VirtualMachineDescriptor(in);
                 }
@@ -63,19 +62,17 @@ public final class VirtualMachineDescriptor implements Parcelable {
 
     /**
      * @return File descriptor of the VM configuration file config.xml.
-     * @hide
      */
-    @VisibleForTesting
-    public @NonNull ParcelFileDescriptor getConfigFd() {
+    @NonNull
+    ParcelFileDescriptor getConfigFd() {
         return mConfigFd;
     }
 
     /**
      * @return File descriptor of the instance.img of the VM.
-     * @hide
      */
-    @VisibleForTesting
-    public @NonNull ParcelFileDescriptor getInstanceImgFd() {
+    @NonNull
+    ParcelFileDescriptor getInstanceImgFd() {
         return mInstanceImgFd;
     }
 
