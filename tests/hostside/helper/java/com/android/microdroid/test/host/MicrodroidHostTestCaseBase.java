@@ -26,6 +26,7 @@ import static com.google.common.truth.Truth.assertWithMessage;
 import static org.junit.Assume.assumeTrue;
 
 import com.android.compatibility.common.tradefed.build.CompatibilityBuildHelper;
+import com.android.microdroid.test.common.DeviceProperties;
 import com.android.microdroid.test.common.MetricsProcessor;
 import com.android.tradefed.build.IBuildInfo;
 import com.android.tradefed.device.DeviceNotAvailableException;
@@ -34,7 +35,6 @@ import com.android.tradefed.device.TestDevice;
 import com.android.tradefed.testtype.junit4.BaseHostJUnit4Test;
 import com.android.tradefed.util.CommandResult;
 import com.android.tradefed.util.RunUtil;
-import com.android.virt.VirtualizationTestHelper;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -48,10 +48,6 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
     private static final int TEST_VM_ADB_PORT = 8000;
     private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
     private static final String INSTANCE_IMG = "instance.img";
-
-    // This is really slow on GCE (2m 40s) but fast on localhost or actual Android phones (< 10s).
-    // Then there is time to run the actual task. Set the maximum timeout value big enough.
-    private static final long MICRODROID_MAX_LIFETIME_MINUTES = 20;
 
     private static final long MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES = 5;
     protected static final long MICRODROID_COMMAND_TIMEOUT_MILLIS = 30000;
@@ -87,14 +83,13 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         android.tryRun("rm", "-rf", "/data/misc/virtualizationservice/*");
     }
 
-    protected boolean isCuttlefish() throws Exception {
-        return VirtualizationTestHelper.isCuttlefish(
-            getDevice().getProperty("ro.product.vendor.device"));
+    protected boolean isCuttlefish() {
+        return DeviceProperties.create(getDevice()::getProperty).isCuttlefish();
     }
 
-    protected String getMetricPrefix() throws Exception {
+    protected String getMetricPrefix() {
         return MetricsProcessor.getMetricPrefix(
-                getDevice().getProperty("debug.hypervisor.metrics_tag"));
+                DeviceProperties.create(getDevice()::getProperty).getMetricsTag());
     }
 
     public static void testIfDeviceIsCapable(ITestDevice androidDevice) throws Exception {
@@ -194,17 +189,6 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         assertWithMessage("Package " + packageName + " not found")
                 .that(pathLine).startsWith("package:");
         return pathLine.substring("package:".length());
-    }
-
-    private static void forwardFileToLog(CommandRunner android, String path, String tag)
-            throws DeviceNotAvailableException {
-        android.runWithTimeout(
-                MICRODROID_MAX_LIFETIME_MINUTES * 60 * 1000,
-                "logwrapper",
-                "sh",
-                "-c",
-                "\"$'tail -f -n +0 " + path
-                        + " | sed \\'s/^/" + tag + ": /g\\''\""); // add tags in front of lines
     }
 
     public static void shutdownMicrodroid(ITestDevice androidDevice, String cid)
