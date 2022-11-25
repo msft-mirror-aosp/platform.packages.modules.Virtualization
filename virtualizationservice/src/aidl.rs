@@ -16,7 +16,7 @@
 
 use crate::atom::{write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
-use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmInstance, VmState};
+use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmContext, VmInstance, VmState};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images};
 use crate::selinux::{getfilecon, SeContext};
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
@@ -41,22 +41,22 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
     IVirtualizationServiceInternal::{BnVirtualizationServiceInternal, IVirtualizationServiceInternal},
 };
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
-        BnVirtualMachineService, IVirtualMachineService, VM_BINDER_SERVICE_PORT,
-        VM_TOMBSTONES_SERVICE_PORT,
+        BnVirtualMachineService, IVirtualMachineService, VM_TOMBSTONES_SERVICE_PORT,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use apkverify::{HashAlgorithm, V4Signature};
 use binder::{
     self, BinderFeatures, ExceptionCode, Interface, LazyServiceGuard, ParcelFileDescriptor,
-    SpIBinder, Status, StatusCode, Strong, ThreadState,
+    Status, StatusCode, Strong, ThreadState,
 };
 use disk::QcowFile;
 use libc::VMADDR_CID_HOST;
 use log::{debug, error, info, warn};
 use microdroid_payload_config::{OsConfig, Task, TaskType, VmPayloadConfig};
-use rpcbinder::run_vsock_rpc_server_with_factory;
+use rpcbinder::RpcServer;
 use rustutils::system_properties;
 use semver::VersionReq;
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fs::{create_dir, File, OpenOptions};
@@ -80,7 +80,8 @@ pub const TEMPORARY_DIRECTORY: &str = "/data/misc/virtualizationservice";
 
 /// The first CID to assign to a guest VM managed by the VirtualizationService. CIDs lower than this
 /// are reserved for the host or other usage.
-const FIRST_GUEST_CID: Cid = 10;
+const GUEST_CID_MIN: Cid = 2048;
+const GUEST_CID_MAX: Cid = 65535;
 
 const SYSPROP_LAST_CID: &str = "virtualizationservice.state.last_cid";
 
@@ -99,6 +100,19 @@ const CHUNK_RECV_MAX_LEN: usize = 1024;
 const MICRODROID_OS_NAME: &str = "microdroid";
 
 const UNFORMATTED_STORAGE_MAGIC: &str = "UNFORMATTED-STORAGE";
+
+fn is_valid_guest_cid(cid: Cid) -> bool {
+    (GUEST_CID_MIN..=GUEST_CID_MAX).contains(&cid)
+}
+
+fn next_guest_cid(cid: Cid) -> Cid {
+    assert!(is_valid_guest_cid(cid));
+    if cid == GUEST_CID_MAX {
+        GUEST_CID_MIN
+    } else {
+        cid + 1
+    }
+}
 
 /// Singleton service for allocating globally-unique VM resources, such as the CID, and running
 /// singleton servers, like tombstone receiver.
@@ -136,25 +150,65 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
 /// The mutable state of the VirtualizationServiceInternal. There should only be one instance
 /// of this struct.
 #[derive(Debug, Default)]
-struct GlobalState {}
+struct GlobalState {
+    /// CIDs currently allocated to running VMs. A CID is never recycled as long
+    /// as there is a strong reference held by a GlobalVmContext.
+    held_cids: HashMap<Cid, Weak<Cid>>,
+}
 
 impl GlobalState {
     /// Get the next available CID, or an error if we have run out. The last CID used is stored in
     /// a system property so that restart of virtualizationservice doesn't reuse CID while the host
     /// Android is up.
-    fn allocate_cid(&mut self) -> Result<Cid> {
-        let cid = match system_properties::read(SYSPROP_LAST_CID)? {
-            Some(val) => match val.parse::<Cid>() {
-                Ok(num) => num.checked_add(1).ok_or_else(|| anyhow!("ran out of CIDs"))?,
+    fn allocate_cid(&mut self) -> Result<Arc<Cid>> {
+        // Garbage collect unused CIDs.
+        self.held_cids.retain(|_, cid| cid.strong_count() > 0);
+
+        // Start trying to find a CID from the last used CID + 1. This ensures
+        // that we do not eagerly recycle CIDs. It makes debugging easier but
+        // also means that retrying to allocate a CID, eg. because it is
+        // erroneously occupied by a process, will not recycle the same CID.
+        let last_cid_prop =
+            system_properties::read(SYSPROP_LAST_CID)?.and_then(|val| match val.parse::<Cid>() {
+                Ok(num) => {
+                    if is_valid_guest_cid(num) {
+                        Some(num)
+                    } else {
+                        error!("Invalid value '{}' of property '{}'", num, SYSPROP_LAST_CID);
+                        None
+                    }
+                }
                 Err(_) => {
                     error!("Invalid value '{}' of property '{}'", val, SYSPROP_LAST_CID);
-                    FIRST_GUEST_CID
+                    None
                 }
-            },
-            None => FIRST_GUEST_CID,
+            });
+
+        let first_cid = if let Some(last_cid) = last_cid_prop {
+            next_guest_cid(last_cid)
+        } else {
+            GUEST_CID_MIN
         };
-        system_properties::write(SYSPROP_LAST_CID, &format!("{}", cid))?;
-        Ok(cid)
+
+        let cid = self
+            .find_available_cid(first_cid..=GUEST_CID_MAX)
+            .or_else(|| self.find_available_cid(GUEST_CID_MIN..first_cid));
+
+        if let Some(cid) = cid {
+            let cid_arc = Arc::new(cid);
+            self.held_cids.insert(cid, Arc::downgrade(&cid_arc));
+            system_properties::write(SYSPROP_LAST_CID, &format!("{}", cid))?;
+            Ok(cid_arc)
+        } else {
+            Err(anyhow!("Could not find an available CID."))
+        }
+    }
+
+    fn find_available_cid<I>(&self, mut range: I) -> Option<Cid>
+    where
+        I: Iterator<Item = Cid>,
+    {
+        range.find(|cid| !self.held_cids.contains_key(cid))
     }
 }
 
@@ -162,14 +216,14 @@ impl GlobalState {
 #[derive(Debug, Default)]
 struct GlobalVmContext {
     /// The unique CID assigned to the VM for vsock communication.
-    cid: Cid,
-    /// Keeps our service process running as long as this VM instance exists.
+    cid: Arc<Cid>,
+    /// Keeps our service process running as long as this VM context exists.
     #[allow(dead_code)]
     lazy_service_guard: LazyServiceGuard,
 }
 
 impl GlobalVmContext {
-    fn create(cid: Cid) -> Strong<dyn IGlobalVmContext> {
+    fn create(cid: Arc<Cid>) -> Strong<dyn IGlobalVmContext> {
         let binder = GlobalVmContext { cid, ..Default::default() };
         BnGlobalVmContext::new_binder(binder, BinderFeatures::default())
     }
@@ -179,7 +233,7 @@ impl Interface for GlobalVmContext {}
 
 impl IGlobalVmContext for GlobalVmContext {
     fn getCid(&self) -> binder::Result<i32> {
-        Ok(self.cid as i32)
+        Ok(*self.cid as i32)
     }
 }
 
@@ -341,8 +395,10 @@ impl IVirtualizationService for VirtualizationService {
 }
 
 fn handle_stream_connection_tombstoned() -> Result<()> {
+    // Should not listen for tombstones on a guest VM's port.
+    assert!(!is_valid_guest_cid(VM_TOMBSTONES_SERVICE_PORT as Cid));
     let listener =
-        VsockListener::bind_with_cid_port(VMADDR_CID_HOST, VM_TOMBSTONES_SERVICE_PORT as u32)?;
+        VsockListener::bind_with_cid_port(VMADDR_CID_HOST, VM_TOMBSTONES_SERVICE_PORT as Cid)?;
     for incoming_stream in listener.incoming() {
         let mut incoming_stream = match incoming_stream {
             Err(e) => {
@@ -394,22 +450,31 @@ impl VirtualizationService {
         let global_service =
             BnVirtualizationServiceInternal::new_binder(global_service, BinderFeatures::default());
 
-        let service = VirtualizationService { global_service, state: Default::default() };
+        VirtualizationService { global_service, state: Default::default() }
+    }
 
-        // binder server for vm
-        // reference to state (not the state itself) is copied
-        let state = service.state.clone();
-        std::thread::spawn(move || {
-            debug!("VirtualMachineService is starting as an RPC service.");
-            if run_vsock_rpc_server_with_factory(VM_BINDER_SERVICE_PORT as u32, |cid| {
-                VirtualMachineService::factory(cid, &state)
-            }) {
-                debug!("RPC server has shut down gracefully");
-            } else {
-                panic!("Premature termination of RPC server");
+    fn create_vm_context(&self) -> Result<(VmContext, Cid)> {
+        const NUM_ATTEMPTS: usize = 5;
+
+        for _ in 0..NUM_ATTEMPTS {
+            let global_context = self.global_service.allocateGlobalVmContext()?;
+            let cid = global_context.getCid()? as Cid;
+            let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
+
+            // Start VM service listening for connections from the new CID on port=CID.
+            // TODO(b/245727626): Only accept connections from the new VM.
+            let port = cid;
+            match RpcServer::new_vsock(service, port) {
+                Ok(vm_server) => {
+                    vm_server.start();
+                    return Ok((VmContext::new(global_context, vm_server), cid));
+                }
+                Err(err) => {
+                    warn!("Could not start RpcServer on port {}: {}", port, err);
+                }
             }
-        });
-        service
+        }
+        bail!("Too many attempts to create VM context failed.");
     }
 
     fn create_vm_internal(
@@ -435,8 +500,13 @@ impl VirtualizationService {
             check_use_custom_virtual_machine()?;
         }
 
-        let vm_context = self.global_service.allocateGlobalVmContext()?;
-        let cid = vm_context.getCid()? as Cid;
+        let (vm_context, cid) = self.create_vm_context().map_err(|e| {
+            error!("Failed to create VmContext: {:?}", e);
+            Status::new_service_specific_error_str(
+                -1,
+                Some(format!("Failed to create VmContext: {:?}", e)),
+            )
+        })?;
 
         let state = &mut *self.state.lock().unwrap();
         let console_fd = console_fd.map(clone_file).transpose()?;
@@ -1188,17 +1258,6 @@ impl IVirtualMachineService for VirtualMachineService {
 }
 
 impl VirtualMachineService {
-    fn factory(cid: Cid, state: &Arc<Mutex<State>>) -> Option<SpIBinder> {
-        if let Some(vm) = state.lock().unwrap().get_vm(cid) {
-            let mut vm_service = vm.vm_service.lock().unwrap();
-            let service = vm_service.get_or_insert_with(|| Self::new_binder(state.clone(), cid));
-            Some(service.as_binder())
-        } else {
-            error!("connection from cid={} is not from a guest VM", cid);
-            None
-        }
-    }
-
     fn new_binder(state: Arc<Mutex<State>>, cid: Cid) -> Strong<dyn IVirtualMachineService> {
         BnVirtualMachineService::new_binder(
             VirtualMachineService { state, cid },
