@@ -15,6 +15,9 @@
  */
 package com.android.microdroid.test;
 
+import static android.system.virtualmachine.VirtualMachine.STATUS_DELETED;
+import static android.system.virtualmachine.VirtualMachine.STATUS_RUNNING;
+import static android.system.virtualmachine.VirtualMachine.STATUS_STOPPED;
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_APP_ONLY;
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_FULL;
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_NONE;
@@ -102,11 +105,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     private static final int MIN_MEM_X86_64 = 196;
 
     @Test
-    @CddTest(requirements = {
-            "9.17/C-1-1",
-            "9.17/C-2-1"
-    })
-    public void connectToVmService() throws Exception {
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    public void createAndConnectToVm() throws Exception {
         assumeSupportedKernel();
 
         VirtualMachineConfig config =
@@ -126,12 +126,13 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @CddTest(requirements = {
-            "9.17/C-1-1",
-            "9.17/C-1-2",
-            "9.17/C-1-4",
-    })
-    public void createVmRequiresPermission() throws Exception {
+    @CddTest(
+            requirements = {
+                "9.17/C-1-1",
+                "9.17/C-1-2",
+                "9.17/C-1-4",
+            })
+    public void createVmRequiresPermission() {
         assumeSupportedKernel();
 
         revokePermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
@@ -148,6 +149,98 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         () -> forceCreateNewVirtualMachine("test_vm_requires_permission", config));
         assertThat(e).hasMessageThat()
                 .contains("android.permission.MANAGE_VIRTUAL_MACHINE permission");
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    public void autoCloseVm() throws Exception {
+        assumeSupportedKernel();
+
+        VirtualMachineConfig config =
+                newVmConfigBuilder()
+                        .setPayloadBinaryPath("MicrodroidTestNativeLib.so")
+                        .setMemoryMib(minMemoryRequired())
+                        .build();
+
+        try (VirtualMachine vm = forceCreateNewVirtualMachine("test_vm", config)) {
+            assertThat(vm.getStatus()).isEqualTo(STATUS_STOPPED);
+            // close() implicitly called on stopped VM.
+        }
+
+        try (VirtualMachine vm = getVirtualMachineManager().get("test_vm")) {
+            vm.run();
+            assertThat(vm.getStatus()).isEqualTo(STATUS_RUNNING);
+            // close() implicitly called on running VM.
+        }
+
+        try (VirtualMachine vm = getVirtualMachineManager().get("test_vm")) {
+            assertThat(vm.getStatus()).isEqualTo(STATUS_STOPPED);
+            getVirtualMachineManager().delete("test_vm");
+            assertThat(vm.getStatus()).isEqualTo(STATUS_DELETED);
+            // close() implicitly called on deleted VM.
+        }
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1"})
+    public void vmConfigUnitTests() {
+        VirtualMachineConfig minimal =
+                newVmConfigBuilder().setPayloadBinaryPath("binary/path").build();
+
+        assertThat(minimal.getApkPath()).isEqualTo(getContext().getPackageCodePath());
+        assertThat(minimal.getDebugLevel()).isEqualTo(DEBUG_LEVEL_NONE);
+        assertThat(minimal.getMemoryMib()).isEqualTo(0);
+        assertThat(minimal.getNumCpus()).isEqualTo(1);
+        assertThat(minimal.getPayloadBinaryPath()).isEqualTo("binary/path");
+        assertThat(minimal.getPayloadConfigPath()).isNull();
+        assertThat(minimal.isProtectedVm()).isEqualTo(isProtectedVm());
+
+        int maxCpus = Runtime.getRuntime().availableProcessors();
+        VirtualMachineConfig.Builder maximalBuilder =
+                newVmConfigBuilder()
+                        .setPayloadConfigPath("config/path")
+                        .setApkPath("/apk/path")
+                        .setNumCpus(maxCpus)
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setMemoryMib(42);
+        VirtualMachineConfig maximal = maximalBuilder.build();
+
+        assertThat(maximal.getApkPath()).isEqualTo("/apk/path");
+        assertThat(maximal.getDebugLevel()).isEqualTo(DEBUG_LEVEL_FULL);
+        assertThat(maximal.getMemoryMib()).isEqualTo(42);
+        assertThat(maximal.getNumCpus()).isEqualTo(maxCpus);
+        assertThat(maximal.getPayloadBinaryPath()).isNull();
+        assertThat(maximal.getPayloadConfigPath()).isEqualTo("config/path");
+        assertThat(maximal.isProtectedVm()).isEqualTo(isProtectedVm());
+
+        assertThat(minimal.isCompatibleWith(maximal)).isFalse();
+        assertThat(minimal.isCompatibleWith(minimal)).isTrue();
+        assertThat(maximal.isCompatibleWith(maximal)).isTrue();
+
+        VirtualMachineConfig compatible = maximalBuilder.setNumCpus(1).setMemoryMib(99).build();
+        assertThat(compatible.isCompatibleWith(maximal)).isTrue();
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1"})
+    public void vmUnitTests() throws Exception {
+        VirtualMachineConfig.Builder builder =
+                newVmConfigBuilder().setPayloadBinaryPath("binary/path");
+        VirtualMachineConfig config = builder.build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("vm_name", config);
+
+        assertThat(vm.getName()).isEqualTo("vm_name");
+        assertThat(vm.getConfig().getPayloadBinaryPath()).isEqualTo("binary/path");
+        assertThat(vm.getConfig().getMemoryMib()).isEqualTo(0);
+
+        VirtualMachineConfig compatibleConfig = builder.setMemoryMib(42).build();
+        vm.setConfig(compatibleConfig);
+
+        assertThat(vm.getName()).isEqualTo("vm_name");
+        assertThat(vm.getConfig().getPayloadBinaryPath()).isEqualTo("binary/path");
+        assertThat(vm.getConfig().getMemoryMib()).isEqualTo(42);
+
+        assertThat(getVirtualMachineManager().get("vm_name")).isSameInstanceAs(vm);
     }
 
     @Test
@@ -399,6 +492,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     })
     public void sameInstanceKeepsSameCdis() throws Exception {
         assumeSupportedKernel();
+        assume().withMessage("Skip on CF. Too Slow. b/257270529").that(isCuttlefish()).isFalse();
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig normalConfig =
