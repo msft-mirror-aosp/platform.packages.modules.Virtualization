@@ -97,6 +97,15 @@ atest MicrodroidTestApp
 If you run into problems, inspect the logs produced by `atest`. Their location is printed at the
 end. The `host_log_*.zip` file should contain the output of individual commands as well as VM logs.
 
+### Custom pvmfw
+
+Hostside tests, which run on the PC and extends `MicrodroidHostTestCaseBase`, can be run with
+a custom `pvmfw`. Use `--module-arg` to push `pvmfw` for individual test methods.
+
+```shell
+atest com.android.microdroid.test.MicrodroidHostTests -- --module-arg MicrodroidHostTestCases:set-option:pvmfw:pvmfw.img
+```
+
 ## Spawning your own VMs with custom kernel
 
 You can spawn your own VMs by passing a JSON config file to the VirtualizationService via the `vm`
@@ -119,6 +128,17 @@ adb shell "/apex/com.android.virt/bin/vm run /data/local/tmp/vm_config.json"
 
 The `vm` command also has other subcommands for debugging; run `/apex/com.android.virt/bin/vm help`
 for details.
+
+## Spawning your own VMs with custom pvmfw
+
+Set system property `hypervisor.pvmfw.path` to custom `pvmfw` on the device before using `vm` tool.
+`virtualizationservice` will pass the specified `pvmfw` to `crosvm` for protected VMs.
+
+```shell
+adb push pvmfw.img /data/local/tmp/pvmfw.img
+adb root  # required for setprop
+adb shell setprop hypervisor.pvmfw.path /data/local/tmp/pvmfw.img
+```
 
 ## Spawning your own VMs with Microdroid
 
