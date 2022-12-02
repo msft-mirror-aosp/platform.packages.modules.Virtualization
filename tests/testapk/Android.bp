@@ -19,9 +19,12 @@ android_test {
         "truth-prebuilt",
         "compatibility-common-util-devicesidelib",
     ],
-    libs: ["android.system.virtualmachine"],
-    jni_libs: ["MicrodroidTestNativeLib"],
-    platform_apis: true,
+    sdk_version: "test_current",
+    jni_libs: [
+        "MicrodroidTestNativeLib",
+        "MicrodroidIdleNativeLib",
+    ],
+    jni_uses_platform_apis: true,
     use_embedded_native_libs: true,
     // We only support 64-bit ABI, but CTS demands all APKs to be multi-ABI.
     compile_multilib: "both",
@@ -31,16 +34,16 @@ android_test {
 cc_library_shared {
     name: "MicrodroidTestNativeLib",
     srcs: ["src/native/testbinary.cpp"],
+    stl: "libc++_static",
+    header_libs: ["vm_payload_restricted_headers"],
     shared_libs: [
-        "android.security.dice-ndk",
-        "android.system.virtualmachineservice-ndk",
-        "com.android.microdroid.testservice-ndk",
-        "libbase",
         "libbinder_ndk",
-        "libbinder_rpc_unstable",
         "MicrodroidTestNativeLibSub",
+        "libvm_payload#current",
     ],
     static_libs: [
+        "com.android.microdroid.testservice-ndk",
+        "libbase",
         "libfsverity_digests_proto_cc",
         "liblog",
         "libprotobuf-cpp-lite-ndk",
@@ -50,4 +53,12 @@ cc_library_shared {
 cc_library_shared {
     name: "MicrodroidTestNativeLibSub",
     srcs: ["src/native/testlib.cpp"],
+    stl: "libc++_static",
+}
+
+cc_library_shared {
+    name: "MicrodroidIdleNativeLib",
+    srcs: ["src/native/idlebinary.cpp"],
+    header_libs: ["vm_payload_headers"],
+    stl: "libc++_static",
 }

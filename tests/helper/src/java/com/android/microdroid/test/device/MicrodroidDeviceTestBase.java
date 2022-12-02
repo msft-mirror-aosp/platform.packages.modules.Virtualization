@@ -15,10 +15,12 @@
  */
 package com.android.microdroid.test.device;
 
+import static android.content.pm.PackageManager.FEATURE_VIRTUALIZATION_FRAMEWORK;
+
 import static com.google.common.truth.TruthJUnit.assume;
 
-import static org.junit.Assume.assumeNoException;
-
+import android.app.Instrumentation;
+import android.app.UiAutomation;
 import android.content.Context;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemProperties;
@@ -31,10 +33,14 @@ import android.util.Log;
 
 import androidx.annotation.CallSuper;
 import androidx.test.core.app.ApplicationProvider;
+import androidx.test.platform.app.InstrumentationRegistry;
 
-import com.android.virt.VirtualizationTestHelper;
+import com.android.microdroid.test.common.DeviceProperties;
+import com.android.microdroid.test.common.MetricsProcessor;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.OptionalLong;
@@ -45,87 +51,79 @@ import java.util.concurrent.TimeUnit;
 
 public abstract class MicrodroidDeviceTestBase {
     public static boolean isCuttlefish() {
-        return VirtualizationTestHelper.isCuttlefish(SystemProperties.get("ro.product.name"));
+        return DeviceProperties.create(SystemProperties::get).isCuttlefish();
     }
 
-    // TODO(b/220920264): remove Inner class; this is a hack to hide virt APEX types
-    protected static class Inner {
-        private final boolean mProtectedVm;
-        private final Context mContext;
-        private final VirtualMachineManager mVmm;
-
-        public Inner(Context context, boolean protectedVm, VirtualMachineManager vmm) {
-            mProtectedVm = protectedVm;
-            mVmm = vmm;
-            mContext = context;
-        }
-
-        public VirtualMachineManager getVirtualMachineManager() {
-            return mVmm;
-        }
-
-        public Context getContext() {
-            return mContext;
-        }
-
-        /** Create a new VirtualMachineConfig.Builder with the parameterized protection mode. */
-        public VirtualMachineConfig.Builder newVmConfigBuilder(String payloadConfigPath) {
-            return new VirtualMachineConfig.Builder(mContext, payloadConfigPath)
-                        .protectedVm(mProtectedVm);
-        }
-
-        /**
-         * Creates a new virtual machine, potentially removing an existing virtual machine with
-         * given name.
-         */
-        public VirtualMachine forceCreateNewVirtualMachine(String name, VirtualMachineConfig config)
-                throws VirtualMachineException {
-            VirtualMachine existingVm = mVmm.get(name);
-            if (existingVm != null) {
-                existingVm.delete();
-            }
-            return mVmm.create(name, config);
-        }
+    public static String getMetricPrefix() {
+        return MetricsProcessor.getMetricPrefix(
+                DeviceProperties.create(SystemProperties::get).getMetricsTag());
     }
 
-    protected Inner mInner;
+    protected final void grantPermission(String permission) {
+        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
+        UiAutomation uiAutomation = instrumentation.getUiAutomation();
+        uiAutomation.grantRuntimePermission(instrumentation.getContext().getPackageName(),
+                permission);
+    }
+
+    protected final void revokePermission(String permission) {
+        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
+        UiAutomation uiAutomation = instrumentation.getUiAutomation();
+        uiAutomation.revokeRuntimePermission(instrumentation.getContext().getPackageName(),
+                permission);
+    }
+
+    private Context mCtx;
+    private boolean mProtectedVm;
 
     protected Context getContext() {
-        return mInner.getContext();
+        return mCtx;
+    }
+
+    public VirtualMachineManager getVirtualMachineManager() {
+        return mCtx.getSystemService(VirtualMachineManager.class);
+    }
+
+    public VirtualMachineConfig.Builder newVmConfigBuilder() {
+        return new VirtualMachineConfig.Builder(mCtx).setProtectedVm(mProtectedVm);
+    }
+
+    protected final boolean isProtectedVm() {
+        return mProtectedVm;
+    }
+
+    /**
+     * Creates a new virtual machine, potentially removing an existing virtual machine with given
+     * name.
+     */
+    public VirtualMachine forceCreateNewVirtualMachine(String name, VirtualMachineConfig config)
+            throws VirtualMachineException {
+        final VirtualMachineManager vmm = getVirtualMachineManager();
+        VirtualMachine existingVm = vmm.get(name);
+        if (existingVm != null) {
+            vmm.delete(name);
+        }
+        return vmm.create(name, config);
     }
 
     public void prepareTestSetup(boolean protectedVm) {
-        // In case when the virt APEX doesn't exist on the device, classes in the
-        // android.system.virtualmachine package can't be loaded. Therefore, before using the
-        // classes, check the existence of a class in the package and skip this test if not exist.
-        try {
-            Class.forName("android.system.virtualmachine.VirtualMachineManager");
-        } catch (ClassNotFoundException e) {
-            assumeNoException(e);
-            return;
-        }
+        mCtx = ApplicationProvider.getApplicationContext();
+        assume().withMessage("Device doesn't support AVF")
+                .that(mCtx.getPackageManager().hasSystemFeature(FEATURE_VIRTUALIZATION_FRAMEWORK))
+                .isTrue();
+
+        mProtectedVm = protectedVm;
+
+        int capabilities = getVirtualMachineManager().getCapabilities();
         if (protectedVm) {
             assume().withMessage("Skip where protected VMs aren't supported")
-                    .that(hypervisor_protected_vm_supported())
-                    .isTrue();
+                    .that(capabilities & VirtualMachineManager.CAPABILITY_PROTECTED_VM)
+                    .isNotEqualTo(0);
         } else {
             assume().withMessage("Skip where VMs aren't supported")
-                    .that(hypervisor_vm_supported())
-                    .isTrue();
+                    .that(capabilities & VirtualMachineManager.CAPABILITY_NON_PROTECTED_VM)
+                    .isNotEqualTo(0);
         }
-        Context context = ApplicationProvider.getApplicationContext();
-        mInner = new Inner(context, protectedVm, VirtualMachineManager.getInstance(context));
-    }
-
-    // These are inlined from android.sysprop.HypervisorProperties which isn't @SystemApi.
-    // TODO(b/243642678): Move to using a proper Java API for this.
-
-    private boolean hypervisor_vm_supported() {
-        return SystemProperties.getBoolean("ro.boot.hypervisor.vm.supported", false);
-    }
-
-    private boolean hypervisor_protected_vm_supported() {
-        return SystemProperties.getBoolean("ro.boot.hypervisor.protected_vm.supported", false);
     }
 
     public abstract static class VmEventListener implements VirtualMachineCallback {
@@ -139,7 +137,7 @@ public abstract class MicrodroidDeviceTestBase {
             if (!mVcpuStartedNanoTime.isPresent()) {
                 mVcpuStartedNanoTime = OptionalLong.of(System.nanoTime());
             }
-            if (log.contains("Starting kernel") && !mKernelStartedNanoTime.isPresent()) {
+            if (log.contains("Starting payload...") && !mKernelStartedNanoTime.isPresent()) {
                 mKernelStartedNanoTime = OptionalLong.of(System.nanoTime());
             }
             if (log.contains("Run /init as init process") && !mInitStartedNanoTime.isPresent()) {
@@ -187,8 +185,8 @@ public abstract class MicrodroidDeviceTestBase {
                 throws VirtualMachineException, InterruptedException {
             vm.setCallback(mExecutorService, this);
             vm.run();
-            logVmOutputAndMonitorBootEvents(logTag, vm.getConsoleOutputStream(), "Console");
-            logVmOutput(logTag, vm.getLogOutputStream(), "Log");
+            logVmOutputAndMonitorBootEvents(logTag, vm.getConsoleOutput(), "Console");
+            logVmOutput(logTag, vm.getLogOutput(), "Log");
             mExecutorService.awaitTermination(300, TimeUnit.SECONDS);
         }
 
@@ -210,16 +208,14 @@ public abstract class MicrodroidDeviceTestBase {
 
         protected void forceStop(VirtualMachine vm) {
             try {
-                vm.clearCallback();
                 vm.stop();
-                mExecutorService.shutdown();
             } catch (VirtualMachineException e) {
                 throw new RuntimeException(e);
             }
         }
 
         @Override
-        public void onPayloadStarted(VirtualMachine vm, ParcelFileDescriptor stream) {}
+        public void onPayloadStarted(VirtualMachine vm) {}
 
         @Override
         public void onPayloadReady(VirtualMachine vm) {}
@@ -232,7 +228,8 @@ public abstract class MicrodroidDeviceTestBase {
 
         @Override
         @CallSuper
-        public void onDied(VirtualMachine vm, int reason) {
+        public void onStopped(VirtualMachine vm, int reason) {
+            vm.clearCallback();
             mExecutorService.shutdown();
         }
 
@@ -274,7 +271,9 @@ public abstract class MicrodroidDeviceTestBase {
         }
 
         private long getKernelStartedNanoTime() {
-            return kernelStartedNanoTime.getAsLong();
+            // pvmfw emits log at the end which is used to estimate the kernelStart time.
+            // In case of no pvmfw run(non-protected mode), use vCPU started time instead.
+            return kernelStartedNanoTime.orElse(vcpuStartedNanoTime.getAsLong());
         }
 
         private long getInitStartedNanoTime() {
@@ -304,35 +303,51 @@ public abstract class MicrodroidDeviceTestBase {
 
     public BootResult tryBootVm(String logTag, String vmName)
             throws VirtualMachineException, InterruptedException {
-        VirtualMachine vm = mInner.getVirtualMachineManager().get(vmName);
+        VirtualMachine vm = getVirtualMachineManager().get(vmName);
         final CompletableFuture<Boolean> payloadStarted = new CompletableFuture<>();
         final CompletableFuture<Integer> deathReason = new CompletableFuture<>();
         final CompletableFuture<Long> endTime = new CompletableFuture<>();
         VmEventListener listener =
                 new VmEventListener() {
                     @Override
-                    public void onPayloadStarted(VirtualMachine vm, ParcelFileDescriptor stream) {
+                    public void onPayloadStarted(VirtualMachine vm) {
                         endTime.complete(System.nanoTime());
                         payloadStarted.complete(true);
                         forceStop(vm);
                     }
 
                     @Override
-                    public void onDied(VirtualMachine vm, int reason) {
+                    public void onStopped(VirtualMachine vm, int reason) {
                         deathReason.complete(reason);
-                        super.onDied(vm, reason);
+                        super.onStopped(vm, reason);
                     }
                 };
         long apiCallNanoTime = System.nanoTime();
         listener.runToFinish(logTag, vm);
         return new BootResult(
                 payloadStarted.getNow(false),
-                deathReason.getNow(VirtualMachineCallback.DEATH_REASON_INFRASTRUCTURE_ERROR),
+                deathReason.getNow(VmEventListener.STOP_REASON_INFRASTRUCTURE_ERROR),
                 apiCallNanoTime,
                 endTime.getNow(apiCallNanoTime) - apiCallNanoTime,
                 listener.getVcpuStartedNanoTime(),
                 listener.getKernelStartedNanoTime(),
                 listener.getInitStartedNanoTime(),
                 listener.getPayloadStartedNanoTime());
+    }
+
+    /** Execute a command. Returns stdout. */
+    protected String runInShell(String tag, UiAutomation uiAutomation, String command) {
+        try (InputStream is =
+                        new ParcelFileDescriptor.AutoCloseInputStream(
+                                uiAutomation.executeShellCommand(command));
+                ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            is.transferTo(out);
+            String stdout = out.toString("UTF-8");
+            Log.i(tag, "Got stdout : " + stdout);
+            return stdout;
+        } catch (IOException e) {
+            Log.e(tag, "Error executing: " + command, e);
+            throw new RuntimeException("Failed to run the command.");
+        }
     }
 }

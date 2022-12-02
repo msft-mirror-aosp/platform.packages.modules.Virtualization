@@ -16,29 +16,42 @@
 
 #![no_main]
 #![no_std]
+#![feature(default_alloc_error_handler)]
+#![feature(ptr_const_cast)] // Stabilized in 1.65.0
 
+mod avb;
+mod config;
+mod entry;
 mod exceptions;
+mod fdt;
+mod heap;
+mod helpers;
+mod memory;
+mod mmio_guard;
+mod mmu;
+mod smccc;
 
-use vmbase::{main, println};
+use avb::PUBLIC_KEY;
+use avb_nostd::{verify_image, AvbImageVerifyError};
+use log::{debug, info};
 
-main!(main);
-
-/// Entry point for pVM firmware.
-pub fn main(fdt_address: u64, payload_start: u64, payload_size: u64, arg3: u64) {
-    println!("pVM firmware");
-    println!(
-        "fdt_address={:#018x}, payload_start={:#018x}, payload_size={:#018x}, x3={:#018x}",
-        fdt_address, payload_start, payload_size, arg3,
-    );
-
-    println!("Starting payload...");
-    // Safe because this is a function we have implemented in assembly that matches its signature
-    // here.
-    unsafe {
-        start_payload(fdt_address, payload_start);
+/// TODO(b/256148034): Return RebootReason as error here
+fn main(
+    fdt: &libfdt::Fdt,
+    signed_kernel: &[u8],
+    ramdisk: Option<&[u8]>,
+    bcc: &[u8],
+) -> Result<(), AvbImageVerifyError> {
+    info!("pVM firmware");
+    debug!("FDT: {:?}", fdt as *const libfdt::Fdt);
+    debug!("Signed kernel: {:?} ({:#x} bytes)", signed_kernel.as_ptr(), signed_kernel.len());
+    if let Some(rd) = ramdisk {
+        debug!("Ramdisk: {:?} ({:#x} bytes)", rd.as_ptr(), rd.len());
+    } else {
+        debug!("Ramdisk: None");
     }
-}
-
-extern "C" {
-    fn start_payload(fdt_address: u64, payload_start: u64) -> !;
+    debug!("BCC: {:?} ({:#x} bytes)", bcc.as_ptr(), bcc.len());
+    verify_image(signed_kernel, PUBLIC_KEY)?;
+    info!("Payload verified. Starting payload...");
+    Ok(())
 }

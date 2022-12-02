@@ -11,15 +11,19 @@ rust_ffi_static {
     rustlibs: [
         "libaarch64_paging",
         "libbuddy_system_allocator",
+        "libdice_nostd",
+        "liblibfdt",
         "liblog_rust_nostd",
         "libvmbase",
+    ],
+    static_libs: [
+        "libarm-optimized-routines-mem",
     ],
     apex_available: ["com.android.virt"],
 }
 
 cc_binary {
-    name: "vmbase_example_elf",
-    stem: "vmbase_example",
+    name: "vmbase_example",
     defaults: ["vmbase_elf_defaults"],
     srcs: [
         "idmap.S",
@@ -35,8 +39,9 @@ cc_binary {
 }
 
 raw_binary {
-    name: "vmbase_example",
-    src: ":vmbase_example_elf",
+    name: "vmbase_example_bin",
+    stem: "vmbase_example.bin",
+    src: ":vmbase_example",
     enabled: false,
     target: {
         android_arm64: {
@@ -53,14 +58,15 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "android.system.virtualizationservice-rust",
+        "libandroid_logger",
         "libanyhow",
-        "libenv_logger",
         "liblibc",
         "liblog_rust",
+        "libnix",
         "libvmclient",
     ],
     data: [
-        ":vmbase_example",
+        ":vmbase_example_bin",
     ],
     test_suites: ["general-tests"],
     enabled: false,

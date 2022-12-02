@@ -15,6 +15,8 @@
  */
 package android.system.virtualizationservice;
 
+import android.system.virtualizationservice.VirtualMachinePayloadConfig;
+
 /** Configuration for running an App in a VM */
 parcelable VirtualMachineAppConfig {
     /** Name of VM */
@@ -32,8 +34,27 @@ parcelable VirtualMachineAppConfig {
     /** instance.img that has per-instance data */
     ParcelFileDescriptor instanceImage;
 
-    /** Path to a configuration in an APK. This is the actual configuration for a VM. */
-    @utf8InCpp String configPath;
+    /**
+     * This backs the persistent, encrypted storage in vm.
+     * It also comes with some integrity guarantees.
+     * Note: Storage is an optional feature
+     */
+    @nullable ParcelFileDescriptor encryptedStorageImage;
+
+    union Payload {
+        /**
+         * Path to a JSON file in an APK containing the configuration.
+         */
+        @utf8InCpp String configPath;
+
+        /**
+         * Configuration provided explicitly.
+         */
+        VirtualMachinePayloadConfig payloadConfig;
+    }
+
+    /** Detailed configuration for the VM, specifying how the payload will be run. */
+    Payload payload;
 
     enum DebugLevel {
         /** Not debuggable at all */
@@ -63,15 +84,6 @@ parcelable VirtualMachineAppConfig {
      * Number of vCPUs in the VM. Defaults to 1.
      */
     int numCpus = 1;
-
-    /**
-     * Comma-separated list of CPUs or CPU ranges to run vCPUs on (e.g. 0,1-3,5), or
-     * colon-separated list of assignments of vCPU to host CPU assignments (e.g. 0=0:1=1:2=2).
-     * Default is no mask which means a vCPU can run on any host CPU.
-     *
-     * Note: Using a non-null value requires android.permission.USE_CUSTOM_VIRTUAL_MACHINE.
-     */
-    @nullable String cpuAffinity;
 
     /**
      * List of task profile names to apply for the VM

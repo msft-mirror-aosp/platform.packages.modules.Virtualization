@@ -22,15 +22,18 @@ rust_defaults {
     rustlibs: [
         "android.system.virtualizationcommon-rust",
         "android.system.virtualizationservice-rust",
+        "android.system.virtualizationservice_internal-rust",
         "android.system.virtualmachineservice-rust",
         "android.os.permissions_aidl-rust",
         "libandroid_logger",
         "libanyhow",
+        "libapkverify",
+        "libbase_rust",
         "libbinder_rs",
         "libcommand_fds",
         "libdisk",
-        "libidsig",
         "liblazy_static",
+        "liblibc",
         "liblog_rust",
         "libmicrodroid_metadata",
         "libmicrodroid_payload_config",
@@ -48,6 +51,7 @@ rust_defaults {
         "libshared_child",
         "libstatslog_virtualization_rust",
         "libtombstoned_client_rust",
+        "libvm_control",
         "libvmconfig",
         "libzip",
         "libvsock",
@@ -69,5 +73,8 @@ rust_binary {
 rust_test {
     name: "virtualizationservice_device_test",
     defaults: ["virtualizationservice_defaults"],
+    rustlibs: [
+        "libtempfile",
+    ],
     test_suites: ["general-tests"],
 }

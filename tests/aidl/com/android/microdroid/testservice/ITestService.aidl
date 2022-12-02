@@ -19,18 +19,31 @@ package com.android.microdroid.testservice;
 interface ITestService {
     const int SERVICE_PORT = 5678;
 
+    const int ECHO_REVERSE_PORT = 6789;
+
     /* add two integers. */
     int addInteger(int a, int b);
 
     /* read a system property. */
     String readProperty(String prop);
 
-    /* get the VM's stable secret, this is _only_ done for testing. */
-    byte[] insecurelyExposeSealingCdi();
+    /* get a VM instance secret, this is _only_ done for testing. */
+    byte[] insecurelyExposeVmInstanceSecret();
 
     /* get the VM's attestation secret, this is _only_ done for testing. */
     byte[] insecurelyExposeAttestationCdi();
 
     /* get the VM's boot certificate chain (BCC). */
     byte[] getBcc();
+
+    /* get the APK contents path. */
+    String getApkContentsPath();
+
+    /* get the encrypted storage path. */
+    String getEncryptedStoragePath();
+
+    /* start a simple vsock server on ECHO_REVERSE_PORT that reads a line at a time and echoes
+     * each line reverse.
+     */
+    void runEchoReverseServer();
 }

@@ -14,18 +14,22 @@
 
 //! Functions for running instances of `crosvm`.
 
-use crate::aidl::VirtualMachineCallbacks;
+use crate::aidl::{Cid, VirtualMachineCallbacks};
 use crate::atom::write_vm_exited_stats;
-use crate::Cid;
-use anyhow::{anyhow, bail, Context, Error};
+use anyhow::{anyhow, bail, Context, Error, Result};
 use command_fds::CommandFdExt;
 use lazy_static::lazy_static;
+use libc::{sysconf, _SC_CLK_TCK};
 use log::{debug, error, info};
 use semver::{Version, VersionReq};
-use nix::{fcntl::OFlag, unistd::pipe2};
+use nix::{fcntl::OFlag, unistd::pipe2, unistd::Uid, unistd::User};
+use regex::{Captures, Regex};
+use rustutils::system_properties;
 use shared_child::SharedChild;
 use std::borrow::Cow;
-use std::fs::{remove_dir_all, File};
+use std::cmp::max;
+use std::fmt;
+use std::fs::{read_to_string, remove_dir_all, File};
 use std::io::{self, Read};
 use std::mem;
 use std::num::NonZeroU32;
@@ -35,11 +39,19 @@ use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 use std::thread;
-use vsock::VsockStream;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::DeathReason::DeathReason;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    DeathReason::DeathReason,
+    MemoryTrimLevel::MemoryTrimLevel,
+};
+use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
 use binder::Strong;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
 use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
+use rpcbinder::RpcServer;
+
+/// external/crosvm
+use base::UnixSeqpacketListener;
+use vm_control::{BalloonControlCommand, VmRequest, VmResponse};
 
 const CROSVM_PATH: &str = "/apex/com.android.virt/bin/crosvm";
 
@@ -55,6 +67,12 @@ const CROSVM_ERROR_STATUS: i32 = 1;
 const CROSVM_REBOOT_STATUS: i32 = 32;
 /// The exit status which crosvm returns when it crashes due to an error.
 const CROSVM_CRASH_STATUS: i32 = 33;
+/// The exit status which crosvm returns when vcpu is stalled.
+const CROSVM_WATCHDOG_REBOOT_STATUS: i32 = 36;
+
+const MILLIS_PER_SEC: i64 = 1000;
+
+const SYSPROP_CUSTOM_PVMFW_PATH: &str = "hypervisor.pvmfw.path";
 
 lazy_static! {
     /// If the VM doesn't move to the Started state within this amount time, a hang-up error is
@@ -80,7 +98,6 @@ pub struct CrosvmConfig {
     pub protected: bool,
     pub memory_mib: Option<NonZeroU32>,
     pub cpus: Option<NonZeroU32>,
-    pub cpu_affinity: Option<String>,
     pub task_profiles: Vec<String>,
     pub console_fd: Option<File>,
     pub log_fd: Option<File>,
@@ -129,6 +146,24 @@ pub enum VmState {
     Failed,
 }
 
+/// RSS values of VM and CrosVM process itself.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Rss {
+    pub vm: i64,
+    pub crosvm: i64,
+}
+
+/// Metrics regarding the VM.
+#[derive(Debug, Default)]
+pub struct VmMetric {
+    /// Recorded timestamp when the VM is started.
+    pub start_timestamp: Option<SystemTime>,
+    /// Update most recent guest_time periodically from /proc/[crosvm pid]/stat while VM is running.
+    pub cpu_guest_time: Option<i64>,
+    /// Update maximum RSS values periodically from /proc/[crosvm pid]/smaps while VM is running.
+    pub rss: Option<Rss>,
+}
+
 impl VmState {
     /// Tries to start the VM, if it is in the `NotStarted` state.
     ///
@@ -140,7 +175,14 @@ impl VmState {
             let (failure_pipe_read, failure_pipe_write) = create_pipe()?;
 
             // If this fails and returns an error, `self` will be left in the `Failed` state.
-            let child = Arc::new(run_vm(config, failure_pipe_write)?);
+            let child =
+                Arc::new(run_vm(config, &instance.crosvm_control_socket_path, failure_pipe_write)?);
+
+            let instance_monitor_status = instance.clone();
+            let child_monitor_status = child.clone();
+            thread::spawn(move || {
+                instance_monitor_status.clone().monitor_vm_status(child_monitor_status);
+            });
 
             let child_clone = child.clone();
             let instance_clone = instance.clone();
@@ -165,13 +207,34 @@ impl VmState {
     }
 }
 
+/// Internal struct that holds the handles to globally unique resources of a VM.
+#[derive(Debug)]
+pub struct VmContext {
+    #[allow(dead_code)] // Keeps the global context alive
+    global_context: Strong<dyn IGlobalVmContext>,
+    #[allow(dead_code)] // Keeps the server alive
+    vm_server: RpcServer,
+}
+
+impl VmContext {
+    /// Construct new VmContext.
+    pub fn new(global_context: Strong<dyn IGlobalVmContext>, vm_server: RpcServer) -> VmContext {
+        VmContext { global_context, vm_server }
+    }
+}
+
 /// Information about a particular instance of a VM which may be running.
 #[derive(Debug)]
 pub struct VmInstance {
     /// The current state of the VM.
     pub vm_state: Mutex<VmState>,
+    /// Global resources allocated for this VM.
+    #[allow(dead_code)] // Keeps the context alive
+    vm_context: VmContext,
     /// The CID assigned to the VM for vsock communication.
     pub cid: Cid,
+    /// Path to crosvm control socket
+    crosvm_control_socket_path: PathBuf,
     /// The name of the VM.
     pub name: String,
     /// Whether the VM is a protected VM.
@@ -180,23 +243,32 @@ pub struct VmInstance {
     pub temporary_directory: PathBuf,
     /// The UID of the process which requested the VM.
     pub requester_uid: u32,
-    /// The SID of the process which requested the VM.
-    pub requester_sid: String,
     /// The PID of the process which requested the VM. Note that this process may no longer exist
     /// and the PID may have been reused for a different process, so this should not be trusted.
     pub requester_debug_pid: i32,
     /// Callbacks to clients of the VM.
     pub callbacks: VirtualMachineCallbacks,
-    /// Input/output stream of the payload run in the VM.
-    pub stream: Mutex<Option<VsockStream>>,
     /// VirtualMachineService binder object for the VM.
     pub vm_service: Mutex<Option<Strong<dyn IVirtualMachineService>>>,
-    /// Recorded timestamp when the VM is started.
-    pub vm_start_timestamp: Mutex<Option<SystemTime>>,
+    /// Recorded metrics of VM such as timestamp or cpu / memory usage.
+    pub vm_metric: Mutex<VmMetric>,
     /// The latest lifecycle state which the payload reported itself to be in.
     payload_state: Mutex<PayloadState>,
     /// Represents the condition that payload_state was updated
     payload_state_updated: Condvar,
+    /// The human readable name of requester_uid
+    requester_uid_name: String,
+}
+
+impl fmt::Display for VmInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let adj = if self.protected { "Protected" } else { "Non-protected" };
+        write!(
+            f,
+            "{} virtual machine \"{}\" (owner: {}, cid: {})",
+            adj, self.name, self.requester_uid_name, self.cid
+        )
+    }
 }
 
 impl VmInstance {
@@ -205,36 +277,48 @@ impl VmInstance {
         config: CrosvmConfig,
         temporary_directory: PathBuf,
         requester_uid: u32,
-        requester_sid: String,
         requester_debug_pid: i32,
+        vm_context: VmContext,
     ) -> Result<VmInstance, Error> {
         validate_config(&config)?;
         let cid = config.cid;
         let name = config.name.clone();
         let protected = config.protected;
-        Ok(VmInstance {
+        let requester_uid_name = User::from_uid(Uid::from_raw(requester_uid))
+            .ok()
+            .flatten()
+            .map_or_else(|| format!("{}", requester_uid), |u| u.name);
+        let instance = VmInstance {
             vm_state: Mutex::new(VmState::NotStarted { config }),
+            vm_context,
             cid,
+            crosvm_control_socket_path: temporary_directory.join("crosvm.sock"),
             name,
             protected,
             temporary_directory,
             requester_uid,
-            requester_sid,
             requester_debug_pid,
             callbacks: Default::default(),
-            stream: Mutex::new(None),
             vm_service: Mutex::new(None),
-            vm_start_timestamp: Mutex::new(None),
+            vm_metric: Mutex::new(Default::default()),
             payload_state: Mutex::new(PayloadState::Starting),
             payload_state_updated: Condvar::new(),
-        })
+            requester_uid_name,
+        };
+        info!("{} created", &instance);
+        Ok(instance)
     }
 
     /// Starts an instance of `crosvm` to manage the VM. The `crosvm` instance will be killed when
     /// the `VmInstance` is dropped.
     pub fn start(self: &Arc<Self>) -> Result<(), Error> {
-        *self.vm_start_timestamp.lock().unwrap() = Some(SystemTime::now());
-        self.vm_state.lock().unwrap().start(self.clone())
+        let mut vm_metric = self.vm_metric.lock().unwrap();
+        vm_metric.start_timestamp = Some(SystemTime::now());
+        let ret = self.vm_state.lock().unwrap().start(self.clone());
+        if ret.is_ok() {
+            info!("{} started", &self);
+        }
+        ret.with_context(|| format!("{} failed to start", &self))
     }
 
     /// Monitors the exit of the VM (i.e. termination of the `child` process). When that happens,
@@ -244,13 +328,21 @@ impl VmInstance {
         let result = child.wait();
         match &result {
             Err(e) => error!("Error waiting for crosvm({}) instance to die: {}", child.id(), e),
-            Ok(status) => info!("crosvm({}) exited with status {}", child.id(), status),
+            Ok(status) => {
+                info!("crosvm({}) exited with status {}", child.id(), status);
+                if let Some(exit_status_code) = status.code() {
+                    if exit_status_code == CROSVM_WATCHDOG_REBOOT_STATUS {
+                        info!("detected vcpu stall on crosvm");
+                    }
+                }
+            }
         }
 
         let mut vm_state = self.vm_state.lock().unwrap();
         *vm_state = VmState::Dead;
         // Ensure that the mutex is released before calling the callbacks.
         drop(vm_state);
+        info!("{} exited", &self);
 
         // Read the pipe to see if any failure reason is written
         let mut failure_reason = String::new();
@@ -275,13 +367,8 @@ impl VmInstance {
         let death_reason = death_reason(&result, &failure_reason);
         self.callbacks.callback_on_died(self.cid, death_reason);
 
-        let vm_start_timestamp = self.vm_start_timestamp.lock().unwrap();
-        write_vm_exited_stats(
-            self.requester_uid as i32,
-            &self.name,
-            death_reason,
-            *vm_start_timestamp,
-        );
+        let vm_metric = self.vm_metric.lock().unwrap();
+        write_vm_exited_stats(self.requester_uid as i32, &self.name, death_reason, &*vm_metric);
 
         // Delete temporary files.
         if let Err(e) = remove_dir_all(&self.temporary_directory) {
@@ -310,6 +397,42 @@ impl VmInstance {
             if let Err(e) = self.kill() {
                 error!("Error stopping timed-out VM with CID {}: {:?}", child.id(), e);
             }
+        }
+    }
+
+    fn monitor_vm_status(&self, child: Arc<SharedChild>) {
+        let pid = child.id();
+
+        loop {
+            {
+                // Check VM state
+                let vm_state = &*self.vm_state.lock().unwrap();
+                if let VmState::Dead = vm_state {
+                    break;
+                }
+
+                let mut vm_metric = self.vm_metric.lock().unwrap();
+
+                // Get CPU Information
+                // TODO: Collect it once right before VM dies using SIGCHLD
+                if let Ok(guest_time) = get_guest_time(pid) {
+                    vm_metric.cpu_guest_time = Some(guest_time);
+                } else {
+                    error!("Failed to parse /proc/[pid]/stat");
+                }
+
+                // Get Memory Information
+                if let Ok(rss) = get_rss(pid) {
+                    vm_metric.rss = match &vm_metric.rss {
+                        Some(x) => Some(Rss::extract_max(x, &rss)),
+                        None => Some(rss),
+                    }
+                } else {
+                    error!("Failed to parse /proc/[pid]/smaps");
+                }
+            }
+
+            thread::sleep(Duration::from_secs(1));
         }
     }
 
@@ -349,6 +472,46 @@ impl VmInstance {
         }
     }
 
+    /// Responds to memory-trimming notifications by inflating the virtio
+    /// balloon to reclaim guest memory.
+    pub fn trim_memory(&self, level: MemoryTrimLevel) -> Result<(), Error> {
+        let request = VmRequest::BalloonCommand(BalloonControlCommand::Stats {});
+        match vm_control::client::handle_request(&request, &self.crosvm_control_socket_path) {
+            Ok(VmResponse::BalloonStats { stats, balloon_actual: _ }) => {
+                if let Some(total_memory) = stats.total_memory {
+                    // Reclaim up to 50% of total memory assuming worst case
+                    // most memory is anonymous and must be swapped to zram
+                    // with an approximate 2:1 compression ratio.
+                    let pct = match level {
+                        MemoryTrimLevel::TRIM_MEMORY_RUNNING_CRITICAL => 50,
+                        MemoryTrimLevel::TRIM_MEMORY_RUNNING_LOW => 30,
+                        MemoryTrimLevel::TRIM_MEMORY_RUNNING_MODERATE => 10,
+                        _ => bail!("Invalid memory trim level {:?}", level),
+                    };
+                    let command =
+                        BalloonControlCommand::Adjust { num_bytes: total_memory * pct / 100 };
+                    if let Err(e) = vm_control::client::handle_request(
+                        &VmRequest::BalloonCommand(command),
+                        &self.crosvm_control_socket_path,
+                    ) {
+                        bail!("Error sending balloon adjustment: {:?}", e);
+                    }
+                }
+            }
+            Ok(VmResponse::Err(e)) => {
+                // ENOTSUP is returned when the balloon protocol is not initialised. This
+                // can occur for numerous reasons: Guest is still booting, guest doesn't
+                // support ballooning, host doesn't support ballooning. We don't log or
+                // raise an error in this case: trim is just a hint and we can ignore it.
+                if e.errno() != libc::ENOTSUP {
+                    bail!("Errno return when requesting balloon stats: {}", e.errno())
+                }
+            }
+            e => bail!("Error requesting balloon stats: {:?}", e),
+        }
+        Ok(())
+    }
+
     /// Checks if ramdump has been created. If so, send a notification to the user with the handle
     /// to read the ramdump.
     fn handle_ramdump(&self) -> Result<(), Error> {
@@ -383,7 +546,66 @@ impl VmInstance {
     }
 }
 
-fn death_reason(result: &Result<ExitStatus, io::Error>, failure_reason: &str) -> DeathReason {
+impl Rss {
+    fn extract_max(x: &Rss, y: &Rss) -> Rss {
+        Rss { vm: max(x.vm, y.vm), crosvm: max(x.crosvm, y.crosvm) }
+    }
+}
+
+// Get guest time from /proc/[crosvm pid]/stat
+fn get_guest_time(pid: u32) -> Result<i64> {
+    let file = read_to_string(format!("/proc/{}/stat", pid))?;
+    let data_list: Vec<_> = file.split_whitespace().collect();
+
+    // Information about guest_time is at 43th place of the file split with the whitespace.
+    // Example of /proc/[pid]/stat :
+    // 6603 (kworker/104:1H-kblockd) I 2 0 0 0 -1 69238880 0 0 0 0 0 88 0 0 0 -20 1 0 1845 0 0
+    // 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 104 0 0 0 0 0 0 0 0 0 0 0 0 0
+    if data_list.len() < 43 {
+        bail!("Failed to parse command result for getting guest time : {}", file);
+    }
+
+    let guest_time_ticks = data_list[42].parse::<i64>()?;
+    // SAFETY : It just returns an integer about CPU tick information.
+    let ticks_per_sec = unsafe { sysconf(_SC_CLK_TCK) } as i64;
+    Ok(guest_time_ticks * MILLIS_PER_SEC / ticks_per_sec)
+}
+
+// Get rss from /proc/[crosvm pid]/smaps
+fn get_rss(pid: u32) -> Result<Rss> {
+    let file = read_to_string(format!("/proc/{}/smaps", pid))?;
+    let lines: Vec<_> = file.split('\n').collect();
+
+    let mut rss_vm_total = 0i64;
+    let mut rss_crosvm_total = 0i64;
+    let mut is_vm = false;
+    for line in lines {
+        if line.contains("crosvm_guest") {
+            is_vm = true;
+        } else if line.contains("Rss:") {
+            let data_list: Vec<_> = line.split_whitespace().collect();
+            if data_list.len() < 2 {
+                bail!("Failed to parse command result for getting rss :\n{}", line);
+            }
+            let rss = data_list[1].parse::<i64>()?;
+
+            if is_vm {
+                rss_vm_total += rss;
+                is_vm = false;
+            }
+            rss_crosvm_total += rss;
+        }
+    }
+
+    Ok(Rss { vm: rss_vm_total, crosvm: rss_crosvm_total })
+}
+
+fn death_reason(result: &Result<ExitStatus, io::Error>, mut failure_reason: &str) -> DeathReason {
+    if let Some(position) = failure_reason.find('|') {
+        // Separator indicates extra context information is present after the failure name.
+        error!("Failure info: {}", &failure_reason[(position + 1)..]);
+        failure_reason = &failure_reason[..position];
+    }
     if let Ok(status) = result {
         match failure_reason {
             "PVM_FIRMWARE_PUBLIC_KEY_MISMATCH" => {
@@ -418,6 +640,7 @@ fn death_reason(result: &Result<ExitStatus, io::Error>, failure_reason: &str) ->
             Some(CROSVM_ERROR_STATUS) => DeathReason::ERROR,
             Some(CROSVM_REBOOT_STATUS) => DeathReason::REBOOT,
             Some(CROSVM_CRASH_STATUS) => DeathReason::CRASH,
+            Some(CROSVM_WATCHDOG_REBOOT_STATUS) => DeathReason::WATCHDOG_REBOOT,
             Some(_) => DeathReason::UNKNOWN,
         }
     } else {
@@ -426,20 +649,39 @@ fn death_reason(result: &Result<ExitStatus, io::Error>, failure_reason: &str) ->
 }
 
 /// Starts an instance of `crosvm` to manage a new VM.
-fn run_vm(config: CrosvmConfig, failure_pipe_write: File) -> Result<SharedChild, Error> {
+fn run_vm(
+    config: CrosvmConfig,
+    crosvm_control_socket_path: &Path,
+    failure_pipe_write: File,
+) -> Result<SharedChild, Error> {
     validate_config(&config)?;
 
     let mut command = Command::new(CROSVM_PATH);
     // TODO(qwandor): Remove --disable-sandbox.
     command
         .arg("--extended-status")
+        // Configure the logger for the crosvm process to silence logs from the disk crate which
+        // don't provide much information to us (but do spamming us).
+        .arg("--log-level")
+        .arg("info,disk=off")
         .arg("run")
         .arg("--disable-sandbox")
         .arg("--cid")
         .arg(config.cid.to_string());
 
+    if system_properties::read_bool("hypervisor.memory_reclaim.supported", false)? {
+        command.arg("--balloon-page-reporting");
+    } else {
+        command.arg("--no-balloon");
+    }
+
     if config.protected {
-        command.arg("--protected-vm");
+        match system_properties::read(SYSPROP_CUSTOM_PVMFW_PATH)? {
+            Some(pvmfw_path) if !pvmfw_path.is_empty() => {
+                command.arg("--protected-vm-with-firmware").arg(pvmfw_path)
+            }
+            _ => command.arg("--protected-vm"),
+        };
 
         // 3 virtio-console devices + vsock = 4.
         let virtio_pci_device_count = 4 + config.disks.len();
@@ -455,10 +697,6 @@ fn run_vm(config: CrosvmConfig, failure_pipe_write: File) -> Result<SharedChild,
 
     if let Some(cpus) = config.cpus {
         command.arg("--cpus").arg(cpus.to_string());
-    }
-
-    if let Some(cpu_affinity) = config.cpu_affinity {
-        command.arg("--cpu-affinity").arg(cpu_affinity);
     }
 
     if !config.task_profiles.is_empty() {
@@ -519,10 +757,16 @@ fn run_vm(config: CrosvmConfig, failure_pipe_write: File) -> Result<SharedChild,
         command.arg(add_preserved_fd(&mut preserved_fds, kernel));
     }
 
+    let control_server_socket = UnixSeqpacketListener::bind(crosvm_control_socket_path)
+        .context("failed to create control server")?;
+    command.arg("--socket").arg(add_preserved_fd(&mut preserved_fds, &control_server_socket));
+
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);
 
-    info!("Running {:?}", command);
+    command.arg("--params").arg("crashkernel=17M");
+    print_crosvm_args(&command);
+
     let result = SharedChild::spawn(&mut command)?;
     debug!("Spawned crosvm({}).", result.id());
     Ok(result)
@@ -549,9 +793,34 @@ fn validate_config(config: &CrosvmConfig) -> Result<(), Error> {
     Ok(())
 }
 
+/// Print arguments of the crosvm command. In doing so, /proc/self/fd/XX is annotated with the
+/// actual file path if the FD is backed by a regular file. If not, the /proc path is printed
+/// unmodified.
+fn print_crosvm_args(command: &Command) {
+    let re = Regex::new(r"/proc/self/fd/[\d]+").unwrap();
+    info!(
+        "Running crosvm with args: {:?}",
+        command
+            .get_args()
+            .map(|s| s.to_string_lossy())
+            .map(|s| {
+                re.replace_all(&s, |caps: &Captures| {
+                    let path = &caps[0];
+                    if let Ok(realpath) = std::fs::canonicalize(path) {
+                        format!("{} ({})", path, realpath.to_string_lossy())
+                    } else {
+                        path.to_owned()
+                    }
+                })
+                .into_owned()
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Adds the file descriptor for `file` to `preserved_fds`, and returns a string of the form
 /// "/proc/self/fd/N" where N is the file descriptor.
-fn add_preserved_fd(preserved_fds: &mut Vec<RawFd>, file: &File) -> String {
+fn add_preserved_fd(preserved_fds: &mut Vec<RawFd>, file: &dyn AsRawFd) -> String {
     let fd = file.as_raw_fd();
     preserved_fds.push(fd);
     format!("/proc/self/fd/{}", fd)

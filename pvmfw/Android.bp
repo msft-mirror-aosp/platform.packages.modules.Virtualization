@@ -8,19 +8,30 @@ rust_ffi_static {
     defaults: ["vmbase_ffi_defaults"],
     srcs: ["src/main.rs"],
     edition: "2021",
+    features: [
+        "legacy",
+    ],
     rustlibs: [
+        "libaarch64_paging",
+        "libavb_nostd",
+        "libbuddy_system_allocator",
+        "liblibfdt",
+        "liblog_rust_nostd",
+        "libpvmfw_embedded_key",
+        "libtinyvec_nostd",
         "libvmbase",
+    ],
+    static_libs: [
+        "libarm-optimized-routines-mem",
     ],
     apex_available: ["com.android.virt"],
 }
 
 cc_binary {
-    name: "pvmfw_elf",
-    stem: "pvmfw",
+    name: "pvmfw",
     defaults: ["vmbase_elf_defaults"],
     srcs: [
         "idmap.S",
-        "payload.S",
     ],
     static_libs: [
         "libpvmfw",
@@ -33,12 +44,63 @@ cc_binary {
 }
 
 raw_binary {
-    name: "pvmfw",
-    src: ":pvmfw_elf",
+    name: "pvmfw_bin",
+    stem: "pvmfw.bin",
+    src: ":pvmfw",
     enabled: false,
     target: {
         android_arm64: {
             enabled: true,
         },
     },
+}
+
+prebuilt_etc {
+    name: "pvmfw_embedded_key",
+    src: ":avb_testkey_rsa4096_pub_bin",
+    installable: false,
+}
+
+genrule {
+    name: "pvmfw_embedded_key_rs",
+    srcs: [":pvmfw_embedded_key"],
+    out: ["lib.rs"],
+    cmd: "(" +
+        "    echo '#![no_std]';" +
+        "    echo '#![allow(missing_docs)]';" +
+        "    echo 'pub const PUBLIC_KEY: &[u8] = &[';" +
+        "    xxd -i < $(in);" +
+        "    echo '];';" +
+        ") > $(out)",
+}
+
+rust_library_rlib {
+    name: "libpvmfw_embedded_key",
+    defaults: ["vmbase_ffi_defaults"],
+    prefer_rlib: true,
+    srcs: [":pvmfw_embedded_key_rs"],
+    crate_name: "pvmfw_embedded_key",
+    apex_available: ["com.android.virt"],
+}
+
+prebuilt_etc {
+    name: "pvmfw_sign_key",
+    src: ":avb_testkey_rsa4096",
+    installable: false,
+}
+
+bootimg {
+    name: "pvmfw_img",
+    stem: "pvmfw.img",
+    kernel_prebuilt: ":pvmfw_bin",
+    header_version: "3",
+    partition_name: "pvmfw",
+    enabled: false,
+    target: {
+        android_arm64: {
+            enabled: true,
+        },
+    },
+    use_avb: true,
+    avb_private_key: ":pvmfw_sign_key",
 }

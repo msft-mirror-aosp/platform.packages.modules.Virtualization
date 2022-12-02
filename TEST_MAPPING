@@ -7,9 +7,6 @@
       "name": "ComposHostTestCases"
     },
     {
-      "name": "VirtualizationTestCases.64"
-    },
-    {
       "name": "MicrodroidTestApp"
     },
     {
@@ -33,6 +30,11 @@
       "name": "AVFHostTestCases"
     }
   ],
+  "postsubmit": [
+    {
+      "name": "CtsMicrodroidDisabledTestCases"
+    }
+  ],
   "imports": [
     {
       "path": "packages/modules/Virtualization/apkdmverity"
@@ -45,6 +47,9 @@
     },
     {
       "path": "packages/modules/Virtualization/libs/apkverify"
+    },
+    {
+      "path": "packages/modules/Virtualization/libs/devicemapper"
     },
     {
       "path": "packages/modules/Virtualization/libs/vbmeta"

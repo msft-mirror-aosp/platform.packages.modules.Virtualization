@@ -27,7 +27,7 @@ function connect_vm() {
     adb forward tcp:8000 vsock:${cid}:5555
     adb connect localhost:8000
     adb -s localhost:8000 root
-    sleep 2
+    adb -s localhost:8000 wait-for-device
     adb -s localhost:8000 shell
     exit 0
 }
@@ -40,18 +40,18 @@ if [ -z "${available_cids}" ]; then
     exit 1
 fi
 
-if [ -n "${selected_cid}" ]; then
-    if [[ ! " ${available_cids[*]} " =~ " ${selected_cid} " ]]; then
-        echo VM of CID $selected_cid does not exist. Available CIDs: ${available_cids}
-        exit 1
-    fi
-else
+if [ ! -n "${selected_cid}" ]; then
     PS3="Select CID of VM to adb-shell into: "
     select cid in ${available_cids}
     do
         selected_cid=${cid}
         break
     done
+fi
+
+if [[ ! " ${available_cids[*]} " =~ " ${selected_cid} " ]]; then
+    echo VM of CID $selected_cid does not exist. Available CIDs: ${available_cids}
+    exit 1
 fi
 
 connect_vm ${selected_cid}

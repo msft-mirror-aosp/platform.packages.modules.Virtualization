@@ -10,10 +10,11 @@ rust_defaults {
     prefer_rlib: true,
     rustlibs: [
         "libanyhow",
+        "libapkverify",
         "libbitflags",
         "libclap",
         "libdata_model",
-        "libidsig",
+        "libdm_rust",
         "libitertools",
         "liblibc",
         "libnix",
@@ -42,5 +43,9 @@ rust_test {
     compile_multilib: "first",
     rustlibs: [
         "libtempfile",
+    ],
+    data: [
+        "testdata/*.apk",
+        "testdata/*.idsig",
     ],
 }

@@ -7,13 +7,14 @@ android_app {
     name: "android.system.virtualmachine.res",
     installable: true,
     apex_available: ["com.android.virt"],
-    sdk_version: "current",
+    platform_apis: true,
 }
 
 java_sdk_library {
-    name: "android.system.virtualmachine",
-    installable: true,
-    compile_dex: true,
+    name: "framework-virtualization",
+
+    // TODO(b/243512044): introduce non-updatable-framework-module-defaults
+    defaults: ["framework-module-defaults"],
 
     jarjar_rules: "jarjar-rules.txt",
 
@@ -25,11 +26,35 @@ java_sdk_library {
     ],
 
     apex_available: ["com.android.virt"],
+
     permitted_packages: [
         "android.system.virtualmachine",
         "android.system.virtualizationservice",
         // android.sysprop.*, renamed by jarjar
         "com.android.system.virtualmachine.sysprop",
+    ],
+    errorprone: {
+        enabled: true,
+        javacflags: [
+            // We use @GuardedBy and we want a test failure if our locking isn't consistent with it.
+            "-Xep:GuardedBy:ERROR",
+        ],
+    },
+
+    test: {
+        enabled: true,
+        sdk_version: "module_current",
+    },
+
+    sdk_version: "core_platform",
+    stub_only_libs: [
+        "android_module_lib_stubs_current",
+    ],
+    impl_only_libs: [
+        "framework",
+    ],
+    impl_library_visibility: [
+        "//packages/modules/Virtualization:__subpackages__",
     ],
 }
 

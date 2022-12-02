@@ -57,8 +57,6 @@ android_system_image {
         "libbinder",
         "libbinder_ndk",
         "libstdc++",
-        "logcat.microdroid",
-        "logd.microdroid",
         "secilc",
 
         // "com.android.adbd" requires these,
@@ -72,27 +70,26 @@ android_system_image {
         "apexd",
         "atrace",
         "debuggerd",
-        "diced.microdroid",
         "linker",
         "linkerconfig",
-        "servicemanager.microdroid",
-        "tombstoned",
+        "tombstoned.microdroid",
         "tombstone_transmit.microdroid",
         "cgroups.json",
         "task_profiles.json",
         "public.libraries.android.txt",
 
-        "microdroid_compatibility_matrix",
         "microdroid_event-log-tags",
         "microdroid_file_contexts",
         "microdroid_manifest",
         "microdroid_plat_sepolicy_and_mapping.sha256",
         "microdroid_property_contexts",
-        "microdroid_service_contexts",
+        "mke2fs",
 
         // TODO(b/195425111) these should be added automatically
         "libcrypto", // used by many (init_second_stage, microdroid_manager, toybox, etc)
         "liblzma", // used by init_second_stage
+
+        "libvm_payload", // used by payload to interact with microdroid manager
     ] + microdroid_shell_and_utilities,
     multilib: {
         common: {
@@ -110,6 +107,7 @@ android_system_image {
                 "apkdmverity",
                 "authfs",
                 "authfs_service",
+                "encryptedstore",
                 "microdroid_crashdump_kernel",
                 "microdroid_kexec",
                 "microdroid_manager",
@@ -172,7 +170,8 @@ genrule {
         "grep ro\\.build\\.version\\.security_patch= $(location :buildinfo.prop) && " +
         "grep ro\\.build\\.version\\.known_codenames= $(location :buildinfo.prop) && " +
         "cat $(location build.prop) && " +
-        "echo ro.product.cpu.abilist=x86_64) > $(out)",
+        "echo ro.product.cpu.abilist=x86_64 && " +
+        "echo ro.product.cpu.abi=x86_64) > $(out)",
 }
 
 genrule {
@@ -189,7 +188,8 @@ genrule {
         "grep ro\\.build\\.version\\.security_patch= $(location :buildinfo.prop) && " +
         "grep ro\\.build\\.version\\.known_codenames= $(location :buildinfo.prop) && " +
         "cat $(location build.prop) && " +
-        "echo ro.product.cpu.abilist=arm64-v8a) > $(out)",
+        "echo ro.product.cpu.abilist=arm64-v8a && " +
+        "echo ro.product.cpu.abi=arm64-v8a) > $(out)",
 }
 
 android_filesystem {
@@ -197,7 +197,6 @@ android_filesystem {
     partition_name: "vendor",
     use_avb: true,
     deps: [
-        "android.hardware.security.dice-service.microdroid",
         "microdroid_fstab",
         "microdroid_precompiled_sepolicy.plat_sepolicy_and_mapping.sha256",
         "microdroid_vendor_manifest",
@@ -238,14 +237,6 @@ logical_partition {
     ],
 }
 
-microdroid_boot_cmdline = [
-    "panic=-1",
-    "bootconfig",
-    "ioremap_guard",
-    // TODO(b/237381762) do this only when ramdump is enabled. (bootloader shall append this)
-    "crashkernel=17M",
-]
-
 bootimg {
     name: "microdroid_boot",
     // We don't have kernel for arm and x86. But Soong demands one when it builds for
@@ -254,19 +245,9 @@ bootimg {
     arch: {
         arm64: {
             kernel_prebuilt: ":microdroid_kernel_prebuilts-5.15-arm64",
-            cmdline: microdroid_boot_cmdline,
         },
         x86_64: {
             kernel_prebuilt: ":microdroid_kernel_prebuilts-5.15-x86_64",
-            cmdline: microdroid_boot_cmdline + [
-                // console=none is to work around the x86 specific u-boot behavior which when
-                // console= option is not found in the kernel commandline console=ttyS0 is
-                // automatically added. By adding console=none, we can prevent u-boot from doing
-                // that. Note that console is set to hvc0 by bootconfig if the VM is configured as
-                // debuggable.
-                "console=none",
-                "acpi=noirq",
-            ],
         },
     },
 
@@ -322,21 +303,6 @@ bootimg {
     partition_name: "vendor_boot",
     use_avb: true,
     avb_private_key: ":microdroid_sign_key",
-}
-
-// TODO(b/231117670) remove this when VirtualizationTestCases moves to the
-// microdroid kernel
-prebuilt_kernel_modules {
-    name: "microdroid_kernel_modules",
-    arch: {
-        arm64: {
-            srcs: [":virt_device_prebuilts_kernel_modules_microdroid-5.15-arm64"],
-        },
-        x86_64: {
-            srcs: [":virt_device_prebuilts_kernel_modules_microdroid-5.15-x86_64"],
-        },
-    },
-    kernel_version: "5.15",
 }
 
 android_filesystem {
@@ -528,10 +494,7 @@ vbmeta {
     private_key: ":microdroid_sign_key",
     partitions: [
         "microdroid_vendor",
-        "microdroid_vendor_boot",
         "microdroid",
-        "microdroid_boot",
-        "microdroid_init_boot",
     ],
 }
 
@@ -557,14 +520,6 @@ prebuilt_etc {
 }
 
 prebuilt_etc {
-    name: "microdroid_compatibility_matrix",
-    src: "microdroid_compatibility_matrix.xml",
-    filename: "compatibility_matrix.current.xml",
-    relative_install_path: "vintf",
-    installable: false,
-}
-
-prebuilt_etc {
     name: "microdroid_manifest",
     src: "microdroid_manifest.xml",
     filename: "manifest.xml",
@@ -577,4 +532,53 @@ prebuilt_etc {
     src: "microdroid_event-log-tags",
     filename: "event-log-tags",
     installable: false,
+}
+
+filegroup {
+    name: "microdroid_bootconfig_full_debuggable_src",
+    srcs: ["bootconfig.full_debuggable"],
+}
+
+filegroup {
+    name: "microdroid_bootconfig_app_debuggable_src",
+    srcs: ["bootconfig.app_debuggable"],
+}
+
+filegroup {
+    name: "microdroid_bootconfig_normal_src",
+    srcs: ["bootconfig.normal"],
+}
+
+avb_add_hash_footer {
+    name: "microdroid_kernel_signed",
+    src: "empty_kernel",
+    filename: "microdroid_kernel",
+    partition_name: "bootloader",
+    private_key: ":microdroid_sign_key",
+    salt: bootloader_salt,
+    enabled: false,
+    arch: {
+        arm64: {
+            src: ":microdroid_kernel_prebuilts-5.15-arm64",
+            enabled: true,
+        },
+        x86_64: {
+            src: ":microdroid_kernel_prebuilts-5.15-x86_64",
+            enabled: true,
+        },
+    },
+}
+
+prebuilt_etc {
+    name: "microdroid_kernel",
+    src: "empty_kernel",
+    relative_install_path: "fs",
+    arch: {
+        arm64: {
+            src: ":microdroid_kernel_signed",
+        },
+        x86_64: {
+            src: ":microdroid_kernel_signed",
+        },
+    },
 }

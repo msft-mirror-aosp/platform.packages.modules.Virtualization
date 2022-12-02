@@ -15,24 +15,51 @@
 //! Functions for creating and collecting atoms.
 
 use crate::aidl::clone_file;
+use crate::crosvm::VmMetric;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    DeathReason::DeathReason, IVirtualMachine::IVirtualMachine,
-    VirtualMachineAppConfig::VirtualMachineAppConfig, VirtualMachineConfig::VirtualMachineConfig,
+    DeathReason::DeathReason,
+    IVirtualMachine::IVirtualMachine,
+    VirtualMachineAppConfig::{Payload::Payload, VirtualMachineAppConfig},
+    VirtualMachineConfig::VirtualMachineConfig,
 };
 use android_system_virtualizationservice::binder::{Status, Strong};
 use anyhow::{anyhow, Result};
-use binder::ThreadState;
+use binder::{ParcelFileDescriptor, ThreadState};
 use log::{trace, warn};
 use microdroid_payload_config::VmPayloadConfig;
+use rustutils::system_properties;
 use statslog_virtualization_rust::{vm_booted, vm_creation_requested, vm_exited};
+use std::thread;
 use std::time::{Duration, SystemTime};
 use zip::ZipArchive;
 
-fn get_vm_payload_config(config: &VirtualMachineAppConfig) -> Result<VmPayloadConfig> {
-    let apk = config.apk.as_ref().ok_or_else(|| anyhow!("APK is none"))?;
+fn get_apex_list(config: &VirtualMachineAppConfig) -> String {
+    match &config.payload {
+        Payload::PayloadConfig(_) => String::new(),
+        Payload::ConfigPath(config_path) => {
+            let vm_payload_config = get_vm_payload_config(&config.apk, config_path);
+            if let Ok(vm_payload_config) = vm_payload_config {
+                vm_payload_config
+                    .apexes
+                    .iter()
+                    .map(|x| x.name.clone())
+                    .collect::<Vec<String>>()
+                    .join(":")
+            } else {
+                "INFO: Can't get VmPayloadConfig".to_owned()
+            }
+        }
+    }
+}
+
+fn get_vm_payload_config(
+    apk_fd: &Option<ParcelFileDescriptor>,
+    config_path: &str,
+) -> Result<VmPayloadConfig> {
+    let apk = apk_fd.as_ref().ok_or_else(|| anyhow!("APK is none"))?;
     let apk_file = clone_file(apk)?;
     let mut apk_zip = ZipArchive::new(&apk_file)?;
-    let config_file = apk_zip.by_name(&config.configPath)?;
+    let config_file = apk_zip.by_name(config_path)?;
     let vm_payload_config: VmPayloadConfig = serde_json::from_reader(config_file)?;
     Ok(vm_payload_config)
 }
@@ -62,142 +89,162 @@ pub fn write_vm_creation_stats(
             binder_exception_code = e.exception_code() as i32;
         }
     }
-
-    let vm_identifier;
-    let config_type;
-    let num_cpus;
-    let cpu_affinity;
-    let memory_mib;
-    let apexes;
-    match config {
-        VirtualMachineConfig::AppConfig(config) => {
-            vm_identifier = &config.name;
-            config_type = vm_creation_requested::ConfigType::VirtualMachineAppConfig;
-            num_cpus = config.numCpus;
-            cpu_affinity = config.cpuAffinity.clone().unwrap_or_default();
-            memory_mib = config.memoryMib;
-
-            let vm_payload_config = get_vm_payload_config(config);
-            if let Ok(vm_payload_config) = vm_payload_config {
-                apexes = vm_payload_config
-                    .apexes
-                    .iter()
-                    .map(|x| x.name.clone())
-                    .collect::<Vec<String>>()
-                    .join(":");
-            } else {
-                apexes = "INFO: Can't get VmPayloadConfig".into();
-            }
-        }
-        VirtualMachineConfig::RawConfig(config) => {
-            vm_identifier = &config.name;
-            config_type = vm_creation_requested::ConfigType::VirtualMachineRawConfig;
-            num_cpus = config.numCpus;
-            cpu_affinity = config.cpuAffinity.clone().unwrap_or_default();
-            memory_mib = config.memoryMib;
-            apexes = String::new();
-        }
-    }
-
-    let vm_creation_requested = vm_creation_requested::VmCreationRequested {
-        uid: ThreadState::get_calling_uid() as i32,
-        vm_identifier,
-        hypervisor: vm_creation_requested::Hypervisor::Pkvm,
-        is_protected,
-        creation_succeeded,
-        binder_exception_code,
-        config_type,
-        num_cpus,
-        cpu_affinity: &cpu_affinity,
-        memory_mib,
-        apexes: &apexes,
-        // TODO(seungjaeyoo) Fill information about task_profile
-        // TODO(seungjaeyoo) Fill information about disk_image for raw config
+    let (vm_identifier, config_type, num_cpus, memory_mib, apexes) = match config {
+        VirtualMachineConfig::AppConfig(config) => (
+            config.name.clone(),
+            vm_creation_requested::ConfigType::VirtualMachineAppConfig,
+            config.numCpus,
+            config.memoryMib,
+            get_apex_list(config),
+        ),
+        VirtualMachineConfig::RawConfig(config) => (
+            config.name.clone(),
+            vm_creation_requested::ConfigType::VirtualMachineRawConfig,
+            config.numCpus,
+            config.memoryMib,
+            String::new(),
+        ),
     };
 
-    match vm_creation_requested.stats_write() {
-        Err(e) => {
-            warn!("statslog_rust failed with error: {}", e);
+    let uid = ThreadState::get_calling_uid() as i32;
+    thread::spawn(move || {
+        let vm_creation_requested = vm_creation_requested::VmCreationRequested {
+            uid,
+            vm_identifier: &vm_identifier,
+            hypervisor: vm_creation_requested::Hypervisor::Pkvm,
+            is_protected,
+            creation_succeeded,
+            binder_exception_code,
+            config_type,
+            num_cpus,
+            cpu_affinity: "", // deprecated
+            memory_mib,
+            apexes: &apexes,
+            // TODO(seungjaeyoo) Fill information about task_profile
+            // TODO(seungjaeyoo) Fill information about disk_image for raw config
+        };
+
+        wait_for_statsd().unwrap_or_else(|e| warn!("failed to wait for statsd with error: {}", e));
+        match vm_creation_requested.stats_write() {
+            Err(e) => {
+                warn!("statslog_rust failed with error: {}", e);
+            }
+            Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
         }
-        Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
-    }
+    });
 }
 
 /// Write the stats of VM boot to statsd
+/// The function creates a separate thread which waits fro statsd to start to push atom
 pub fn write_vm_booted_stats(
     uid: i32,
-    vm_identifier: &String,
+    vm_identifier: &str,
     vm_start_timestamp: Option<SystemTime>,
 ) {
+    let vm_identifier = vm_identifier.to_owned();
     let duration = get_duration(vm_start_timestamp);
-    let vm_booted = vm_booted::VmBooted {
-        uid,
-        vm_identifier,
-        elapsed_time_millis: duration.as_millis() as i64,
-    };
-    match vm_booted.stats_write() {
-        Err(e) => {
-            warn!("statslog_rust failed with error: {}", e);
+    thread::spawn(move || {
+        let vm_booted = vm_booted::VmBooted {
+            uid,
+            vm_identifier: &vm_identifier,
+            elapsed_time_millis: duration.as_millis() as i64,
+        };
+        wait_for_statsd().unwrap_or_else(|e| warn!("failed to wait for statsd with error: {}", e));
+        match vm_booted.stats_write() {
+            Err(e) => {
+                warn!("statslog_rust failed with error: {}", e);
+            }
+            Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
         }
-        Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
-    }
+    });
 }
 
 /// Write the stats of VM exit to statsd
+/// The function creates a separate thread which waits fro statsd to start to push atom
 pub fn write_vm_exited_stats(
     uid: i32,
-    vm_identifier: &String,
+    vm_identifier: &str,
     reason: DeathReason,
-    vm_start_timestamp: Option<SystemTime>,
+    vm_metric: &VmMetric,
 ) {
-    let duration = get_duration(vm_start_timestamp);
-    let vm_exited = vm_exited::VmExited {
-        uid,
-        vm_identifier,
-        elapsed_time_millis: duration.as_millis() as i64,
-        death_reason: match reason {
-            DeathReason::INFRASTRUCTURE_ERROR => vm_exited::DeathReason::InfrastructureError,
-            DeathReason::KILLED => vm_exited::DeathReason::Killed,
-            DeathReason::UNKNOWN => vm_exited::DeathReason::Unknown,
-            DeathReason::SHUTDOWN => vm_exited::DeathReason::Shutdown,
-            DeathReason::ERROR => vm_exited::DeathReason::Error,
-            DeathReason::REBOOT => vm_exited::DeathReason::Reboot,
-            DeathReason::CRASH => vm_exited::DeathReason::Crash,
-            DeathReason::PVM_FIRMWARE_PUBLIC_KEY_MISMATCH => {
-                vm_exited::DeathReason::PvmFirmwarePublicKeyMismatch
+    let vm_identifier = vm_identifier.to_owned();
+    let elapsed_time_millis = get_duration(vm_metric.start_timestamp).as_millis() as i64;
+    let guest_time_millis = vm_metric.cpu_guest_time.unwrap_or_default();
+    let rss = vm_metric.rss.unwrap_or_default();
+
+    thread::spawn(move || {
+        let vm_exited = vm_exited::VmExited {
+            uid,
+            vm_identifier: &vm_identifier,
+            elapsed_time_millis,
+            death_reason: match reason {
+                DeathReason::INFRASTRUCTURE_ERROR => vm_exited::DeathReason::InfrastructureError,
+                DeathReason::KILLED => vm_exited::DeathReason::Killed,
+                DeathReason::UNKNOWN => vm_exited::DeathReason::Unknown,
+                DeathReason::SHUTDOWN => vm_exited::DeathReason::Shutdown,
+                DeathReason::ERROR => vm_exited::DeathReason::Error,
+                DeathReason::REBOOT => vm_exited::DeathReason::Reboot,
+                DeathReason::CRASH => vm_exited::DeathReason::Crash,
+                DeathReason::PVM_FIRMWARE_PUBLIC_KEY_MISMATCH => {
+                    vm_exited::DeathReason::PvmFirmwarePublicKeyMismatch
+                }
+                DeathReason::PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED => {
+                    vm_exited::DeathReason::PvmFirmwareInstanceImageChanged
+                }
+                DeathReason::BOOTLOADER_PUBLIC_KEY_MISMATCH => {
+                    vm_exited::DeathReason::BootloaderPublicKeyMismatch
+                }
+                DeathReason::BOOTLOADER_INSTANCE_IMAGE_CHANGED => {
+                    vm_exited::DeathReason::BootloaderInstanceImageChanged
+                }
+                DeathReason::MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE => {
+                    vm_exited::DeathReason::MicrodroidFailedToConnectToVirtualizationService
+                }
+                DeathReason::MICRODROID_PAYLOAD_HAS_CHANGED => {
+                    vm_exited::DeathReason::MicrodroidPayloadHasChanged
+                }
+                DeathReason::MICRODROID_PAYLOAD_VERIFICATION_FAILED => {
+                    vm_exited::DeathReason::MicrodroidPayloadVerificationFailed
+                }
+                DeathReason::MICRODROID_INVALID_PAYLOAD_CONFIG => {
+                    vm_exited::DeathReason::MicrodroidInvalidPayloadConfig
+                }
+                DeathReason::MICRODROID_UNKNOWN_RUNTIME_ERROR => {
+                    vm_exited::DeathReason::MicrodroidUnknownRuntimeError
+                }
+                DeathReason::HANGUP => vm_exited::DeathReason::Hangup,
+                _ => vm_exited::DeathReason::Unknown,
+            },
+            guest_time_millis,
+            rss_vm_kb: rss.vm,
+            rss_crosvm_kb: rss.crosvm,
+        };
+        wait_for_statsd().unwrap_or_else(|e| warn!("failed to wait for statsd with error: {}", e));
+        match vm_exited.stats_write() {
+            Err(e) => {
+                warn!("statslog_rust failed with error: {}", e);
             }
-            DeathReason::PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED => {
-                vm_exited::DeathReason::PvmFirmwareInstanceImageChanged
-            }
-            DeathReason::BOOTLOADER_PUBLIC_KEY_MISMATCH => {
-                vm_exited::DeathReason::BootloaderPublicKeyMismatch
-            }
-            DeathReason::BOOTLOADER_INSTANCE_IMAGE_CHANGED => {
-                vm_exited::DeathReason::BootloaderInstanceImageChanged
-            }
-            DeathReason::MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE => {
-                vm_exited::DeathReason::MicrodroidFailedToConnectToVirtualizationService
-            }
-            DeathReason::MICRODROID_PAYLOAD_HAS_CHANGED => {
-                vm_exited::DeathReason::MicrodroidPayloadHasChanged
-            }
-            DeathReason::MICRODROID_PAYLOAD_VERIFICATION_FAILED => {
-                vm_exited::DeathReason::MicrodroidPayloadVerificationFailed
-            }
-            DeathReason::MICRODROID_INVALID_PAYLOAD_CONFIG => {
-                vm_exited::DeathReason::MicrodroidInvalidPayloadConfig
-            }
-            DeathReason::MICRODROID_UNKNOWN_RUNTIME_ERROR => {
-                vm_exited::DeathReason::MicrodroidUnknownRuntimeError
-            }
-            DeathReason::HANGUP => vm_exited::DeathReason::Hangup,
-            _ => vm_exited::DeathReason::Unknown,
-        },
-    };
-    match vm_exited.stats_write() {
-        Err(e) => {
-            warn!("statslog_rust failed with error: {}", e);
+            Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
         }
-        Ok(_) => trace!("statslog_rust succeeded for virtualization service"),
+    });
+}
+
+fn wait_for_statsd() -> Result<()> {
+    let mut prop = system_properties::PropertyWatcher::new("init.svc.statsd")?;
+    loop {
+        prop.wait()?;
+        match system_properties::read("init.svc.statsd")? {
+            Some(s) => {
+                if s == "running" {
+                    break;
+                }
+            }
+            None => {
+                // This case never really happens because
+                // prop.wait() waits for property to be non-null.
+                break;
+            }
+        }
     }
+    Ok(())
 }

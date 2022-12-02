@@ -33,7 +33,7 @@ acloud create --local-instance --local-image
 ### Pixel 6 and 6 Pro
 
 If the device is running Android 12, join the [Android Beta
-Program](https://www.google.com/android/beta) to uprade to Android 13 Beta.
+Program](https://www.google.com/android/beta) to upgrade to Android 13 Beta.
 
 Once upgraded to Android 13, execute the following command to enable pKVM.
 
@@ -66,10 +66,18 @@ fastboot reboot
 ```
 
 Finally, if the `pvmfw` partition has been corrupted, both slots may be flashed
-using the [`pvmfw.img` pre-built](https://android.googlesource.com/platform/packages/modules/Virtualization/+/refs/heads/master/pvmfw/pvmfw.img)
+using the [`pvmfw.img` pre-built](https://android.googlesource.com/platform/packages/modules/Virtualization/+/08deac98acefd62e222edfa374d5292458cf97eb%5E/pvmfw/pvmfw.img)
 as long as the bootloader remains unlocked. Otherwise, a fresh install of
 Android 13 followed by the manual steps above for flashing the `other` slot
 should be used as a last resort.
+
+Starting in Android 14, `pvmfw.img` can be built using the Android Build system:
+```
+lunch <target>  # where PRODUCT_BUILD_PVMFW_IMAGE=true
+m pvmfwimage    # partition image under ${ANDROID_PRODUCT_OUT}/pvmfw.img
+```
+Note that the result is not intended to be used in Android 13 as not
+backward-compatibility is guaranteed.
 
 ## Running demo app
 
@@ -88,6 +96,15 @@ atest MicrodroidTestApp
 
 If you run into problems, inspect the logs produced by `atest`. Their location is printed at the
 end. The `host_log_*.zip` file should contain the output of individual commands as well as VM logs.
+
+### Custom pvmfw
+
+Hostside tests, which run on the PC and extends `MicrodroidHostTestCaseBase`, can be run with
+a custom `pvmfw`. Use `--module-arg` to push `pvmfw` for individual test methods.
+
+```shell
+atest com.android.microdroid.test.MicrodroidHostTests -- --module-arg MicrodroidHostTestCases:set-option:pvmfw:pvmfw.img
+```
 
 ## Spawning your own VMs with custom kernel
 
@@ -112,20 +129,41 @@ adb shell "/apex/com.android.virt/bin/vm run /data/local/tmp/vm_config.json"
 The `vm` command also has other subcommands for debugging; run `/apex/com.android.virt/bin/vm help`
 for details.
 
+## Spawning your own VMs with custom pvmfw
+
+Set system property `hypervisor.pvmfw.path` to custom `pvmfw` on the device before using `vm` tool.
+`virtualizationservice` will pass the specified `pvmfw` to `crosvm` for protected VMs.
+
+```shell
+adb push pvmfw.img /data/local/tmp/pvmfw.img
+adb root  # required for setprop
+adb shell setprop hypervisor.pvmfw.path /data/local/tmp/pvmfw.img
+```
+
 ## Spawning your own VMs with Microdroid
 
 [Microdroid](../../microdroid/README.md) is a lightweight version of Android that is intended to run
-on pVM. You can manually run the demo app on top of Microdroid as follows:
+on pVM. You can run a Microdroid with empty payload using the following command:
 
 ```shell
-TARGET_BUILD_APPS=MicrodroidDemoApp m apps_only dist
+adb shell /apex/com.android.virt/bin/vm run-microdroid --debug full
+```
+
+The `instance.img` and `apk.idsig` files will be stored in a subdirectory under
+`/data/local/tmp/microdroid`, that `vm` will create.
+
+Atlernatively, you can manually run the demo app on top of Microdroid as follows:
+
+```shell
+UNBUNDLED_BUILD_SDKS_FROM_SOURCE=true TARGET_BUILD_APPS=MicrodroidDemoApp m apps_only dist
 adb shell mkdir -p /data/local/tmp/virt
 adb push out/dist/MicrodroidDemoApp.apk /data/local/tmp/virt/
 adb shell /apex/com.android.virt/bin/vm run-app \
   --debug full \
   /data/local/tmp/virt/MicrodroidDemoApp.apk \
   /data/local/tmp/virt/MicrodroidDemoApp.apk.idsig \
-  /data/local/tmp/virt/instance.img assets/vm_config.json
+  /data/local/tmp/virt/instance.img \
+  --payload-path MicrodroidTestNativeLib.so
 ```
 
 ## Building and updating CrosVM and VirtualizationService {#building-and-updating}
@@ -142,25 +180,4 @@ adb reboot
 
 ## Building and updating kernel inside Microdroid
 
-Checkout the Android common kernel and build it following the [official
-guideline](https://source.android.com/setup/build/building-kernels).
-
-```shell
-mkdir android-kernel && cd android-kernel
-repo init -u https://android.googlesource.com/kernel/manifest -b common-android14-5.15
-repo sync
-FAST_BUILD=1 DIST_DIR=out/dist BUILD_CONFIG=common/build.config.microdroid.aarch64 build/build.sh -j80
-```
-
-Replace `build.config.microdroid.aarch64` with `build.config.microdroid.x86_64` if building
-for x86.
-
-Then copy the built kernel to the Android source tree.
-
-```
-cp out/dist/Image <android_root>/packages/modules/Virtualization/microdroid/kernel/arm64/kernel-5.15
-```
-
-Finally rebuild the `com.android.virt` APEX and install it by following the
-steps shown in [Building and updating Crosvm and
-Virtualization](#building-and-updating).
+The instruction is [here](../../microdroid/kernel/README.md).

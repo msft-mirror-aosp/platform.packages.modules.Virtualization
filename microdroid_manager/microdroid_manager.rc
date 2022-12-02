@@ -1,6 +1,12 @@
 service microdroid_manager /system/bin/microdroid_manager
     disabled
+    # print android log to kmsg
     file /dev/kmsg w
+    # redirect stdout/stderr to kmsg_debug
+    stdio_to_kmsg
     setenv RUST_LOG info
     # TODO(jooyung) remove this when microdroid_manager becomes a daemon
     oneshot
+    # SYS_BOOT is required to exec kexecload from microdroid_manager
+    capabilities AUDIT_CONTROL SYS_ADMIN SYS_BOOT
+    socket vm_payload_service stream 0666 system system

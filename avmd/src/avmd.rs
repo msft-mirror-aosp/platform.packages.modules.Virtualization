@@ -18,7 +18,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use apexutil::to_hex_string;
+use apkverify::SignatureAlgorithmID;
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -105,7 +105,7 @@ impl fmt::Display for VbMetaDescriptor {
         writeln!(f, "  VBMeta descriptor:")?;
         writeln!(f, "    namespace:             {}", self.resource.namespace)?;
         writeln!(f, "    name:                  {}", self.resource.name)?;
-        writeln!(f, "    vbmeta digest:         {}", to_hex_string(&self.vbmeta_digest))?;
+        writeln!(f, "    vbmeta digest:         {}", hex::encode(&self.vbmeta_digest))?;
         Ok(())
     }
 }
@@ -120,7 +120,7 @@ pub struct ApkDescriptor {
     /// It should be one of the algorithms in the [list][].
     ///
     /// [list]: https://source.android.com/security/apksigning/v2#signature-algorithm-ids
-    pub signature_algorithm_id: u32,
+    pub signature_algorithm_id: SignatureAlgorithmID,
     /// Digest of the APK's v3 signing block. TODO: fix
     pub apk_digest: Vec<u8>,
 }
@@ -130,8 +130,8 @@ impl fmt::Display for ApkDescriptor {
         writeln!(f, "  APK descriptor:")?;
         writeln!(f, "    namespace:             {}", self.resource.namespace)?;
         writeln!(f, "    name:                  {}", self.resource.name)?;
-        writeln!(f, "    Signing algorithm ID:  {:#x}", self.signature_algorithm_id)?;
-        writeln!(f, "    APK digest:            {}", to_hex_string(&self.apk_digest))?;
+        writeln!(f, "    Signing algorithm ID:  {:#04x}", self.signature_algorithm_id.to_u32())?;
+        writeln!(f, "    APK digest:            {}", hex::encode(&self.apk_digest))?;
         Ok(())
     }
 }

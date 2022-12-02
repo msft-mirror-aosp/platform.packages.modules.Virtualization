@@ -42,10 +42,10 @@ with `aosp_x86_64`.
 ## Building an app
 
 An app in microdroid is a shared library file embedded in an APK. The shared
-library should have an entry point `android_native_main` as shown below:
+library should have an entry point `AVmPayload_main` as shown below:
 
 ```C++
-extern "C" int android_native_main(int argc, char* argv[]) {
+extern "C" int AVmPayload_main() {
   printf("Hello Microdroid!\n");
 }
 ```
@@ -141,7 +141,7 @@ adb shell /apex/com.android.virt/bin/vm run-app \
 PATH_TO_YOUR_APP \
 $TEST_ROOT/MyApp.apk.idsig \
 $TEST_ROOT/instance.img \
-assets/VM_CONFIG_FILE
+--config-path assets/VM_CONFIG_FILE
 ```
 
 The last command lets you know the CID assigned to the VM. The console output
@@ -171,3 +171,17 @@ vm_shell
 ```
 
 Done. Now you are logged into Microdroid. Have fun!
+
+Once you have an adb connection with `vm_shell`, `localhost:8000` will be the
+serial of microdroid.
+
+## Debugging the payload on microdroid
+
+Like a normal adb device, you can debug native processes using `lldbclient.py`
+script, either by running a new process, or attaching to an existing process.
+Use `vm_shell` tool above, and then run `lldbclient.py`.
+
+```sh
+development/scripts/lldbclient.py -s localhost:8000 --chroot . --user '' \
+    (-p PID | -n NAME | -r ...)
+```
