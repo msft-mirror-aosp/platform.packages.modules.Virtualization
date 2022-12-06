@@ -27,7 +27,6 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService,
-    MemoryTrimLevel::MemoryTrimLevel,
     Partition::Partition,
     PartitionType::PartitionType,
     VirtualMachineAppConfig::{Payload::Payload, VirtualMachineAppConfig},
@@ -958,13 +957,6 @@ impl IVirtualMachine for VirtualMachine {
     fn stop(&self) -> binder::Result<()> {
         self.instance.kill().map_err(|e| {
             error!("Error stopping VM with CID {}: {:?}", self.instance.cid, e);
-            Status::new_service_specific_error_str(-1, Some(e.to_string()))
-        })
-    }
-
-    fn onTrimMemory(&self, level: MemoryTrimLevel) -> binder::Result<()> {
-        self.instance.trim_memory(level).map_err(|e| {
-            error!("Error trimming VM with CID {}: {:?}", self.instance.cid, e);
             Status::new_service_specific_error_str(-1, Some(e.to_string()))
         })
     }

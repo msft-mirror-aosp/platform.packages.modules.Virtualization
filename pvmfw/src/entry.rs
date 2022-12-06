@@ -45,8 +45,6 @@ enum RebootReason {
     InvalidPayload,
     /// The provided ramdisk was invalid.
     InvalidRamdisk,
-    /// Failed to verify the payload.
-    PayloadVerificationError,
 }
 
 main!(start);
@@ -225,10 +223,7 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
     let slices = MemorySlices::new(fdt, payload, payload_size, &mut memory)?;
 
     // This wrapper allows main() to be blissfully ignorant of platform details.
-    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc).map_err(|e| {
-        error!("Failed to verify the payload: {e}");
-        RebootReason::PayloadVerificationError
-    })?;
+    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc);
 
     // TODO: Overwrite BCC before jumping to payload to avoid leaking our sealing key.
 

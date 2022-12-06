@@ -30,9 +30,6 @@ interface IBenchmarkService {
     /** Returns an entry from /proc/meminfo. */
     long getMemInfoEntry(String name);
 
-    /** Allocates anonymous memory and returns the raw pointer. */
-    long allocAnonMemory(long mb);
-
     /**
      * Initializes the vsock server on VM.
      * @return the server socket file descriptor.
