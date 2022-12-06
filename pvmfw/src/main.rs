@@ -31,10 +31,17 @@ mod mmio_guard;
 mod mmu;
 mod smccc;
 
+use crate::entry::RebootReason;
 use avb::PUBLIC_KEY;
-use log::{debug, info};
+use avb_nostd::verify_image;
+use log::{debug, error, info};
 
-fn main(fdt: &libfdt::Fdt, signed_kernel: &[u8], ramdisk: Option<&[u8]>, bcc: &[u8]) {
+fn main(
+    fdt: &libfdt::Fdt,
+    signed_kernel: &[u8],
+    ramdisk: Option<&[u8]>,
+    bcc: &[u8],
+) -> Result<(), RebootReason> {
     info!("pVM firmware");
     debug!("FDT: {:?}", fdt as *const libfdt::Fdt);
     debug!("Signed kernel: {:?} ({:#x} bytes)", signed_kernel.as_ptr(), signed_kernel.len());
@@ -44,6 +51,10 @@ fn main(fdt: &libfdt::Fdt, signed_kernel: &[u8], ramdisk: Option<&[u8]>, bcc: &[
         debug!("Ramdisk: None");
     }
     debug!("BCC: {:?} ({:#x} bytes)", bcc.as_ptr(), bcc.len());
-    debug!("AVB public key: addr={:?}, size={:#x} ({1})", PUBLIC_KEY.as_ptr(), PUBLIC_KEY.len());
-    info!("Starting payload...");
+    verify_image(signed_kernel, PUBLIC_KEY).map_err(|e| {
+        error!("Failed to verify the payload: {e}");
+        RebootReason::PayloadVerificationError
+    })?;
+    info!("Payload verified. Starting payload...");
+    Ok(())
 }
