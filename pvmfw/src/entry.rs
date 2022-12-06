@@ -32,7 +32,7 @@ use log::LevelFilter;
 use vmbase::{console, layout, logger, main, power::reboot};
 
 #[derive(Debug, Clone)]
-enum RebootReason {
+pub(crate) enum RebootReason {
     /// A malformed BCC was received.
     InvalidBcc,
     /// An invalid configuration was appended to pvmfw.
@@ -59,7 +59,7 @@ pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64
 
     match main_wrapper(fdt_address as usize, payload_start as usize, payload_size as usize) {
         Ok(_) => jump_to_payload(fdt_address, payload_start),
-        Err(_) => reboot(),
+        Err(_) => reboot(), // TODO(b/220071963) propagate the reason back to the host.
     }
 
     // if we reach this point and return, vmbase::entry::rust_entry() will call power::shutdown().
@@ -225,10 +225,7 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
     let slices = MemorySlices::new(fdt, payload, payload_size, &mut memory)?;
 
     // This wrapper allows main() to be blissfully ignorant of platform details.
-    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc).map_err(|e| {
-        error!("Failed to verify the payload: {e}");
-        RebootReason::PayloadVerificationError
-    })?;
+    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc)?;
 
     // TODO: Overwrite BCC before jumping to payload to avoid leaking our sealing key.
 
