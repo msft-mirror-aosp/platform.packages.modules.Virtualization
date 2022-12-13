@@ -18,7 +18,6 @@ package com.android.microdroid.test;
 import static android.system.virtualmachine.VirtualMachine.STATUS_DELETED;
 import static android.system.virtualmachine.VirtualMachine.STATUS_RUNNING;
 import static android.system.virtualmachine.VirtualMachine.STATUS_STOPPED;
-import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_APP_ONLY;
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_FULL;
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_NONE;
 
@@ -520,15 +519,12 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7"})
     public void changingNonDebuggableVmDebuggableInvalidatesVmIdentity() throws Exception {
         changeDebugLevel(DEBUG_LEVEL_NONE, DEBUG_LEVEL_FULL);
-        changeDebugLevel(DEBUG_LEVEL_NONE, DEBUG_LEVEL_APP_ONLY);
     }
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7"})
-    @Ignore("b/260067026")
-    public void changingAppDebuggableVmFullyDebuggableInvalidatesVmIdentity() throws Exception {
-        assume().withMessage("Skip for non-protected VM. b/239158757").that(mProtectedVm).isTrue();
-        changeDebugLevel(DEBUG_LEVEL_APP_ONLY, DEBUG_LEVEL_FULL);
+    public void changingDebuggableVmNonDebuggableInvalidatesVmIdentity() throws Exception {
+        changeDebugLevel(DEBUG_LEVEL_FULL, DEBUG_LEVEL_NONE);
     }
 
     private void changeDebugLevel(int fromLevel, int toLevel) throws Exception {
@@ -836,6 +832,50 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(bootResult.payloadStarted).isFalse();
         assertThat(bootResult.deathReason).isEqualTo(
                 VirtualMachineCallback.STOP_REASON_MICRODROID_UNKNOWN_RUNTIME_ERROR);
+    }
+
+    // Checks whether microdroid_launcher started but payload failed. reason must be recorded in the
+    // console output.
+    private void assertThatPayloadFailsDueTo(VirtualMachine vm, String reason) throws Exception {
+        final CompletableFuture<Boolean> payloadStarted = new CompletableFuture<>();
+        final CompletableFuture<Integer> exitCodeFuture = new CompletableFuture<>();
+        VmEventListener listener =
+                new VmEventListener() {
+                    @Override
+                    public void onPayloadStarted(VirtualMachine vm) {
+                        payloadStarted.complete(true);
+                    }
+
+                    @Override
+                    public void onPayloadFinished(VirtualMachine vm, int exitCode) {
+                        exitCodeFuture.complete(exitCode);
+                    }
+                };
+        listener.runToFinish(TAG, vm);
+
+        assertThat(payloadStarted.getNow(false)).isTrue();
+        assertThat(exitCodeFuture.getNow(0)).isNotEqualTo(0);
+        assertThat(listener.getConsoleOutput()).contains(reason);
+    }
+
+    @Test
+    public void bootFailsWhenBinaryIsMissingEntryFunction() throws Exception {
+        VirtualMachineConfig.Builder builder =
+                newVmConfigBuilder().setPayloadBinaryPath("MicrodroidEmptyNativeLib.so");
+        VirtualMachineConfig normalConfig = builder.setDebugLevel(DEBUG_LEVEL_FULL).build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_missing_entry", normalConfig);
+
+        assertThatPayloadFailsDueTo(vm, "Failed to find entrypoint");
+    }
+
+    @Test
+    public void bootFailsWhenBinaryTriesToLinkAgainstPrivateLibs() throws Exception {
+        VirtualMachineConfig.Builder builder =
+                newVmConfigBuilder().setPayloadBinaryPath("MicrodroidPrivateLinkingNativeLib.so");
+        VirtualMachineConfig normalConfig = builder.setDebugLevel(DEBUG_LEVEL_FULL).build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_private_linking", normalConfig);
+
+        assertThatPayloadFailsDueTo(vm, "Failed to dlopen");
     }
 
     @Test
