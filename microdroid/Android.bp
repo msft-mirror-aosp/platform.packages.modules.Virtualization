@@ -67,7 +67,7 @@ android_system_image {
         "heapprofd_client_api",
         "libartpalette-system",
 
-        "apexd",
+        "apexd.microdroid",
         "atrace",
         "debuggerd",
         "linker",
@@ -373,18 +373,9 @@ avb_add_hash_footer {
 }
 
 avb_add_hash_footer {
-    name: "microdroid_bootconfig_app_debuggable",
-    src: "bootconfig.app_debuggable",
-    filename: "microdroid_bootconfig.app_debuggable",
-    partition_name: "bootconfig",
-    private_key: ":microdroid_sign_key",
-    salt: bootconfig_salt,
-}
-
-avb_add_hash_footer {
-    name: "microdroid_bootconfig_full_debuggable",
-    src: "bootconfig.full_debuggable",
-    filename: "microdroid_bootconfig.full_debuggable",
+    name: "microdroid_bootconfig_debuggable",
+    src: "bootconfig.debuggable",
+    filename: "microdroid_bootconfig.debuggable",
     partition_name: "bootconfig",
     private_key: ":microdroid_sign_key",
     salt: bootconfig_salt,
@@ -535,13 +526,8 @@ prebuilt_etc {
 }
 
 filegroup {
-    name: "microdroid_bootconfig_full_debuggable_src",
-    srcs: ["bootconfig.full_debuggable"],
-}
-
-filegroup {
-    name: "microdroid_bootconfig_app_debuggable_src",
-    srcs: ["bootconfig.app_debuggable"],
+    name: "microdroid_bootconfig_debuggable_src",
+    srcs: ["bootconfig.debuggable"],
 }
 
 filegroup {

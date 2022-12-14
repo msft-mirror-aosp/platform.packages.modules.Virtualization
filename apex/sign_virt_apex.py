@@ -352,8 +352,7 @@ virt_apex_files = {
     'vbmeta.img': 'etc/fs/microdroid_vbmeta.img',
     'vbmeta_bootconfig.img': 'etc/fs/microdroid_vbmeta_bootconfig.img',
     'bootconfig.normal': 'etc/fs/microdroid_bootconfig.normal',
-    'bootconfig.app_debuggable': 'etc/fs/microdroid_bootconfig.app_debuggable',
-    'bootconfig.full_debuggable': 'etc/fs/microdroid_bootconfig.full_debuggable',
+    'bootconfig.debuggable': 'etc/fs/microdroid_bootconfig.debuggable',
     'uboot_env.img': 'etc/fs/uboot_env.img'
 }
 
@@ -400,8 +399,7 @@ def SignVirtApex(args):
     # Re-sign bootconfigs and the uboot_env with the same key
     bootconfig_sign_key = key
     Async(AddHashFooter, args, bootconfig_sign_key, files['bootconfig.normal'])
-    Async(AddHashFooter, args, bootconfig_sign_key, files['bootconfig.app_debuggable'])
-    Async(AddHashFooter, args, bootconfig_sign_key, files['bootconfig.full_debuggable'])
+    Async(AddHashFooter, args, bootconfig_sign_key, files['bootconfig.debuggable'])
     Async(AddHashFooter, args, bootconfig_sign_key, files['uboot_env.img'])
 
     # Re-sign vbmeta_bootconfig with chained_partitions to "bootconfig" and
