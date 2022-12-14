@@ -28,11 +28,10 @@ use avb_bindgen::{
 };
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::mem::{size_of, MaybeUninit};
+use std::mem::{size_of, transmute, MaybeUninit};
 use std::os::raw::c_uint;
 use std::path::Path;
 use std::ptr::null_mut;
-use std::slice;
 use thiserror::Error;
 
 pub use crate::descriptor::{Descriptor, Descriptors};
@@ -189,19 +188,10 @@ fn verify_vbmeta_image(data: &[u8]) -> Result<(), VbMetaImageVerificationError> 
 /// Read the AVB footer, if present, given a reader that's positioned at the end of the image.
 fn read_avb_footer<R: Read + Seek>(image: &mut R) -> io::Result<Option<AvbFooter>> {
     image.seek(SeekFrom::Current(-(size_of::<AvbFooter>() as i64)))?;
+    let mut raw_footer = [0u8; size_of::<AvbFooter>()];
+    image.read_exact(&mut raw_footer)?;
     // SAFETY: the slice is the same size as the struct which only contains simple data types.
-    let mut footer = unsafe {
-        let mut footer = MaybeUninit::<AvbFooter>::uninit();
-        let footer_slice =
-            slice::from_raw_parts_mut(&mut footer as *mut _ as *mut u8, size_of::<AvbFooter>());
-        image.read_exact(footer_slice)?;
-        footer.assume_init()
-    };
-    // Check the magic matches "AVBf" to suppress misleading logs from libavb.
-    const AVB_FOOTER_MAGIC: [u8; 4] = [0x41, 0x56, 0x42, 0x66];
-    if footer.magic != AVB_FOOTER_MAGIC {
-        return Ok(None);
-    }
+    let mut footer = unsafe { transmute::<[u8; size_of::<AvbFooter>()], AvbFooter>(raw_footer) };
     // SAFETY: the function updates the struct in-place.
     if unsafe { avb_footer_validate_and_byteswap(&footer, &mut footer) } {
         Ok(Some(footer))
@@ -220,7 +210,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_unsigned_image() -> Result<()> {
+    fn unsigned_image_does_not_have_public_key() -> Result<()> {
         let test_dir = TempDir::new().unwrap();
         let test_file = test_dir.path().join("test.img");
         let mut cmd = Command::new("./avbtool");
