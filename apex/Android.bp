@@ -57,7 +57,6 @@ apex_defaults {
         "com.android.virt-bootclasspath-fragment",
     ],
     jni_libs: [
-        "libvirtualizationservice_jni",
         "libvirtualmachine_jni",
     ],
 }
