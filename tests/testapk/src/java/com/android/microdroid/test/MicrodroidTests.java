@@ -20,6 +20,8 @@ import static android.system.virtualmachine.VirtualMachine.STATUS_RUNNING;
 import static android.system.virtualmachine.VirtualMachine.STATUS_STOPPED;
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_FULL;
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_NONE;
+import static android.system.virtualmachine.VirtualMachineManager.CAPABILITY_NON_PROTECTED_VM;
+import static android.system.virtualmachine.VirtualMachineManager.CAPABILITY_PROTECTED_VM;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
@@ -47,6 +49,8 @@ import androidx.test.core.app.ApplicationProvider;
 import com.android.compatibility.common.util.CddTest;
 import com.android.microdroid.test.device.MicrodroidDeviceTestBase;
 import com.android.microdroid.testservice.ITestService;
+
+import com.google.common.truth.BooleanSubject;
 
 import org.junit.After;
 import org.junit.Before;
@@ -314,8 +318,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
-    public void vmConfigUnitTests() {
-
+    public void vmConfigGetAndSetTests() {
+        // Minimal has as little as specified as possible; everything that can be is defaulted.
         VirtualMachineConfig.Builder minimalBuilder = newVmConfigBuilder();
         VirtualMachineConfig minimal = minimalBuilder.setPayloadBinaryPath("binary/path").build();
 
@@ -329,6 +333,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(minimal.isEncryptedStorageEnabled()).isFalse();
         assertThat(minimal.getEncryptedStorageKib()).isEqualTo(0);
 
+        // Maximal has everything that can be set to some non-default value. (And has different
+        // values than minimal for the required fields.)
         int maxCpus = Runtime.getRuntime().availableProcessors();
         VirtualMachineConfig.Builder maximalBuilder =
                 newVmConfigBuilder()
@@ -353,18 +359,11 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(minimal.isCompatibleWith(maximal)).isFalse();
         assertThat(minimal.isCompatibleWith(minimal)).isTrue();
         assertThat(maximal.isCompatibleWith(maximal)).isTrue();
-
-        VirtualMachineConfig compatible = maximalBuilder.setNumCpus(1).setMemoryMib(99).build();
-        assertThat(compatible.isCompatibleWith(maximal)).isTrue();
-
-        // Assert that different encrypted storage size would imply the configs are incompatible
-        VirtualMachineConfig incompatible = minimalBuilder.setEncryptedStorageKib(1048).build();
-        assertThat(incompatible.isCompatibleWith(minimal)).isFalse();
     }
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
-    public void vmConfigBuilderUnitTests() {
+    public void vmConfigBuilderValidationTests() {
         VirtualMachineConfig.Builder builder = newVmConfigBuilder();
 
         // All your null are belong to me.
@@ -391,6 +390,44 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 new VirtualMachineConfig.Builder(getContext()).setPayloadBinaryPath("binary/path");
         e = assertThrows(IllegalStateException.class, () -> protectedNotSet.build());
         assertThat(e).hasMessageThat().contains("setProtectedVm must be called");
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1"})
+    public void compatibleConfigTests() throws Exception {
+        int maxCpus = Runtime.getRuntime().availableProcessors();
+
+        VirtualMachineConfig.Builder builder =
+                newVmConfigBuilder().setPayloadBinaryPath("binary/path").setApkPath("/apk/path");
+        VirtualMachineConfig baseline = builder.build();
+
+        // A config must be compatible with itself
+        assertConfigCompatible(baseline, builder).isTrue();
+
+        // Changes that must always be compatible
+        assertConfigCompatible(baseline, builder.setMemoryMib(99)).isTrue();
+        if (maxCpus > 1) {
+            assertConfigCompatible(baseline, builder.setNumCpus(2)).isTrue();
+        }
+
+        // Changes that must be incompatible, since they must change the VM identity.
+        assertConfigCompatible(baseline, builder.setDebugLevel(DEBUG_LEVEL_FULL)).isFalse();
+        assertConfigCompatible(baseline, builder.setPayloadBinaryPath("different")).isFalse();
+        int capabilities = getVirtualMachineManager().getCapabilities();
+        if ((capabilities & CAPABILITY_PROTECTED_VM) != 0
+                && (capabilities & CAPABILITY_NON_PROTECTED_VM) != 0) {
+            assertConfigCompatible(baseline, builder.setProtectedVm(!isProtectedVm())).isFalse();
+        }
+
+        // Changes that are currently incompatible for ease of implementation, but this might change
+        // in the future.
+        assertConfigCompatible(baseline, builder.setApkPath("/different")).isFalse();
+        assertConfigCompatible(baseline, builder.setEncryptedStorageKib(100)).isFalse();
+    }
+
+    private BooleanSubject assertConfigCompatible(
+            VirtualMachineConfig baseline, VirtualMachineConfig.Builder builder) {
+        return assertThat(builder.build().isCompatibleWith(baseline));
     }
 
     @Test
@@ -1166,6 +1203,30 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(testResults.mFileContent).isEqualTo(EXAMPLE_STRING);
     }
 
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    public void canReadFileFromAssets_debugFull() throws Exception {
+        assumeSupportedKernel();
+
+        VirtualMachineConfig config =
+                newVmConfigBuilder()
+                        .setPayloadBinaryPath("MicrodroidTestNativeLib.so")
+                        .setMemoryMib(minMemoryRequired())
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_read_from_assets", config);
+
+        TestResults testResults =
+                runVmTestService(
+                        vm,
+                        (testService, ts) -> {
+                            ts.mFileContent = testService.readFromFile("/mnt/apk/assets/file.txt");
+                        });
+
+        assertThat(testResults.mException).isNull();
+        assertThat(testResults.mFileContent).isEqualTo("Hello, I am a file!");
+    }
+
     private void assertFileContentsAreEqualInTwoVms(String fileName, String vmName1, String vmName2)
             throws IOException {
         File file1 = getVmFile(vmName1, fileName);
@@ -1283,5 +1344,48 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(payloadStarted.getNow(false)).isTrue();
         assertThat(payloadReady.getNow(false)).isTrue();
         return testResults;
+    }
+
+    private TestResults runVmTestService(VirtualMachine vm, RunTestsAgainstTestService testsToRun)
+            throws Exception {
+        CompletableFuture<Boolean> payloadStarted = new CompletableFuture<>();
+        CompletableFuture<Boolean> payloadReady = new CompletableFuture<>();
+        TestResults testResults = new TestResults();
+        VmEventListener listener =
+                new VmEventListener() {
+                    private void testVMService(VirtualMachine vm) {
+                        try {
+                            ITestService testService =
+                                    ITestService.Stub.asInterface(
+                                            vm.connectToVsockServer(ITestService.SERVICE_PORT));
+                            testsToRun.runTests(testService, testResults);
+                        } catch (Exception e) {
+                            testResults.mException = e;
+                        }
+                    }
+
+                    @Override
+                    public void onPayloadReady(VirtualMachine vm) {
+                        Log.i(TAG, "onPayloadReady");
+                        payloadReady.complete(true);
+                        testVMService(vm);
+                        forceStop(vm);
+                    }
+
+                    @Override
+                    public void onPayloadStarted(VirtualMachine vm) {
+                        Log.i(TAG, "onPayloadStarted");
+                        payloadStarted.complete(true);
+                    }
+                };
+        listener.runToFinish(TAG, vm);
+        assertThat(payloadStarted.getNow(false)).isTrue();
+        assertThat(payloadReady.getNow(false)).isTrue();
+        return testResults;
+    }
+
+    @FunctionalInterface
+    interface RunTestsAgainstTestService {
+        void runTests(ITestService testService, TestResults testResults) throws Exception;
     }
 }
