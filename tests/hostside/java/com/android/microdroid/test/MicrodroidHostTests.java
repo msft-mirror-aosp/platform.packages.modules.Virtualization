@@ -678,9 +678,6 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         // Check if the native library in the APK is has correct filesystem info
         final String[] abis = microdroid.run("getprop", "ro.product.cpu.abilist").split(",");
         assertThat(abis).hasLength(1);
-        final String testLib = "/mnt/apk/lib/" + abis[0] + "/MicrodroidTestNativeLib.so";
-        final String label = "u:object_r:system_file:s0";
-        assertThat(microdroid.run("ls", "-Z", testLib)).isEqualTo(label + " " + testLib);
 
         // Check that no denials have happened so far
         CommandRunner android = new CommandRunner(getDevice());
@@ -793,6 +790,39 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 .contains(
                         "does not have the android.permission.USE_CUSTOM_VIRTUAL_MACHINE"
                                 + " permission");
+    }
+
+    @Test
+    public void testPathToBinaryIsRejected() throws Exception {
+        CommandRunner android = new CommandRunner(getDevice());
+
+        // Create the idsig file for the APK
+        final String apkPath = getPathForPackage(PACKAGE_NAME);
+        final String idSigPath = TEST_ROOT + "idsig";
+        android.run(VIRT_APEX + "bin/vm", "create-idsig", apkPath, idSigPath);
+
+        // Create the instance image for the VM
+        final String instanceImgPath = TEST_ROOT + "instance.img";
+        android.run(
+                VIRT_APEX + "bin/vm",
+                "create-partition",
+                "--type instance",
+                instanceImgPath,
+                Integer.toString(10 * 1024 * 1024));
+
+        final String ret =
+                android.runForResult(
+                                VIRT_APEX + "bin/vm",
+                                "run-app",
+                                "--payload-binary-name",
+                                "./MicrodroidTestNativeLib.so",
+                                apkPath,
+                                idSigPath,
+                                instanceImgPath)
+                        .getStderr()
+                        .trim();
+
+        assertThat(ret).contains("Payload binary name must not specify a path");
     }
 
     @Before

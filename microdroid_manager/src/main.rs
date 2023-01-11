@@ -259,7 +259,7 @@ fn dice_derivation(
     //   ? -71001: PayloadConfig
     // }
     // PayloadConfig = {
-    //   1: tstr // payload_binary_path
+    //   1: tstr // payload_binary_name
     // }
 
     let mut config_desc = vec![
@@ -278,7 +278,7 @@ fn dice_derivation(
             encode_negative_number(-71001, &mut config_desc)?;
             encode_header(5, 1, &mut config_desc)?; // map(1)
             encode_number(1, &mut config_desc)?;
-            encode_tstr(&payload_config.payload_binary_path, &mut config_desc)?;
+            encode_tstr(&payload_config.payload_binary_name, &mut config_desc)?;
         }
     }
 
@@ -488,6 +488,8 @@ struct Zipfuse {
 }
 
 impl Zipfuse {
+    const MICRODROID_PAYLOAD_UID: u32 = 0; // TODO(b/264861173) should be non-root
+    const MICRODROID_PAYLOAD_GID: u32 = 0; // TODO(b/264861173) should be non-root
     fn mount(
         &mut self,
         noexec: MountForExec,
@@ -501,6 +503,8 @@ impl Zipfuse {
             cmd.arg("--noexec");
         }
         cmd.args(["-p", &ready_prop, "-o", option]);
+        cmd.args(["-u", &Self::MICRODROID_PAYLOAD_UID.to_string()]);
+        cmd.args(["-g", &Self::MICRODROID_PAYLOAD_GID.to_string()]);
         cmd.arg(zip_path).arg(mount_dir);
         self.ready_properties.push(ready_prop);
         cmd.spawn().with_context(|| format!("Failed to run zipfuse for {mount_dir:?}"))
@@ -757,7 +761,7 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
         PayloadMetadata::config(payload_config) => {
             let task = Task {
                 type_: TaskType::MicrodroidLauncher,
-                command: payload_config.payload_binary_path,
+                command: payload_config.payload_binary_name,
             };
             Ok(VmPayloadConfig {
                 os: OsConfig { name: "microdroid".to_owned() },
