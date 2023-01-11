@@ -59,6 +59,18 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .help("Specify a property to be set when mount is ready"),
         )
+        .arg(
+            Arg::with_name("uid")
+                .short('u')
+                .takes_value(true)
+                .help("numeric UID who's the owner of the files"),
+        )
+        .arg(
+            Arg::with_name("gid")
+                .short('g')
+                .takes_value(true)
+                .help("numeric GID who's the group of the files"),
+        )
         .arg(Arg::with_name("ZIPFILE").required(true))
         .arg(Arg::with_name("MOUNTPOINT").required(true))
         .get_matches();
@@ -68,7 +80,9 @@ fn main() -> Result<()> {
     let options = matches.value_of("options");
     let noexec = matches.is_present("noexec");
     let ready_prop = matches.value_of("readyprop");
-    run_fuse(zip_file, mount_point, options, noexec, ready_prop)?;
+    let uid: u32 = matches.value_of("uid").map_or(0, |s| s.parse().unwrap());
+    let gid: u32 = matches.value_of("gid").map_or(0, |s| s.parse().unwrap());
+    run_fuse(zip_file, mount_point, options, noexec, ready_prop, uid, gid)?;
     Ok(())
 }
 
@@ -79,6 +93,8 @@ pub fn run_fuse(
     extra_options: Option<&str>,
     noexec: bool,
     ready_prop: Option<&str>,
+    uid: u32,
+    gid: u32,
 ) -> Result<()> {
     const MAX_READ: u32 = 1 << 20; // TODO(jiyong): tune this
     const MAX_WRITE: u32 = 1 << 13; // This is a read-only filesystem
@@ -87,6 +103,7 @@ pub fn run_fuse(
 
     let mut mount_options = vec![
         MountOption::FD(dev_fuse.as_raw_fd()),
+        MountOption::DefaultPermissions,
         MountOption::RootMode(libc::S_IFDIR | libc::S_IXUSR | libc::S_IXGRP | libc::S_IXOTH),
         MountOption::AllowOther,
         MountOption::UserId(0),
@@ -110,7 +127,7 @@ pub fn run_fuse(
 
     let mut config = fuse::FuseConfig::new();
     config.dev_fuse(dev_fuse).max_write(MAX_WRITE).max_read(MAX_READ);
-    Ok(config.enter_message_loop(ZipFuse::new(zip_file)?)?)
+    Ok(config.enter_message_loop(ZipFuse::new(zip_file, uid, gid)?)?)
 }
 
 struct ZipFuse {
@@ -119,6 +136,8 @@ struct ZipFuse {
     inode_table: InodeTable,
     open_files: Mutex<HashMap<Handle, OpenFile>>,
     open_dirs: Mutex<HashMap<Handle, OpenDirBuf>>,
+    uid: u32,
+    gid: u32,
 }
 
 /// Represents a [`ZipFile`] that is opened.
@@ -151,7 +170,7 @@ fn timeout_max() -> std::time::Duration {
 }
 
 impl ZipFuse {
-    fn new(zip_file: &Path) -> Result<ZipFuse> {
+    fn new(zip_file: &Path, uid: u32, gid: u32) -> Result<ZipFuse> {
         // TODO(jiyong): Use O_DIRECT to avoid double caching.
         // `.custom_flags(nix::fcntl::OFlag::O_DIRECT.bits())` currently doesn't work.
         let f = File::open(zip_file)?;
@@ -166,6 +185,8 @@ impl ZipFuse {
             inode_table: it,
             open_files: Mutex::new(HashMap::new()),
             open_dirs: Mutex::new(HashMap::new()),
+            uid,
+            gid,
         })
     }
 
@@ -188,8 +209,8 @@ impl ZipFuse {
         st.st_ino = inode;
         st.st_mode = if inode_data.is_dir() { libc::S_IFDIR } else { libc::S_IFREG };
         st.st_mode |= inode_data.mode;
-        st.st_uid = 0;
-        st.st_gid = 0;
+        st.st_uid = self.uid;
+        st.st_gid = self.gid;
         st.st_size = i64::try_from(inode_data.size).unwrap_or(i64::MAX);
         Ok(st)
     }
@@ -456,30 +477,40 @@ mod tests {
     use std::fs;
     use std::fs::File;
     use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use zip::write::FileOptions;
 
+    #[derive(Default)]
+    struct Options {
+        noexec: bool,
+        uid: u32,
+        gid: u32,
+    }
+
     #[cfg(not(target_os = "android"))]
-    fn start_fuse(zip_path: &Path, mnt_path: &Path, noexec: bool) {
+    fn start_fuse(zip_path: &Path, mnt_path: &Path, opt: Options) {
         let zip_path = PathBuf::from(zip_path);
         let mnt_path = PathBuf::from(mnt_path);
         std::thread::spawn(move || {
-            crate::run_fuse(&zip_path, &mnt_path, None, noexec).unwrap();
+            crate::run_fuse(&zip_path, &mnt_path, None, opt.noexec, opt.uid, opt.gid).unwrap();
         });
     }
 
     #[cfg(target_os = "android")]
-    fn start_fuse(zip_path: &Path, mnt_path: &Path, noexec: bool) {
+    fn start_fuse(zip_path: &Path, mnt_path: &Path, opt: Options) {
         // Note: for some unknown reason, running a thread to serve fuse doesn't work on Android.
         // Explicitly spawn a zipfuse process instead.
         // TODO(jiyong): fix this
-        let noexec = if noexec { "--noexec" } else { "" };
+        let noexec = if opt.noexec { "--noexec" } else { "" };
         assert!(std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "/data/local/tmp/zipfuse {} {} {}",
+                "/data/local/tmp/zipfuse {} -u {} -g {} {} {}",
                 noexec,
+                opt.uid,
+                opt.gid,
                 zip_path.display(),
                 mnt_path.display()
             ))
@@ -508,11 +539,11 @@ mod tests {
     // Creates a zip file, adds some files to the zip file, mounts it using zipfuse, runs the check
     // routine, and finally unmounts.
     fn run_test(add: fn(&mut zip::ZipWriter<File>), check: fn(&std::path::Path)) {
-        run_test_noexec(false, add, check);
+        run_test_with_options(Default::default(), add, check);
     }
 
-    fn run_test_noexec(
-        noexec: bool,
+    fn run_test_with_options(
+        opt: Options,
         add: fn(&mut zip::ZipWriter<File>),
         check: fn(&std::path::Path),
     ) {
@@ -532,7 +563,7 @@ mod tests {
         let mnt_path = test_dir.path().join("mnt");
         assert!(fs::create_dir(&mnt_path).is_ok());
 
-        start_fuse(&zip_path, &mnt_path, noexec);
+        start_fuse(&zip_path, &mnt_path, opt);
 
         let mnt_path = test_dir.path().join("mnt");
         // Give some time for the fuse to boot up
@@ -629,11 +660,34 @@ mod tests {
         });
 
         // Mounting with noexec results in permissions denial when running an executable.
-        let noexec = true;
-        run_test_noexec(noexec, add_executable, |root| {
+        let opt = Options { noexec: true, ..Default::default() };
+        run_test_with_options(opt, add_executable, |root| {
             let res = std::process::Command::new(root.join("executable")).status();
             assert!(matches!(res.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied));
         });
+    }
+
+    #[test]
+    fn uid_gid() {
+        const UID: u32 = 100;
+        const GID: u32 = 200;
+        run_test_with_options(
+            Options { noexec: true, uid: UID, gid: GID },
+            |zip| {
+                zip.start_file("foo", FileOptions::default()).unwrap();
+                zip.write_all(b"0123456789").unwrap();
+            },
+            |root| {
+                let path = root.join("foo");
+
+                let metadata = fs::metadata(&path);
+                assert!(metadata.is_ok());
+                let metadata = metadata.unwrap();
+
+                assert_eq!(UID, metadata.uid());
+                assert_eq!(GID, metadata.gid());
+            },
+        );
     }
 
     #[test]
@@ -748,8 +802,8 @@ mod tests {
         let mnt_path = test_dir.join("mnt");
         assert!(fs::create_dir(&mnt_path).is_ok());
 
-        let noexec = false;
-        start_fuse(zip_path, &mnt_path, noexec);
+        let opt = Options { noexec: false, ..Default::default() };
+        start_fuse(zip_path, &mnt_path, opt);
 
         // Give some time for the fuse to boot up
         assert!(wait_for_mount(&mnt_path).is_ok());

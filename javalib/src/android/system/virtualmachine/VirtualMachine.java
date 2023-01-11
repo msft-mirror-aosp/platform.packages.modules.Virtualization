@@ -192,9 +192,6 @@ public class VirtualMachine implements AutoCloseable {
     /** Name of the idsig files for extra APKs. */
     private static final String EXTRA_IDSIG_FILE_PREFIX = "extra_idsig_";
 
-    /** Name of the virtualization service. */
-    private static final String SERVICE_NAME = "android.system.virtualizationservice";
-
     /** Size of the instance image. 10 MB. */
     private static final long INSTANCE_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -1226,17 +1223,15 @@ public class VirtualMachine implements AutoCloseable {
     public String toString() {
         VirtualMachineConfig config = getConfig();
         String payloadConfigPath = config.getPayloadConfigPath();
-        String payloadBinaryPath = config.getPayloadBinaryPath();
+        String payloadBinaryName = config.getPayloadBinaryName();
 
         StringBuilder result = new StringBuilder();
         result.append("VirtualMachine(")
                 .append("name:")
                 .append(getName())
                 .append(", ");
-        if (payloadBinaryPath != null) {
-            result.append("payload:")
-                    .append(payloadBinaryPath)
-                    .append(", ");
+        if (payloadBinaryName != null) {
+            result.append("payload:").append(payloadBinaryName).append(", ");
         }
         if (payloadConfigPath != null) {
             result.append("config:")
