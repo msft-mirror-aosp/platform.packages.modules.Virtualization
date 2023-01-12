@@ -169,7 +169,7 @@ fn try_get_preloaded_partition(
     out_pointer: *mut *mut u8,
     out_num_bytes_preloaded: *mut usize,
 ) -> Result<(), AvbIOError> {
-    let ops = as_avbops_ref(ops)?;
+    let ops = as_ref(ops)?;
     let partition = ops.as_ref().get_partition(partition)?;
     let out_pointer = to_nonnull(out_pointer)?;
     // SAFETY: It is safe as the raw pointer `out_pointer` is a nonnull pointer.
@@ -211,7 +211,7 @@ fn try_read_from_partition(
     buffer: *mut c_void,
     out_num_read: *mut usize,
 ) -> Result<(), AvbIOError> {
-    let ops = as_avbops_ref(ops)?;
+    let ops = as_ref(ops)?;
     let partition = ops.as_ref().get_partition(partition)?;
     let buffer = to_nonnull(buffer)?;
     // SAFETY: It is safe to copy the requested number of bytes to `buffer` as `buffer`
@@ -253,7 +253,7 @@ fn try_get_size_of_partition(
     partition: *const c_char,
     out_size_num_bytes: *mut u64,
 ) -> Result<(), AvbIOError> {
-    let ops = as_avbops_ref(ops)?;
+    let ops = as_ref(ops)?;
     let partition = ops.as_ref().get_partition(partition)?;
     let partition_size =
         u64::try_from(partition.len()).map_err(|_| AvbIOError::InvalidValueSize)?;
@@ -324,7 +324,7 @@ fn try_validate_public_key_for_partition(
     // `public_key_data` is a valid pointer and it points to an array of length
     // `public_key_length`.
     let public_key = unsafe { slice::from_raw_parts(public_key_data, public_key_length) };
-    let ops = as_avbops_ref(ops)?;
+    let ops = as_ref(ops)?;
     // Verifies the public key for the known partitions only.
     ops.as_ref().get_partition(partition)?;
     let trusted_public_key = ops.as_ref().trusted_public_key;
@@ -336,14 +336,14 @@ fn try_validate_public_key_for_partition(
     Ok(())
 }
 
-fn as_avbops_ref<'a>(ops: *mut AvbOps) -> Result<&'a AvbOps, AvbIOError> {
-    let ops = to_nonnull(ops)?;
-    // SAFETY: It is safe as the raw pointer `ops` is a nonnull pointer.
-    unsafe { Ok(ops.as_ref()) }
+fn as_ref<'a, T>(ptr: *mut T) -> Result<&'a T, AvbIOError> {
+    let ptr = to_nonnull(ptr)?;
+    // SAFETY: It is safe as the raw pointer `ptr` is a nonnull pointer.
+    unsafe { Ok(ptr.as_ref()) }
 }
 
-fn to_nonnull<T>(p: *mut T) -> Result<NonNull<T>, AvbIOError> {
-    NonNull::new(p).ok_or(AvbIOError::NoSuchValue)
+fn to_nonnull<T>(ptr: *mut T) -> Result<NonNull<T>, AvbIOError> {
+    NonNull::new(ptr).ok_or(AvbIOError::NoSuchValue)
 }
 
 fn is_not_null<T>(ptr: *const T) -> Result<(), AvbIOError> {
@@ -351,6 +351,41 @@ fn is_not_null<T>(ptr: *const T) -> Result<(), AvbIOError> {
         Err(AvbIOError::NoSuchValue)
     } else {
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PartitionName {
+    Kernel,
+    InitrdNormal,
+    InitrdDebug,
+}
+
+impl PartitionName {
+    const KERNEL_PARTITION_NAME: &[u8] = b"bootloader\0";
+    const INITRD_NORMAL_PARTITION_NAME: &[u8] = b"initrd_normal\0";
+    const INITRD_DEBUG_PARTITION_NAME: &[u8] = b"initrd_debug\0";
+
+    fn as_cstr(&self) -> &CStr {
+        let partition_name = match self {
+            Self::Kernel => Self::KERNEL_PARTITION_NAME,
+            Self::InitrdNormal => Self::INITRD_NORMAL_PARTITION_NAME,
+            Self::InitrdDebug => Self::INITRD_DEBUG_PARTITION_NAME,
+        };
+        CStr::from_bytes_with_nul(partition_name).unwrap()
+    }
+}
+
+impl TryFrom<&CStr> for PartitionName {
+    type Error = AvbIOError;
+
+    fn try_from(partition_name: &CStr) -> Result<Self, Self::Error> {
+        match partition_name.to_bytes_with_nul() {
+            Self::KERNEL_PARTITION_NAME => Ok(Self::Kernel),
+            Self::INITRD_NORMAL_PARTITION_NAME => Ok(Self::InitrdNormal),
+            Self::INITRD_DEBUG_PARTITION_NAME => Ok(Self::InitrdDebug),
+            _ => Err(AvbIOError::NoSuchPartition),
+        }
     }
 }
 
@@ -372,22 +407,17 @@ impl<'a> AsRef<Payload<'a>> for AvbOps {
 }
 
 impl<'a> Payload<'a> {
-    const KERNEL_PARTITION_NAME: &[u8] = b"bootloader\0";
-    const INITRD_NORMAL_PARTITION_NAME: &[u8] = b"initrd_normal\0";
-    const INITRD_DEBUG_PARTITION_NAME: &[u8] = b"initrd_debug\0";
-
     const MAX_NUM_OF_HASH_DESCRIPTORS: usize = 3;
 
     fn get_partition(&self, partition_name: *const c_char) -> Result<&[u8], AvbIOError> {
         is_not_null(partition_name)?;
         // SAFETY: It is safe as the raw pointer `partition_name` is a nonnull pointer.
         let partition_name = unsafe { CStr::from_ptr(partition_name) };
-        match partition_name.to_bytes_with_nul() {
-            Self::KERNEL_PARTITION_NAME => Ok(self.kernel),
-            Self::INITRD_NORMAL_PARTITION_NAME | Self::INITRD_DEBUG_PARTITION_NAME => {
+        match partition_name.try_into()? {
+            PartitionName::Kernel => Ok(self.kernel),
+            PartitionName::InitrdNormal | PartitionName::InitrdDebug => {
                 self.initrd.ok_or(AvbIOError::NoSuchPartition)
             }
-            _ => Err(AvbIOError::NoSuchPartition),
         }
     }
 
@@ -445,8 +475,7 @@ pub fn verify_payload(
     trusted_public_key: &[u8],
 ) -> Result<(), AvbImageVerifyError> {
     let mut payload = Payload { kernel, initrd, trusted_public_key };
-    let kernel = CStr::from_bytes_with_nul(Payload::KERNEL_PARTITION_NAME).unwrap();
-    let requested_partitions = [kernel];
+    let requested_partitions = [PartitionName::Kernel.as_cstr()];
     payload.verify_partitions(&requested_partitions)
 }
 
