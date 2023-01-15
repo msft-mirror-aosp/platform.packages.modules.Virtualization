@@ -22,7 +22,7 @@ use core::{
     slice,
 };
 
-static NULL_BYTE: &[u8] = b"\0";
+const NULL_BYTE: &[u8] = b"\0";
 
 enum AvbIOError {
     /// AVB_IO_RESULT_ERROR_OOM,
@@ -68,17 +68,10 @@ extern "C" fn read_is_device_unlocked(
     _ops: *mut AvbOps,
     out_is_unlocked: *mut bool,
 ) -> AvbIOResult {
-    if let Err(e) = is_not_null(out_is_unlocked) {
-        return e.into();
-    }
-    // SAFETY: It is safe as the raw pointer `out_is_unlocked` is a valid pointer.
-    unsafe {
-        *out_is_unlocked = false;
-    }
-    AvbIOResult::AVB_IO_RESULT_OK
+    to_avb_io_result(write(out_is_unlocked, false))
 }
 
-unsafe extern "C" fn get_preloaded_partition(
+extern "C" fn get_preloaded_partition(
     ops: *mut AvbOps,
     partition: *const c_char,
     num_bytes: usize,
@@ -103,18 +96,8 @@ fn try_get_preloaded_partition(
 ) -> Result<(), AvbIOError> {
     let ops = as_ref(ops)?;
     let partition = ops.as_ref().get_partition(partition)?;
-    let out_pointer = to_nonnull(out_pointer)?;
-    // SAFETY: It is safe as the raw pointer `out_pointer` is a nonnull pointer.
-    unsafe {
-        *out_pointer.as_ptr() = partition.as_ptr() as _;
-    }
-    let out_num_bytes_preloaded = to_nonnull(out_num_bytes_preloaded)?;
-    // SAFETY: The raw pointer `out_num_bytes_preloaded` was created to point to a valid a `usize`
-    // and we checked it is nonnull.
-    unsafe {
-        *out_num_bytes_preloaded.as_ptr() = partition.len().min(num_bytes);
-    }
-    Ok(())
+    write(out_pointer, partition.as_ptr() as *mut u8)?;
+    write(out_num_bytes_preloaded, partition.len().min(num_bytes))
 }
 
 extern "C" fn read_from_partition(
@@ -150,13 +133,7 @@ fn try_read_from_partition(
     // is created to point to the `num_bytes` of bytes in memory.
     let buffer_slice = unsafe { slice::from_raw_parts_mut(buffer.as_ptr() as *mut u8, num_bytes) };
     copy_data_to_dst(partition, offset, buffer_slice)?;
-    let out_num_read = to_nonnull(out_num_read)?;
-    // SAFETY: The raw pointer `out_num_read` was created to point to a valid a `usize`
-    // and we checked it is nonnull.
-    unsafe {
-        *out_num_read.as_ptr() = buffer_slice.len();
-    }
-    Ok(())
+    write(out_num_read, buffer_slice.len())
 }
 
 fn copy_data_to_dst(src: &[u8], offset: i64, dst: &mut [u8]) -> Result<(), AvbIOError> {
@@ -189,13 +166,7 @@ fn try_get_size_of_partition(
     let partition = ops.as_ref().get_partition(partition)?;
     let partition_size =
         u64::try_from(partition.len()).map_err(|_| AvbIOError::InvalidValueSize)?;
-    let out_size_num_bytes = to_nonnull(out_size_num_bytes)?;
-    // SAFETY: The raw pointer `out_size_num_bytes` was created to point to a valid a `u64`
-    // and we checked it is nonnull.
-    unsafe {
-        *out_size_num_bytes.as_ptr() = partition_size;
-    }
-    Ok(())
+    write(out_size_num_bytes, partition_size)
 }
 
 extern "C" fn read_rollback_index(
@@ -260,10 +231,14 @@ fn try_validate_public_key_for_partition(
     // Verifies the public key for the known partitions only.
     ops.as_ref().get_partition(partition)?;
     let trusted_public_key = ops.as_ref().trusted_public_key;
-    let out_is_trusted = to_nonnull(out_is_trusted)?;
-    // SAFETY: It is safe as the raw pointer `out_is_trusted` is a nonnull pointer.
+    write(out_is_trusted, public_key == trusted_public_key)
+}
+
+fn write<T>(ptr: *mut T, value: T) -> Result<(), AvbIOError> {
+    let ptr = to_nonnull(ptr)?;
+    // SAFETY: It is safe as the raw pointer `ptr` is a nonnull pointer.
     unsafe {
-        *out_is_trusted.as_ptr() = public_key == trusted_public_key;
+        *ptr.as_ptr() = value;
     }
     Ok(())
 }
@@ -409,130 +384,4 @@ pub fn verify_payload(
     let mut payload = Payload { kernel, initrd, trusted_public_key };
     let requested_partitions = [PartitionName::Kernel.as_cstr()];
     payload.verify_partitions(&requested_partitions)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::Result;
-    use avb_bindgen::AvbFooter;
-    use std::{fs, mem::size_of};
-
-    const MICRODROID_KERNEL_IMG_PATH: &str = "microdroid_kernel";
-    const INITRD_NORMAL_IMG_PATH: &str = "microdroid_initrd_normal.img";
-    const TEST_IMG_WITH_ONE_HASHDESC_PATH: &str = "test_image_with_one_hashdesc.img";
-    const UNSIGNED_TEST_IMG_PATH: &str = "unsigned_test.img";
-
-    const PUBLIC_KEY_RSA2048_PATH: &str = "data/testkey_rsa2048_pub.bin";
-    const PUBLIC_KEY_RSA4096_PATH: &str = "data/testkey_rsa4096_pub.bin";
-    const RANDOM_FOOTER_POS: usize = 30;
-
-    /// This test uses the Microdroid payload compiled on the fly to check that
-    /// the latest payload can be verified successfully.
-    #[test]
-    fn latest_valid_payload_passes_verification() -> Result<()> {
-        let kernel = load_latest_signed_kernel()?;
-        let initrd_normal = fs::read(INITRD_NORMAL_IMG_PATH)?;
-        let public_key = fs::read(PUBLIC_KEY_RSA4096_PATH)?;
-
-        assert_eq!(Ok(()), verify_payload(&kernel, Some(&initrd_normal[..]), &public_key));
-        Ok(())
-    }
-
-    #[test]
-    fn payload_expecting_no_initrd_passes_verification_with_no_initrd() -> Result<()> {
-        let kernel = fs::read(TEST_IMG_WITH_ONE_HASHDESC_PATH)?;
-        let public_key = fs::read(PUBLIC_KEY_RSA4096_PATH)?;
-
-        assert_eq!(Ok(()), verify_payload(&kernel, None, &public_key));
-        Ok(())
-    }
-
-    // TODO(b/256148034): Test that kernel with two hashdesc and no initrd fails verification.
-    // e.g. payload_expecting_initrd_fails_verification_with_no_initrd
-
-    #[test]
-    fn payload_with_empty_public_key_fails_verification() -> Result<()> {
-        assert_payload_verification_fails(
-            &load_latest_signed_kernel()?,
-            &load_latest_initrd_normal()?,
-            /*trusted_public_key=*/ &[0u8; 0],
-            AvbSlotVerifyError::PublicKeyRejected,
-        )
-    }
-
-    #[test]
-    fn payload_with_an_invalid_public_key_fails_verification() -> Result<()> {
-        assert_payload_verification_fails(
-            &load_latest_signed_kernel()?,
-            &load_latest_initrd_normal()?,
-            /*trusted_public_key=*/ &[0u8; 512],
-            AvbSlotVerifyError::PublicKeyRejected,
-        )
-    }
-
-    #[test]
-    fn payload_with_a_different_valid_public_key_fails_verification() -> Result<()> {
-        assert_payload_verification_fails(
-            &load_latest_signed_kernel()?,
-            &load_latest_initrd_normal()?,
-            &fs::read(PUBLIC_KEY_RSA2048_PATH)?,
-            AvbSlotVerifyError::PublicKeyRejected,
-        )
-    }
-
-    #[test]
-    fn unsigned_kernel_fails_verification() -> Result<()> {
-        assert_payload_verification_fails(
-            &fs::read(UNSIGNED_TEST_IMG_PATH)?,
-            &load_latest_initrd_normal()?,
-            &fs::read(PUBLIC_KEY_RSA4096_PATH)?,
-            AvbSlotVerifyError::Io,
-        )
-    }
-
-    #[test]
-    fn tampered_kernel_fails_verification() -> Result<()> {
-        let mut kernel = load_latest_signed_kernel()?;
-        kernel[1] = !kernel[1]; // Flip the bits
-
-        assert_payload_verification_fails(
-            &kernel,
-            &load_latest_initrd_normal()?,
-            &fs::read(PUBLIC_KEY_RSA4096_PATH)?,
-            AvbSlotVerifyError::Verification,
-        )
-    }
-
-    #[test]
-    fn tampered_kernel_footer_fails_verification() -> Result<()> {
-        let mut kernel = load_latest_signed_kernel()?;
-        let avb_footer_index = kernel.len() - size_of::<AvbFooter>() + RANDOM_FOOTER_POS;
-        kernel[avb_footer_index] = !kernel[avb_footer_index];
-
-        assert_payload_verification_fails(
-            &kernel,
-            &load_latest_initrd_normal()?,
-            &fs::read(PUBLIC_KEY_RSA4096_PATH)?,
-            AvbSlotVerifyError::InvalidMetadata,
-        )
-    }
-
-    fn assert_payload_verification_fails(
-        kernel: &[u8],
-        initrd: &[u8],
-        trusted_public_key: &[u8],
-        expected_error: AvbSlotVerifyError,
-    ) -> Result<()> {
-        assert_eq!(Err(expected_error), verify_payload(kernel, Some(initrd), trusted_public_key));
-        Ok(())
-    }
-
-    fn load_latest_signed_kernel() -> Result<Vec<u8>> {
-        Ok(fs::read(MICRODROID_KERNEL_IMG_PATH)?)
-    }
-
-    fn load_latest_initrd_normal() -> Result<Vec<u8>> {
-        Ok(fs::read(INITRD_NORMAL_IMG_PATH)?)
-    }
 }
