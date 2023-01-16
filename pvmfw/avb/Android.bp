@@ -25,19 +25,24 @@ rust_library_rlib {
 }
 
 rust_test {
-    name: "libpvmfw_avb.test",
-    defaults: ["libpvmfw_avb_nostd_defaults"],
+    name: "libpvmfw_avb.integration_test",
+    crate_name: "pvmfw_avb_test",
+    srcs: ["tests/*_test.rs"],
     test_suites: ["general-tests"],
     data: [
         ":avb_testkey_rsa2048_pub_bin",
         ":avb_testkey_rsa4096_pub_bin",
         ":microdroid_kernel_signed",
         ":microdroid_initrd_normal",
+        ":microdroid_initrd_debuggable",
         ":test_image_with_one_hashdesc",
         ":unsigned_test_image",
     ],
+    prefer_rlib: true,
     rustlibs: [
         "libanyhow",
+        "libavb_bindgen",
+        "libpvmfw_avb_nostd",
     ],
     enabled: false,
     arch: {
