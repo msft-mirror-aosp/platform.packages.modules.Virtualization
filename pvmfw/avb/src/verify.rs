@@ -14,7 +14,9 @@
 
 //! This module handles the pvmfw payload verification.
 
-use crate::error::{slot_verify_result_to_verify_payload_result, AvbSlotVerifyError};
+use crate::error::{
+    slot_verify_result_to_verify_payload_result, to_avb_io_result, AvbIOError, AvbSlotVerifyError,
+};
 use avb_bindgen::{
     avb_descriptor_foreach, avb_hash_descriptor_validate_and_byteswap, avb_slot_verify,
     avb_slot_verify_data_free, AvbDescriptor, AvbHashDescriptor, AvbHashtreeErrorMode, AvbIOResult,
@@ -28,47 +30,6 @@ use core::{
 };
 
 const NULL_BYTE: &[u8] = b"\0";
-
-#[derive(Debug)]
-enum AvbIOError {
-    /// AVB_IO_RESULT_ERROR_OOM,
-    #[allow(dead_code)]
-    Oom,
-    /// AVB_IO_RESULT_ERROR_IO,
-    #[allow(dead_code)]
-    Io,
-    /// AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION,
-    NoSuchPartition,
-    /// AVB_IO_RESULT_ERROR_RANGE_OUTSIDE_PARTITION,
-    RangeOutsidePartition,
-    /// AVB_IO_RESULT_ERROR_NO_SUCH_VALUE,
-    NoSuchValue,
-    /// AVB_IO_RESULT_ERROR_INVALID_VALUE_SIZE,
-    InvalidValueSize,
-    /// AVB_IO_RESULT_ERROR_INSUFFICIENT_SPACE,
-    #[allow(dead_code)]
-    InsufficientSpace,
-}
-
-impl From<AvbIOError> for AvbIOResult {
-    fn from(error: AvbIOError) -> Self {
-        match error {
-            AvbIOError::Oom => AvbIOResult::AVB_IO_RESULT_ERROR_OOM,
-            AvbIOError::Io => AvbIOResult::AVB_IO_RESULT_ERROR_IO,
-            AvbIOError::NoSuchPartition => AvbIOResult::AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION,
-            AvbIOError::RangeOutsidePartition => {
-                AvbIOResult::AVB_IO_RESULT_ERROR_RANGE_OUTSIDE_PARTITION
-            }
-            AvbIOError::NoSuchValue => AvbIOResult::AVB_IO_RESULT_ERROR_NO_SUCH_VALUE,
-            AvbIOError::InvalidValueSize => AvbIOResult::AVB_IO_RESULT_ERROR_INVALID_VALUE_SIZE,
-            AvbIOError::InsufficientSpace => AvbIOResult::AVB_IO_RESULT_ERROR_INSUFFICIENT_SPACE,
-        }
-    }
-}
-
-fn to_avb_io_result(result: Result<(), AvbIOError>) -> AvbIOResult {
-    result.map_or_else(|e| e.into(), |_| AvbIOResult::AVB_IO_RESULT_OK)
-}
 
 extern "C" fn read_is_device_unlocked(
     _ops: *mut AvbOps,
@@ -380,6 +341,17 @@ impl PartitionName {
     }
 }
 
+impl TryFrom<*const c_char> for PartitionName {
+    type Error = AvbIOError;
+
+    fn try_from(partition_name: *const c_char) -> Result<Self, Self::Error> {
+        is_not_null(partition_name)?;
+        // SAFETY: It is safe as the raw pointer `partition_name` is a nonnull pointer.
+        let partition_name = unsafe { CStr::from_ptr(partition_name) };
+        partition_name.try_into()
+    }
+}
+
 impl TryFrom<&CStr> for PartitionName {
     type Error = AvbIOError;
 
@@ -465,9 +437,6 @@ impl<'a> AsRef<Payload<'a>> for AvbOps {
 
 impl<'a> Payload<'a> {
     fn get_partition(&self, partition_name: *const c_char) -> Result<&[u8], AvbIOError> {
-        is_not_null(partition_name)?;
-        // SAFETY: It is safe as the raw pointer `partition_name` is a nonnull pointer.
-        let partition_name = unsafe { CStr::from_ptr(partition_name) };
         match partition_name.try_into()? {
             PartitionName::Kernel => Ok(self.kernel),
             PartitionName::InitrdNormal | PartitionName::InitrdDebug => {
@@ -545,6 +514,15 @@ fn verify_vbmeta_has_no_initrd_descriptor(
     }
 }
 
+fn verify_vbmeta_is_from_kernel_partition(
+    vbmeta_image: &AvbVBMetaData,
+) -> Result<(), AvbSlotVerifyError> {
+    match (vbmeta_image.partition_name as *const c_char).try_into() {
+        Ok(PartitionName::Kernel) => Ok(()),
+        _ => Err(AvbSlotVerifyError::InvalidMetadata),
+    }
+}
+
 /// Verifies the payload (signed kernel + initrd) against the trusted public key.
 pub fn verify_payload(
     kernel: &[u8],
@@ -555,11 +533,13 @@ pub fn verify_payload(
     let kernel_verify_result = payload.verify_partition(PartitionName::Kernel.as_cstr())?;
     let vbmeta_images = kernel_verify_result.vbmeta_images()?;
     if vbmeta_images.len() != 1 {
-        // There can only be one VBMeta, from the 'boot' partition.
+        // There can only be one VBMeta.
         return Err(AvbSlotVerifyError::InvalidMetadata);
     }
+    let vbmeta_image = vbmeta_images[0];
+    verify_vbmeta_is_from_kernel_partition(&vbmeta_image)?;
     if payload.initrd.is_none() {
-        verify_vbmeta_has_no_initrd_descriptor(&vbmeta_images[0])?;
+        verify_vbmeta_has_no_initrd_descriptor(&vbmeta_image)?;
     }
     // TODO(b/256148034): Check the vbmeta doesn't have hash descriptors other than
     // boot, initrd_normal, initrd_debug.
