@@ -1,4 +1,4 @@
-// Copyright 2022, The Android Open Source Project
+// Copyright 2023, The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A library implementing the payload verification for pvmfw with libavb
+#![allow(missing_docs)]
+#![no_main]
 
-#![cfg_attr(not(test), no_std)]
-// For usize.checked_add_signed(isize), available in Rust 1.66.0
-#![feature(mixed_integer_ops)]
+use libfuzzer_sys::fuzz_target;
+use pvmfw_avb::verify_payload;
 
-mod error;
-mod ops;
-mod partition;
-mod utils;
-mod verify;
-
-pub use error::AvbSlotVerifyError;
-pub use verify::{verify_payload, DebugLevel};
+fuzz_target!(|kernel: &[u8]| {
+    // This fuzzer is mostly supposed to catch the memory corruption in
+    // AVB footer parsing. It is unlikely that the randomly generated
+    // kernel can pass the kernel verification, so the value of `initrd`
+    // is not so important as we won't reach initrd verification with
+    // this fuzzer.
+    let _ = verify_payload(kernel, /*initrd=*/ None, &[0u8; 64]);
+});
