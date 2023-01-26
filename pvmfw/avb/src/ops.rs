@@ -21,7 +21,7 @@ use crate::partition::PartitionName;
 use crate::utils::{self, as_ref, is_not_null, to_nonnull, write};
 use avb_bindgen::{
     avb_slot_verify, avb_slot_verify_data_free, AvbHashtreeErrorMode, AvbIOResult, AvbOps,
-    AvbSlotVerifyData, AvbSlotVerifyFlags, AvbVBMetaData,
+    AvbPartitionData, AvbSlotVerifyData, AvbSlotVerifyFlags, AvbVBMetaData,
 };
 use core::{
     ffi::{c_char, c_void, CStr},
@@ -229,15 +229,13 @@ fn try_get_size_of_partition(
 extern "C" fn read_rollback_index(
     _ops: *mut AvbOps,
     _rollback_index_location: usize,
-    _out_rollback_index: *mut u64,
+    out_rollback_index: *mut u64,
 ) -> AvbIOResult {
-    // TODO(b/256148034): Write -1 to out_rollback_index
-    // so that we won't compare the current rollback index with uninitialized number
-    // in avb_slot_verify.
-
-    // Rollback protection is not yet implemented, but
-    // this method is required by `avb_slot_verify()`.
-    AvbIOResult::AVB_IO_RESULT_OK
+    // Rollback protection is not yet implemented, but this method is required by
+    // `avb_slot_verify()`.
+    // We set `out_rollback_index` to 0 to ensure that the default rollback index (0)
+    // is never smaller than it, thus the rollback index check will pass.
+    to_avb_io_result(write(out_rollback_index, 0))
 }
 
 extern "C" fn get_unique_guid_for_partition(
@@ -326,5 +324,16 @@ impl AvbSlotVerifyDataWrap {
         let vbmeta_images =
             unsafe { slice::from_raw_parts(data.vbmeta_images, data.num_vbmeta_images) };
         Ok(vbmeta_images)
+    }
+
+    pub(crate) fn loaded_partitions(&self) -> Result<&[AvbPartitionData], AvbSlotVerifyError> {
+        let data = self.as_ref();
+        is_not_null(data.loaded_partitions).map_err(|_| AvbSlotVerifyError::Io)?;
+        // SAFETY: It is safe as the raw pointer `data.loaded_partitions` is a nonnull pointer and
+        // is guaranteed by libavb to point to a valid `AvbPartitionData` array as part of the
+        // `AvbSlotVerifyData` struct.
+        let loaded_partitions =
+            unsafe { slice::from_raw_parts(data.loaded_partitions, data.num_loaded_partitions) };
+        Ok(loaded_partitions)
     }
 }
