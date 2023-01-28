@@ -55,7 +55,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
@@ -173,7 +172,11 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 .isSuccess();
     }
 
-    private void resignVirtApex(File virtApexDir, File signingKey, Map<String, File> keyOverrides) {
+    private void resignVirtApex(
+            File virtApexDir,
+            File signingKey,
+            Map<String, File> keyOverrides,
+            boolean updateBootconfigs) {
         File signVirtApex = findTestFile("sign_virt_apex");
 
         RunUtil runUtil = new RunUtil();
@@ -184,6 +187,9 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
         List<String> command = new ArrayList<>();
         command.add(signVirtApex.getAbsolutePath());
+        if (!updateBootconfigs) {
+            command.add("--do_not_update_bootconfigs");
+        }
         keyOverrides.forEach(
                 (filename, keyFile) ->
                         command.add("--key_override " + filename + "=" + keyFile.getPath()));
@@ -271,7 +277,11 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     private VmInfo runMicrodroidWithResignedImages(
-            File key, Map<String, File> keyOverrides, boolean isProtected) throws Exception {
+            File key,
+            Map<String, File> keyOverrides,
+            boolean isProtected,
+            boolean updateBootconfigs)
+            throws Exception {
         CommandRunner android = new CommandRunner(getDevice());
 
         File virtApexDir = FileUtil.createTempDir("virt_apex");
@@ -284,7 +294,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertWithMessage("Failed to pull " + VIRT_APEX + "etc")
                 .that(getDevice().pullDir(VIRT_APEX + "etc", virtApexEtcDir)).isTrue();
 
-        resignVirtApex(virtApexDir, key, keyOverrides);
+        resignVirtApex(virtApexDir, key, keyOverrides, updateBootconfigs);
 
         // Push back re-signed virt APEX contents and updated microdroid.json
         getDevice().pushDir(virtApexDir, TEST_ROOT);
@@ -460,7 +470,8 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
         // Act
         VmInfo vmInfo =
-                runMicrodroidWithResignedImages(key, /*keyOverrides=*/ Map.of(), protectedVm);
+                runMicrodroidWithResignedImages(
+                        key, /*keyOverrides=*/ Map.of(), protectedVm, /*updateBootconfigs=*/ true);
 
         // Assert
         vmInfo.mProcess.waitFor(5L, TimeUnit.SECONDS);
@@ -471,16 +482,15 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         vmInfo.mProcess.destroy();
     }
 
-    // TODO(b/245277660): Resigning the system/vendor image changes the vbmeta hash.
-    // So, unless vbmeta related bootconfigs are updated the following test will fail
     @Test
-    @Ignore("b/245277660")
     @CddTest(requirements = {"9.17/C-2-2", "9.17/C-2-6"})
     public void testBootSucceedsWhenNonProtectedVmStartsWithImagesSignedWithDifferentKey()
             throws Exception {
         File key = findTestFile("test.com.android.virt.pem");
         Map<String, File> keyOverrides = Map.of();
-        VmInfo vmInfo = runMicrodroidWithResignedImages(key, keyOverrides, /*isProtected=*/ false);
+        VmInfo vmInfo =
+                runMicrodroidWithResignedImages(
+                        key, keyOverrides, /*isProtected=*/ false, /*updateBootconfigs=*/ true);
         // Device online means that boot must have succeeded.
         adbConnectToMicrodroid(getDevice(), vmInfo.mCid);
         vmInfo.mProcess.destroy();
@@ -491,10 +501,10 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     public void testBootFailsWhenVbMetaDigestDoesNotMatchBootconfig() throws Exception {
         // Sign everything with key1 except vbmeta
         File key = findTestFile("test.com.android.virt.pem");
-        File key2 = findTestFile("test2.com.android.virt.pem");
-        Map<String, File> keyOverrides = Map.of("microdroid_vbmeta.img", key2);
         // To be able to stop it, it should be a daemon.
-        VmInfo vmInfo = runMicrodroidWithResignedImages(key, keyOverrides, /*isProtected=*/ false);
+        VmInfo vmInfo =
+                runMicrodroidWithResignedImages(
+                        key, Map.of(), /*isProtected=*/ false, /*updateBootconfigs=*/ false);
         // Wait so that init can print errors to console (time in cuttlefish >> in real device)
         assertThatEventually(
                 100000,
@@ -837,6 +847,64 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .trim();
 
         assertThat(ret).contains("Payload binary name must not specify a path");
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-2-2", "9.17/C-2-6"})
+    public void testAllVbmetaUseSHA256() throws Exception {
+        File virtApexDir = FileUtil.createTempDir("virt_apex");
+        // Pull the virt apex's etc/ directory (which contains images)
+        File virtApexEtcDir = new File(virtApexDir, "etc");
+        // We need only etc/ directory for images
+        assertWithMessage("Failed to mkdir " + virtApexEtcDir)
+                .that(virtApexEtcDir.mkdirs())
+                .isTrue();
+        assertWithMessage("Failed to pull " + VIRT_APEX + "etc")
+                .that(getDevice().pullDir(VIRT_APEX + "etc", virtApexEtcDir))
+                .isTrue();
+
+        checkHashAlgorithm(virtApexEtcDir);
+    }
+
+    private String avbInfo(String image_path) throws Exception {
+        File avbtool = findTestFile("avbtool");
+        List<String> command =
+                Arrays.asList(avbtool.getAbsolutePath(), "info_image", "--image", image_path);
+        CommandResult result =
+                new RunUtil().runTimedCmd(5000, "/bin/bash", "-c", String.join(" ", command));
+        String out = result.getStdout();
+        String err = result.getStderr();
+        assertWithMessage(
+                        "Command "
+                                + command
+                                + " failed."
+                                + ":\n\tout: "
+                                + out
+                                + "\n\terr: "
+                                + err
+                                + "\n")
+                .about(command_results())
+                .that(result)
+                .isSuccess();
+        return out;
+    }
+
+    private void checkHashAlgorithm(File virtApexEtcDir) throws Exception {
+        List<String> images =
+                Arrays.asList(
+                        // kernel image (contains descriptors from initrd(s) as well)
+                        "/fs/microdroid_kernel",
+                        // vbmeta partition (contains descriptors from vendor/system images)
+                        "/fs/microdroid_vbmeta.img");
+
+        for (String path : images) {
+            String info = avbInfo(virtApexEtcDir + path);
+            Pattern pattern = Pattern.compile("Hash Algorithm:[ ]*(sha1|sha256)");
+            Matcher m = pattern.matcher(info);
+            while (m.find()) {
+                assertThat(m.group(1)).isEqualTo("sha256");
+            }
+        }
     }
 
     @Before
