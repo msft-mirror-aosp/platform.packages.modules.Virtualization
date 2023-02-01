@@ -5,46 +5,111 @@ package {
 rust_ffi_static {
     name: "libpvmfw",
     crate_name: "pvmfw",
+    defaults: ["vmbase_ffi_defaults"],
     srcs: ["src/main.rs"],
     edition: "2021",
-    no_stdlibs: true,
-    stdlibs: [
-        "libcompiler_builtins.rust_sysroot",
-        "libcore.rust_sysroot",
+    features: [
+        "legacy",
     ],
     rustlibs: [
-        "libspin_nostd",
+        "libaarch64_paging",
+        "libbuddy_system_allocator",
+        "libdice_nostd",
+        "libfdtpci",
+        "liblibfdt",
+        "liblog_rust_nostd",
+        "libonce_cell_nostd",
+        "libpvmfw_avb_nostd",
+        "libpvmfw_embedded_key",
+        "libtinyvec_nostd",
+        "libvirtio_drivers",
+        "libvmbase",
+        "libzeroize_nostd",
     ],
-    enabled: false,
-    target: {
-        android_arm64: {
-            enabled: true,
-        },
-    },
-    apex_available: ["com.android.virt"],
 }
 
 cc_binary {
     name: "pvmfw",
+    defaults: ["vmbase_elf_defaults"],
     srcs: [
-        "entry.S",
         "idmap.S",
     ],
     static_libs: [
         "libpvmfw",
     ],
-    static_executable: true,
-    no_libcrt: true,
-    nocrt: true,
-    system_shared_libs: [],
-    ldflags: [
-        "-Tpackages/modules/Virtualization/pvmfw/image.ld",
+    linker_scripts: [
+        "image.ld",
+        ":vmbase_sections",
     ],
+    // `installable: false` is inherited from vmbase_elf_defaults, and that
+    // hides this module from Make, which makes it impossible for the Make world
+    // to place the unstripped binary to the symbols directory. Marking back as
+    // installable exposes this module to the Make world again. Note that this
+    // module (pvmfw) still is NOT installed to any of the filesystem images. It
+    // is fed into pvmfw_bin and then into pvmfw_img to become a standalone
+    // partition image. This is just to package the unstripped file into the
+    // symbols zip file for debugging purpose.
+    installable: true,
+}
+
+raw_binary {
+    name: "pvmfw_bin",
+    stem: "pvmfw.bin",
+    src: ":pvmfw",
     enabled: false,
     target: {
         android_arm64: {
             enabled: true,
         },
     },
+}
+
+prebuilt_etc {
+    name: "pvmfw_embedded_key",
+    src: ":avb_testkey_rsa4096_pub_bin",
+    installable: false,
+}
+
+genrule {
+    name: "pvmfw_embedded_key_rs",
+    srcs: [":pvmfw_embedded_key"],
+    out: ["lib.rs"],
+    cmd: "(" +
+        "    echo '#![no_std]';" +
+        "    echo '#![allow(missing_docs)]';" +
+        "    echo 'pub const PUBLIC_KEY: &[u8] = &[';" +
+        "    xxd -i < $(in);" +
+        "    echo '];';" +
+        ") > $(out)",
+}
+
+rust_library_rlib {
+    name: "libpvmfw_embedded_key",
+    defaults: ["vmbase_ffi_defaults"],
+    prefer_rlib: true,
+    srcs: [":pvmfw_embedded_key_rs"],
+    crate_name: "pvmfw_embedded_key",
     apex_available: ["com.android.virt"],
+}
+
+prebuilt_etc {
+    name: "pvmfw_sign_key",
+    src: ":avb_testkey_rsa4096",
+    installable: false,
+}
+
+bootimg {
+    name: "pvmfw_img",
+    stem: "pvmfw.img",
+    kernel_prebuilt: ":pvmfw_bin",
+    header_version: "3",
+    partition_name: "pvmfw",
+    enabled: false,
+    target: {
+        android_arm64: {
+            enabled: true,
+        },
+    },
+    use_avb: true,
+    avb_private_key: ":pvmfw_sign_key",
 }
