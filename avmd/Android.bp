@@ -9,8 +9,9 @@ rust_defaults {
     srcs: ["src/lib.rs"],
     prefer_rlib: true,
     rustlibs: [
+        "libhex",
         "libserde",
-        "libapexutil_rust", // TODO(b/239413416): Remove this after adding hex
+        "libapkverify",
     ],
 }
 
@@ -19,8 +20,8 @@ rust_library {
     defaults: ["libavmd_defaults"],
 }
 
-rust_binary {
-    name: "avmdtool",
+rust_defaults {
+    name: "avmdtool.defaults",
     srcs: ["src/main.rs"],
     host_supported: true,
     prefer_rlib: true,
@@ -36,15 +37,25 @@ rust_binary {
     ],
 }
 
-rust_test_host {
+rust_binary {
+    name: "avmdtool",
+    defaults: ["avmdtool.defaults"],
+}
+
+rust_test {
+    name: "avmdtool.test",
+    defaults: ["avmdtool.defaults"],
+    test_suites: ["general-tests"],
+}
+
+rust_test {
     name: "avmdtool_tests",
     srcs: ["tests/*_test.rs"],
     test_suites: ["general-tests"],
-    prefer_rlib: true,
-    data: ["tests/data/*"],
-    data_bins: ["avmdtool"],
-    data_libs: [
-        "libcrypto",
-        "libz",
+    rustlibs: [
+        "libtempfile",
     ],
+    compile_multilib: "first",
+    data_bins: ["avmdtool"],
+    data: ["tests/data/*"],
 }

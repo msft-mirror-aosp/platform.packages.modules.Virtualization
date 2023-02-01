@@ -17,10 +17,13 @@
 //! Support for starting CompOS in a VM and connecting to the service
 
 use crate::timeouts::TIMEOUTS;
-use crate::{COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT, DEFAULT_VM_CONFIG_PATH};
+use crate::{
+    get_vm_config_path, BUILD_MANIFEST_APK_PATH, BUILD_MANIFEST_SYSTEM_EXT_APK_PATH,
+    COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT,
+};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     IVirtualizationService::IVirtualizationService,
-    VirtualMachineAppConfig::{DebugLevel::DebugLevel, VirtualMachineAppConfig},
+    VirtualMachineAppConfig::{DebugLevel::DebugLevel, Payload::Payload, VirtualMachineAppConfig},
     VirtualMachineConfig::VirtualMachineConfig,
 };
 use anyhow::{bail, Context, Result};
@@ -29,11 +32,9 @@ use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsSe
 use log::{info, warn};
 use rustutils::system_properties;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::thread;
-use vmclient::{DeathReason, VmInstance, VmWaitError};
+use vmclient::{DeathReason, ErrorCode, VmInstance, VmWaitError};
 
 /// This owns an instance of the CompOS VM.
 pub struct ComposClient(VmInstance);
@@ -45,15 +46,12 @@ pub struct VmParameters {
     pub debug_mode: bool,
     /// Number of vCPUs to have in the VM. If None, defaults to 1.
     pub cpus: Option<NonZeroU32>,
-    /// Comma separated list of host CPUs where vCPUs are assigned to. If None, any host CPU can be
-    /// used to run any vCPU.
-    pub cpu_set: Option<String>,
     /// List of task profiles to apply to the VM
     pub task_profiles: Vec<String>,
-    /// If present, overrides the path to the VM config JSON file
-    pub config_path: Option<String>,
     /// If present, overrides the amount of RAM to give the VM
     pub memory_mib: Option<i32>,
+    /// Whether the VM prefers staged APEXes or activated ones (false; default)
+    pub prefer_staged: bool,
 }
 
 impl ComposClient {
@@ -63,6 +61,7 @@ impl ComposClient {
         instance_image: File,
         idsig: &Path,
         idsig_manifest_apk: &Path,
+        idsig_manifest_ext_apk: &Path,
         parameters: &VmParameters,
     ) -> Result<Self> {
         let protected_vm = want_protected_vm()?;
@@ -77,16 +76,28 @@ impl ComposClient {
         let apk_fd = ParcelFileDescriptor::new(apk_fd);
         let idsig_fd = prepare_idsig(service, &apk_fd, idsig)?;
 
-        let manifest_apk_fd = File::open("/system/etc/security/fsverity/BuildManifest.apk")
+        let manifest_apk_fd = File::open(BUILD_MANIFEST_APK_PATH)
             .context("Failed to open build manifest APK file")?;
         let manifest_apk_fd = ParcelFileDescriptor::new(manifest_apk_fd);
         let idsig_manifest_apk_fd = prepare_idsig(service, &manifest_apk_fd, idsig_manifest_apk)?;
 
-        let debug_level = match (protected_vm, parameters.debug_mode) {
-            (_, true) => DebugLevel::FULL,
-            (false, false) => DebugLevel::APP_ONLY,
-            (true, false) => DebugLevel::NONE,
-        };
+        // Prepare a few things based on whether /system_ext exists, including:
+        // 1. generate the additional idsig FD for the APK from /system_ext, then pass to VS
+        // 2. select the correct VM config json
+        let (extra_idsigs, has_system_ext) =
+            if let Ok(manifest_ext_apk_fd) = File::open(BUILD_MANIFEST_SYSTEM_EXT_APK_PATH) {
+                // Optional idsig in /system_ext is found, so prepare additionally.
+                let manifest_ext_apk_fd = ParcelFileDescriptor::new(manifest_ext_apk_fd);
+                let idsig_manifest_ext_apk_fd =
+                    prepare_idsig(service, &manifest_ext_apk_fd, idsig_manifest_ext_apk)?;
+
+                (vec![idsig_manifest_apk_fd, idsig_manifest_ext_apk_fd], true)
+            } else {
+                (vec![idsig_manifest_apk_fd], false)
+            };
+        let config_path = get_vm_config_path(has_system_ext, parameters.prefer_staged);
+
+        let debug_level = if parameters.debug_mode { DebugLevel::FULL } else { DebugLevel::NONE };
 
         let (console_fd, log_fd) = if debug_level == DebugLevel::NONE {
             (None, None)
@@ -100,18 +111,18 @@ impl ComposClient {
             (Some(console_fd), Some(log_fd))
         };
 
-        let config_path = parameters.config_path.as_deref().unwrap_or(DEFAULT_VM_CONFIG_PATH);
         let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
+            name: String::from("Compos"),
             apk: Some(apk_fd),
             idsig: Some(idsig_fd),
             instanceImage: Some(instance_fd),
-            configPath: config_path.to_owned(),
+            encryptedStorageImage: None,
+            payload: Payload::ConfigPath(config_path),
             debugLevel: debug_level,
-            extraIdsigs: vec![idsig_manifest_apk_fd],
+            extraIdsigs: extra_idsigs,
             protectedVm: protected_vm,
             memoryMib: parameters.memory_mib.unwrap_or(0), // 0 means use the default
             numCpus: parameters.cpus.map_or(1, NonZeroU32::get) as i32,
-            cpuAffinity: parameters.cpu_set.clone(),
             taskProfiles: parameters.task_profiles.clone(),
         });
 
@@ -211,10 +222,10 @@ fn want_protected_vm() -> Result<bool> {
         bail!("Protected VM not supported, unable to start VM");
     }
 
-    let have_unprotected_vm =
+    let have_non_protected_vm =
         system_properties::read_bool("ro.boot.hypervisor.vm.supported", false)?;
-    if have_unprotected_vm {
-        warn!("Protected VM not supported, falling back to unprotected on debuggable build");
+    if have_non_protected_vm {
+        warn!("Protected VM not supported, falling back to non-protected on debuggable build");
         return Ok(false);
     }
 
@@ -223,12 +234,7 @@ fn want_protected_vm() -> Result<bool> {
 
 struct Callback {}
 impl vmclient::VmCallback for Callback {
-    fn on_payload_started(&self, cid: i32, stream: Option<&File>) {
-        if let Some(file) = stream {
-            if let Err(e) = start_logging(file) {
-                warn!("Can't log vm output: {}", e);
-            };
-        }
+    fn on_payload_started(&self, cid: i32) {
         log::info!("VM payload started, cid = {}", cid);
     }
 
@@ -240,27 +246,11 @@ impl vmclient::VmCallback for Callback {
         log::warn!("VM payload finished, cid = {}, exit code = {}", cid, exit_code);
     }
 
-    fn on_error(&self, cid: i32, error_code: i32, message: &str) {
-        log::warn!("VM error, cid = {}, error code = {}, message = {}", cid, error_code, message);
+    fn on_error(&self, cid: i32, error_code: ErrorCode, message: &str) {
+        log::warn!("VM error, cid = {}, error code = {:?}, message = {}", cid, error_code, message);
     }
 
     fn on_died(&self, cid: i32, death_reason: DeathReason) {
         log::warn!("VM died, cid = {}, reason = {:?}", cid, death_reason);
     }
-}
-
-fn start_logging(file: &File) -> Result<()> {
-    let reader = BufReader::new(file.try_clone().context("Cloning file failed")?);
-    thread::spawn(move || {
-        for line in reader.lines() {
-            match line {
-                Ok(line) => info!("VM: {}", line),
-                Err(e) => {
-                    warn!("Reading VM output failed: {}", e);
-                    break;
-                }
-            }
-        }
-    });
-    Ok(())
 }

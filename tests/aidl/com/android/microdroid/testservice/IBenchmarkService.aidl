@@ -20,6 +20,25 @@ package com.android.microdroid.testservice;
 interface IBenchmarkService {
     const int SERVICE_PORT = 5677;
 
-    /** Reads a file and returns the elapsed seconds for the reading. */
-    double readFile(String filename, long fileSizeBytes, boolean isRand);
+    /**
+     * Measures the read rate for reading the given file.
+     *
+     * @return The read rate in MB/s.
+     */
+    double measureReadRate(String filename, boolean isRand);
+
+    /** Returns an entry from /proc/meminfo. */
+    long getMemInfoEntry(String name);
+
+    /** Allocates anonymous memory and returns the raw pointer. */
+    long allocAnonMemory(long mb);
+
+    /**
+     * Initializes the vsock server on VM.
+     * @return the server socket file descriptor.
+     */
+    int initVsockServer(int port);
+
+    /** Runs the vsock server on VM and receives data. */
+    void runVsockServerAndReceiveData(int serverFd, int numBytesToReceive);
 }

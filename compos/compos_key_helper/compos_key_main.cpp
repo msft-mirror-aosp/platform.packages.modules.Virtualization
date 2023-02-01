@@ -14,50 +14,37 @@
  * limitations under the License.
  */
 
-#include <aidl/android/security/dice/IDiceNode.h>
 #include <android-base/file.h>
 #include <android-base/logging.h>
-#include <android/binder_auto_utils.h>
-#include <android/binder_manager.h>
 #include <unistd.h>
+#include <vm_payload_restricted.h>
 
 #include <string_view>
+#include <vector>
 
 #include "compos_key.h"
 
-using aidl::android::hardware::security::dice::Bcc;
-using aidl::android::hardware::security::dice::BccHandover;
-using aidl::android::hardware::security::dice::InputValues;
-using aidl::android::security::dice::IDiceNode;
 using android::base::Error;
 using android::base::ReadFdToString;
 using android::base::Result;
 using android::base::WriteFully;
 using namespace std::literals;
 using compos_key::Ed25519KeyPair;
+using compos_key::Seed;
 
 namespace {
-Result<Ed25519KeyPair> deriveKeyFromDice() {
-    ndk::SpAIBinder binder{AServiceManager_getService("android.security.dice.IDiceNode")};
-    auto dice_node = IDiceNode::fromBinder(binder);
-    if (!dice_node) {
-        return Error() << "Unable to connect to IDiceNode";
-    }
 
-    const std::vector<InputValues> empty_input_values;
-    BccHandover bcc;
-    auto status = dice_node->derive(empty_input_values, &bcc);
-    if (!status.isOk()) {
-        return Error() << "Derive failed: " << status.getDescription();
-    }
+constexpr const char* kSigningKeySeedIdentifier = "CompOS signing key seed";
 
-    // We use the sealing CDI because we want stability - the key needs to be the same
-    // for any instance of the "same" VM.
-    return compos_key::deriveKeyFromSecret(bcc.cdiSeal.data(), bcc.cdiSeal.size());
+Result<Ed25519KeyPair> getSigningKey() {
+    Seed seed;
+    AVmPayload_getVmInstanceSecret(kSigningKeySeedIdentifier, strlen(kSigningKeySeedIdentifier),
+                                   seed.data(), seed.size());
+    return compos_key::keyFromSeed(seed);
 }
 
 int write_public_key() {
-    auto key_pair = deriveKeyFromDice();
+    auto key_pair = getSigningKey();
     if (!key_pair.ok()) {
         LOG(ERROR) << key_pair.error();
         return 1;
@@ -70,22 +57,11 @@ int write_public_key() {
 }
 
 int write_bcc() {
-    ndk::SpAIBinder binder{AServiceManager_getService("android.security.dice.IDiceNode")};
-    auto dice_node = IDiceNode::fromBinder(binder);
-    if (!dice_node) {
-        LOG(ERROR) << "Unable to connect to IDiceNode";
-        return 1;
-    }
+    size_t bcc_size = AVmPayload_getDiceAttestationChain(nullptr, 0);
+    std::vector<uint8_t> bcc(bcc_size);
+    AVmPayload_getDiceAttestationChain(bcc.data(), bcc.size());
 
-    const std::vector<InputValues> empty_input_values;
-    Bcc bcc;
-    auto status = dice_node->getAttestationChain(empty_input_values, &bcc);
-    if (!status.isOk()) {
-        LOG(ERROR) << "GetAttestationChain failed: " << status.getDescription();
-        return 1;
-    }
-
-    if (!WriteFully(STDOUT_FILENO, bcc.data.data(), bcc.data.size())) {
+    if (!WriteFully(STDOUT_FILENO, bcc.data(), bcc.size())) {
         PLOG(ERROR) << "Write failed";
         return 1;
     }
@@ -100,7 +76,7 @@ int sign_input() {
         return 1;
     }
 
-    auto key_pair = deriveKeyFromDice();
+    auto key_pair = getSigningKey();
     if (!key_pair.ok()) {
         LOG(ERROR) << key_pair.error();
         return 1;

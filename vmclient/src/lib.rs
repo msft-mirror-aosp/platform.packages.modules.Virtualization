@@ -15,15 +15,19 @@
 //! Client library for VirtualizationService.
 
 mod death_reason;
+mod error_code;
 mod errors;
 mod sync;
 
 pub use crate::death_reason::DeathReason;
+pub use crate::error_code::ErrorCode;
 pub use crate::errors::VmWaitError;
 use crate::sync::Monitor;
+use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::{
+    DeathReason::DeathReason as AidlDeathReason, ErrorCode::ErrorCode as AidlErrorCode,
+};
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::{
-        DeathReason::DeathReason as AidlDeathReason,
         IVirtualMachine::IVirtualMachine,
         IVirtualMachineCallback::{BnVirtualMachineCallback, IVirtualMachineCallback},
         IVirtualizationService::IVirtualizationService,
@@ -35,18 +39,95 @@ use android_system_virtualizationservice::{
         ParcelFileDescriptor, Result as BinderResult, StatusCode, Strong,
     },
 };
-use binder_common::rpc_client::connect_preconnected_rpc_binder;
+use command_fds::CommandFdExt;
 use log::warn;
+use rpcbinder::{FileDescriptorTransportMode, RpcSession};
+use shared_child::SharedChild;
+use std::io::{self, Read};
+use std::process::Command;
 use std::{
     fmt::{self, Debug, Formatter},
     fs::File,
-    os::unix::io::IntoRawFd,
+    os::unix::io::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     sync::Arc,
     time::Duration,
 };
 
 const VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER: &str =
     "android.system.virtualizationservice";
+
+const VIRTMGR_PATH: &str = "/apex/com.android.virt/bin/virtmgr";
+const VIRTMGR_THREADS: usize = 16;
+
+fn posix_pipe() -> Result<(OwnedFd, OwnedFd), io::Error> {
+    use nix::fcntl::OFlag;
+    use nix::unistd::pipe2;
+
+    // Create new POSIX pipe. Make it O_CLOEXEC to align with how Rust creates
+    // file descriptors (expected by SharedChild).
+    let (raw1, raw2) = pipe2(OFlag::O_CLOEXEC)?;
+
+    // SAFETY - Taking ownership of brand new FDs.
+    unsafe { Ok((OwnedFd::from_raw_fd(raw1), OwnedFd::from_raw_fd(raw2))) }
+}
+
+fn posix_socketpair() -> Result<(OwnedFd, OwnedFd), io::Error> {
+    use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
+
+    // Create new POSIX socketpair, suitable for use with RpcBinder UDS bootstrap
+    // transport. Make it O_CLOEXEC to align with how Rust creates file
+    // descriptors (expected by SharedChild).
+    let (raw1, raw2) =
+        socketpair(AddressFamily::Unix, SockType::Stream, None, SockFlag::SOCK_CLOEXEC)?;
+
+    // SAFETY - Taking ownership of brand new FDs.
+    unsafe { Ok((OwnedFd::from_raw_fd(raw1), OwnedFd::from_raw_fd(raw2))) }
+}
+
+/// A running instance of virtmgr which is hosting a VirtualizationService
+/// RpcBinder server.
+pub struct VirtualizationService {
+    /// Client FD for UDS connection to virtmgr's RpcBinder server. Closing it
+    /// will make virtmgr shut down.
+    client_fd: OwnedFd,
+}
+
+impl VirtualizationService {
+    /// Spawns a new instance of virtmgr, a child process that will host
+    /// the VirtualizationService AIDL service.
+    pub fn new() -> Result<VirtualizationService, io::Error> {
+        let (wait_fd, ready_fd) = posix_pipe()?;
+        let (client_fd, server_fd) = posix_socketpair()?;
+
+        let mut command = Command::new(VIRTMGR_PATH);
+        command.arg("--rpc-server-fd").arg(format!("{}", server_fd.as_raw_fd()));
+        command.arg("--ready-fd").arg(format!("{}", ready_fd.as_raw_fd()));
+        command.preserved_fds(vec![server_fd.as_raw_fd(), ready_fd.as_raw_fd()]);
+
+        SharedChild::spawn(&mut command)?;
+
+        // Drop FDs that belong to virtmgr.
+        drop(server_fd);
+        drop(ready_fd);
+
+        // Wait for the child to signal that the RpcBinder server is ready
+        // by closing its end of the pipe.
+        let _ = File::from(wait_fd).read(&mut [0]);
+
+        Ok(VirtualizationService { client_fd })
+    }
+
+    /// Connects to the VirtualizationService AIDL service.
+    pub fn connect(&self) -> Result<Strong<dyn IVirtualizationService>, io::Error> {
+        let session = RpcSession::new();
+        session.set_file_descriptor_transport_mode(FileDescriptorTransportMode::Unix);
+        session.set_max_incoming_threads(VIRTMGR_THREADS);
+        session.set_max_outgoing_threads(VIRTMGR_THREADS);
+        session
+            .setup_unix_domain_bootstrap_client(self.client_fd.as_fd())
+            .map_err(|_| io::Error::from(io::ErrorKind::ConnectionRefused))
+    }
+}
 
 /// Connects to the VirtualizationService AIDL service.
 pub fn connect() -> Result<Strong<dyn IVirtualizationService>, StatusCode> {
@@ -71,7 +152,7 @@ pub struct VmInstance {
 pub trait VmCallback {
     /// Called when the payload has been started within the VM. If present, `stream` is connected
     /// to the stdin/stdout of the payload.
-    fn on_payload_started(&self, cid: i32, stream: Option<&File>) {}
+    fn on_payload_started(&self, cid: i32) {}
 
     /// Callend when the payload has notified Virtualization Service that it is ready to serve
     /// clients.
@@ -83,7 +164,7 @@ pub trait VmCallback {
 
     /// Called when an error has occurred in the VM. The `error_code` and `message` may give
     /// further details.
-    fn on_error(&self, cid: i32, error_code: i32, message: &str) {}
+    fn on_error(&self, cid: i32, error_code: ErrorCode, message: &str) {}
 
     /// Called when the VM has exited, all resources have been freed, and any logs have been
     /// written. `death_reason` gives an indication why the VM exited.
@@ -174,7 +255,7 @@ impl VmInstance {
         &self,
         port: u32,
     ) -> Result<Strong<T>, StatusCode> {
-        connect_preconnected_rpc_binder(|| {
+        RpcSession::new().setup_preconnected_client(|| {
             match self.vm.connectVsock(port as i32) {
                 Ok(vsock) => {
                     // Ownership of the fd is transferred to binder
@@ -186,11 +267,6 @@ impl VmInstance {
                 }
             }
         })
-    }
-
-    /// Get ramdump
-    pub fn get_ramdump(&self) -> Option<File> {
-        self.state.get_ramdump()
     }
 }
 
@@ -219,7 +295,6 @@ fn wait_for_binder_death(
 struct VmState {
     death_reason: Option<DeathReason>,
     reported_state: VirtualMachineState,
-    ramdump: Option<File>,
 }
 
 impl Monitor<VmState> {
@@ -235,14 +310,6 @@ impl Monitor<VmState> {
     fn notify_state(&self, state: VirtualMachineState) {
         self.state.lock().unwrap().reported_state = state;
         self.cv.notify_all();
-    }
-
-    fn set_ramdump(&self, ramdump: File) {
-        self.state.lock().unwrap().ramdump = Some(ramdump);
-    }
-
-    fn get_ramdump(&self) -> Option<File> {
-        self.state.lock().unwrap().ramdump.as_ref().and_then(|f| f.try_clone().ok())
     }
 }
 
@@ -266,14 +333,10 @@ impl Debug for VirtualMachineCallback {
 impl Interface for VirtualMachineCallback {}
 
 impl IVirtualMachineCallback for VirtualMachineCallback {
-    fn onPayloadStarted(
-        &self,
-        cid: i32,
-        stream: Option<&ParcelFileDescriptor>,
-    ) -> BinderResult<()> {
+    fn onPayloadStarted(&self, cid: i32) -> BinderResult<()> {
         self.state.notify_state(VirtualMachineState::STARTED);
         if let Some(ref callback) = self.client_callback {
-            callback.on_payload_started(cid, stream.map(ParcelFileDescriptor::as_ref));
+            callback.on_payload_started(cid);
         }
         Ok(())
     }
@@ -294,17 +357,12 @@ impl IVirtualMachineCallback for VirtualMachineCallback {
         Ok(())
     }
 
-    fn onError(&self, cid: i32, error_code: i32, message: &str) -> BinderResult<()> {
+    fn onError(&self, cid: i32, error_code: AidlErrorCode, message: &str) -> BinderResult<()> {
         self.state.notify_state(VirtualMachineState::FINISHED);
         if let Some(ref callback) = self.client_callback {
+            let error_code = error_code.into();
             callback.on_error(cid, error_code, message);
         }
-        Ok(())
-    }
-
-    fn onRamdump(&self, _cid: i32, ramdump: &ParcelFileDescriptor) -> BinderResult<()> {
-        let ramdump: File = ramdump.as_ref().try_clone().unwrap();
-        self.state.set_ramdump(ramdump);
         Ok(())
     }
 

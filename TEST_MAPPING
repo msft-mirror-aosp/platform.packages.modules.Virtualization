@@ -1,13 +1,10 @@
 {
-  "presubmit": [
+  "avf-presubmit": [
     {
       "name": "MicrodroidHostTestCases"
     },
     {
       "name": "ComposHostTestCases"
-    },
-    {
-      "name": "VirtualizationTestCases.64"
     },
     {
       "name": "MicrodroidTestApp"
@@ -16,10 +13,19 @@
       "name": "art_standalone_dexpreopt_tests"
     },
     {
+      "name": "composd_cmd.test"
+    },
+    {
       "name": "compos_key_tests"
+    },
+    {
+      "name": "compos_verify.test"
+    },
+    {
+      "name": "initrd_bootconfig.test"
     }
   ],
-  "postsubmit": [
+  "avf-postsubmit": [
     {
       "name": "odsign_e2e_tests_full"
     },
@@ -28,6 +34,14 @@
     },
     {
       "name": "ComposBenchmarkApp"
+    },
+    {
+      "name": "AVFHostTestCases"
+    }
+  ],
+  "postsubmit": [
+    {
+      "name": "CtsMicrodroidDisabledTestCases"
     }
   ],
   "imports": [
@@ -38,10 +52,25 @@
       "path": "packages/modules/Virtualization/avmd"
     },
     {
-      "path": "packages/modules/Virtualization/virtualizationservice"
+      "path": "packages/modules/Virtualization/encryptedstore"
+    },
+    {
+      "path": "packages/modules/Virtualization/virtualizationmanager"
+    },
+    {
+      "path": "packages/modules/Virtualization/libs/apexutil"
     },
     {
       "path": "packages/modules/Virtualization/libs/apkverify"
+    },
+    {
+      "path": "packages/modules/Virtualization/libs/avb"
+    },
+    {
+      "path": "packages/modules/Virtualization/libs/capabilities"
+    },
+    {
+      "path": "packages/modules/Virtualization/libs/devicemapper"
     },
     {
       "path": "packages/modules/Virtualization/libs/vbmeta"
@@ -50,7 +79,16 @@
       "path": "packages/modules/Virtualization/authfs"
     },
     {
+      "path": "packages/modules/Virtualization/microdroid_manager"
+    },
+    {
+      "path": "packages/modules/Virtualization/pvmfw"
+    },
+    {
       "path": "packages/modules/Virtualization/rialto"
+    },
+    {
+      "path": "packages/modules/Virtualization/vm"
     },
     {
       "path": "packages/modules/Virtualization/vmbase"

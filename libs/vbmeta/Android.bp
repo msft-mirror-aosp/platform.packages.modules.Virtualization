@@ -7,7 +7,7 @@ rust_defaults {
     crate_name: "vbmeta",
     host_supported: true,
     srcs: ["src/lib.rs"],
-    edition: "2018",
+    edition: "2021",
     rustlibs: [
         "libavb_bindgen",
         "libthiserror",
@@ -27,7 +27,11 @@ rust_test_host {
         "libanyhow",
         "libtempfile",
     ],
-    data: ["tests/data/*"],
+    data: [
+        ":avb_testkey_rsa2048",
+        ":avb_testkey_rsa4096",
+        ":avb_testkey_rsa8192",
+    ],
     required: ["avbtool"],
     test_suites: ["general-tests"],
     test_options: {

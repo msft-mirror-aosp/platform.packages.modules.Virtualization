@@ -4,6 +4,7 @@ package {
 
 rust_defaults {
     name: "vmbase_rust_defaults",
+    edition: "2021",
     host_supported: false,
     enabled: false,
     target: {
@@ -45,9 +46,15 @@ cc_defaults {
     defaults: ["vmbase_cc_defaults"],
     static_executable: true,
     static_libs: [
-        "libarm-optimized-routines-mem",
         "libvmbase_entry",
     ],
+    installable: false,
+    enabled: false,
+    target: {
+        android_arm64: {
+            enabled: true,
+        },
+    },
 }
 
 rust_library_rlib {
@@ -55,11 +62,13 @@ rust_library_rlib {
     defaults: ["vmbase_rust_defaults"],
     crate_name: "vmbase",
     srcs: ["src/lib.rs"],
-    edition: "2021",
     rustlibs: [
         "liblog_rust_nostd",
         "libpsci",
         "libspin_nostd",
+    ],
+    whole_static_libs: [
+        "librust_baremetal",
     ],
     apex_available: ["com.android.virt"],
 }

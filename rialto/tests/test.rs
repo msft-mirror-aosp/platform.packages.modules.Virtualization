@@ -33,7 +33,7 @@ use vmclient::{DeathReason, VmInstance};
 
 const RIALTO_PATH: &str = "/data/local/tmp/rialto_test/arm64/rialto.bin";
 
-/// Runs the Rialto VM as an unprotected VM via VirtualizationService.
+/// Runs the Rialto VM as a non-protected VM via VirtualizationService.
 #[test]
 fn test_boots() -> Result<(), Error> {
     android_logger::init_once(
@@ -48,12 +48,16 @@ fn test_boots() -> Result<(), Error> {
     // We need to start the thread pool for Binder to work properly, especially link_to_death.
     ProcessState::start_thread_pool();
 
-    let service = vmclient::connect().context("Failed to find VirtualizationService")?;
+    let virtmgr =
+        vmclient::VirtualizationService::new().context("Failed to spawn VirtualizationService")?;
+    let service = virtmgr.connect().context("Failed to connect to VirtualizationService")?;
+
     let rialto = File::open(RIALTO_PATH).context("Failed to open Rialto kernel binary")?;
     let console = android_log_fd()?;
     let log = android_log_fd()?;
 
     let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
+        name: String::from("RialtoTest"),
         kernel: None,
         initrd: None,
         params: None,
@@ -62,7 +66,6 @@ fn test_boots() -> Result<(), Error> {
         protectedVm: false,
         memoryMib: 300,
         numCpus: 1,
-        cpuAffinity: None,
         platformVersion: "~1.0".to_string(),
         taskProfiles: vec![],
     });

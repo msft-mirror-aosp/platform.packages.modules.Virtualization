@@ -20,16 +20,22 @@
 
 mod exceptions;
 mod layout;
+mod pci;
 
 extern crate alloc;
 
 use crate::layout::{
-    dtb_range, print_addresses, rodata_range, text_range, writable_region, DEVICE_REGION,
+    bionic_tls, dtb_range, print_addresses, rodata_range, stack_chk_guard, text_range,
+    writable_region, DEVICE_REGION,
 };
+use crate::pci::{check_pci, get_bar_region};
 use aarch64_paging::{idmap::IdMap, paging::Attributes};
 use alloc::{vec, vec::Vec};
 use buddy_system_allocator::LockedHeap;
-use log::{info, LevelFilter};
+use core::ffi::CStr;
+use fdtpci::PciInfo;
+use libfdt::Fdt;
+use log::{debug, info, trace, LevelFilter};
 use vmbase::{logger, main, println};
 
 static INITIALISED_DATA: [u32; 4] = [1, 2, 3, 4];
@@ -55,9 +61,23 @@ pub fn main(arg0: u64, arg1: u64, arg2: u64, arg3: u64) {
     print_addresses();
     assert_eq!(arg0, dtb_range().start.0 as u64);
     check_data();
+    check_stack_guard();
+
+    info!("Checking FDT...");
+    let fdt = dtb_range();
+    let fdt =
+        unsafe { core::slice::from_raw_parts_mut(fdt.start.0 as *mut u8, fdt.end.0 - fdt.start.0) };
+    let fdt = Fdt::from_mut_slice(fdt).unwrap();
+    info!("FDT passed verification.");
+    check_fdt(fdt);
+
+    let pci_info = PciInfo::from_fdt(fdt).unwrap();
+    debug!("Found PCI CAM at {:#x}-{:#x}", pci_info.cam_range.start, pci_info.cam_range.end);
+
+    modify_fdt(fdt);
 
     unsafe {
-        HEAP_ALLOCATOR.lock().init(&mut HEAP as *mut u8 as usize, HEAP.len());
+        HEAP_ALLOCATOR.lock().init(HEAP.as_mut_ptr() as usize, HEAP.len());
     }
 
     check_alloc();
@@ -85,21 +105,44 @@ pub fn main(arg0: u64, arg1: u64, arg2: u64, arg3: u64) {
             Attributes::NORMAL | Attributes::NON_GLOBAL | Attributes::EXECUTE_NEVER,
         )
         .unwrap();
+    idmap
+        .map_range(
+            &dtb_range().into(),
+            Attributes::NORMAL
+                | Attributes::NON_GLOBAL
+                | Attributes::READ_ONLY
+                | Attributes::EXECUTE_NEVER,
+        )
+        .unwrap();
+    idmap
+        .map_range(&get_bar_region(&pci_info), Attributes::DEVICE_NGNRE | Attributes::EXECUTE_NEVER)
+        .unwrap();
 
     info!("Activating IdMap...");
-    info!("{:?}", idmap);
+    trace!("{:?}", idmap);
     idmap.activate();
     info!("Activated.");
 
     check_data();
+    check_dice();
+
+    let mut pci_root = unsafe { pci_info.make_pci_root() };
+    check_pci(&mut pci_root);
+}
+
+fn check_stack_guard() {
+    const BIONIC_TLS_STACK_GRD_OFF: usize = 40;
+
+    info!("Testing stack guard");
+    assert_eq!(bionic_tls(BIONIC_TLS_STACK_GRD_OFF), stack_chk_guard());
 }
 
 fn check_data() {
-    info!("INITIALISED_DATA: {:#010x}", &INITIALISED_DATA as *const u32 as usize);
+    info!("INITIALISED_DATA: {:?}", INITIALISED_DATA.as_ptr());
     unsafe {
-        info!("ZEROED_DATA: {:#010x}", &ZEROED_DATA as *const u32 as usize);
-        info!("MUTABLE_DATA: {:#010x}", &MUTABLE_DATA as *const u32 as usize);
-        info!("HEAP: {:#010x}", &HEAP as *const u8 as usize);
+        info!("ZEROED_DATA: {:?}", ZEROED_DATA.as_ptr());
+        info!("MUTABLE_DATA: {:?}", MUTABLE_DATA.as_ptr());
+        info!("HEAP: {:?}", HEAP.as_ptr());
     }
 
     assert_eq!(INITIALISED_DATA[0], 1);
@@ -128,6 +171,46 @@ fn check_data() {
     info!("Data looks good");
 }
 
+fn check_fdt(reader: &Fdt) {
+    for reg in reader.memory().unwrap().unwrap() {
+        info!("memory @ {reg:#x?}");
+    }
+
+    let compatible = CStr::from_bytes_with_nul(b"ns16550a\0").unwrap();
+
+    for c in reader.compatible_nodes(compatible).unwrap() {
+        let reg = c.reg().unwrap().unwrap().next().unwrap();
+        info!("node compatible with '{}' at {reg:?}", compatible.to_str().unwrap());
+    }
+}
+
+fn modify_fdt(writer: &mut Fdt) {
+    writer.unpack().unwrap();
+    info!("FDT successfully unpacked.");
+
+    let path = CStr::from_bytes_with_nul(b"/memory\0").unwrap();
+    let mut node = writer.node_mut(path).unwrap().unwrap();
+    let name = CStr::from_bytes_with_nul(b"child\0").unwrap();
+    let mut child = node.add_subnode(name).unwrap();
+    info!("Created subnode '{}/{}'.", path.to_str().unwrap(), name.to_str().unwrap());
+
+    let name = CStr::from_bytes_with_nul(b"str-property\0").unwrap();
+    child.appendprop(name, b"property-value\0").unwrap();
+    info!("Appended property '{}'.", name.to_str().unwrap());
+
+    let name = CStr::from_bytes_with_nul(b"pair-property\0").unwrap();
+    let addr = 0x0123_4567u64;
+    let size = 0x89ab_cdefu64;
+    child.appendprop_addrrange(name, addr, size).unwrap();
+    info!("Appended property '{}'.", name.to_str().unwrap());
+
+    let writer = child.fdt();
+    writer.pack().unwrap();
+    info!("FDT successfully packed.");
+
+    info!("FDT checks done.");
+}
+
 fn check_alloc() {
     info!("Allocating a Vec...");
     let mut vector: Vec<u32> = vec![1, 2, 3, 4];
@@ -138,4 +221,19 @@ fn check_alloc() {
     vector[2] = 42;
     assert_eq!(vector[2], 42);
     info!("Vec seems to work.");
+}
+
+fn check_dice() {
+    info!("Testing DICE integration...");
+    let hash = dice::hash("hello world".as_bytes()).expect("DiceHash failed");
+    assert_eq!(
+        hash,
+        [
+            0x30, 0x9e, 0xcc, 0x48, 0x9c, 0x12, 0xd6, 0xeb, 0x4c, 0xc4, 0x0f, 0x50, 0xc9, 0x02,
+            0xf2, 0xb4, 0xd0, 0xed, 0x77, 0xee, 0x51, 0x1a, 0x7c, 0x7a, 0x9b, 0xcd, 0x3c, 0xa8,
+            0x6d, 0x4c, 0xd8, 0x6f, 0x98, 0x9d, 0xd3, 0x5b, 0xc5, 0xff, 0x49, 0x96, 0x70, 0xda,
+            0x34, 0x25, 0x5b, 0x45, 0xb0, 0xcf, 0xd8, 0x30, 0xe8, 0x1f, 0x60, 0x5d, 0xcf, 0x7d,
+            0xc5, 0x54, 0x2e, 0x93, 0xae, 0x9c, 0xd7, 0x6f
+        ]
+    );
 }

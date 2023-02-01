@@ -1,7 +1,10 @@
 {
-  "presubmit" : [
+  "avf-presubmit": [
     {
-      "name" : "avmdtool_tests"
+      "name": "avmdtool.test"
+    },
+    {
+      "name": "avmdtool_tests"
     }
   ]
 }

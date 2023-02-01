@@ -1,0 +1,38 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+java_test_host {
+    name: "AuthFsBenchmarks",
+    srcs: ["src/java/com/android/fs/benchmarks/*.java"],
+    libs: [
+        "tradefed",
+    ],
+    static_libs: [
+        "AuthFsHostTestCommon",
+        "MicrodroidHostTestHelper",
+        "cts-host-utils",
+    ],
+    test_suites: ["general-tests"],
+    data_device_bins_first: [
+        "open_then_run",
+        "fsverity",
+    ],
+    per_testcase_directory: true,
+    data: [
+        ":authfs_test_files",
+        ":CtsApkVerityTestPrebuiltFiles",
+        ":MicrodroidTestApp",
+        ":measure_io",
+    ],
+}
+
+cc_binary {
+    name: "measure_io",
+    srcs: [
+        "src/measure_io.cpp",
+    ],
+    shared_libs: [
+        "libbase",
+    ],
+}

@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{self, Debug, Display, Formatter};
-use android_system_virtualizationservice::{
-        aidl::android::system::virtualizationservice::{
-            DeathReason::DeathReason as AidlDeathReason}};
+use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::DeathReason::DeathReason as AidlDeathReason;
 
 /// The reason why a VM died.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,7 +28,7 @@ pub enum DeathReason {
     /// The VM requested to shut down.
     Shutdown,
     /// crosvm had an error starting the VM.
-    Error,
+    StartFailed,
     /// The VM requested to reboot, possibly as the result of a kernel panic.
     Reboot,
     /// The VM or crosvm crashed.
@@ -67,7 +64,7 @@ impl From<AidlDeathReason> for DeathReason {
             AidlDeathReason::KILLED => Self::Killed,
             AidlDeathReason::UNKNOWN => Self::Unknown,
             AidlDeathReason::SHUTDOWN => Self::Shutdown,
-            AidlDeathReason::ERROR => Self::Error,
+            AidlDeathReason::START_FAILED => Self::StartFailed,
             AidlDeathReason::REBOOT => Self::Reboot,
             AidlDeathReason::CRASH => Self::Crash,
             AidlDeathReason::PVM_FIRMWARE_PUBLIC_KEY_MISMATCH => Self::PvmFirmwarePublicKeyMismatch,
@@ -94,50 +91,5 @@ impl From<AidlDeathReason> for DeathReason {
             AidlDeathReason::HANGUP => Self::Hangup,
             _ => Self::Unrecognised(reason),
         }
-    }
-}
-
-impl Display for DeathReason {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let s = match self {
-            Self::VirtualizationServiceDied => "VirtualizationService died.",
-            Self::InfrastructureError => "Error waiting for VM to finish.",
-            Self::Killed => "VM was killed.",
-            Self::Unknown => "VM died for an unknown reason.",
-            Self::Shutdown => "VM shutdown cleanly.",
-            Self::Error => "Error starting VM.",
-            Self::Reboot => "VM tried to reboot, possibly due to a kernel panic.",
-            Self::Crash => "VM crashed.",
-            Self::PvmFirmwarePublicKeyMismatch => {
-                "pVM firmware failed to verify the VM because the public key doesn't match."
-            }
-            Self::PvmFirmwareInstanceImageChanged => {
-                "pVM firmware failed to verify the VM because the instance image changed."
-            }
-            Self::BootloaderPublicKeyMismatch => {
-                "Bootloader failed to verify the VM because the public key doesn't match."
-            }
-            Self::BootloaderInstanceImageChanged => {
-                "Bootloader failed to verify the VM because the instance image changed."
-            }
-            Self::MicrodroidFailedToConnectToVirtualizationService => {
-                "The microdroid failed to connect to VirtualizationService's RPC server."
-            }
-            Self::MicrodroidPayloadHasChanged => "The payload for microdroid is changed.",
-            Self::MicrodroidPayloadVerificationFailed => {
-                "The microdroid failed to verify given payload APK."
-            }
-            Self::MicrodroidInvalidPayloadConfig => {
-                "The VM config for microdroid is invalid (e.g. missing tasks)."
-            }
-            Self::MicrodroidUnknownRuntimeError => {
-                "There was a runtime error while running microdroid manager."
-            }
-            Self::Hangup => "VM hangup.",
-            Self::Unrecognised(reason) => {
-                return write!(f, "Unrecognised death reason {:?}.", reason);
-            }
-        };
-        f.write_str(s)
     }
 }

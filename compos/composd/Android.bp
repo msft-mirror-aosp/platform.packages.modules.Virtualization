@@ -5,7 +5,7 @@ package {
 rust_binary {
     name: "composd",
     srcs: ["src/composd_main.rs"],
-    edition: "2018",
+    edition: "2021",
     prefer_rlib: true,
     rustlibs: [
         "android.system.composd-rust",
@@ -13,7 +13,6 @@ rust_binary {
         "compos_aidl_interface-rust",
         "libandroid_logger",
         "libanyhow",
-        "libbinder_common",
         "libbinder_rs",
         "libcompos_common",
         "libcomposd_native_rust",

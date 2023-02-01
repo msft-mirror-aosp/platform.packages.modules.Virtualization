@@ -7,7 +7,7 @@ rust_defaults {
     crate_name: "apexutil",
     host_supported: true,
     srcs: ["src/lib.rs"],
-    edition: "2018",
+    edition: "2021",
     rustlibs: [
         "liblog_rust",
         "libthiserror",
@@ -27,6 +27,9 @@ rust_test {
     prefer_rlib: true,
     test_suites: ["general-tests"],
     data: ["tests/data/*"],
+    rustlibs: [
+        "libhex",
+    ],
     target: {
         host: {
             // TODO(b/204562227): remove once the build does this automatically

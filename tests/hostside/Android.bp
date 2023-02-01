@@ -15,6 +15,7 @@ java_test_host {
     static_libs: [
         "MicrodroidHostTestHelper",
         "compatibility-host-util",
+        "cts-statsd-atom-host-test-utils",
     ],
     per_testcase_directory: true,
     data: [
@@ -22,15 +23,16 @@ java_test_host {
         ":microdroid_general_sepolicy.conf",
         ":test.com.android.virt.pem",
         ":test2.com.android.virt.pem",
-        ":test-payload-metadata",
     ],
     data_native_bins: [
         "sepolicy-analyze",
         // For re-sign test
         "avbtool",
         "img2simg",
+        "initrd_bootconfig",
         "lpmake",
         "lpunpack",
+        "mk_payload",
         "sign_virt_apex",
         "simg2img",
     ],

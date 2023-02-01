@@ -11,6 +11,6 @@ java_library_host {
         "truth-prebuilt",
     ],
     static_libs: [
-        "VirtualizationTestHelper",
+        "MicrodroidTestHelper",
     ],
 }

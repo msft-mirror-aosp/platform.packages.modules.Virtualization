@@ -16,43 +16,55 @@
 
 use crate::create_partition::command_create_partition;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    IVirtualizationService::IVirtualizationService, PartitionType::PartitionType,
-    VirtualMachineAppConfig::DebugLevel::DebugLevel,
-    VirtualMachineAppConfig::VirtualMachineAppConfig, VirtualMachineConfig::VirtualMachineConfig,
+    IVirtualizationService::IVirtualizationService,
+    PartitionType::PartitionType,
+    VirtualMachineAppConfig::{DebugLevel::DebugLevel, Payload::Payload, VirtualMachineAppConfig},
+    VirtualMachineConfig::VirtualMachineConfig,
+    VirtualMachinePayloadConfig::VirtualMachinePayloadConfig,
     VirtualMachineState::VirtualMachineState,
 };
-use anyhow::{bail, Context, Error};
+use anyhow::{anyhow, bail, Context, Error};
 use binder::ParcelFileDescriptor;
+use glob::glob;
 use microdroid_payload_config::VmPayloadConfig;
+use rand::{distributions::Alphanumeric, Rng};
+use std::fs;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
-use vmclient::VmInstance;
+use vmclient::{ErrorCode, VmInstance};
 use vmconfig::{open_parcel_file, VmConfig};
 use zip::ZipArchive;
 
 /// Run a VM from the given APK, idsig, and config.
 #[allow(clippy::too_many_arguments)]
 pub fn command_run_app(
+    name: Option<String>,
     service: &dyn IVirtualizationService,
     apk: &Path,
     idsig: &Path,
     instance: &Path,
-    config_path: &str,
-    daemonize: bool,
+    storage: Option<&Path>,
+    storage_size: Option<u64>,
+    config_path: Option<String>,
+    payload_binary_name: Option<String>,
     console_path: Option<&Path>,
     log_path: Option<&Path>,
-    ramdump_path: Option<&Path>,
     debug_level: DebugLevel,
     protected: bool,
     mem: Option<u32>,
     cpus: Option<u32>,
-    cpu_affinity: Option<String>,
     task_profiles: Vec<String>,
     extra_idsigs: &[PathBuf],
 ) -> Result<(), Error> {
-    let extra_apks = parse_extra_apk_list(apk, config_path)?;
+    let apk_file = File::open(apk).context("Failed to open APK file")?;
+
+    let extra_apks = match config_path.as_deref() {
+        Some(path) => parse_extra_apk_list(apk, path)?,
+        None => vec![],
+    };
+
     if extra_apks.len() != extra_idsigs.len() {
         bail!(
             "Found {} extra apks, but there are {} extra idsigs",
@@ -67,7 +79,6 @@ pub fn command_run_app(
         service.createOrUpdateIdsigFile(&extra_apk_fd, &extra_idsig_fd)?;
     }
 
-    let apk_file = File::open(apk).context("Failed to open APK file")?;
     let idsig_file = File::create(idsig).context("Failed to create idsig file")?;
 
     let apk_fd = ParcelFileDescriptor::new(apk_file);
@@ -87,44 +98,135 @@ pub fn command_run_app(
         )?;
     }
 
+    let storage = if let Some(path) = storage {
+        if !path.exists() {
+            command_create_partition(
+                service,
+                path,
+                storage_size.unwrap_or(10 * 1024 * 1024),
+                PartitionType::ENCRYPTEDSTORE,
+            )?;
+        }
+        Some(open_parcel_file(path, true)?)
+    } else {
+        None
+    };
+
     let extra_idsig_files: Result<Vec<File>, _> = extra_idsigs.iter().map(File::open).collect();
     let extra_idsig_fds = extra_idsig_files?.into_iter().map(ParcelFileDescriptor::new).collect();
 
+    let payload = if let Some(config_path) = config_path {
+        if payload_binary_name.is_some() {
+            bail!("Only one of --config-path or --payload-binary-name can be defined")
+        }
+        Payload::ConfigPath(config_path)
+    } else if let Some(payload_binary_name) = payload_binary_name {
+        Payload::PayloadConfig(VirtualMachinePayloadConfig {
+            payloadBinaryName: payload_binary_name,
+        })
+    } else {
+        bail!("Either --config-path or --payload-binary-name must be defined")
+    };
+
+    let payload_config_str = format!("{:?}!{:?}", apk, payload);
+
     let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
+        name: name.unwrap_or_else(|| String::from("VmRunApp")),
         apk: apk_fd.into(),
         idsig: idsig_fd.into(),
         extraIdsigs: extra_idsig_fds,
         instanceImage: open_parcel_file(instance, true /* writable */)?.into(),
-        configPath: config_path.to_owned(),
+        encryptedStorageImage: storage,
+        payload,
         debugLevel: debug_level,
         protectedVm: protected,
         memoryMib: mem.unwrap_or(0) as i32, // 0 means use the VM default
         numCpus: cpus.unwrap_or(1) as i32,
-        cpuAffinity: cpu_affinity,
         taskProfiles: task_profiles,
     });
-    run(
+    run(service, &config, &payload_config_str, console_path, log_path)
+}
+
+fn find_empty_payload_apk_path() -> Result<PathBuf, Error> {
+    const GLOB_PATTERN: &str = "/apex/com.android.virt/app/**/EmptyPayloadApp.apk";
+    let mut entries: Vec<PathBuf> =
+        glob(GLOB_PATTERN).context("failed to glob")?.filter_map(|e| e.ok()).collect();
+    if entries.len() > 1 {
+        return Err(anyhow!("Found more than one apk matching {}", GLOB_PATTERN));
+    }
+    match entries.pop() {
+        Some(path) => Ok(path),
+        None => Err(anyhow!("No apks match {}", GLOB_PATTERN)),
+    }
+}
+
+fn create_work_dir() -> Result<PathBuf, Error> {
+    let s: String =
+        rand::thread_rng().sample_iter(&Alphanumeric).take(17).map(char::from).collect();
+    let work_dir = PathBuf::from("/data/local/tmp/microdroid").join(s);
+    println!("creating work dir {}", work_dir.display());
+    fs::create_dir_all(&work_dir).context("failed to mkdir")?;
+    Ok(work_dir)
+}
+
+/// Run a VM with Microdroid
+#[allow(clippy::too_many_arguments)]
+pub fn command_run_microdroid(
+    name: Option<String>,
+    service: &dyn IVirtualizationService,
+    work_dir: Option<PathBuf>,
+    storage: Option<&Path>,
+    storage_size: Option<u64>,
+    console_path: Option<&Path>,
+    log_path: Option<&Path>,
+    debug_level: DebugLevel,
+    protected: bool,
+    mem: Option<u32>,
+    cpus: Option<u32>,
+    task_profiles: Vec<String>,
+) -> Result<(), Error> {
+    let apk = find_empty_payload_apk_path()?;
+    println!("found path {}", apk.display());
+
+    let work_dir = work_dir.unwrap_or(create_work_dir()?);
+    let idsig = work_dir.join("apk.idsig");
+    println!("apk.idsig path: {}", idsig.display());
+    let instance_img = work_dir.join("instance.img");
+    println!("instance.img path: {}", instance_img.display());
+
+    let payload_binary_name = "MicrodroidEmptyPayloadJniLib.so";
+    let extra_sig = [];
+    command_run_app(
+        name,
         service,
-        &config,
-        &format!("{:?}!{:?}", apk, config_path),
-        daemonize,
+        &apk,
+        &idsig,
+        &instance_img,
+        storage,
+        storage_size,
+        /* config_path= */ None,
+        Some(payload_binary_name.to_owned()),
         console_path,
         log_path,
-        ramdump_path,
+        debug_level,
+        protected,
+        mem,
+        cpus,
+        task_profiles,
+        &extra_sig,
     )
 }
 
 /// Run a VM from the given configuration file.
 #[allow(clippy::too_many_arguments)]
 pub fn command_run(
+    name: Option<String>,
     service: &dyn IVirtualizationService,
     config_path: &Path,
-    daemonize: bool,
     console_path: Option<&Path>,
     log_path: Option<&Path>,
     mem: Option<u32>,
     cpus: Option<u32>,
-    cpu_affinity: Option<String>,
     task_profiles: Vec<String>,
 ) -> Result<(), Error> {
     let config_file = File::open(config_path).context("Failed to open config file")?;
@@ -136,16 +238,18 @@ pub fn command_run(
     if let Some(cpus) = cpus {
         config.numCpus = cpus as i32;
     }
-    config.cpuAffinity = cpu_affinity;
+    if let Some(name) = name {
+        config.name = name;
+    } else {
+        config.name = String::from("VmRun");
+    }
     config.taskProfiles = task_profiles;
     run(
         service,
         &VirtualMachineConfig::RawConfig(config),
         &format!("{:?}", config_path),
-        daemonize,
         console_path,
         log_path,
-        /* ramdump_path */ None,
     )
 }
 
@@ -164,19 +268,15 @@ fn state_to_str(vm_state: VirtualMachineState) -> &'static str {
 fn run(
     service: &dyn IVirtualizationService,
     config: &VirtualMachineConfig,
-    config_path: &str,
-    daemonize: bool,
+    payload_config: &str,
     console_path: Option<&Path>,
     log_path: Option<&Path>,
-    ramdump_path: Option<&Path>,
 ) -> Result<(), Error> {
     let console = if let Some(console_path) = console_path {
         Some(
             File::create(console_path)
                 .with_context(|| format!("Failed to open console file {:?}", console_path))?,
         )
-    } else if daemonize {
-        None
     } else {
         Some(duplicate_stdout()?)
     };
@@ -185,8 +285,6 @@ fn run(
             File::create(log_path)
                 .with_context(|| format!("Failed to open log file {:?}", log_path))?,
         )
-    } else if daemonize {
-        None
     } else {
         Some(duplicate_stdout()?)
     };
@@ -198,37 +296,15 @@ fn run(
 
     println!(
         "Created VM from {} with CID {}, state is {}.",
-        config_path,
+        payload_config,
         vm.cid(),
         state_to_str(vm.state()?)
     );
 
-    if daemonize {
-        // Pass the VM reference back to VirtualizationService and have it hold it in the
-        // background.
-        service.debugHoldVmRef(&vm.vm).context("Failed to pass VM to VirtualizationService")?;
-    } else {
-        // Wait until the VM or VirtualizationService dies. If we just returned immediately then the
-        // IVirtualMachine Binder object would be dropped and the VM would be killed.
-        let death_reason = vm.wait_for_death();
-
-        if let Some(path) = ramdump_path {
-            save_ramdump_if_available(path, &vm)?;
-        }
-        println!("{}", death_reason);
-    }
-
-    Ok(())
-}
-
-fn save_ramdump_if_available(path: &Path, vm: &VmInstance) -> Result<(), Error> {
-    if let Some(mut ramdump) = vm.get_ramdump() {
-        let mut file =
-            File::create(path).context(format!("Failed to create ramdump file {:?}", path))?;
-        let size = std::io::copy(&mut ramdump, &mut file)
-            .context(format!("Failed to save ramdump to file {:?}", path))?;
-        eprintln!("Ramdump ({} bytes) saved to {:?}", size, path);
-    }
+    // Wait until the VM or VirtualizationService dies. If we just returned immediately then the
+    // IVirtualMachine Binder object would be dropped and the VM would be killed.
+    let death_reason = vm.wait_for_death();
+    println!("VM ended: {:?}", death_reason);
     Ok(())
 }
 
@@ -242,19 +318,8 @@ fn parse_extra_apk_list(apk: &Path, config_path: &str) -> Result<Vec<String>, Er
 struct Callback {}
 
 impl vmclient::VmCallback for Callback {
-    fn on_payload_started(&self, _cid: i32, stream: Option<&File>) {
-        // Show the output of the payload
-        if let Some(stream) = stream {
-            let mut reader = BufReader::new(stream);
-            loop {
-                let mut s = String::new();
-                match reader.read_line(&mut s) {
-                    Ok(0) => break,
-                    Ok(_) => print!("{}", s),
-                    Err(e) => eprintln!("error reading from virtual machine: {}", e),
-                };
-            }
-        }
+    fn on_payload_started(&self, _cid: i32) {
+        eprintln!("payload started");
     }
 
     fn on_payload_ready(&self, _cid: i32) {
@@ -265,8 +330,8 @@ impl vmclient::VmCallback for Callback {
         eprintln!("payload finished with exit code {}", exit_code);
     }
 
-    fn on_error(&self, _cid: i32, error_code: i32, message: &str) {
-        eprintln!("VM encountered an error: code={}, message={}", error_code, message);
+    fn on_error(&self, _cid: i32, error_code: ErrorCode, message: &str) {
+        eprintln!("VM encountered an error: code={:?}, message={}", error_code, message);
     }
 }
 

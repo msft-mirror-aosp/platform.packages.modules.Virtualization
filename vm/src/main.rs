@@ -24,120 +24,160 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
 };
 use anyhow::{Context, Error};
 use binder::ProcessState;
+use clap::Parser;
 use create_idsig::command_create_idsig;
 use create_partition::command_create_partition;
-use run::{command_run, command_run_app};
+use run::{command_run, command_run_app, command_run_microdroid};
 use rustutils::system_properties;
 use std::path::{Path, PathBuf};
-use structopt::clap::AppSettings;
-use structopt::StructOpt;
 
 #[derive(Debug)]
 struct Idsigs(Vec<PathBuf>);
 
-#[derive(StructOpt)]
-#[structopt(no_version, global_settings = &[AppSettings::DisableVersion])]
+#[derive(Parser)]
 enum Opt {
     /// Run a virtual machine with a config in APK
     RunApp {
         /// Path to VM Payload APK
-        #[structopt(parse(from_os_str))]
         apk: PathBuf,
 
         /// Path to idsig of the APK
-        #[structopt(parse(from_os_str))]
         idsig: PathBuf,
 
         /// Path to the instance image. Created if not exists.
-        #[structopt(parse(from_os_str))]
         instance: PathBuf,
 
         /// Path to VM config JSON within APK (e.g. assets/vm_config.json)
-        config_path: String,
+        #[clap(long)]
+        config_path: Option<String>,
 
-        /// Detach VM from the terminal and run in the background
-        #[structopt(short, long)]
-        daemonize: bool,
+        /// Name of VM payload binary within APK (e.g. MicrodroidTestNativeLib.so)
+        #[clap(long)]
+        #[clap(alias = "payload_path")]
+        payload_binary_name: Option<String>,
+
+        /// Name of VM
+        #[clap(long)]
+        name: Option<String>,
+
+        /// Path to the file backing the storage.
+        /// Created if the option is used but the path does not exist in the device.
+        #[clap(long)]
+        storage: Option<PathBuf>,
+
+        /// Size of the storage. Used only if --storage is supplied but path does not exist
+        /// Default size is 10*1024*1024
+        #[clap(long)]
+        storage_size: Option<u64>,
 
         /// Path to file for VM console output.
-        #[structopt(long)]
+        #[clap(long)]
         console: Option<PathBuf>,
 
         /// Path to file for VM log output.
-        #[structopt(long)]
+        #[clap(long)]
         log: Option<PathBuf>,
 
-        /// Path to file where ramdump is recorded on kernel panic
-        #[structopt(long)]
-        ramdump: Option<PathBuf>,
-
-        /// Debug level of the VM. Supported values: "none" (default), "app_only", and "full".
-        #[structopt(long, default_value = "none", parse(try_from_str=parse_debug_level))]
+        /// Debug level of the VM. Supported values: "none" (default), and "full".
+        #[clap(long, default_value = "none", value_parser = parse_debug_level)]
         debug: DebugLevel,
 
         /// Run VM in protected mode.
-        #[structopt(short, long)]
+        #[clap(short, long)]
         protected: bool,
 
         /// Memory size (in MiB) of the VM. If unspecified, defaults to the value of `memory_mib`
         /// in the VM config file.
-        #[structopt(short, long)]
+        #[clap(short, long)]
         mem: Option<u32>,
 
         /// Number of vCPUs in the VM. If unspecified, defaults to 1.
-        #[structopt(long)]
+        #[clap(long)]
         cpus: Option<u32>,
 
-        /// Host CPUs where vCPUs are run on. If unspecified, vCPU runs on any host CPU.
-        #[structopt(long)]
-        cpu_affinity: Option<String>,
-
         /// Comma separated list of task profile names to apply to the VM
-        #[structopt(long)]
+        #[clap(long)]
         task_profiles: Vec<String>,
 
         /// Paths to extra idsig files.
-        #[structopt(long = "extra-idsig")]
+        #[clap(long = "extra-idsig")]
         extra_idsigs: Vec<PathBuf>,
+    },
+    /// Run a virtual machine with Microdroid inside
+    RunMicrodroid {
+        /// Path to the directory where VM-related files (e.g. instance.img, apk.idsig, etc.) will
+        /// be stored. If not specified a random directory under /data/local/tmp/microdroid will be
+        /// created and used.
+        #[clap(long)]
+        work_dir: Option<PathBuf>,
+
+        /// Name of VM
+        #[clap(long)]
+        name: Option<String>,
+
+        /// Path to the file backing the storage.
+        /// Created if the option is used but the path does not exist in the device.
+        #[clap(long)]
+        storage: Option<PathBuf>,
+
+        /// Size of the storage. Used only if --storage is supplied but path does not exist
+        /// Default size is 10*1024*1024
+        #[clap(long)]
+        storage_size: Option<u64>,
+
+        /// Path to file for VM console output.
+        #[clap(long)]
+        console: Option<PathBuf>,
+
+        /// Path to file for VM log output.
+        #[clap(long)]
+        log: Option<PathBuf>,
+
+        /// Debug level of the VM. Supported values: "none" (default), and "full".
+        #[clap(long, default_value = "full", value_parser = parse_debug_level)]
+        debug: DebugLevel,
+
+        /// Run VM in protected mode.
+        #[clap(short, long)]
+        protected: bool,
+
+        /// Memory size (in MiB) of the VM. If unspecified, defaults to the value of `memory_mib`
+        /// in the VM config file.
+        #[clap(short, long)]
+        mem: Option<u32>,
+
+        /// Number of vCPUs in the VM. If unspecified, defaults to 1.
+        #[clap(long)]
+        cpus: Option<u32>,
+
+        /// Comma separated list of task profile names to apply to the VM
+        #[clap(long)]
+        task_profiles: Vec<String>,
     },
     /// Run a virtual machine
     Run {
         /// Path to VM config JSON
-        #[structopt(parse(from_os_str))]
         config: PathBuf,
 
-        /// Detach VM from the terminal and run in the background
-        #[structopt(short, long)]
-        daemonize: bool,
+        /// Name of VM
+        #[clap(long)]
+        name: Option<String>,
 
         /// Number of vCPUs in the VM. If unspecified, defaults to 1.
-        #[structopt(long)]
+        #[clap(long)]
         cpus: Option<u32>,
 
-        /// Host CPUs where vCPUs are run on. If unspecified, vCPU runs on any host CPU. The format
-        /// can be either a comma-separated list of CPUs or CPU ranges to run vCPUs on (e.g.
-        /// "0,1-3,5" to choose host CPUs 0, 1, 2, 3, and 5, or a colon-separated list of
-        /// assignments of vCPU-to-host-CPU assignments e.g. "0=0:1=1:2=2" to map vCPU 0 to host
-        /// CPU 0 and so on.
-        #[structopt(long)]
-        cpu_affinity: Option<String>,
-
         /// Comma separated list of task profile names to apply to the VM
-        #[structopt(long)]
+        #[clap(long)]
         task_profiles: Vec<String>,
 
         /// Path to file for VM console output.
-        #[structopt(long)]
+        #[clap(long)]
         console: Option<PathBuf>,
 
         /// Path to file for VM log output.
-        #[structopt(long)]
+        #[clap(long)]
         log: Option<PathBuf>,
-    },
-    /// Stop a virtual machine running in the background
-    Stop {
-        /// CID of the virtual machine
-        cid: u32,
     },
     /// List running virtual machines
     List,
@@ -146,23 +186,22 @@ enum Opt {
     /// Create a new empty partition to be used as a writable partition for a VM
     CreatePartition {
         /// Path at which to create the image file
-        #[structopt(parse(from_os_str))]
         path: PathBuf,
 
         /// The desired size of the partition, in bytes.
         size: u64,
 
         /// Type of the partition
-        #[structopt(short="t", long="type", default_value="raw", parse(try_from_str=parse_partition_type))]
+        #[clap(short = 't', long = "type", default_value = "raw",
+               value_parser = parse_partition_type)]
         partition_type: PartitionType,
     },
     /// Creates or update the idsig file by digesting the input APK file.
     CreateIdsig {
         /// Path to VM Payload APK
-        #[structopt(parse(from_os_str))]
         apk: PathBuf,
+
         /// Path to idsig of the APK
-        #[structopt(parse(from_os_str))]
         path: PathBuf,
     },
 }
@@ -170,7 +209,6 @@ enum Opt {
 fn parse_debug_level(s: &str) -> Result<DebugLevel, String> {
     match s {
         "none" => Ok(DebugLevel::NONE),
-        "app_only" => Ok(DebugLevel::APP_ONLY),
         "full" => Ok(DebugLevel::FULL),
         _ => Err(format!("Invalid debug level {}", s)),
     }
@@ -186,62 +224,90 @@ fn parse_partition_type(s: &str) -> Result<PartitionType, String> {
 
 fn main() -> Result<(), Error> {
     env_logger::init();
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     // We need to start the thread pool for Binder to work properly, especially link_to_death.
     ProcessState::start_thread_pool();
 
-    let service = vmclient::connect().context("Failed to find VirtualizationService")?;
+    let virtmgr =
+        vmclient::VirtualizationService::new().context("Failed to spawn VirtualizationService")?;
+    let service = virtmgr.connect().context("Failed to connect to VirtualizationService")?;
 
     match opt {
         Opt::RunApp {
+            name,
             apk,
             idsig,
             instance,
+            storage,
+            storage_size,
             config_path,
-            daemonize,
+            payload_binary_name,
             console,
             log,
-            ramdump,
             debug,
             protected,
             mem,
             cpus,
-            cpu_affinity,
             task_profiles,
             extra_idsigs,
         } => command_run_app(
+            name,
             service.as_ref(),
             &apk,
             &idsig,
             &instance,
-            &config_path,
-            daemonize,
+            storage.as_deref(),
+            storage_size,
+            config_path,
+            payload_binary_name,
             console.as_deref(),
             log.as_deref(),
-            ramdump.as_deref(),
             debug,
             protected,
             mem,
             cpus,
-            cpu_affinity,
             task_profiles,
             &extra_idsigs,
         ),
-        Opt::Run { config, daemonize, cpus, cpu_affinity, task_profiles, console, log } => {
+        Opt::RunMicrodroid {
+            name,
+            work_dir,
+            storage,
+            storage_size,
+            console,
+            log,
+            debug,
+            protected,
+            mem,
+            cpus,
+            task_profiles,
+        } => command_run_microdroid(
+            name,
+            service.as_ref(),
+            work_dir,
+            storage.as_deref(),
+            storage_size,
+            console.as_deref(),
+            log.as_deref(),
+            debug,
+            protected,
+            mem,
+            cpus,
+            task_profiles,
+        ),
+        Opt::Run { name, config, cpus, task_profiles, console, log } => {
             command_run(
+                name,
                 service.as_ref(),
                 &config,
-                daemonize,
                 console.as_deref(),
                 log.as_deref(),
                 /* mem */ None,
                 cpus,
-                cpu_affinity,
                 task_profiles,
             )
         }
-        Opt::Stop { cid } => command_stop(service.as_ref(), cid),
         Opt::List => command_list(service.as_ref()),
         Opt::Info => command_info(),
         Opt::CreatePartition { path, size, partition_type } => {
@@ -249,15 +315,6 @@ fn main() -> Result<(), Error> {
         }
         Opt::CreateIdsig { apk, path } => command_create_idsig(service.as_ref(), &apk, &path),
     }
-}
-
-/// Retrieve reference to a previously daemonized VM and stop it.
-fn command_stop(service: &dyn IVirtualizationService, cid: u32) -> Result<(), Error> {
-    service
-        .debugDropVmRef(cid as i32)
-        .context("Failed to get VM from VirtualizationService")?
-        .context("CID does not correspond to a running background VM")?;
-    Ok(())
 }
 
 /// List the VMs currently running.
@@ -269,15 +326,15 @@ fn command_list(service: &dyn IVirtualizationService) -> Result<(), Error> {
 
 /// Print information about supported VM types.
 fn command_info() -> Result<(), Error> {
-    let unprotected_vm_supported =
+    let non_protected_vm_supported =
         system_properties::read_bool("ro.boot.hypervisor.vm.supported", false)?;
     let protected_vm_supported =
         system_properties::read_bool("ro.boot.hypervisor.protected_vm.supported", false)?;
-    match (unprotected_vm_supported, protected_vm_supported) {
+    match (non_protected_vm_supported, protected_vm_supported) {
         (false, false) => println!("VMs are not supported."),
         (false, true) => println!("Only protected VMs are supported."),
-        (true, false) => println!("Only unprotected VMs are supported."),
-        (true, true) => println!("Both protected and unprotected VMs are supported."),
+        (true, false) => println!("Only non-protected VMs are supported."),
+        (true, true) => println!("Both protected and non-protected VMs are supported."),
     }
 
     if let Some(version) = system_properties::read("ro.boot.hypervisor.version")? {
@@ -293,4 +350,16 @@ fn command_info() -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn verify_app() {
+        // Check that the command parsing has been configured in a valid way.
+        Opt::command().debug_assert();
+    }
 }

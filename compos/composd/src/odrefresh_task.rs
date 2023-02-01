@@ -25,16 +25,16 @@ use android_system_composd::aidl::android::system::composd::{
 use anyhow::{Context, Result};
 use binder::{Interface, Result as BinderResult, Strong};
 use compos_aidl_interface::aidl::com::android::compos::ICompOsService::{
-    CompilationMode::CompilationMode, ICompOsService,
+    CompilationMode::CompilationMode, ICompOsService, OdrefreshArgs::OdrefreshArgs,
 };
 use compos_common::odrefresh::{
     is_system_property_interesting, ExitCode, ODREFRESH_OUTPUT_ROOT_DIR,
 };
 use log::{error, info, warn};
 use rustutils::system_properties;
-use std::fs::{remove_dir_all, File, OpenOptions};
+use std::fs::{remove_dir_all, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -152,14 +152,27 @@ fn run_in_vm(
             .with_context(|| format!("Failed to delete {}", target_path.display()))?;
     }
 
-    let staging_dir = open_dir(composd_native::palette_create_odrefresh_staging_directory()?)?;
-    let system_dir = open_dir(Path::new("/system"))?;
-    let output_dir = open_dir(output_root)?;
+    let staging_dir_fd = open_dir(composd_native::palette_create_odrefresh_staging_directory()?)?;
+    let system_dir_fd = open_dir(Path::new("/system"))?;
+    let output_dir_fd = open_dir(output_root)?;
+
+    // Get the raw FD before passing the ownership, since borrowing will violate the borrow check.
+    let system_dir_raw_fd = system_dir_fd.as_raw_fd();
+    let output_dir_raw_fd = output_dir_fd.as_raw_fd();
+    let staging_dir_raw_fd = staging_dir_fd.as_raw_fd();
+
+    // Get the /system_ext FD differently because it may not exist.
+    let (system_ext_dir_raw_fd, ro_dir_fds) =
+        if let Ok(system_ext_dir_fd) = open_dir(Path::new("/system_ext")) {
+            (system_ext_dir_fd.as_raw_fd(), vec![system_dir_fd, system_ext_dir_fd])
+        } else {
+            (-1, vec![system_dir_fd])
+        };
 
     // Spawn a fd_server to serve the FDs.
     let fd_server_config = FdServerConfig {
-        ro_dir_fds: vec![system_dir.as_raw_fd()],
-        rw_dir_fds: vec![staging_dir.as_raw_fd(), output_dir.as_raw_fd()],
+        ro_dir_fds,
+        rw_dir_fds: vec![staging_dir_fd, output_dir_fd],
         ..Default::default()
     };
     let fd_server_raii = fd_server_config.into_fd_server()?;
@@ -167,26 +180,30 @@ fn run_in_vm(
     let zygote_arch = system_properties::read("ro.zygote")?.context("ro.zygote not set")?;
     let system_server_compiler_filter =
         system_properties::read("dalvik.vm.systemservercompilerfilter")?.unwrap_or_default();
-    let exit_code = service.odrefresh(
-        compilation_mode,
-        system_dir.as_raw_fd(),
-        output_dir.as_raw_fd(),
-        staging_dir.as_raw_fd(),
-        target_dir_name,
-        &zygote_arch,
-        &system_server_compiler_filter,
-    )?;
+
+    let args = OdrefreshArgs {
+        compilationMode: compilation_mode,
+        systemDirFd: system_dir_raw_fd,
+        systemExtDirFd: system_ext_dir_raw_fd,
+        outputDirFd: output_dir_raw_fd,
+        stagingDirFd: staging_dir_raw_fd,
+        targetDirName: target_dir_name.to_string(),
+        zygoteArch: zygote_arch,
+        systemServerCompilerFilter: system_server_compiler_filter,
+    };
+    let exit_code = service.odrefresh(&args)?;
 
     drop(fd_server_raii);
     ExitCode::from_i32(exit_code.into())
 }
 
-/// Returns an owned FD of the directory. It currently returns a `File` as a FD owner, but
-/// it's better to use `std::os::unix::io::OwnedFd` once/if it becomes standard.
-fn open_dir(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .custom_flags(libc::O_DIRECTORY)
-        .read(true) // O_DIRECTORY can only be opened with read
-        .open(path)
-        .with_context(|| format!("Failed to open {:?} directory as path fd", path))
+/// Returns an `OwnedFD` of the directory.
+fn open_dir(path: &Path) -> Result<OwnedFd> {
+    Ok(OwnedFd::from(
+        OpenOptions::new()
+            .custom_flags(libc::O_DIRECTORY)
+            .read(true) // O_DIRECTORY can only be opened with read
+            .open(path)
+            .with_context(|| format!("Failed to open {:?} directory as path fd", path))?,
+    ))
 }

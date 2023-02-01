@@ -3,20 +3,20 @@ package {
 }
 
 java_library_static {
-    name: "VirtualizationTestHelper",
-    srcs: ["src/java/com/android/virt/**/*.java"],
+    name: "MicrodroidTestHelper",
+    srcs: ["src/java/com/android/microdroid/test/common/*.java"],
     host_supported: true,
+    sdk_version: "system_current",
 }
 
 java_library_static {
-    name: "MicroroidDeviceTestHelper",
-    srcs: ["src/java/com/android/microdroid/**/*.java"],
+    name: "MicrodroidDeviceTestHelper",
+    srcs: ["src/java/com/android/microdroid/test/device/*.java"],
     static_libs: [
         "androidx.test.runner",
         "androidx.test.ext.junit",
-        "VirtualizationTestHelper",
+        "MicrodroidTestHelper",
         "truth-prebuilt",
     ],
-    libs: ["android.system.virtualmachine"],
-    platform_apis: true,
+    sdk_version: "system_current",
 }
