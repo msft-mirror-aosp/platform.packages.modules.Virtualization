@@ -70,12 +70,14 @@ const MAIN_APK_DEVICE_NAME: &str = "microdroid-apk";
 const EXTRA_APK_PATH_PATTERN: &str = "/dev/block/by-name/extra-apk-*";
 const EXTRA_IDSIG_PATH_PATTERN: &str = "/dev/block/by-name/extra-idsig-*";
 const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
-const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
-const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
 const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
 const DEBUG_MICRODROID_NO_VERIFIED_BOOT: &str =
     "/sys/firmware/devicetree/base/virtualization/guest/debug-microdroid,no-verified-boot";
+
+const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
+const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
+const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
 const TOMBSTONE_TRANSMIT_DONE_PROP: &str = "tombstone_transmit.init_done";
@@ -84,9 +86,7 @@ const DEBUGGABLE_PROP: &str = "ro.boot.microdroid.debuggable";
 // SYNC WITH virtualizationservice/src/crosvm.rs
 const FAILURE_SERIAL_DEVICE: &str = "/dev/ttyS1";
 
-/// Identifier for the key used for encrypted store.
 const ENCRYPTEDSTORE_BACKING_DEVICE: &str = "/dev/block/by-name/encryptedstore";
-const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
 const ENCRYPTEDSTORE_KEY_IDENTIFIER: &str = "encryptedstore_key";
 const ENCRYPTEDSTORE_KEYSIZE: u32 = 32;
 
@@ -347,6 +347,13 @@ fn is_verified_boot() -> bool {
     !Path::new(DEBUG_MICRODROID_NO_VERIFIED_BOOT).exists()
 }
 
+fn should_export_tombstones(config: &VmPayloadConfig) -> bool {
+    match config.export_tombstones {
+        Some(b) => b,
+        None => system_properties::read_bool(DEBUGGABLE_PROP, true).unwrap_or(false),
+    }
+}
+
 fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
     let metadata = load_metadata().context("Failed to load payload metadata")?;
     let dice = DiceDriver::new(Path::new("/dev/open-dice0")).context("Failed to load DICE")?;
@@ -456,7 +463,7 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     setup_config_sysprops(&config)?;
 
     // Start tombstone_transmit if enabled
-    if config.export_tombstones {
+    if should_export_tombstones(&config) {
         system_properties::write("tombstone_transmit.start", "1")
             .context("set tombstone_transmit.start")?;
     } else {
@@ -481,7 +488,7 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
         .context("set microdroid_manager.init_done")?;
 
     // Wait for tombstone_transmit to init
-    if config.export_tombstones {
+    if should_export_tombstones(&config) {
         wait_for_tombstone_transmit_done()?;
     }
 
@@ -813,7 +820,7 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
                 apexes: vec![],
                 extra_apks: vec![],
                 prefer_staged: false,
-                export_tombstones: false,
+                export_tombstones: None,
                 enable_authfs: false,
             })
         }
