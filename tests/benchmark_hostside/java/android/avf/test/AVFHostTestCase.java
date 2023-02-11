@@ -79,7 +79,6 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     private static final int ROUND_IGNORE_STARTUP_TIME = 3;
     private static final String APK_NAME = "MicrodroidTestApp.apk";
     private static final String PACKAGE_NAME = "com.android.microdroid.test";
-    private static final int NUM_VCPUS = 3;
 
     private MetricsProcessor mMetricsProcessor;
     @Rule public TestMetrics mMetrics = new TestMetrics();
@@ -95,6 +94,14 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
 
     @After
     public void tearDown() throws Exception {
+        try {
+            testIfDeviceIsCapable(getDevice());
+        } catch (Exception e) {
+            // Suppress execption here.
+            // If we throw exceptions in both setUp() and tearDown(),
+            // then test is reported as fail with org.junit.TestCouldNotBeSkippedException.
+            return;
+        }
         // Set PKVM enable and reboot to prevent previous staged session.
         if (!isCuttlefish()) {
             setPKVMStatusWithRebootToBootloader(true);
@@ -247,7 +254,7 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(vm_mem_mb)
-                        .numCpus(NUM_VCPUS)
+                        .cpuTopology("match_host")
                         .build(device);
         microdroidDevice.waitForBootComplete(30000);
         microdroidDevice.enableAdbRoot();
