@@ -25,6 +25,9 @@ import android.os.Parcel;
 import android.os.ParcelFileDescriptor;
 import android.os.Parcelable;
 
+import java.io.Closeable;
+import java.io.IOException;
+
 /**
  * A VM descriptor that captures the state of a Virtual Machine.
  *
@@ -34,8 +37,10 @@ import android.os.Parcelable;
  *
  * @hide
  */
+// TODO(b/268613460): should implement autocloseable.
 @SystemApi
-public final class VirtualMachineDescriptor implements Parcelable {
+public final class VirtualMachineDescriptor implements Parcelable, Closeable {
+    private volatile boolean mClosed = false;
     @NonNull private final ParcelFileDescriptor mConfigFd;
     @NonNull private final ParcelFileDescriptor mInstanceImgFd;
     // File descriptor of the image backing the encrypted storage - Will be null if encrypted
@@ -49,9 +54,10 @@ public final class VirtualMachineDescriptor implements Parcelable {
 
     @Override
     public void writeToParcel(@NonNull Parcel out, int flags) {
-        mConfigFd.writeToParcel(out, flags);
-        mInstanceImgFd.writeToParcel(out, flags);
-        if (mEncryptedStoreFd != null) mEncryptedStoreFd.writeToParcel(out, flags);
+        checkNotClosed();
+        out.writeParcelable(mConfigFd, flags);
+        out.writeParcelable(mInstanceImgFd, flags);
+        out.writeParcelable(mEncryptedStoreFd, flags);
     }
 
     @NonNull
@@ -71,6 +77,7 @@ public final class VirtualMachineDescriptor implements Parcelable {
      */
     @NonNull
     ParcelFileDescriptor getConfigFd() {
+        checkNotClosed();
         return mConfigFd;
     }
 
@@ -79,6 +86,7 @@ public final class VirtualMachineDescriptor implements Parcelable {
      */
     @NonNull
     ParcelFileDescriptor getInstanceImgFd() {
+        checkNotClosed();
         return mInstanceImgFd;
     }
 
@@ -88,6 +96,7 @@ public final class VirtualMachineDescriptor implements Parcelable {
      */
     @Nullable
     ParcelFileDescriptor getEncryptedStoreFd() {
+        checkNotClosed();
         return mEncryptedStoreFd;
     }
 
@@ -95,14 +104,34 @@ public final class VirtualMachineDescriptor implements Parcelable {
             @NonNull ParcelFileDescriptor configFd,
             @NonNull ParcelFileDescriptor instanceImgFd,
             @Nullable ParcelFileDescriptor encryptedStoreFd) {
-        mConfigFd = configFd;
-        mInstanceImgFd = instanceImgFd;
+        mConfigFd = requireNonNull(configFd);
+        mInstanceImgFd = requireNonNull(instanceImgFd);
         mEncryptedStoreFd = encryptedStoreFd;
     }
 
     private VirtualMachineDescriptor(Parcel in) {
-        mConfigFd = requireNonNull(in.readFileDescriptor());
-        mInstanceImgFd = requireNonNull(in.readFileDescriptor());
-        mEncryptedStoreFd = in.readFileDescriptor();
+        mConfigFd = requireNonNull(readParcelFileDescriptor(in));
+        mInstanceImgFd = requireNonNull(readParcelFileDescriptor(in));
+        mEncryptedStoreFd = readParcelFileDescriptor(in);
+    }
+
+    private ParcelFileDescriptor readParcelFileDescriptor(Parcel in) {
+        return in.readParcelable(
+                ParcelFileDescriptor.class.getClassLoader(), ParcelFileDescriptor.class);
+    }
+
+    @Override
+    public void close() throws IOException {
+        mClosed = true;
+        // Let the compiler do the work: close everything, throw if any of them fail, skipping null.
+        try (mConfigFd;
+                mInstanceImgFd;
+                mEncryptedStoreFd) {}
+    }
+
+    private void checkNotClosed() {
+        if (mClosed) {
+            throw new IllegalStateException("Descriptor has been closed");
+        }
     }
 }

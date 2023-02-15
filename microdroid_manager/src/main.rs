@@ -21,7 +21,7 @@ mod payload;
 mod swap;
 mod vm_payload_service;
 
-use crate::dice::{DiceContext, DiceDriver};
+use crate::dice::{DiceDriver, derive_sealing_key};
 use crate::instance::{ApexData, ApkData, InstanceDisk, MicrodroidData, RootHash};
 use crate::vm_payload_service::register_vm_payload_service;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::ErrorCode::ErrorCode;
@@ -34,6 +34,7 @@ use android_system_virtualization_payload::aidl::android::system::virtualization
 use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use apkverify::{get_public_key_der, verify, V4Signature};
 use binder::Strong;
+use diced_open_dice::OwnedDiceArtifacts;
 use diced_utils::cbor::{encode_header, encode_number};
 use glob::glob;
 use itertools::sorted;
@@ -70,12 +71,14 @@ const MAIN_APK_DEVICE_NAME: &str = "microdroid-apk";
 const EXTRA_APK_PATH_PATTERN: &str = "/dev/block/by-name/extra-apk-*";
 const EXTRA_IDSIG_PATH_PATTERN: &str = "/dev/block/by-name/extra-idsig-*";
 const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
-const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
-const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
 const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
 const DEBUG_MICRODROID_NO_VERIFIED_BOOT: &str =
     "/sys/firmware/devicetree/base/virtualization/guest/debug-microdroid,no-verified-boot";
+
+const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
+const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
+const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
 const TOMBSTONE_TRANSMIT_DONE_PROP: &str = "tombstone_transmit.init_done";
@@ -84,11 +87,9 @@ const DEBUGGABLE_PROP: &str = "ro.boot.microdroid.debuggable";
 // SYNC WITH virtualizationservice/src/crosvm.rs
 const FAILURE_SERIAL_DEVICE: &str = "/dev/ttyS1";
 
-/// Identifier for the key used for encrypted store.
 const ENCRYPTEDSTORE_BACKING_DEVICE: &str = "/dev/block/by-name/encryptedstore";
-const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
 const ENCRYPTEDSTORE_KEY_IDENTIFIER: &str = "encryptedstore_key";
-const ENCRYPTEDSTORE_KEYSIZE: u32 = 32;
+const ENCRYPTEDSTORE_KEYSIZE: usize = 32;
 
 #[derive(thiserror::Error, Debug)]
 enum MicrodroidError {
@@ -268,7 +269,7 @@ fn dice_derivation(
     dice: DiceDriver,
     verified_data: &MicrodroidData,
     payload_metadata: &PayloadMetadata,
-) -> Result<DiceContext> {
+) -> Result<OwnedDiceArtifacts> {
     // Calculate compound digests of code and authorities
     let mut code_hash_ctx = Sha512::new();
     let mut authority_hash_ctx = Sha512::new();
@@ -347,6 +348,13 @@ fn is_verified_boot() -> bool {
     !Path::new(DEBUG_MICRODROID_NO_VERIFIED_BOOT).exists()
 }
 
+fn should_export_tombstones(config: &VmPayloadConfig) -> bool {
+    match config.export_tombstones {
+        Some(b) => b,
+        None => system_properties::read_bool(DEBUGGABLE_PROP, true).unwrap_or(false),
+    }
+}
+
 fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
     let metadata = load_metadata().context("Failed to load payload metadata")?;
     let dice = DiceDriver::new(Path::new("/dev/open-dice0")).context("Failed to load DICE")?;
@@ -406,12 +414,12 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
 
     // To minimize the exposure to untrusted data, derive dice profile as soon as possible.
     info!("DICE derivation for payload");
-    let dice_context = dice_derivation(dice, &verified_data, &payload_metadata)?;
+    let dice_artifacts = dice_derivation(dice, &verified_data, &payload_metadata)?;
 
     // Run encryptedstore binary to prepare the storage
     let encryptedstore_child = if Path::new(ENCRYPTEDSTORE_BACKING_DEVICE).exists() {
         info!("Preparing encryptedstore ...");
-        Some(prepare_encryptedstore(&dice_context).context("encryptedstore run")?)
+        Some(prepare_encryptedstore(&dice_artifacts).context("encryptedstore run")?)
     } else {
         None
     };
@@ -456,7 +464,7 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     setup_config_sysprops(&config)?;
 
     // Start tombstone_transmit if enabled
-    if config.export_tombstones {
+    if should_export_tombstones(&config) {
         system_properties::write("tombstone_transmit.start", "1")
             .context("set tombstone_transmit.start")?;
     } else {
@@ -466,7 +474,7 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     // Wait until zipfuse has mounted the APKs so we can access the payload
     zipfuse.wait_until_done()?;
 
-    register_vm_payload_service(allow_restricted_apis, service.clone(), dice_context)?;
+    register_vm_payload_service(allow_restricted_apis, service.clone(), dice_artifacts)?;
 
     // Wait for encryptedstore to finish mounting the storage (if enabled) before setting
     // microdroid_manager.init_done. Reason is init stops uneventd after that.
@@ -481,7 +489,7 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
         .context("set microdroid_manager.init_done")?;
 
     // Wait for tombstone_transmit to init
-    if config.export_tombstones {
+    if should_export_tombstones(&config) {
         wait_for_tombstone_transmit_done()?;
     }
 
@@ -813,7 +821,7 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
                 apexes: vec![],
                 extra_apks: vec![],
                 prefer_staged: false,
-                export_tombstones: false,
+                export_tombstones: None,
                 enable_authfs: false,
             })
         }
@@ -900,7 +908,7 @@ fn to_hex_string(buf: &[u8]) -> String {
     buf.iter().map(|b| format!("{:02X}", b)).collect()
 }
 
-fn prepare_encryptedstore(dice: &DiceContext) -> Result<Child> {
+fn prepare_encryptedstore(dice_artifacts: &OwnedDiceArtifacts) -> Result<Child> {
     // Use a fixed salt to scope the derivation to this API.
     // Generated using hexdump -vn32 -e'14/1 "0x%02X, " 1 "\n"' /dev/urandom
     // TODO(b/241541860) : Move this (& other salts) to a salt container, i.e. a global enum
@@ -909,7 +917,8 @@ fn prepare_encryptedstore(dice: &DiceContext) -> Result<Child> {
         0x6F, 0xB3, 0xF9, 0x40, 0xCE, 0xDD, 0x99, 0x40, 0xAA, 0xA7, 0x0E, 0x92, 0x73, 0x90, 0x86,
         0x4A, 0x75,
     ];
-    let key = dice.get_sealing_key(
+    let key = derive_sealing_key(
+        &dice_artifacts.cdi_values.cdi_seal,
         &salt,
         ENCRYPTEDSTORE_KEY_IDENTIFIER.as_bytes(),
         ENCRYPTEDSTORE_KEYSIZE,

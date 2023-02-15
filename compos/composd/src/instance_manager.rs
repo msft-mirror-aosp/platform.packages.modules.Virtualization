@@ -21,11 +21,8 @@ use crate::instance_starter::{CompOsInstance, InstanceStarter};
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice;
 use anyhow::{bail, Result};
 use binder::Strong;
-use compos_common::compos_client::VmParameters;
-use compos_common::{CURRENT_INSTANCE_DIR, DEX2OAT_THREADS_PROP_NAME, TEST_INSTANCE_DIR};
-use rustutils::system_properties;
-use std::num::NonZeroU32;
-use std::str::FromStr;
+use compos_common::compos_client::{VmCpuTopology, VmParameters};
+use compos_common::{CURRENT_INSTANCE_DIR, TEST_INSTANCE_DIR};
 use std::sync::{Arc, Mutex, Weak};
 use virtualizationservice::IVirtualizationService::IVirtualizationService;
 
@@ -79,16 +76,17 @@ impl InstanceManager {
 }
 
 fn new_vm_parameters() -> Result<VmParameters> {
-    let cpus = match system_properties::read(DEX2OAT_THREADS_PROP_NAME)? {
-        Some(s) => Some(NonZeroU32::from_str(&s)?),
-        None => {
-            // dex2oat uses all CPUs by default. To match the behavior, give the VM all CPUs by
-            // default.
-            NonZeroU32::new(num_cpus::get() as u32)
-        }
-    };
+    // By default, dex2oat starts as many threads as there are CPUs. This can be overridden with
+    // a system property. Start the VM with all CPUs and assume the guest will start a suitable
+    // number of dex2oat threads.
+    let cpu_topology = VmCpuTopology::MatchHost;
     let task_profiles = vec!["SCHED_SP_COMPUTE".to_string()];
-    Ok(VmParameters { cpus, task_profiles, memory_mib: Some(VM_MEMORY_MIB), ..Default::default() })
+    Ok(VmParameters {
+        cpu_topology,
+        task_profiles,
+        memory_mib: Some(VM_MEMORY_MIB),
+        ..Default::default()
+    })
 }
 
 // Ensures we only run one instance at a time.

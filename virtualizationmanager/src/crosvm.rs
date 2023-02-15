@@ -15,7 +15,7 @@
 //! Functions for running instances of `crosvm`.
 
 use crate::aidl::{remove_temporary_files, Cid, VirtualMachineCallbacks};
-use crate::atom::write_vm_exited_stats;
+use crate::atom::{get_num_cpus, write_vm_exited_stats};
 use anyhow::{anyhow, bail, Context, Error, Result};
 use command_fds::CommandFdExt;
 use lazy_static::lazy_static;
@@ -97,6 +97,7 @@ pub struct CrosvmConfig {
     pub protected: bool,
     pub memory_mib: Option<NonZeroU32>,
     pub cpus: Option<NonZeroU32>,
+    pub host_cpu_topology: bool,
     pub task_profiles: Vec<String>,
     pub console_fd: Option<File>,
     pub log_fd: Option<File>,
@@ -663,6 +664,24 @@ fn exit_signal(result: &Result<ExitStatus, io::Error>) -> Option<i32> {
     }
 }
 
+fn should_configure_ramdump(protected: bool) -> bool {
+    if protected {
+        // Protected VM needs ramdump configuration here.
+        // pvmfw will disable ramdump if unnecessary.
+        true
+    } else {
+        // For unprotected VM, ramdump should be handled here.
+        // ramdump wouldn't be enabled if ramdump is explicitly set to <1>.
+        if let Ok(mut file) = File::open("/proc/device-tree/avf/guest/common/ramdump") {
+            let mut ramdump: [u8; 4] = Default::default();
+            file.read_exact(&mut ramdump).map_err(|_| false).unwrap();
+            // DT spec uses big endian although Android is always little endian.
+            return u32::from_be_bytes(ramdump) == 1;
+        }
+        false
+    }
+}
+
 /// Starts an instance of `crosvm` to manage a new VM.
 fn run_vm(
     config: CrosvmConfig,
@@ -712,6 +731,15 @@ fn run_vm(
 
     if let Some(cpus) = config.cpus {
         command.arg("--cpus").arg(cpus.to_string());
+    }
+
+    if config.host_cpu_topology {
+        // TODO(b/266664564): replace with --host-cpu-topology once available
+        if let Some(cpus) = get_num_cpus() {
+            command.arg("--cpus").arg(cpus.to_string());
+        } else {
+            bail!("Could not determine the number of CPUs in the system");
+        }
     }
 
     if !config.task_profiles.is_empty() {
@@ -779,7 +807,10 @@ fn run_vm(
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);
 
-    command.arg("--params").arg("crashkernel=17M");
+    if should_configure_ramdump(config.protected) {
+        command.arg("--params").arg("crashkernel=17M");
+    }
+
     print_crosvm_args(&command);
 
     let result = SharedChild::spawn(&mut command)?;

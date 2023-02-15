@@ -55,6 +55,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
@@ -72,6 +73,7 @@ import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -90,9 +92,6 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     private static final int MIN_MEM_ARM64 = 145;
     private static final int MIN_MEM_X86_64 = 196;
-
-    // Number of vCPUs for testing purpose
-    private static final int NUM_VCPUS = 3;
 
     private static final int BOOT_COMPLETE_TIMEOUT = 30000; // 30 seconds
 
@@ -219,6 +218,14 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
             Thread.sleep(500);
         }
         assertThat(callable.call(), matcher);
+    }
+
+    private int getDeviceNumCpus(CommandRunner runner) throws DeviceNotAvailableException {
+        return Integer.parseInt(runner.run("nproc --all").trim());
+    }
+
+    private int getDeviceNumCpus(ITestDevice device) throws DeviceNotAvailableException {
+        return getDeviceNumCpus(new CommandRunner(device));
     }
 
     static class ActiveApexInfo {
@@ -442,7 +449,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
-                        .numCpus(NUM_VCPUS)
+                        .cpuTopology("match_host")
                         .protectedVm(protectedVm)
                         .build(getAndroidDevice());
 
@@ -513,24 +520,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         vmInfo.mProcess.destroy();
     }
 
-    private boolean isTombstoneGenerated(String configPath, String... crashCommand)
-            throws Exception {
-        // Note this test relies on logcat values being printed by tombstone_transmit on
-        // and the reeceiver on host (virtualization_service)
-        mMicrodroidDevice =
-                MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
-                        .debugLevel("full")
-                        .memoryMib(minMemorySize())
-                        .numCpus(NUM_VCPUS)
-                        .build(getAndroidDevice());
-        mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
-        mMicrodroidDevice.enableAdbRoot();
-
-        CommandRunner microdroid = new CommandRunner(mMicrodroidDevice);
-        microdroid.run(crashCommand);
-
-        // check until microdroid is shut down
-        CommandRunner android = new CommandRunner(getDevice());
+    private void waitForCrosvmExit(CommandRunner android) throws Exception {
         // TODO: improve crosvm exit check. b/258848245
         android.runWithTimeout(
                 15000,
@@ -539,8 +529,12 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 "1",
                 "-e",
                 "'virtualizationmanager::crosvm.*exited with status exit status:'");
+    }
 
-        // Check that tombstone is received (from host logcat)
+    private boolean isTombstoneReceivedFromHostLogcat() throws Exception {
+        // Note this method relies on logcat values being printed by the receiver on host
+        // userspace crash log: virtualizationservice/src/aidl.rs
+        // kernel ramdump log: virtualizationmanager/src/crosvm.rs
         String ramdumpRegex =
                 "Received [0-9]+ bytes from guest & wrote to tombstone file|"
                         + "Ramdump \"[^ ]+/ramdump\" sent to tombstoned";
@@ -560,11 +554,32 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         return !result.trim().isEmpty();
     }
 
+    private boolean isTombstoneGeneratedWithCmd(String configPath, String... crashCommand)
+            throws Exception {
+        mMicrodroidDevice =
+                MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
+                        .debugLevel("full")
+                        .memoryMib(minMemorySize())
+                        .cpuTopology("match_host")
+                        .build(getAndroidDevice());
+        mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
+        mMicrodroidDevice.enableAdbRoot();
+
+        CommandRunner microdroid = new CommandRunner(mMicrodroidDevice);
+        microdroid.run(crashCommand);
+
+        // check until microdroid is shut down
+        CommandRunner android = new CommandRunner(getDevice());
+        waitForCrosvmExit(android);
+
+        return isTombstoneReceivedFromHostLogcat();
+    }
+
     @Test
     public void testTombstonesAreGeneratedUponUserspaceCrash() throws Exception {
         assertThat(
-                        isTombstoneGenerated(
-                                "assets/vm_config_crash.json",
+                        isTombstoneGeneratedWithCmd(
+                                "assets/vm_config.json",
                                 "kill",
                                 "-SIGSEGV",
                                 "$(pidof microdroid_launcher)"))
@@ -574,8 +589,8 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     @Test
     public void testTombstonesAreNotGeneratedIfNotExportedUponUserspaceCrash() throws Exception {
         assertThat(
-                        isTombstoneGenerated(
-                                "assets/vm_config_crash_no_tombstone.json",
+                        isTombstoneGeneratedWithCmd(
+                                "assets/vm_config_no_tombstone.json",
                                 "kill",
                                 "-SIGSEGV",
                                 "$(pidof microdroid_launcher)"))
@@ -583,16 +598,71 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
+    @Ignore("b/243630590: Temporal workaround until lab devices has flashed new DPM")
     public void testTombstonesAreGeneratedUponKernelCrash() throws Exception {
         assumeFalse("Cuttlefish is not supported", isCuttlefish());
+        assumeFalse("Skipping test because ramdump is disabled on user build", isUserBuild());
         assertThat(
-                        isTombstoneGenerated(
-                                "assets/vm_config_crash.json",
-                                "echo",
-                                "c",
-                                ">",
-                                "/proc/sysrq-trigger"))
+                        isTombstoneGeneratedWithCmd(
+                                "assets/vm_config.json", "echo", "c", ">", "/proc/sysrq-trigger"))
                 .isTrue();
+    }
+
+    private boolean isTombstoneGeneratedWithVmRunApp(boolean debuggable, String... additionalArgs)
+            throws Exception {
+        // we can't use microdroid builder as it wants ADB connection (debuggable)
+        CommandRunner android = new CommandRunner(getDevice());
+
+        android.run("rm", "-rf", TEST_ROOT + "*");
+        android.run("mkdir", "-p", TEST_ROOT + "*");
+
+        final String apkPath = getPathForPackage(PACKAGE_NAME);
+        final String idsigPath = TEST_ROOT + "idsig";
+        final String instanceImgPath = TEST_ROOT + "instance.img";
+        List<String> cmd =
+                new ArrayList<>(
+                        Arrays.asList(
+                                VIRT_APEX + "bin/vm",
+                                "run-app",
+                                "--debug",
+                                debuggable ? "full" : "none",
+                                apkPath,
+                                idsigPath,
+                                instanceImgPath));
+        Collections.addAll(cmd, additionalArgs);
+
+        android.run(cmd.toArray(new String[0]));
+        return isTombstoneReceivedFromHostLogcat();
+    }
+
+    private boolean isTombstoneGeneratedWithCrashPayload(boolean debuggable) throws Exception {
+        return isTombstoneGeneratedWithVmRunApp(
+                debuggable, "--payload-binary-name", "MicrodroidCrashNativeLib.so");
+    }
+
+    @Test
+    public void testTombstonesAreGeneratedWithCrashPayload() throws Exception {
+        assertThat(isTombstoneGeneratedWithCrashPayload(true /* debuggable */)).isTrue();
+    }
+
+    @Test
+    public void testTombstonesAreNotGeneratedWithCrashPayloadWhenNonDebuggable() throws Exception {
+        assertThat(isTombstoneGeneratedWithCrashPayload(false /* debuggable */)).isFalse();
+    }
+
+    private boolean isTombstoneGeneratedWithCrashConfig(boolean debuggable) throws Exception {
+        return isTombstoneGeneratedWithVmRunApp(
+                debuggable, "--config-path", "assets/vm_config_crash.json");
+    }
+
+    @Test
+    public void testTombstonesAreGeneratedWithCrashConfig() throws Exception {
+        assertThat(isTombstoneGeneratedWithCrashConfig(true /* debuggable */)).isTrue();
+    }
+
+    @Test
+    public void testTombstonesAreNotGeneratedWithCrashConfigWhenNonDebuggable() throws Exception {
+        assertThat(isTombstoneGeneratedWithCrashConfig(false /* debuggable */)).isFalse();
     }
 
     @Test
@@ -616,7 +686,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
-                        .numCpus(NUM_VCPUS)
+                        .cpuTopology("match_host")
                         .build(device);
         microdroid.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
         device.shutdownMicrodroid(microdroid);
@@ -644,7 +714,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertThat(atomVmCreationRequested.getVmIdentifier()).isEqualTo("VmRunApp");
         assertThat(atomVmCreationRequested.getConfigType())
                 .isEqualTo(AtomsProto.VmCreationRequested.ConfigType.VIRTUAL_MACHINE_APP_CONFIG);
-        assertThat(atomVmCreationRequested.getNumCpus()).isEqualTo(NUM_VCPUS);
+        assertThat(atomVmCreationRequested.getNumCpus()).isEqualTo(getDeviceNumCpus(device));
         assertThat(atomVmCreationRequested.getMemoryMib()).isEqualTo(minMemorySize());
         assertThat(atomVmCreationRequested.getApexes())
                 .isEqualTo("com.android.art:com.android.compos:com.android.sdkext");
@@ -679,7 +749,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
-                        .numCpus(NUM_VCPUS)
+                        .cpuTopology("match_host")
                         .build(getAndroidDevice());
         mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
         CommandRunner microdroid = new CommandRunner(mMicrodroidDevice);
@@ -708,8 +778,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertThat(android.tryRun("egrep", "'avc:[[:space:]]{1,2}denied'", LOG_PATH)).isNull();
         assertThat(android.tryRun("egrep", "'avc:[[:space:]]{1,2}denied'", CONSOLE_PATH)).isNull();
 
-        assertThat(microdroid.run("cat /proc/cpuinfo | grep processor | wc -l"))
-                .isEqualTo(Integer.toString(NUM_VCPUS));
+        assertThat(getDeviceNumCpus(microdroid)).isEqualTo(getDeviceNumCpus(android));
 
         // Check that selinux is enabled
         assertThat(microdroid.run("getenforce")).isEqualTo("Enforcing");
@@ -745,7 +814,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
-                        .numCpus(NUM_VCPUS)
+                        .cpuTopology("match_host")
                         .build(getAndroidDevice());
         mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
         mMicrodroidDevice.enableAdbRoot();
