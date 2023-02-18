@@ -15,7 +15,7 @@
 //! Functions for running instances of `crosvm`.
 
 use crate::aidl::{remove_temporary_files, Cid, VirtualMachineCallbacks};
-use crate::atom::write_vm_exited_stats;
+use crate::atom::{get_num_cpus, write_vm_exited_stats};
 use anyhow::{anyhow, bail, Context, Error, Result};
 use command_fds::CommandFdExt;
 use lazy_static::lazy_static;
@@ -32,7 +32,7 @@ use std::fmt;
 use std::fs::{read_to_string, File};
 use std::io::{self, Read};
 use std::mem;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::io::{AsRawFd, RawFd, FromRawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -105,6 +105,7 @@ pub struct CrosvmConfig {
     pub indirect_files: Vec<File>,
     pub platform_version: VersionReq,
     pub detect_hangup: bool,
+    pub gdb_port: Option<NonZeroU16>,
 }
 
 /// A disk image to pass to crosvm for a VM.
@@ -734,11 +735,20 @@ fn run_vm(
     }
 
     if config.host_cpu_topology {
-        command.arg("--host-cpu-topology");
+        // TODO(b/266664564): replace with --host-cpu-topology once available
+        if let Some(cpus) = get_num_cpus() {
+            command.arg("--cpus").arg(cpus.to_string());
+        } else {
+            bail!("Could not determine the number of CPUs in the system");
+        }
     }
 
     if !config.task_profiles.is_empty() {
         command.arg("--task-profiles").arg(config.task_profiles.join(","));
+    }
+
+    if let Some(gdb_port) = config.gdb_port {
+        command.arg("--gdb").arg(gdb_port.to_string());
     }
 
     // Keep track of what file descriptors should be mapped to the crosvm process.
