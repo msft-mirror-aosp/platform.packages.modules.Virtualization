@@ -50,6 +50,7 @@ import com.android.tradefed.util.CommandResult;
 import com.android.tradefed.util.FileUtil;
 import com.android.tradefed.util.RunUtil;
 import com.android.tradefed.util.xml.AbstractXmlParser;
+import com.android.virt.PayloadMetadata;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -73,6 +74,7 @@ import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -132,42 +134,14 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     private void createPayloadMetadata(List<ActiveApexInfo> apexes, File payloadMetadata)
             throws Exception {
-        // mk_payload's config
-        File configFile = new File(payloadMetadata.getParentFile(), "payload_config.json");
-        JSONObject config = new JSONObject();
-        config.put(
-                "apk",
-                new JSONObject(Map.of("name", "microdroid-apk", "path", "", "idsig_path", "")));
-        config.put("payload_config_path", "/mnt/apk/assets/vm_config.json");
-        config.put(
-                "apexes",
-                new JSONArray(
+        PayloadMetadata.write(
+                PayloadMetadata.metadata(
+                        "/mnt/apk/assets/vm_config.json",
+                        PayloadMetadata.apk("microdroid-apk"),
                         apexes.stream()
-                                .map(apex -> new JSONObject(Map.of("name", apex.name, "path", "")))
-                                .collect(toList())));
-        FileUtil.writeToFile(config.toString(), configFile);
-
-        RunUtil runUtil = new RunUtil();
-        String command =
-                String.join(
-                        " ",
-                        findTestFile("mk_payload").getAbsolutePath(),
-                        "--metadata-only",
-                        configFile.getAbsolutePath(),
-                        payloadMetadata.getAbsolutePath());
-        // mk_payload should run fast enough
-        CommandResult result = runUtil.runTimedCmd(5000, "/bin/bash", "-c", command);
-        String out = result.getStdout();
-        String err = result.getStderr();
-        assertWithMessage(
-                        "creating payload metadata failed:\n\tout: "
-                                + out
-                                + "\n\terr: "
-                                + err
-                                + "\n")
-                .about(command_results())
-                .that(result)
-                .isSuccess();
+                                .map(apex -> PayloadMetadata.apex(apex.name))
+                                .collect(toList())),
+                payloadMetadata);
     }
 
     private void resignVirtApex(
@@ -214,7 +188,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         long start = System.currentTimeMillis();
         while ((System.currentTimeMillis() - start < timeoutMillis)
                 && !matcher.matches(callable.call())) {
-            Thread.sleep(500);
+            RunUtil.getDefault().sleep(500);
         }
         assertThat(callable.call(), matcher);
     }
@@ -607,7 +581,8 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 .isTrue();
     }
 
-    private boolean isTombstoneGeneratedWithCrashPayload(boolean debuggable) throws Exception {
+    private boolean isTombstoneGeneratedWithVmRunApp(boolean debuggable, String... additionalArgs)
+            throws Exception {
         // we can't use microdroid builder as it wants ADB connection (debuggable)
         CommandRunner android = new CommandRunner(getDevice());
 
@@ -617,18 +592,25 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         final String apkPath = getPathForPackage(PACKAGE_NAME);
         final String idsigPath = TEST_ROOT + "idsig";
         final String instanceImgPath = TEST_ROOT + "instance.img";
-        android.run(
-                VIRT_APEX + "bin/vm",
-                "run-app",
-                "--payload-binary-name",
-                "MicrodroidCrashNativeLib.so",
-                "--debug",
-                debuggable ? "full" : "none",
-                apkPath,
-                idsigPath,
-                instanceImgPath);
+        List<String> cmd =
+                new ArrayList<>(
+                        Arrays.asList(
+                                VIRT_APEX + "bin/vm",
+                                "run-app",
+                                "--debug",
+                                debuggable ? "full" : "none",
+                                apkPath,
+                                idsigPath,
+                                instanceImgPath));
+        Collections.addAll(cmd, additionalArgs);
 
+        android.run(cmd.toArray(new String[0]));
         return isTombstoneReceivedFromHostLogcat();
+    }
+
+    private boolean isTombstoneGeneratedWithCrashPayload(boolean debuggable) throws Exception {
+        return isTombstoneGeneratedWithVmRunApp(
+                debuggable, "--payload-binary-name", "MicrodroidCrashNativeLib.so");
     }
 
     @Test
@@ -639,6 +621,21 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     @Test
     public void testTombstonesAreNotGeneratedWithCrashPayloadWhenNonDebuggable() throws Exception {
         assertThat(isTombstoneGeneratedWithCrashPayload(false /* debuggable */)).isFalse();
+    }
+
+    private boolean isTombstoneGeneratedWithCrashConfig(boolean debuggable) throws Exception {
+        return isTombstoneGeneratedWithVmRunApp(
+                debuggable, "--config-path", "assets/vm_config_crash.json");
+    }
+
+    @Test
+    public void testTombstonesAreGeneratedWithCrashConfig() throws Exception {
+        assertThat(isTombstoneGeneratedWithCrashConfig(true /* debuggable */)).isTrue();
+    }
+
+    @Test
+    public void testTombstonesAreNotGeneratedWithCrashConfigWhenNonDebuggable() throws Exception {
+        assertThat(isTombstoneGeneratedWithCrashConfig(false /* debuggable */)).isFalse();
     }
 
     @Test

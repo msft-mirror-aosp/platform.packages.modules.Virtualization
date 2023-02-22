@@ -14,7 +14,6 @@ rust_ffi_static {
     rustlibs: [
         "libaarch64_paging",
         "libbuddy_system_allocator",
-        "libdice_nostd", // TODO(b/267575445): Remove this library once the migration is done.
         "libdiced_open_dice_nostd",
         "libfdtpci",
         "liblibfdt",
@@ -63,6 +62,22 @@ raw_binary {
             enabled: true,
         },
     },
+}
+
+// Provide pvmfw.bin binary regardless of the architecture for building test.
+// Note that skipping tests on unsupported device is easy
+// while configuring server configuration to make such tests to run on working
+// devices.
+prebuilt_etc {
+    name: "pvmfw_test",
+    filename: "pvmfw_test.bin",
+    target: {
+        android_arm64: {
+            src: ":pvmfw_bin",
+        },
+    },
+    src: "empty_file",
+    installable: false,
 }
 
 prebuilt_etc {
