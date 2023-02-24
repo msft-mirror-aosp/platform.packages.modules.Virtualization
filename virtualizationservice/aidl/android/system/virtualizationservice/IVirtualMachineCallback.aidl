@@ -15,8 +15,8 @@
  */
 package android.system.virtualizationservice;
 
+import android.system.virtualizationcommon.DeathReason;
 import android.system.virtualizationcommon.ErrorCode;
-import android.system.virtualizationservice.DeathReason;
 
 /**
  * An object which a client may register with the VirtualizationService to get callbacks about the
@@ -50,9 +50,4 @@ oneway interface IVirtualMachineCallback {
      * also use `link_to_death` to handle that.
      */
     void onDied(int cid, in DeathReason reason);
-
-    /**
-     * Called when kernel panic occurs and as a result ramdump is generated from the VM.
-     */
-    void onRamdump(int cid, in ParcelFileDescriptor ramdump);
 }

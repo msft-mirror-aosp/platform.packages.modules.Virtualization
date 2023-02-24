@@ -16,7 +16,7 @@
 
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::{
-        VirtualMachineConfig::VirtualMachineConfig,
+        CpuTopology::CpuTopology, VirtualMachineConfig::VirtualMachineConfig,
         VirtualMachineRawConfig::VirtualMachineRawConfig,
     },
     binder::{ParcelFileDescriptor, ProcessState},
@@ -33,7 +33,7 @@ use vmclient::{DeathReason, VmInstance};
 
 const RIALTO_PATH: &str = "/data/local/tmp/rialto_test/arm64/rialto.bin";
 
-/// Runs the Rialto VM as an unprotected VM via VirtualizationService.
+/// Runs the Rialto VM as a non-protected VM via VirtualizationService.
 #[test]
 fn test_boots() -> Result<(), Error> {
     android_logger::init_once(
@@ -48,7 +48,10 @@ fn test_boots() -> Result<(), Error> {
     // We need to start the thread pool for Binder to work properly, especially link_to_death.
     ProcessState::start_thread_pool();
 
-    let service = vmclient::connect().context("Failed to find VirtualizationService")?;
+    let virtmgr =
+        vmclient::VirtualizationService::new().context("Failed to spawn VirtualizationService")?;
+    let service = virtmgr.connect().context("Failed to connect to VirtualizationService")?;
+
     let rialto = File::open(RIALTO_PATH).context("Failed to open Rialto kernel binary")?;
     let console = android_log_fd()?;
     let log = android_log_fd()?;
@@ -62,9 +65,10 @@ fn test_boots() -> Result<(), Error> {
         disks: vec![],
         protectedVm: false,
         memoryMib: 300,
-        numCpus: 1,
+        cpuTopology: CpuTopology::ONE_CPU,
         platformVersion: "~1.0".to_string(),
         taskProfiles: vec![],
+        gdbPort: 0, // No gdb
     });
     let vm = VmInstance::create(service.as_ref(), &config, Some(console), Some(log), None)
         .context("Failed to create VM")?;

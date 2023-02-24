@@ -18,8 +18,8 @@ rust_defaults {
         "libapkverify",
         "libbinder_rs",
         "libbyteorder",
-        "libdiced",
-        "libdiced_open_dice_cbor",
+        "libcap_rust",
+        "libdiced_open_dice",
         "libdiced_sample_inputs",
         "libdiced_utils",
         "libglob",
@@ -45,9 +45,6 @@ rust_defaults {
         "libuuid",
         "libvsock",
         "librand",
-    ],
-    shared_libs: [
-        "libbinder_rpc_unstable",
     ],
     init_rc: ["microdroid_manager.rc"],
     multilib: {

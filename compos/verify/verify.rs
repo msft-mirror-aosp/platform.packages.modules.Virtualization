@@ -21,7 +21,7 @@ use android_logger::LogId;
 use anyhow::{bail, Context, Result};
 use binder::ProcessState;
 use clap::{Parser, ValueEnum};
-use compos_common::compos_client::{ComposClient, VmParameters};
+use compos_common::compos_client::{ComposClient, VmCpuTopology, VmParameters};
 use compos_common::odrefresh::{
     CURRENT_ARTIFACTS_SUBDIR, ODREFRESH_OUTPUT_ROOT_DIR, PENDING_ARTIFACTS_SUBDIR,
     TEST_ARTIFACTS_SUBDIR,
@@ -106,14 +106,19 @@ fn try_main() -> Result<()> {
     // We need to start the thread pool to be able to receive Binder callbacks
     ProcessState::start_thread_pool();
 
-    let virtualization_service = vmclient::connect()?;
+    let virtmgr = vmclient::VirtualizationService::new()?;
+    let virtualization_service = virtmgr.connect()?;
     let vm_instance = ComposClient::start(
         &*virtualization_service,
         instance_image,
         &idsig,
         &idsig_manifest_apk,
         &idsig_manifest_ext_apk,
-        &VmParameters { debug_mode: args.debug, ..Default::default() },
+        &VmParameters {
+            cpu_topology: VmCpuTopology::OneCpu, // This VM runs very little work at boot
+            debug_mode: args.debug,
+            ..Default::default()
+        },
     )?;
 
     let service = vm_instance.connect_service()?;
@@ -136,4 +141,16 @@ fn read_small_file(file: &Path) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn verify_args() {
+        // Check that the command parsing has been configured in a valid way.
+        Args::command().debug_assert();
+    }
 }

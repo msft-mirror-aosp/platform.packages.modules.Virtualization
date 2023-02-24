@@ -110,7 +110,7 @@ pub(crate) fn extract_signer_and_apk_sections<R: Read + Seek>(
 ) -> Result<(Signer, ApkSections<R>)> {
     let mut sections = ApkSections::new(apk)?;
     let mut block = sections.find_signature(APK_SIGNATURE_SCHEME_V3_BLOCK_ID).context(
-        "Fallback to v2 when v3 block not found is not yet implemented. See b/197052981.",
+        "Fallback to v2 when v3 block not found is not yet implemented.", // b/197052981
     )?;
     let mut supported = block
         .read::<Signers>()?
@@ -135,7 +135,7 @@ impl Signer {
             .iter()
             .filter(|sig| sig.signature_algorithm_id.map_or(false, |algo| algo.is_supported()))
             .max_by_key(|sig| sig.signature_algorithm_id.unwrap().content_digest_algorithm())
-            .context("No supported signatures found")?)
+            .context("No supported APK signatures found; DSA is not supported")?)
     }
 
     pub(crate) fn find_digest_by_algorithm(
@@ -196,8 +196,8 @@ impl Signer {
         ensure!(
             computed == digest.digest.as_ref(),
             "Digest mismatch: computed={:?} vs expected={:?}",
-            to_hex_string(&computed),
-            to_hex_string(&digest.digest),
+            hex::encode(&computed),
+            hex::encode(digest.digest.as_ref()),
         );
 
         // 7. Verify that public key of the first certificate of certificates is identical
@@ -260,9 +260,4 @@ impl ReadFromBytes for PKey<pkey::Public> {
         let raw_public_key = buf.read::<LengthPrefixed<Bytes>>()?;
         Ok(PKey::public_key_from_der(raw_public_key.as_ref())?)
     }
-}
-
-#[inline]
-pub(crate) fn to_hex_string(buf: &[u8]) -> String {
-    buf.iter().map(|b| format!("{:02X}", b)).collect()
 }

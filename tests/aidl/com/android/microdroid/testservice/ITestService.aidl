@@ -17,9 +17,9 @@ package com.android.microdroid.testservice;
 
 /** {@hide} */
 interface ITestService {
-    const int SERVICE_PORT = 5678;
+    const long SERVICE_PORT = 5678;
 
-    const int ECHO_REVERSE_PORT = 6789;
+    const long ECHO_REVERSE_PORT = 0x80000001L; // Deliberately chosen to be > 2^31, < 2^32
 
     /* add two integers. */
     int addInteger(int a, int b);
@@ -46,4 +46,19 @@ interface ITestService {
      * each line reverse.
      */
     void runEchoReverseServer();
+
+    /** Returns a mask of effective capabilities that the process running the payload binary has. */
+    String[] getEffectiveCapabilities();
+
+    /* write the content into the specified file. */
+    void writeToFile(String content, String path);
+
+    /* get the content of the specified file. */
+    String readFromFile(String path);
+
+    /**
+     * Request the service to exit, triggering the termination of the VM. This may cause any
+     * requests in flight to fail.
+     */
+    oneway void quit();
 }

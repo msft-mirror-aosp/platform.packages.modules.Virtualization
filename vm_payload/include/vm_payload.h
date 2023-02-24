@@ -18,6 +18,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdnoreturn.h>
 #include <sys/cdefs.h>
 
@@ -52,25 +53,40 @@ void AVmPayload_notifyPayloadReady(void);
  *
  * \param service the service to bind to the given port.
  * \param port vsock port.
- * \param on_ready the callback to execute once the server is ready for connections. The callback
- *                 will be called at most once.
- * \param param param for the `on_ready` callback.
+ * \param on_ready the callback to execute once the server is ready for connections. If not null the
+ * callback will be called at most once.
+ * \param param parameter to be passed to the `on_ready` callback.
  */
-noreturn void AVmPayload_runVsockRpcServer(AIBinder *service, unsigned int port,
-                                           void (*on_ready)(void *param), void *param);
+noreturn void AVmPayload_runVsockRpcServer(AIBinder* _Nonnull service, uint32_t port,
+                                           void (*_Nullable on_ready)(void* _Nullable param),
+                                           void* _Nullable param);
 
 /**
- * Get a secret that is uniquely bound to this VM instance. The secrets are
- * 32-byte values and the value associated with an identifier will not change
- * over the lifetime of the VM instance.
+ * Returns all or part of a 32-byte secret that is bound to this unique VM
+ * instance and the supplied identifier. The secret can be used e.g. as an
+ * encryption key.
+ *
+ * Every VM has a secret that is derived from a device-specific value known to
+ * the hypervisor, the code that runs in the VM and its non-modifiable
+ * configuration; it is not made available to the host OS.
+ *
+ * This function performs a further derivation from the VM secret and the
+ * supplied identifier. As long as the VM identity doesn't change the same value
+ * will be returned for the same identifier, even if the VM is stopped &
+ * restarted or the device rebooted.
+ *
+ * If multiple secrets are required for different purposes, a different
+ * identifier should be used for each. The identifiers otherwise are arbitrary
+ * byte sequences and do not need to be kept secret; typically they are
+ * hardcoded in the calling code.
  *
  * \param identifier identifier of the secret to return.
  * \param identifier_size size of the secret identifier.
  * \param secret pointer to size bytes where the secret is written.
  * \param size number of bytes of the secret to get, <= 32.
  */
-void AVmPayload_getVmInstanceSecret(const void *identifier, size_t identifier_size, void *secret,
-                                    size_t size);
+void AVmPayload_getVmInstanceSecret(const void* _Nonnull identifier, size_t identifier_size,
+                                    void* _Nonnull secret, size_t size);
 
 /**
  * Gets the path to the APK contents. It is a directory, under which are
@@ -81,7 +97,7 @@ void AVmPayload_getVmInstanceSecret(const void *identifier, size_t identifier_si
  * deleted or freed by the application. The string remains valid for the
  * lifetime of the VM.
  */
-const char *AVmPayload_getApkContentsPath(void);
+const char* _Nonnull AVmPayload_getApkContentsPath(void);
 
 /**
  * Gets the path to the encrypted persistent storage for the VM, if any. This is
@@ -94,6 +110,6 @@ const char *AVmPayload_getApkContentsPath(void);
  * be deleted or freed by the application and remains valid for the lifetime of
  * the VM.
  */
-const char *AVmPayload_getEncryptedStoragePath(void);
+const char* _Nullable AVmPayload_getEncryptedStoragePath(void);
 
 __END_DECLS

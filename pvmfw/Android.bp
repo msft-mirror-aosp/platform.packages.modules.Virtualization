@@ -13,18 +13,19 @@ rust_ffi_static {
     ],
     rustlibs: [
         "libaarch64_paging",
-        "libavb_nostd",
         "libbuddy_system_allocator",
+        "libdiced_open_dice_nostd",
+        "libfdtpci",
         "liblibfdt",
         "liblog_rust_nostd",
+        "libonce_cell_nostd",
+        "libpvmfw_avb_nostd",
         "libpvmfw_embedded_key",
         "libtinyvec_nostd",
+        "libvirtio_drivers",
         "libvmbase",
+        "libzeroize_nostd",
     ],
-    static_libs: [
-        "libarm-optimized-routines-mem",
-    ],
-    apex_available: ["com.android.virt"],
 }
 
 cc_binary {
@@ -40,7 +41,15 @@ cc_binary {
         "image.ld",
         ":vmbase_sections",
     ],
-    apex_available: ["com.android.virt"],
+    // `installable: false` is inherited from vmbase_elf_defaults, and that
+    // hides this module from Make, which makes it impossible for the Make world
+    // to place the unstripped binary to the symbols directory. Marking back as
+    // installable exposes this module to the Make world again. Note that this
+    // module (pvmfw) still is NOT installed to any of the filesystem images. It
+    // is fed into pvmfw_bin and then into pvmfw_img to become a standalone
+    // partition image. This is just to package the unstripped file into the
+    // symbols zip file for debugging purpose.
+    installable: true,
 }
 
 raw_binary {
@@ -53,6 +62,22 @@ raw_binary {
             enabled: true,
         },
     },
+}
+
+// Provide pvmfw.bin binary regardless of the architecture for building test.
+// Note that skipping tests on unsupported device is easy
+// while configuring server configuration to make such tests to run on working
+// devices.
+prebuilt_etc {
+    name: "pvmfw_test",
+    filename: "pvmfw_test.bin",
+    target: {
+        android_arm64: {
+            src: ":pvmfw_bin",
+        },
+    },
+    src: "empty_file",
+    installable: false,
 }
 
 prebuilt_etc {

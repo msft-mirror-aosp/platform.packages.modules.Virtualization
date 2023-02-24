@@ -19,16 +19,16 @@ mod create_partition;
 mod run;
 
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    IVirtualizationService::IVirtualizationService, PartitionType::PartitionType,
-    VirtualMachineAppConfig::DebugLevel::DebugLevel,
+    CpuTopology::CpuTopology, IVirtualizationService::IVirtualizationService,
+    PartitionType::PartitionType, VirtualMachineAppConfig::DebugLevel::DebugLevel,
 };
 use anyhow::{Context, Error};
-use binder::ProcessState;
+use binder::{ProcessState, Strong};
 use clap::Parser;
 use create_idsig::command_create_idsig;
 use create_partition::command_create_partition;
 use run::{command_run, command_run_app, command_run_microdroid};
-use rustutils::system_properties;
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -51,17 +51,14 @@ enum Opt {
         #[clap(long)]
         config_path: Option<String>,
 
-        /// Path to VM payload binary within APK (e.g. MicrodroidTestNativeLib.so)
+        /// Name of VM payload binary within APK (e.g. MicrodroidTestNativeLib.so)
         #[clap(long)]
-        payload_path: Option<String>,
+        #[clap(alias = "payload_path")]
+        payload_binary_name: Option<String>,
 
         /// Name of VM
         #[clap(long)]
         name: Option<String>,
-
-        /// Detach VM from the terminal and run in the background
-        #[clap(short, long)]
-        daemonize: bool,
 
         /// Path to the file backing the storage.
         /// Created if the option is used but the path does not exist in the device.
@@ -81,11 +78,7 @@ enum Opt {
         #[clap(long)]
         log: Option<PathBuf>,
 
-        /// Path to file where ramdump is recorded on kernel panic
-        #[clap(long)]
-        ramdump: Option<PathBuf>,
-
-        /// Debug level of the VM. Supported values: "none" (default), "app_only", and "full".
+        /// Debug level of the VM. Supported values: "none" (default), and "full".
         #[clap(long, default_value = "none", value_parser = parse_debug_level)]
         debug: DebugLevel,
 
@@ -98,9 +91,9 @@ enum Opt {
         #[clap(short, long)]
         mem: Option<u32>,
 
-        /// Number of vCPUs in the VM. If unspecified, defaults to 1.
-        #[clap(long)]
-        cpus: Option<u32>,
+        /// Run VM with vCPU topology matching that of the host. If unspecified, defaults to 1 vCPU.
+        #[clap(long, default_value = "one_cpu", value_parser = parse_cpu_topology)]
+        cpu_topology: CpuTopology,
 
         /// Comma separated list of task profile names to apply to the VM
         #[clap(long)]
@@ -109,6 +102,11 @@ enum Opt {
         /// Paths to extra idsig files.
         #[clap(long = "extra-idsig")]
         extra_idsigs: Vec<PathBuf>,
+
+        /// Port at which crosvm will start a gdb server to debug guest kernel.
+        /// Note: this is only supported on Android kernels android14-5.15 and higher.
+        #[clap(long)]
+        gdb: Option<NonZeroU16>,
     },
     /// Run a virtual machine with Microdroid inside
     RunMicrodroid {
@@ -122,10 +120,6 @@ enum Opt {
         #[clap(long)]
         name: Option<String>,
 
-        /// Detach VM from the terminal and run in the background
-        #[clap(short, long)]
-        daemonize: bool,
-
         /// Path to the file backing the storage.
         /// Created if the option is used but the path does not exist in the device.
         #[clap(long)]
@@ -144,11 +138,7 @@ enum Opt {
         #[clap(long)]
         log: Option<PathBuf>,
 
-        /// Path to file where ramdump is recorded on kernel panic
-        #[clap(long)]
-        ramdump: Option<PathBuf>,
-
-        /// Debug level of the VM. Supported values: "none" (default), "app_only", and "full".
+        /// Debug level of the VM. Supported values: "none" (default), and "full".
         #[clap(long, default_value = "full", value_parser = parse_debug_level)]
         debug: DebugLevel,
 
@@ -161,13 +151,18 @@ enum Opt {
         #[clap(short, long)]
         mem: Option<u32>,
 
-        /// Number of vCPUs in the VM. If unspecified, defaults to 1.
-        #[clap(long)]
-        cpus: Option<u32>,
+        /// Run VM with vCPU topology matching that of the host. If unspecified, defaults to 1 vCPU.
+        #[clap(long, default_value = "one_cpu", value_parser = parse_cpu_topology)]
+        cpu_topology: CpuTopology,
 
         /// Comma separated list of task profile names to apply to the VM
         #[clap(long)]
         task_profiles: Vec<String>,
+
+        /// Port at which crosvm will start a gdb server to debug guest kernel.
+        /// Note: this is only supported on Android kernels android14-5.15 and higher.
+        #[clap(long)]
+        gdb: Option<NonZeroU16>,
     },
     /// Run a virtual machine
     Run {
@@ -178,13 +173,9 @@ enum Opt {
         #[clap(long)]
         name: Option<String>,
 
-        /// Detach VM from the terminal and run in the background
-        #[clap(short, long)]
-        daemonize: bool,
-
-        /// Number of vCPUs in the VM. If unspecified, defaults to 1.
-        #[clap(long)]
-        cpus: Option<u32>,
+        /// Run VM with vCPU topology matching that of the host. If unspecified, defaults to 1 vCPU.
+        #[clap(long, default_value = "one_cpu", value_parser = parse_cpu_topology)]
+        cpu_topology: CpuTopology,
 
         /// Comma separated list of task profile names to apply to the VM
         #[clap(long)]
@@ -197,11 +188,11 @@ enum Opt {
         /// Path to file for VM log output.
         #[clap(long)]
         log: Option<PathBuf>,
-    },
-    /// Stop a virtual machine running in the background
-    Stop {
-        /// CID of the virtual machine
-        cid: u32,
+
+        /// Port at which crosvm will start a gdb server to debug guest kernel.
+        /// Note: this is only supported on Android kernels android14-5.15 and higher.
+        #[clap(long)]
+        gdb: Option<NonZeroU16>,
     },
     /// List running virtual machines
     List,
@@ -233,7 +224,6 @@ enum Opt {
 fn parse_debug_level(s: &str) -> Result<DebugLevel, String> {
     match s {
         "none" => Ok(DebugLevel::NONE),
-        "app_only" => Ok(DebugLevel::APP_ONLY),
         "full" => Ok(DebugLevel::FULL),
         _ => Err(format!("Invalid debug level {}", s)),
     }
@@ -247,14 +237,26 @@ fn parse_partition_type(s: &str) -> Result<PartitionType, String> {
     }
 }
 
+fn parse_cpu_topology(s: &str) -> Result<CpuTopology, String> {
+    match s {
+        "one_cpu" => Ok(CpuTopology::ONE_CPU),
+        "match_host" => Ok(CpuTopology::MATCH_HOST),
+        _ => Err(format!("Invalid cpu topology {}", s)),
+    }
+}
+
+fn get_service() -> Result<Strong<dyn IVirtualizationService>, Error> {
+    let virtmgr =
+        vmclient::VirtualizationService::new().context("Failed to spawn VirtualizationService")?;
+    virtmgr.connect().context("Failed to connect to VirtualizationService")
+}
+
 fn main() -> Result<(), Error> {
     env_logger::init();
     let opt = Opt::parse();
 
     // We need to start the thread pool for Binder to work properly, especially link_to_death.
     ProcessState::start_thread_pool();
-
-    let service = vmclient::connect().context("Failed to find VirtualizationService")?;
 
     match opt {
         Opt::RunApp {
@@ -265,98 +267,86 @@ fn main() -> Result<(), Error> {
             storage,
             storage_size,
             config_path,
-            payload_path,
-            daemonize,
+            payload_binary_name,
             console,
             log,
-            ramdump,
             debug,
             protected,
             mem,
-            cpus,
+            cpu_topology,
             task_profiles,
             extra_idsigs,
+            gdb,
         } => command_run_app(
             name,
-            service.as_ref(),
+            get_service()?.as_ref(),
             &apk,
             &idsig,
             &instance,
             storage.as_deref(),
             storage_size,
             config_path,
-            payload_path,
-            daemonize,
+            payload_binary_name,
             console.as_deref(),
             log.as_deref(),
-            ramdump.as_deref(),
             debug,
             protected,
             mem,
-            cpus,
+            cpu_topology,
             task_profiles,
             &extra_idsigs,
+            gdb,
         ),
         Opt::RunMicrodroid {
             name,
             work_dir,
             storage,
             storage_size,
-            daemonize,
             console,
             log,
-            ramdump,
             debug,
             protected,
             mem,
-            cpus,
+            cpu_topology,
             task_profiles,
+            gdb,
         } => command_run_microdroid(
             name,
-            service.as_ref(),
+            get_service()?.as_ref(),
             work_dir,
             storage.as_deref(),
             storage_size,
-            daemonize,
             console.as_deref(),
             log.as_deref(),
-            ramdump.as_deref(),
             debug,
             protected,
             mem,
-            cpus,
+            cpu_topology,
             task_profiles,
+            gdb,
         ),
-        Opt::Run { name, config, daemonize, cpus, task_profiles, console, log } => {
+        Opt::Run { name, config, cpu_topology, task_profiles, console, log, gdb } => {
             command_run(
                 name,
-                service.as_ref(),
+                get_service()?.as_ref(),
                 &config,
-                daemonize,
                 console.as_deref(),
                 log.as_deref(),
                 /* mem */ None,
-                cpus,
+                cpu_topology,
                 task_profiles,
+                gdb,
             )
         }
-        Opt::Stop { cid } => command_stop(service.as_ref(), cid),
-        Opt::List => command_list(service.as_ref()),
+        Opt::List => command_list(get_service()?.as_ref()),
         Opt::Info => command_info(),
         Opt::CreatePartition { path, size, partition_type } => {
-            command_create_partition(service.as_ref(), &path, size, partition_type)
+            command_create_partition(get_service()?.as_ref(), &path, size, partition_type)
         }
-        Opt::CreateIdsig { apk, path } => command_create_idsig(service.as_ref(), &apk, &path),
+        Opt::CreateIdsig { apk, path } => {
+            command_create_idsig(get_service()?.as_ref(), &apk, &path)
+        }
     }
-}
-
-/// Retrieve reference to a previously daemonized VM and stop it.
-fn command_stop(service: &dyn IVirtualizationService, cid: u32) -> Result<(), Error> {
-    service
-        .debugDropVmRef(cid as i32)
-        .context("Failed to get VM from VirtualizationService")?
-        .context("CID does not correspond to a running background VM")?;
-    Ok(())
 }
 
 /// List the VMs currently running.
@@ -368,18 +358,16 @@ fn command_list(service: &dyn IVirtualizationService) -> Result<(), Error> {
 
 /// Print information about supported VM types.
 fn command_info() -> Result<(), Error> {
-    let unprotected_vm_supported =
-        system_properties::read_bool("ro.boot.hypervisor.vm.supported", false)?;
-    let protected_vm_supported =
-        system_properties::read_bool("ro.boot.hypervisor.protected_vm.supported", false)?;
-    match (unprotected_vm_supported, protected_vm_supported) {
+    let non_protected_vm_supported = hypervisor_props::is_vm_supported()?;
+    let protected_vm_supported = hypervisor_props::is_protected_vm_supported()?;
+    match (non_protected_vm_supported, protected_vm_supported) {
         (false, false) => println!("VMs are not supported."),
         (false, true) => println!("Only protected VMs are supported."),
-        (true, false) => println!("Only unprotected VMs are supported."),
-        (true, true) => println!("Both protected and unprotected VMs are supported."),
+        (true, false) => println!("Only non-protected VMs are supported."),
+        (true, true) => println!("Both protected and non-protected VMs are supported."),
     }
 
-    if let Some(version) = system_properties::read("ro.boot.hypervisor.version")? {
+    if let Some(version) = hypervisor_props::version()? {
         println!("Hypervisor version: {}", version);
     } else {
         println!("Hypervisor version not set.");
@@ -397,10 +385,11 @@ fn command_info() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::IntoApp;
+    use clap::CommandFactory;
 
     #[test]
     fn verify_app() {
-        Opt::into_app().debug_assert();
+        // Check that the command parsing has been configured in a valid way.
+        Opt::command().debug_assert();
     }
 }

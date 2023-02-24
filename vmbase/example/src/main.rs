@@ -20,6 +20,7 @@
 
 mod exceptions;
 mod layout;
+mod pci;
 
 extern crate alloc;
 
@@ -27,15 +28,14 @@ use crate::layout::{
     bionic_tls, dtb_range, print_addresses, rodata_range, stack_chk_guard, text_range,
     writable_region, DEVICE_REGION,
 };
-use aarch64_paging::{
-    idmap::IdMap,
-    paging::{Attributes, MemoryRegion},
-};
+use crate::pci::{check_pci, get_bar_region};
+use aarch64_paging::{idmap::IdMap, paging::Attributes};
 use alloc::{vec, vec::Vec};
 use buddy_system_allocator::LockedHeap;
 use core::ffi::CStr;
+use fdtpci::PciInfo;
 use libfdt::Fdt;
-use log::{info, LevelFilter};
+use log::{debug, info, trace, LevelFilter};
 use vmbase::{logger, main, println};
 
 static INITIALISED_DATA: [u32; 4] = [1, 2, 3, 4];
@@ -62,7 +62,19 @@ pub fn main(arg0: u64, arg1: u64, arg2: u64, arg3: u64) {
     assert_eq!(arg0, dtb_range().start.0 as u64);
     check_data();
     check_stack_guard();
-    check_fdt();
+
+    info!("Checking FDT...");
+    let fdt = dtb_range();
+    let fdt =
+        unsafe { core::slice::from_raw_parts_mut(fdt.start.0 as *mut u8, fdt.end.0 - fdt.start.0) };
+    let fdt = Fdt::from_mut_slice(fdt).unwrap();
+    info!("FDT passed verification.");
+    check_fdt(fdt);
+
+    let pci_info = PciInfo::from_fdt(fdt).unwrap();
+    debug!("Found PCI CAM at {:#x}-{:#x}", pci_info.cam_range.start, pci_info.cam_range.end);
+
+    modify_fdt(fdt);
 
     unsafe {
         HEAP_ALLOCATOR.lock().init(HEAP.as_mut_ptr() as usize, HEAP.len());
@@ -93,14 +105,29 @@ pub fn main(arg0: u64, arg1: u64, arg2: u64, arg3: u64) {
             Attributes::NORMAL | Attributes::NON_GLOBAL | Attributes::EXECUTE_NEVER,
         )
         .unwrap();
+    idmap
+        .map_range(
+            &dtb_range().into(),
+            Attributes::NORMAL
+                | Attributes::NON_GLOBAL
+                | Attributes::READ_ONLY
+                | Attributes::EXECUTE_NEVER,
+        )
+        .unwrap();
+    idmap
+        .map_range(&get_bar_region(&pci_info), Attributes::DEVICE_NGNRE | Attributes::EXECUTE_NEVER)
+        .unwrap();
 
     info!("Activating IdMap...");
-    info!("{:?}", idmap);
+    trace!("{:?}", idmap);
     idmap.activate();
     info!("Activated.");
 
     check_data();
     check_dice();
+
+    let mut pci_root = unsafe { pci_info.make_pci_root() };
+    check_pci(&mut pci_root);
 }
 
 fn check_stack_guard() {
@@ -144,13 +171,7 @@ fn check_data() {
     info!("Data looks good");
 }
 
-fn check_fdt() {
-    info!("Checking FDT...");
-    let fdt = MemoryRegion::from(layout::dtb_range());
-    let fdt = unsafe { core::slice::from_raw_parts_mut(fdt.start().0 as *mut u8, fdt.len()) };
-
-    let reader = Fdt::from_slice(fdt).unwrap();
-    info!("FDT passed verification.");
+fn check_fdt(reader: &Fdt) {
     for reg in reader.memory().unwrap().unwrap() {
         info!("memory @ {reg:#x?}");
     }
@@ -161,8 +182,9 @@ fn check_fdt() {
         let reg = c.reg().unwrap().unwrap().next().unwrap();
         info!("node compatible with '{}' at {reg:?}", compatible.to_str().unwrap());
     }
+}
 
-    let writer = Fdt::from_mut_slice(fdt).unwrap();
+fn modify_fdt(writer: &mut Fdt) {
     writer.unpack().unwrap();
     info!("FDT successfully unpacked.");
 
@@ -203,7 +225,7 @@ fn check_alloc() {
 
 fn check_dice() {
     info!("Testing DICE integration...");
-    let hash = dice::hash("hello world".as_bytes()).expect("DiceHash failed");
+    let hash = diced_open_dice::hash("hello world".as_bytes()).expect("DiceHash failed");
     assert_eq!(
         hash,
         [

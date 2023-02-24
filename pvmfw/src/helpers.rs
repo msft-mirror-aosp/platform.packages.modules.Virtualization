@@ -15,9 +15,12 @@
 //! Miscellaneous helper functions.
 
 use core::arch::asm;
+use zeroize::Zeroize;
 
 pub const SIZE_4KB: usize = 4 << 10;
 pub const SIZE_2MB: usize = 2 << 20;
+
+pub const GUEST_PAGE_SIZE: usize = SIZE_4KB;
 
 /// Computes the largest multiple of the provided alignment smaller or equal to the address.
 ///
@@ -41,6 +44,17 @@ pub const fn align_up(addr: usize, alignment: usize) -> Option<usize> {
         Some(unchecked_align_down(s, alignment))
     } else {
         None
+    }
+}
+
+/// Aligns the given address to the given alignment, if it is a power of two.
+///
+/// Returns `None` if the alignment isn't a power of two.
+pub const fn align_down(addr: usize, alignment: usize) -> Option<usize> {
+    if !alignment.is_power_of_two() {
+        None
+    } else {
+        Some(unchecked_align_down(addr, alignment))
     }
 }
 
@@ -74,4 +88,17 @@ pub fn flush_region(start: usize, size: usize) {
         // SAFETY - Clearing cache lines shouldn't have Rust-visible side effects.
         unsafe { asm!("dc cvau, {x}", x = in(reg) line) }
     }
+}
+
+#[inline]
+/// Flushes the slice to the point of unification.
+pub fn flush(reg: &[u8]) {
+    flush_region(reg.as_ptr() as usize, reg.len())
+}
+
+#[inline]
+/// Overwrites the slice with zeroes, to the point of unification.
+pub fn flushed_zeroize(reg: &mut [u8]) {
+    reg.zeroize();
+    flush(reg)
 }

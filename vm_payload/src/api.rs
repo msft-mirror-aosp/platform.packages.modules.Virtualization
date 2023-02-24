@@ -23,7 +23,7 @@ use anyhow::{ensure, bail, Context, Result};
 use binder::{Strong, unstable_api::{AIBinder, new_spibinder}};
 use lazy_static::lazy_static;
 use log::{error, info, Level};
-use rpcbinder::{get_unix_domain_rpc_interface, RpcServer};
+use rpcbinder::{RpcSession, RpcServer};
 use std::convert::Infallible;
 use std::ffi::CString;
 use std::fmt::Debug;
@@ -49,10 +49,9 @@ fn get_vm_payload_service() -> Result<Strong<dyn IVmPayloadService>> {
     if let Some(strong) = &*connection {
         Ok(strong.clone())
     } else {
-        let new_connection: Strong<dyn IVmPayloadService> = get_unix_domain_rpc_interface(
-            VM_PAYLOAD_SERVICE_SOCKET_NAME,
-        )
-        .context(format!("Failed to connect to service: {}", VM_PAYLOAD_SERVICE_SOCKET_NAME))?;
+        let new_connection: Strong<dyn IVmPayloadService> = RpcSession::new()
+            .setup_unix_domain_client(VM_PAYLOAD_SERVICE_SOCKET_NAME)
+            .context(format!("Failed to connect to service: {}", VM_PAYLOAD_SERVICE_SOCKET_NAME))?;
         *connection = Some(new_connection.clone());
         Ok(new_connection)
     }
@@ -136,7 +135,7 @@ unsafe fn try_run_vsock_server(
     // safely be taken by new_spibinder.
     let service = unsafe { new_spibinder(service) };
     if let Some(service) = service {
-        match RpcServer::new_vsock(service, port) {
+        match RpcServer::new_vsock(service, libc::VMADDR_CID_HOST, port) {
             Ok(server) => {
                 if let Some(on_ready) = on_ready {
                     // SAFETY: We're calling the callback with the parameter specified within the
@@ -206,7 +205,7 @@ fn try_get_vm_instance_secret(identifier: &[u8], size: usize) -> Result<Vec<u8>>
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `data` must be [valid] for writes of `size` bytes.
+/// * `data` must be [valid] for writes of `size` bytes, if size > 0.
 ///
 /// [valid]: ptr#safety
 #[no_mangle]
@@ -214,9 +213,13 @@ pub unsafe extern "C" fn AVmPayload_getDiceAttestationChain(data: *mut u8, size:
     initialize_logging();
 
     let chain = unwrap_or_abort(try_get_dice_attestation_chain());
-    // SAFETY: See the requirements on `data` above. The number of bytes copied doesn't exceed
-    // the length of either buffer, and `chain` cannot overlap `data` because we just allocated it.
-    unsafe { ptr::copy_nonoverlapping(chain.as_ptr(), data, std::cmp::min(chain.len(), size)) };
+    if size != 0 {
+        // SAFETY: See the requirements on `data` above. The number of bytes copied doesn't exceed
+        // the length of either buffer, and `chain` cannot overlap `data` because we just allocated
+        // it. We allow data to be null, which is never valid, but only if size == 0 which is
+        // checked above.
+        unsafe { ptr::copy_nonoverlapping(chain.as_ptr(), data, std::cmp::min(chain.len(), size)) };
+    }
     chain.len()
 }
 
@@ -231,7 +234,7 @@ fn try_get_dice_attestation_chain() -> Result<Vec<u8>> {
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `data` must be [valid] for writes of `size` bytes.
+/// * `data` must be [valid] for writes of `size` bytes, if size > 0.
 ///
 /// [valid]: ptr#safety
 #[no_mangle]
@@ -239,9 +242,13 @@ pub unsafe extern "C" fn AVmPayload_getDiceAttestationCdi(data: *mut u8, size: u
     initialize_logging();
 
     let cdi = unwrap_or_abort(try_get_dice_attestation_cdi());
-    // SAFETY: See the requirements on `data` above. The number of bytes copied doesn't exceed
-    // the length of either buffer, and `cdi` cannot overlap `data` because we just allocated it.
-    unsafe { ptr::copy_nonoverlapping(cdi.as_ptr(), data, std::cmp::min(cdi.len(), size)) };
+    if size != 0 {
+        // SAFETY: See the requirements on `data` above. The number of bytes copied doesn't exceed
+        // the length of either buffer, and `cdi` cannot overlap `data` because we just allocated
+        // it. We allow data to be null, which is never valid, but only if size == 0 which is
+        // checked above.
+        unsafe { ptr::copy_nonoverlapping(cdi.as_ptr(), data, std::cmp::min(cdi.len(), size)) };
+    }
     cdi.len()
 }
 

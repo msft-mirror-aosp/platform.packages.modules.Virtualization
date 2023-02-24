@@ -21,9 +21,6 @@ pub mod compos_client;
 pub mod odrefresh;
 pub mod timeouts;
 
-/// Special CID indicating "any".
-pub const VMADDR_CID_ANY: u32 = -1i32 as u32;
-
 /// VSock port that the CompOS server listens on for RPC binder connections. This should be out of
 /// future port range (if happens) that microdroid may reserve for system components.
 pub const COMPOS_VSOCK_PORT: u32 = 6432;
@@ -55,9 +52,6 @@ pub const IDSIG_MANIFEST_APK_FILE: &str = "idsig_manifest_apk";
 /// The file that holds the idsig for the build manifest APK that makes enumerated files from
 /// /system_ext available in CompOS.
 pub const IDSIG_MANIFEST_EXT_APK_FILE: &str = "idsig_manifest_ext_apk";
-
-/// Number of CPUs to run dex2oat (actually the entire compos VM) with
-pub const DEX2OAT_THREADS_PROP_NAME: &str = "dalvik.vm.boot-dex2oat-threads";
 
 /// The Android path of fs-verity build manifest APK for /system.
 pub const BUILD_MANIFEST_APK_PATH: &str = "/system/etc/security/fsverity/BuildManifest.apk";

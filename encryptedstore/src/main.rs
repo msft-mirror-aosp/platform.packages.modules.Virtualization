@@ -19,9 +19,8 @@
 //! It uses dm_rust lib.
 
 use anyhow::{ensure, Context, Result};
-use clap::{arg, App};
-use dm::crypt::CipherType;
-use dm::util;
+use clap::arg;
+use dm::{crypt::CipherType, util};
 use log::info;
 use std::ffi::CString;
 use std::fs::{create_dir_all, OpenOptions};
@@ -42,18 +41,12 @@ fn main() -> Result<()> {
     );
     info!("Starting encryptedstore binary");
 
-    let matches = App::new("encryptedstore")
-        .args(&[
-            arg!(--blkdevice <FILE> "the block device backing the encrypted storage")
-                .required(true),
-            arg!(--key <KEY> "key (in hex) equivalent to 32 bytes)").required(true),
-            arg!(--mountpoint <MOUNTPOINT> "mount point for the storage").required(true),
-        ])
-        .get_matches();
+    let matches = clap_command().get_matches();
 
-    let blkdevice = Path::new(matches.value_of("blkdevice").unwrap());
-    let key = matches.value_of("key").unwrap();
-    let mountpoint = Path::new(matches.value_of("mountpoint").unwrap());
+    let blkdevice = Path::new(matches.get_one::<String>("blkdevice").unwrap());
+    let key = matches.get_one::<String>("key").unwrap();
+    let mountpoint = Path::new(matches.get_one::<String>("mountpoint").unwrap());
+    // Note this error context is used in MicrodroidTests.
     encryptedstore_init(blkdevice, key, mountpoint).context(format!(
         "Unable to initialize encryptedstore on {:?} & mount at {:?}",
         blkdevice, mountpoint
@@ -61,9 +54,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn clap_command() -> clap::Command {
+    clap::Command::new("encryptedstore").args(&[
+        arg!(--blkdevice <FILE> "the block device backing the encrypted storage").required(true),
+        arg!(--key <KEY> "key (in hex) equivalent to 32 bytes)").required(true),
+        arg!(--mountpoint <MOUNTPOINT> "mount point for the storage").required(true),
+    ])
+}
+
 fn encryptedstore_init(blkdevice: &Path, key: &str, mountpoint: &Path) -> Result<()> {
     ensure!(
-        std::fs::metadata(&blkdevice)
+        std::fs::metadata(blkdevice)
             .context(format!("Failed to get metadata of {:?}", blkdevice))?
             .file_type()
             .is_block_device(),
@@ -94,6 +95,8 @@ fn enable_crypt(data_device: &Path, key: &str, name: &str) -> Result<PathBuf> {
         .data_device(data_device, dev_size)
         .cipher(CipherType::AES256HCTR2)
         .key(&key)
+        .opt_param("sector_size:4096")
+        .opt_param("iv_large_sectors")
         .build()
         .context("Couldn't build the DMCrypt target")?;
     let dm = dm::DeviceMapper::new()?;
@@ -124,6 +127,7 @@ fn format_ext4(device: &Path) -> Result<()> {
     let mkfs_options = [
         "-j",               // Create appropriate sized journal
         "-O metadata_csum", // Metadata checksum for filesystem integrity
+        "-b 4096",          // block size in the filesystem
     ];
     let mut cmd = Command::new(MK2FS_BIN);
     let status = cmd
@@ -137,7 +141,10 @@ fn format_ext4(device: &Path) -> Result<()> {
 
 fn mount(source: &Path, mountpoint: &Path) -> Result<()> {
     create_dir_all(mountpoint).context(format!("Failed to create {:?}", &mountpoint))?;
-    let mount_options = CString::new("").unwrap();
+    let mount_options = CString::new(
+        "fscontext=u:object_r:encryptedstore_fs:s0,context=u:object_r:encryptedstore_file:s0",
+    )
+    .unwrap();
     let source = CString::new(source.as_os_str().as_bytes())?;
     let mountpoint = CString::new(mountpoint.as_os_str().as_bytes())?;
     let fstype = CString::new("ext4").unwrap();
@@ -155,5 +162,16 @@ fn mount(source: &Path, mountpoint: &Path) -> Result<()> {
         Err(Error::last_os_error()).context("mount failed")
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_command() {
+        // Check that the command parsing has been configured in a valid way.
+        clap_command().debug_assert();
     }
 }

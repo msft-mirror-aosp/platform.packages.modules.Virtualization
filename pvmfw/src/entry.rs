@@ -15,6 +15,7 @@
 //! Low-level entry and exit points of pvmfw.
 
 use crate::config;
+use crate::debug_policy::{handle_debug_policy, DebugPolicyError};
 use crate::fdt;
 use crate::heap;
 use crate::helpers;
@@ -32,7 +33,7 @@ use log::LevelFilter;
 use vmbase::{console, layout, logger, main, power::reboot};
 
 #[derive(Debug, Clone)]
-enum RebootReason {
+pub enum RebootReason {
     /// A malformed BCC was received.
     InvalidBcc,
     /// An invalid configuration was appended to pvmfw.
@@ -47,6 +48,18 @@ enum RebootReason {
     InvalidRamdisk,
     /// Failed to verify the payload.
     PayloadVerificationError,
+    /// DICE layering process failed.
+    SecretDerivationError,
+}
+
+impl From<DebugPolicyError> for RebootReason {
+    fn from(error: DebugPolicyError) -> Self {
+        match error {
+            DebugPolicyError::Fdt(_, _) => RebootReason::InvalidFdt,
+            DebugPolicyError::DebugPolicyFdt(_, _) => RebootReason::InvalidConfig,
+            DebugPolicyError::OverlaidFdt(_, _) => RebootReason::InternalError,
+        }
+    }
 }
 
 main!(start);
@@ -58,8 +71,8 @@ pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64
     // - can't access MMIO (therefore, no logging)
 
     match main_wrapper(fdt_address as usize, payload_start as usize, payload_size as usize) {
-        Ok(_) => jump_to_payload(fdt_address, payload_start),
-        Err(_) => reboot(),
+        Ok(entry) => jump_to_payload(fdt_address, entry.try_into().unwrap()),
+        Err(_) => reboot(), // TODO(b/220071963) propagate the reason back to the host.
     }
 
     // if we reach this point and return, vmbase::entry::rust_entry() will call power::shutdown().
@@ -74,8 +87,8 @@ struct MemorySlices<'a> {
 impl<'a> MemorySlices<'a> {
     fn new(
         fdt: usize,
-        payload: usize,
-        payload_size: usize,
+        kernel: usize,
+        kernel_size: usize,
         memory: &mut MemoryTracker,
     ) -> Result<Self, RebootReason> {
         // SAFETY - SIZE_2MB is non-zero.
@@ -120,18 +133,36 @@ impl<'a> MemorySlices<'a> {
             RebootReason::InvalidFdt
         })?;
 
-        let payload_size = NonZeroUsize::new(payload_size).ok_or_else(|| {
-            error!("Invalid payload size: {payload_size:#x}");
-            RebootReason::InvalidPayload
+        let kernel_range = fdt::kernel_range(fdt).map_err(|e| {
+            error!("Error while attempting to read the kernel range from the DT: {e}");
+            RebootReason::InvalidFdt
         })?;
 
-        let payload_range = memory.alloc(payload, payload_size).map_err(|e| {
-            error!("Failed to obtain the payload range: {e}");
-            RebootReason::InternalError
-        })?;
+        let kernel_range = if let Some(r) = kernel_range {
+            memory.alloc_range(&r).map_err(|e| {
+                error!("Failed to obtain the kernel range with DT range: {e}");
+                RebootReason::InternalError
+            })?
+        } else if cfg!(feature = "legacy") {
+            warn!("Failed to find the kernel range in the DT; falling back to legacy ABI");
+
+            let kernel_size = NonZeroUsize::new(kernel_size).ok_or_else(|| {
+                error!("Invalid kernel size: {kernel_size:#x}");
+                RebootReason::InvalidPayload
+            })?;
+
+            memory.alloc(kernel, kernel_size).map_err(|e| {
+                error!("Failed to obtain the kernel range with legacy range: {e}");
+                RebootReason::InternalError
+            })?
+        } else {
+            error!("Failed to locate the kernel from the DT");
+            return Err(RebootReason::InvalidPayload);
+        };
+
         // SAFETY - The tracker validated the range to be in main memory, mapped, and not overlap.
         let kernel =
-            unsafe { slice::from_raw_parts(payload_range.start as *const u8, payload_range.len()) };
+            unsafe { slice::from_raw_parts(kernel_range.start as *const u8, kernel_range.len()) };
 
         let ramdisk_range = fdt::initrd_range(fdt).map_err(|e| {
             error!("An error occurred while locating the ramdisk in the device tree: {e}");
@@ -161,7 +192,7 @@ impl<'a> MemorySlices<'a> {
 ///
 /// Provide the abstractions necessary for start() to abort the pVM boot and for main() to run with
 /// the assumption that its environment has been properly configured.
-fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), RebootReason> {
+fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<usize, RebootReason> {
     // Limitations in this function:
     // - only access MMIO once (and while) it has been mapped and configured
     // - only perform logging once the logger has been initialized
@@ -210,10 +241,7 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
         RebootReason::InvalidConfig
     })?;
 
-    let bcc = appended.get_bcc_mut().ok_or_else(|| {
-        error!("Invalid BCC");
-        RebootReason::InvalidBcc
-    })?;
+    let bcc_slice = appended.get_bcc_mut();
 
     debug!("Activating dynamic page table...");
     // SAFETY - page_table duplicates the static mappings for everything that the Rust code is
@@ -225,19 +253,30 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
     let slices = MemorySlices::new(fdt, payload, payload_size, &mut memory)?;
 
     // This wrapper allows main() to be blissfully ignorant of platform details.
-    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc).map_err(|e| {
-        error!("Failed to verify the payload: {e}");
-        RebootReason::PayloadVerificationError
+    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc_slice, &mut memory)?;
+
+    helpers::flushed_zeroize(bcc_slice);
+    helpers::flush(slices.fdt.as_slice());
+
+    // SAFETY - As we `?` the result, there is no risk of using a bad `slices.fdt`.
+    unsafe {
+        handle_debug_policy(slices.fdt, appended.get_debug_policy()).map_err(|e| {
+            error!("Unexpected error when handling debug policy: {e:?}");
+            RebootReason::from(e)
+        })?;
+    }
+
+    info!("Expecting a bug making MMIO_GUARD_UNMAP return NOT_SUPPORTED on success");
+    memory.mmio_unmap_all().map_err(|e| {
+        error!("Failed to unshare MMIO ranges: {e}");
+        RebootReason::InternalError
     })?;
-
-    // TODO: Overwrite BCC before jumping to payload to avoid leaking our sealing key.
-
     mmio_guard::unmap(console::BASE_ADDRESS).map_err(|e| {
         error!("Failed to unshare the UART: {e}");
         RebootReason::InternalError
     })?;
 
-    Ok(())
+    Ok(slices.kernel.as_ptr() as usize)
 }
 
 fn jump_to_payload(fdt_address: u64, payload_start: u64) -> ! {
@@ -308,6 +347,12 @@ unsafe fn get_appended_data_slice() -> &'static mut [u8] {
     slice::from_raw_parts_mut(base as *mut u8, size)
 }
 
+enum AppendedConfigType {
+    Valid,
+    Invalid,
+    NotFound,
+}
+
 enum AppendedPayload<'a> {
     /// Configuration data.
     Config(config::Config<'a>),
@@ -318,27 +363,34 @@ enum AppendedPayload<'a> {
 impl<'a> AppendedPayload<'a> {
     /// SAFETY - 'data' should respect the alignment of config::Header.
     unsafe fn new(data: &'a mut [u8]) -> Option<Self> {
-        if Self::is_valid_config(data) {
-            Some(Self::Config(config::Config::new(data).unwrap()))
-        } else if cfg!(feature = "legacy") {
-            const BCC_SIZE: usize = helpers::SIZE_4KB;
-            warn!("Assuming the appended data at {:?} to be a raw BCC", data.as_ptr());
-            Some(Self::LegacyBcc(&mut data[..BCC_SIZE]))
-        } else {
-            None
+        match Self::guess_config_type(data) {
+            AppendedConfigType::Valid => Some(Self::Config(config::Config::new(data).unwrap())),
+            AppendedConfigType::NotFound if cfg!(feature = "legacy") => {
+                const BCC_SIZE: usize = helpers::SIZE_4KB;
+                warn!("Assuming the appended data at {:?} to be a raw BCC", data.as_ptr());
+                Some(Self::LegacyBcc(&mut data[..BCC_SIZE]))
+            }
+            _ => None,
         }
     }
 
-    unsafe fn is_valid_config(data: &mut [u8]) -> bool {
+    unsafe fn guess_config_type(data: &mut [u8]) -> AppendedConfigType {
         // This function is necessary to prevent the borrow checker from getting confused
         // about the ownership of data in new(); see https://users.rust-lang.org/t/78467.
         let addr = data.as_ptr();
-        config::Config::new(data)
-            .map_err(|e| warn!("Invalid configuration data at {addr:?}: {e}"))
-            .is_ok()
+        match config::Config::new(data) {
+            Err(config::Error::InvalidMagic) => {
+                warn!("No configuration data found at {addr:?}");
+                AppendedConfigType::NotFound
+            }
+            Err(e) => {
+                error!("Invalid configuration data at {addr:?}: {e}");
+                AppendedConfigType::Invalid
+            }
+            Ok(_) => AppendedConfigType::Valid,
+        }
     }
 
-    #[allow(dead_code)] // TODO(b/232900974)
     fn get_debug_policy(&mut self) -> Option<&mut [u8]> {
         match self {
             Self::Config(ref mut cfg) => cfg.get_debug_policy(),
@@ -346,12 +398,10 @@ impl<'a> AppendedPayload<'a> {
         }
     }
 
-    fn get_bcc_mut(&mut self) -> Option<&mut [u8]> {
-        let bcc = match self {
+    fn get_bcc_mut(&mut self) -> &mut [u8] {
+        match self {
             Self::LegacyBcc(ref mut bcc) => bcc,
             Self::Config(ref mut cfg) => cfg.get_bcc_mut(),
-        };
-        // TODO(b/256148034): return None if BccHandoverParse(bcc) != kDiceResultOk.
-        Some(bcc)
+        }
     }
 }

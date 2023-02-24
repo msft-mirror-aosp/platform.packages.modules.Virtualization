@@ -18,12 +18,14 @@
 #include <android-base/file.h>
 #include <android-base/properties.h>
 #include <android-base/result.h>
+#include <android-base/scopeguard.h>
 #include <android/log.h>
 #include <fcntl.h>
 #include <fsverity_digests.pb.h>
 #include <linux/vm_sockets.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/capability.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
 #include <vm_main.h>
@@ -35,6 +37,7 @@
 using android::base::borrowed_fd;
 using android::base::ErrnoError;
 using android::base::Error;
+using android::base::make_scope_guard;
 using android::base::Result;
 using android::base::unique_fd;
 
@@ -81,28 +84,26 @@ Result<void> run_echo_reverse_server(borrowed_fd listening_fd) {
         return ErrnoError() << "Failed to fdopen";
     }
 
-    char* line = nullptr;
-    size_t size = 0;
-    if (getline(&line, &size, input) < 0) {
-        return ErrnoError() << "Failed to read";
+    // Run forever, reverse one line at a time.
+    while (true) {
+        char* line = nullptr;
+        size_t size = 0;
+        if (getline(&line, &size, input) < 0) {
+            return ErrnoError() << "Failed to read";
+        }
+
+        std::string_view original = line;
+        if (!original.empty() && original.back() == '\n') {
+            original = original.substr(0, original.size() - 1);
+        }
+
+        std::string reversed(original.rbegin(), original.rend());
+        reversed += "\n";
+
+        if (write(connect_fd, reversed.data(), reversed.size()) < 0) {
+            return ErrnoError() << "Failed to write";
+        }
     }
-
-    if (fclose(input) != 0) {
-        return ErrnoError() << "Failed to fclose";
-    }
-
-    std::string_view original = line;
-    if (!original.empty() && original.back() == '\n') {
-        original = original.substr(0, original.size() - 1);
-    }
-
-    std::string reversed(original.rbegin(), original.rend());
-
-    if (write(connect_fd, reversed.data(), reversed.size()) < 0) {
-        return ErrnoError() << "Failed to write";
-    }
-
-    return {};
 }
 
 Result<void> start_echo_reverse_server() {
@@ -112,7 +113,7 @@ Result<void> start_echo_reverse_server() {
     }
     struct sockaddr_vm server_sa = (struct sockaddr_vm){
             .svm_family = AF_VSOCK,
-            .svm_port = BnTestService::ECHO_REVERSE_PORT,
+            .svm_port = static_cast<uint32_t>(BnTestService::ECHO_REVERSE_PORT),
             .svm_cid = VMADDR_CID_ANY,
     };
     int ret = TEMP_FAILURE_RETRY(bind(server_fd, (struct sockaddr*)&server_sa, sizeof(server_sa)));
@@ -197,6 +198,29 @@ Result<void> start_test_service() {
             return ScopedAStatus::ok();
         }
 
+        ScopedAStatus getEffectiveCapabilities(std::vector<std::string>* out) override {
+            if (out == nullptr) {
+                return ScopedAStatus::ok();
+            }
+            cap_t cap = cap_get_proc();
+            auto guard = make_scope_guard([&cap]() { cap_free(cap); });
+            for (cap_value_t cap_id = 0; cap_id < CAP_LAST_CAP + 1; cap_id++) {
+                cap_flag_value_t value;
+                if (cap_get_flag(cap, cap_id, CAP_EFFECTIVE, &value) != 0) {
+                    return ScopedAStatus::
+                            fromServiceSpecificErrorWithMessage(0, "cap_get_flag failed");
+                }
+                if (value == CAP_SET) {
+                    // Ideally we would just send back the cap_ids, but I wasn't able to find java
+                    // APIs for linux capabilities, hence we transform to the human readable name
+                    // here.
+                    char* name = cap_to_name(cap_id);
+                    out->push_back(std::string(name) + "(" + std::to_string(cap_id) + ")");
+                }
+            }
+            return ScopedAStatus::ok();
+        }
+
         virtual ::ScopedAStatus runEchoReverseServer() override {
             auto result = start_echo_reverse_server();
             if (result.ok()) {
@@ -206,6 +230,28 @@ Result<void> start_test_service() {
                 return ScopedAStatus::fromServiceSpecificErrorWithMessage(-1, message.c_str());
             }
         }
+
+        ScopedAStatus writeToFile(const std::string& content, const std::string& path) override {
+            if (!android::base::WriteStringToFile(content, path)) {
+                std::string msg = "Failed to write " + content + " to file " + path +
+                        ". Errono: " + std::to_string(errno);
+                return ScopedAStatus::fromExceptionCodeWithMessage(EX_SERVICE_SPECIFIC,
+                                                                   msg.c_str());
+            }
+            return ScopedAStatus::ok();
+        }
+
+        ScopedAStatus readFromFile(const std::string& path, std::string* out) override {
+            if (!android::base::ReadFileToString(path, out)) {
+                std::string msg =
+                        "Failed to read " + path + " to string. Errono: " + std::to_string(errno);
+                return ScopedAStatus::fromExceptionCodeWithMessage(EX_SERVICE_SPECIFIC,
+                                                                   msg.c_str());
+            }
+            return ScopedAStatus::ok();
+        }
+
+        ScopedAStatus quit() override { exit(0); }
     };
     auto testService = ndk::SharedRefBase::make<TestService>();
 

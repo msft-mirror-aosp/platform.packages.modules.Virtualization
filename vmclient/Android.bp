@@ -11,12 +11,12 @@ rust_library {
         "android.system.virtualizationcommon-rust",
         "android.system.virtualizationservice-rust",
         "libbinder_rs",
+        "libcommand_fds",
         "liblog_rust",
+        "libnix",
         "librpcbinder_rs",
+        "libshared_child",
         "libthiserror",
-    ],
-    shared_libs: [
-        "libbinder_rpc_unstable",
     ],
     apex_available: [
         "com.android.compos",

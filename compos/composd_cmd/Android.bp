@@ -2,8 +2,8 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-rust_binary {
-    name: "composd_cmd",
+rust_defaults {
+    name: "composd_cmd_defaults",
     srcs: ["composd_cmd.rs"],
     edition: "2021",
     rustlibs: [
@@ -12,9 +12,21 @@ rust_binary {
         "libbinder_rs",
         "libclap",
         "libcompos_common",
+        "libhypervisor_props",
     ],
     prefer_rlib: true,
+}
+
+rust_binary {
+    name: "composd_cmd",
+    defaults: ["composd_cmd_defaults"],
     apex_available: [
         "com.android.compos",
     ],
+}
+
+rust_test {
+    name: "composd_cmd.test",
+    defaults: ["composd_cmd_defaults"],
+    test_suites: ["general-tests"],
 }

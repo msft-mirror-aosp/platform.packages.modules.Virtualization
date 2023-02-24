@@ -19,7 +19,6 @@ package com.android.microdroid.demo;
 import android.app.Application;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineCallback;
@@ -238,22 +237,16 @@ public class MainActivity extends AppCompatActivity {
                             mService.shutdownNow();
                             mStatus.postValue(VirtualMachine.STATUS_STOPPED);
                         }
-
-                        @Override
-                        public void onRamdump(VirtualMachine vm, ParcelFileDescriptor ramdump) {
-                            if (!mService.isShutdown()) {
-                                mPayloadOutput.postValue("(Kernel panic. Ramdump created)");
-                            }
-                        }
                     };
 
             try {
                 VirtualMachineConfig.Builder builder =
                         new VirtualMachineConfig.Builder(getApplication());
-                builder.setPayloadBinaryPath("MicrodroidTestNativeLib.so");
+                builder.setPayloadBinaryName("MicrodroidTestNativeLib.so");
                 builder.setProtectedVm(true);
                 if (debug) {
                     builder.setDebugLevel(VirtualMachineConfig.DEBUG_LEVEL_FULL);
+                    builder.setVmOutputCaptured(true);
                 }
                 VirtualMachineConfig config = builder.build();
                 VirtualMachineManager vmm =
@@ -269,10 +262,12 @@ public class MainActivity extends AppCompatActivity {
                 mVirtualMachine.setCallback(Executors.newSingleThreadExecutor(), callback);
                 mStatus.postValue(mVirtualMachine.getStatus());
 
-                InputStream console = mVirtualMachine.getConsoleOutput();
-                InputStream log = mVirtualMachine.getLogOutput();
-                mExecutorService.execute(new Reader("console", mConsoleOutput, console));
-                mExecutorService.execute(new Reader("log", mLogOutput, log));
+                if (debug) {
+                    InputStream console = mVirtualMachine.getConsoleOutput();
+                    InputStream log = mVirtualMachine.getLogOutput();
+                    mExecutorService.execute(new Reader("console", mConsoleOutput, console));
+                    mExecutorService.execute(new Reader("log", mLogOutput, log));
+                }
             } catch (VirtualMachineException e) {
                 throw new RuntimeException(e);
             }

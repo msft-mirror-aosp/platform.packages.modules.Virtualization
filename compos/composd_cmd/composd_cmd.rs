@@ -128,6 +128,12 @@ where
         &Strong<dyn ICompilationTaskCallback>,
     ) -> BinderResult<Strong<dyn ICompilationTask>>,
 {
+    if !hypervisor_props::is_any_vm_supported()? {
+        // Give up now, before trying to start composd, or we may end up waiting forever
+        // as it repeatedly starts and then aborts (b/254599807).
+        bail!("Device doesn't support protected or non-protected VMs")
+    }
+
     let service = wait_for_interface::<dyn IIsolatedCompilationService>("android.system.composd")
         .context("Failed to connect to composd service")?;
 
@@ -161,5 +167,17 @@ where
             }
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn verify_actions() {
+        // Check that the command parsing has been configured in a valid way.
+        Actions::command().debug_assert();
     }
 }
