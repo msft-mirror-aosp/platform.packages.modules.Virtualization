@@ -19,6 +19,8 @@ use crate::atom::{
     write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmContext, VmInstance, VmState};
+use crate::debug_config::should_prepare_console_output;
+use crate::debug_config::is_ramdump_needed;
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images};
 use crate::selinux::{getfilecon, SeContext};
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
@@ -317,6 +319,12 @@ impl VirtualizationService {
             check_gdb_allowed(config)?;
         }
 
+        let ramdump = if is_ramdump_needed(config) {
+            Some(prepare_ramdump_file(&temporary_directory)?)
+        } else {
+            None
+        };
+
         let state = &mut *self.state.lock().unwrap();
         let console_fd =
             clone_or_prepare_logger_fd(config, console_fd, format!("Console({})", cid))?;
@@ -407,19 +415,6 @@ impl VirtualizationService {
             }
         };
 
-        // Creating this ramdump file unconditionally is not harmful as ramdump will be created
-        // only when the VM is configured as such. `ramdump_write` is sent to crosvm and will
-        // be the backing store for the /dev/hvc1 where VM will emit ramdump to. `ramdump_read`
-        // will be sent back to the client (i.e. the VM owner) for readout.
-        let ramdump_path = temporary_directory.join("ramdump");
-        let ramdump = prepare_ramdump_file(&ramdump_path).map_err(|e| {
-            error!("Failed to prepare ramdump file: {:?}", e);
-            Status::new_service_specific_error_str(
-                -1,
-                Some(format!("Failed to prepare ramdump file: {:?}", e)),
-            )
-        })?;
-
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -436,7 +431,7 @@ impl VirtualizationService {
             task_profiles: config.taskProfiles.clone(),
             console_fd,
             log_fd,
-            ramdump: Some(ramdump),
+            ramdump,
             indirect_files,
             platform_version: parse_platform_version_req(&config.platformVersion)?,
             detect_hangup: is_app_config,
@@ -483,10 +478,6 @@ fn format_as_android_vm_instance(part: &mut dyn Write) -> std::io::Result<()> {
 fn format_as_encryptedstore(part: &mut dyn Write) -> std::io::Result<()> {
     part.write_all(UNFORMATTED_STORAGE_MAGIC.as_bytes())?;
     part.flush()
-}
-
-fn prepare_ramdump_file(ramdump_path: &Path) -> Result<File> {
-    File::create(ramdump_path).context(format!("Failed to create ramdump file {:?}", &ramdump_path))
 }
 
 fn round_up(input: u64, granularity: u64) -> u64 {
@@ -978,11 +969,20 @@ fn parse_platform_version_req(s: &str) -> Result<VersionReq, Status> {
     })
 }
 
-fn is_debuggable(config: &VirtualMachineConfig) -> bool {
-    match config {
-        VirtualMachineConfig::AppConfig(config) => config.debugLevel != DebugLevel::NONE,
-        _ => false,
-    }
+/// Create the empty ramdump file
+fn prepare_ramdump_file(temporary_directory: &Path) -> binder::Result<File> {
+    // `ramdump_write` is sent to crosvm and will be the backing store for the /dev/hvc1 where
+    // VM will emit ramdump to. `ramdump_read` will be sent back to the client (i.e. the VM
+    // owner) for readout.
+    let ramdump_path = temporary_directory.join("ramdump");
+    let ramdump = File::create(ramdump_path).map_err(|e| {
+        error!("Failed to prepare ramdump file: {:?}", e);
+        Status::new_service_specific_error_str(
+            -1,
+            Some(format!("Failed to prepare ramdump file: {:?}", e)),
+        )
+    })?;
+    Ok(ramdump)
 }
 
 fn is_protected(config: &VirtualMachineConfig) -> bool {
@@ -1031,9 +1031,12 @@ fn clone_or_prepare_logger_fd(
         return Ok(Some(clone_file(fd)?));
     }
 
-    if !is_debuggable(config) {
+    let VirtualMachineConfig::AppConfig(app_config) = config else {
         return Ok(None);
-    }
+    };
+    if !should_prepare_console_output(app_config.debugLevel) {
+        return Ok(None);
+    };
 
     let (raw_read_fd, raw_write_fd) = pipe().map_err(|e| {
         Status::new_service_specific_error_str(-1, Some(format!("Failed to create pipe: {:?}", e)))
