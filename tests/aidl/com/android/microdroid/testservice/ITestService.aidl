@@ -15,7 +15,12 @@
  */
 package com.android.microdroid.testservice;
 
-/** {@hide} */
+import com.android.microdroid.testservice.IAppCallback;
+
+/**
+ * This is the service exposed by the test payload, called by the test app.
+ * {@hide}
+ */
 interface ITestService {
     const long SERVICE_PORT = 5678;
 
@@ -55,6 +60,15 @@ interface ITestService {
 
     /* get the content of the specified file. */
     String readFromFile(String path);
+
+    /* get file permissions of the give file by stat'ing it */
+    int getFilePermissions(String path);
+
+    /** Returns flags for the given mountPoint. */
+    int getMountFlags(String mountPoint);
+
+    /** Requests the VM to asynchronously call appCallback.setVmCallback() */
+    void requestCallback(IAppCallback appCallback);
 
     /**
      * Request the service to exit, triggering the termination of the VM. This may cause any
