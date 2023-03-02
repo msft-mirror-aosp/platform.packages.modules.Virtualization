@@ -53,15 +53,27 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public abstract class MicrodroidDeviceTestBase {
+    private static final String TAG = "MicrodroidDeviceTestBase";
     private final String MAX_PERFORMANCE_TASK_PROFILE = "CPUSET_SP_TOP_APP";
 
     public static boolean isCuttlefish() {
-        return DeviceProperties.create(SystemProperties::get).isCuttlefish();
+        return getDeviceProperties().isCuttlefish();
+    }
+
+    public static boolean isGs101() {
+        return getDeviceProperties().isGs101();
+    }
+
+    public static boolean isUserBuild() {
+        return getDeviceProperties().isUserBuild();
     }
 
     public static String getMetricPrefix() {
-        return MetricsProcessor.getMetricPrefix(
-                DeviceProperties.create(SystemProperties::get).getMetricsTag());
+        return MetricsProcessor.getMetricPrefix(getDeviceProperties().getMetricsTag());
+    }
+
+    private static DeviceProperties getDeviceProperties() {
+        return DeviceProperties.create(SystemProperties::get);
     }
 
     protected final void grantPermission(String permission) {
@@ -82,11 +94,20 @@ public abstract class MicrodroidDeviceTestBase {
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         UiAutomation uiAutomation = instrumentation.getUiAutomation();
         String cmd = "settaskprofile " + Os.gettid() + " " + MAX_PERFORMANCE_TASK_PROFILE;
-        String out = runInShell("MicrodroidDeviceTestBase", uiAutomation, cmd).trim();
+        String out = runInShell(TAG, uiAutomation, cmd).trim();
         String expect = "Profile " + MAX_PERFORMANCE_TASK_PROFILE + " is applied successfully!";
         if (!expect.equals(out)) {
             throw new IOException("Could not apply max performance task profile: " + out);
         }
+    }
+
+    public final boolean getDebugPolicyBoolean(String debugPolicy) throws IOException {
+        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
+        UiAutomation uiAutomation = instrumentation.getUiAutomation();
+        String debugPolicyFilePath = "/proc/device-tree" + debugPolicy;
+        String cmd = "su root xxd -p " + debugPolicyFilePath;
+        String dp = runInShell(TAG, uiAutomation, cmd).trim();
+        return "00000001".equals(dp);
     }
 
     private Context mCtx;
@@ -443,6 +464,8 @@ public abstract class MicrodroidDeviceTestBase {
         public String mFileContent;
         public byte[] mBcc;
         public long[] mTimings;
+        public int mFileMode;
+        public int mMountFlags;
 
         public void assertNoException() {
             if (mException != null) {

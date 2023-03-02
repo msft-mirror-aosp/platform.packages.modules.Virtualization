@@ -29,6 +29,7 @@ import android.util.Log;
 
 import com.android.microdroid.test.vmshare.IVmShareTestService;
 import com.android.microdroid.testservice.ITestService;
+import com.android.microdroid.testservice.IAppCallback;
 
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -227,6 +228,21 @@ public class VmShareServiceImpl extends Service {
         @Override
         public String readFromFile(String path) throws RemoteException {
             return mServiceInVm.readFromFile(path);
+        }
+
+        @Override
+        public int getFilePermissions(String path) throws RemoteException {
+            throw new UnsupportedOperationException("Not supported");
+        }
+
+        @Override
+        public int getMountFlags(String path) throws RemoteException {
+            throw new UnsupportedOperationException("Not supported");
+        }
+
+        @Override
+        public void requestCallback(IAppCallback appCallback) {
+            throw new UnsupportedOperationException("Not supported");
         }
 
         @Override
