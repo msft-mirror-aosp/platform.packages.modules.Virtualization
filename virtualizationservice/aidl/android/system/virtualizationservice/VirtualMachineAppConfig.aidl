@@ -15,6 +15,7 @@
  */
 package android.system.virtualizationservice;
 
+import android.system.virtualizationservice.CpuTopology;
 import android.system.virtualizationservice.VirtualMachinePayloadConfig;
 
 /** Configuration for running an App in a VM */
@@ -69,6 +70,12 @@ parcelable VirtualMachineAppConfig {
     /** Debug level of the VM */
     DebugLevel debugLevel = DebugLevel.NONE;
 
+    /**
+     * Port at which crosvm will start a gdb server to debug guest kernel.
+     * If set to zero, then gdb server won't be started.
+     */
+    int gdbPort = 0;
+
     /** Whether the VM should be a protected VM. */
     boolean protectedVm;
 
@@ -78,10 +85,8 @@ parcelable VirtualMachineAppConfig {
      */
     int memoryMib;
 
-    /**
-     * Number of vCPUs in the VM. Defaults to 1.
-     */
-    int numCpus = 1;
+    /** The vCPU topology that will be generated for the VM. Default to 1 vCPU. */
+    CpuTopology cpuTopology = CpuTopology.ONE_CPU;
 
     /**
      * List of task profile names to apply for the VM

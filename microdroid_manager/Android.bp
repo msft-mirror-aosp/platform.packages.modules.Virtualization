@@ -19,10 +19,9 @@ rust_defaults {
         "libbinder_rs",
         "libbyteorder",
         "libcap_rust",
-        "libdiced",
-        "libdiced_open_dice_cbor",
+        "libciborium",
+        "libdiced_open_dice",
         "libdiced_sample_inputs",
-        "libdiced_utils",
         "libglob",
         "libhex",
         "libitertools",
@@ -46,9 +45,6 @@ rust_defaults {
         "libuuid",
         "libvsock",
         "librand",
-    ],
-    shared_libs: [
-        "libbinder_rpc_unstable",
     ],
     init_rc: ["microdroid_manager.rc"],
     multilib: {

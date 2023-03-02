@@ -21,32 +21,37 @@
 extern crate alloc;
 
 mod config;
+mod crypto;
 mod debug_policy;
 mod dice;
 mod entry;
 mod exceptions;
 mod fdt;
+mod gpt;
 mod heap;
 mod helpers;
 mod hvc;
+mod instance;
 mod memory;
 mod mmio_guard;
 mod mmu;
+mod rand;
 mod smccc;
 mod virtio;
 
 use alloc::boxed::Box;
 
-use crate::{
-    dice::derive_next_bcc,
-    entry::RebootReason,
-    fdt::add_dice_node,
-    helpers::flush,
-    helpers::GUEST_PAGE_SIZE,
-    memory::MemoryTracker,
-    virtio::pci::{self, find_virtio_devices},
-};
-use ::dice::bcc;
+use crate::dice::PartialInputs;
+use crate::entry::RebootReason;
+use crate::fdt::modify_for_next_stage;
+use crate::helpers::flush;
+use crate::helpers::GUEST_PAGE_SIZE;
+use crate::instance::get_or_generate_instance_salt;
+use crate::memory::MemoryTracker;
+use crate::virtio::pci;
+use diced_open_dice::bcc_handover_main_flow;
+use diced_open_dice::bcc_handover_parse;
+use diced_open_dice::DiceArtifacts;
 use fdtpci::{PciError, PciInfo};
 use libfdt::Fdt;
 use log::{debug, error, info, trace};
@@ -59,11 +64,11 @@ fn main(
     fdt: &mut Fdt,
     signed_kernel: &[u8],
     ramdisk: Option<&[u8]>,
-    bcc: &bcc::Handover,
+    current_bcc_handover: &[u8],
     memory: &mut MemoryTracker,
 ) -> Result<(), RebootReason> {
     info!("pVM firmware");
-    debug!("FDT: {:?}", fdt as *const libfdt::Fdt);
+    debug!("FDT: {:?}", fdt.as_ptr());
     debug!("Signed kernel: {:?} ({:#x} bytes)", signed_kernel.as_ptr(), signed_kernel.len());
     debug!("AVB public key: addr={:?}, size={:#x} ({1})", PUBLIC_KEY.as_ptr(), PUBLIC_KEY.len());
     if let Some(rd) = ramdisk {
@@ -71,13 +76,16 @@ fn main(
     } else {
         debug!("Ramdisk: None");
     }
-    trace!("BCC: {bcc:x?}");
+    let bcc_handover = bcc_handover_parse(current_bcc_handover).map_err(|e| {
+        error!("Invalid BCC Handover: {e:?}");
+        RebootReason::InvalidBcc
+    })?;
+    trace!("BCC: {bcc_handover:x?}");
 
     // Set up PCI bus for VirtIO devices.
     let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;
     debug!("PCI: {:#x?}", pci_info);
     let mut pci_root = pci::initialise(pci_info, memory)?;
-    find_virtio_devices(&mut pci_root).map_err(handle_pci_error)?;
 
     let verified_boot_data = verify_payload(signed_kernel, ramdisk, PUBLIC_KEY).map_err(|e| {
         error!("Failed to verify the payload: {e}");
@@ -90,17 +98,32 @@ fn main(
     })?;
     // By leaking the slice, its content will be left behind for the next stage.
     let next_bcc = Box::leak(next_bcc);
-    let next_bcc_size =
-        derive_next_bcc(bcc, next_bcc, &verified_boot_data, PUBLIC_KEY).map_err(|e| {
-            error!("Failed to derive next-stage DICE secrets: {e:?}");
-            RebootReason::SecretDerivationError
-        })?;
-    trace!("Next BCC: {:x?}", bcc::Handover::new(&next_bcc[..next_bcc_size]));
 
+    let dice_inputs = PartialInputs::new(&verified_boot_data).map_err(|e| {
+        error!("Failed to compute partial DICE inputs: {e:?}");
+        RebootReason::InternalError
+    })?;
+    let cdi_seal = DiceArtifacts::cdi_seal(&bcc_handover);
+    let (new_instance, salt) = get_or_generate_instance_salt(&mut pci_root, &dice_inputs, cdi_seal)
+        .map_err(|e| {
+            error!("Failed to get instance.img salt: {e}");
+            RebootReason::InternalError
+        })?;
+    trace!("Got salt from instance.img: {salt:x?}");
+
+    let dice_inputs = dice_inputs.into_input_values(&salt).map_err(|e| {
+        error!("Failed to generate DICE inputs: {e:?}");
+        RebootReason::InternalError
+    })?;
+    let _ = bcc_handover_main_flow(current_bcc_handover, &dice_inputs, next_bcc).map_err(|e| {
+        error!("Failed to derive next-stage DICE secrets: {e:?}");
+        RebootReason::SecretDerivationError
+    })?;
     flush(next_bcc);
 
-    add_dice_node(fdt, next_bcc.as_ptr() as usize, NEXT_BCC_SIZE).map_err(|e| {
-        error!("Failed to add DICE node to device tree: {e}");
+    let strict_boot = true;
+    modify_for_next_stage(fdt, next_bcc, new_instance, strict_boot).map_err(|e| {
+        error!("Failed to configure device tree: {e}");
         RebootReason::InternalError
     })?;
 
