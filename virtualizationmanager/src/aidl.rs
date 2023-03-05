@@ -19,6 +19,8 @@ use crate::atom::{
     write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmContext, VmInstance, VmState};
+use crate::debug_config::should_prepare_console_output;
+use crate::debug_config::is_ramdump_needed;
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images};
 use crate::selinux::{getfilecon, SeContext};
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
@@ -27,6 +29,7 @@ use android_system_virtualizationcommon::aidl::android::system::virtualizationco
     ErrorCode::ErrorCode,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    CpuTopology::CpuTopology,
     DiskImage::DiskImage,
     IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
@@ -62,7 +65,7 @@ use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fs::{read_dir, remove_file, File, OpenOptions};
 use std::io::{BufRead, BufReader, Error, ErrorKind, Write};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::os::unix::raw::pid_t;
 use std::path::{Path, PathBuf};
@@ -298,13 +301,34 @@ impl VirtualizationService {
                 // Some features are reserved for platform apps only, even when using
                 // VirtualMachineAppConfig:
                 // - controlling CPUs;
-                // - specifying a config file in the APK.
-                !config.taskProfiles.is_empty() || matches!(config.payload, Payload::ConfigPath(_))
+                // - specifying a config file in the APK;
+                // - gdbPort is set, meaning that crosvm will start a gdb server.
+                !config.taskProfiles.is_empty()
+                    || matches!(config.payload, Payload::ConfigPath(_))
+                    || config.gdbPort > 0
             }
         };
         if is_custom {
             check_use_custom_virtual_machine()?;
         }
+
+        let gdb_port = extract_gdb_port(config);
+
+        // Additional permission checks if caller request gdb.
+        if gdb_port.is_some() {
+            check_gdb_allowed(config)?;
+        }
+
+        let ramdump = if is_ramdump_needed(config) {
+            Some(prepare_ramdump_file(&temporary_directory)?)
+        } else {
+            None
+        };
+
+        let debug_level = match config {
+            VirtualMachineConfig::AppConfig(app_config) => app_config.debugLevel,
+            _ => DebugLevel::NONE,
+        };
 
         let state = &mut *self.state.lock().unwrap();
         let console_fd =
@@ -384,18 +408,17 @@ impl VirtualizationService {
             })
             .collect::<Result<Vec<DiskFile>, _>>()?;
 
-        // Creating this ramdump file unconditionally is not harmful as ramdump will be created
-        // only when the VM is configured as such. `ramdump_write` is sent to crosvm and will
-        // be the backing store for the /dev/hvc1 where VM will emit ramdump to. `ramdump_read`
-        // will be sent back to the client (i.e. the VM owner) for readout.
-        let ramdump_path = temporary_directory.join("ramdump");
-        let ramdump = prepare_ramdump_file(&ramdump_path).map_err(|e| {
-            error!("Failed to prepare ramdump file: {:?}", e);
-            Status::new_service_specific_error_str(
-                -1,
-                Some(format!("Failed to prepare ramdump file: {:?}", e)),
-            )
-        })?;
+        let (cpus, host_cpu_topology) = match config.cpuTopology {
+            CpuTopology::MATCH_HOST => (None, true),
+            CpuTopology::ONE_CPU => (NonZeroU32::new(1), false),
+            val => {
+                error!("Unexpected value of CPU topology: {:?}", val);
+                return Err(Status::new_service_specific_error_str(
+                    -1,
+                    Some(format!("Failed to parse CPU topology value: {:?}", val)),
+                ));
+            }
+        };
 
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
@@ -407,15 +430,18 @@ impl VirtualizationService {
             disks,
             params: config.params.to_owned(),
             protected: *is_protected,
+            debug_level,
             memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
-            cpus: config.numCpus.try_into().ok().and_then(NonZeroU32::new),
+            cpus,
+            host_cpu_topology,
             task_profiles: config.taskProfiles.clone(),
             console_fd,
             log_fd,
-            ramdump: Some(ramdump),
+            ramdump,
             indirect_files,
             platform_version: parse_platform_version_req(&config.platformVersion)?,
             detect_hangup: is_app_config,
+            gdb_port,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -458,10 +484,6 @@ fn format_as_android_vm_instance(part: &mut dyn Write) -> std::io::Result<()> {
 fn format_as_encryptedstore(part: &mut dyn Write) -> std::io::Result<()> {
     part.write_all(UNFORMATTED_STORAGE_MAGIC.as_bytes())?;
     part.flush()
-}
-
-fn prepare_ramdump_file(ramdump_path: &Path) -> Result<File> {
-    File::create(ramdump_path).context(format!("Failed to create ramdump file {:?}", &ramdump_path))
 }
 
 fn round_up(input: u64, granularity: u64) -> u64 {
@@ -567,8 +589,9 @@ fn load_app_config(
 
     vm_config.name = config.name.clone();
     vm_config.protectedVm = config.protectedVm;
-    vm_config.numCpus = config.numCpus;
+    vm_config.cpuTopology = config.cpuTopology;
     vm_config.taskProfiles = config.taskProfiles.clone();
+    vm_config.gdbPort = config.gdbPort;
 
     // Microdroid takes additional init ramdisk & (optionally) storage image
     add_microdroid_system_images(config, instance_file, storage_image, &mut vm_config)?;
@@ -611,7 +634,7 @@ fn create_vm_payload_config(
         apexes: vec![],
         extra_apks: vec![],
         prefer_staged: false,
-        export_tombstones: false,
+        export_tombstones: None,
         enable_authfs: false,
     })
 }
@@ -952,10 +975,56 @@ fn parse_platform_version_req(s: &str) -> Result<VersionReq, Status> {
     })
 }
 
-fn is_debuggable(config: &VirtualMachineConfig) -> bool {
+/// Create the empty ramdump file
+fn prepare_ramdump_file(temporary_directory: &Path) -> binder::Result<File> {
+    // `ramdump_write` is sent to crosvm and will be the backing store for the /dev/hvc1 where
+    // VM will emit ramdump to. `ramdump_read` will be sent back to the client (i.e. the VM
+    // owner) for readout.
+    let ramdump_path = temporary_directory.join("ramdump");
+    let ramdump = File::create(ramdump_path).map_err(|e| {
+        error!("Failed to prepare ramdump file: {:?}", e);
+        Status::new_service_specific_error_str(
+            -1,
+            Some(format!("Failed to prepare ramdump file: {:?}", e)),
+        )
+    })?;
+    Ok(ramdump)
+}
+
+fn is_protected(config: &VirtualMachineConfig) -> bool {
     match config {
-        VirtualMachineConfig::AppConfig(config) => config.debugLevel != DebugLevel::NONE,
-        _ => false,
+        VirtualMachineConfig::RawConfig(config) => config.protectedVm,
+        VirtualMachineConfig::AppConfig(config) => config.protectedVm,
+    }
+}
+
+fn check_gdb_allowed(config: &VirtualMachineConfig) -> binder::Result<()> {
+    if is_protected(config) {
+        return Err(Status::new_exception_str(
+            ExceptionCode::SECURITY,
+            Some("can't use gdb with protected VMs"),
+        ));
+    }
+
+    match config {
+        VirtualMachineConfig::RawConfig(_) => Ok(()),
+        VirtualMachineConfig::AppConfig(config) => {
+            if config.debugLevel != DebugLevel::FULL {
+                Err(Status::new_exception_str(
+                    ExceptionCode::SECURITY,
+                    Some("can't use gdb with non-debuggable VMs"),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn extract_gdb_port(config: &VirtualMachineConfig) -> Option<NonZeroU16> {
+    match config {
+        VirtualMachineConfig::RawConfig(config) => NonZeroU16::new(config.gdbPort as u16),
+        VirtualMachineConfig::AppConfig(config) => NonZeroU16::new(config.gdbPort as u16),
     }
 }
 
@@ -968,9 +1037,12 @@ fn clone_or_prepare_logger_fd(
         return Ok(Some(clone_file(fd)?));
     }
 
-    if !is_debuggable(config) {
+    let VirtualMachineConfig::AppConfig(app_config) = config else {
         return Ok(None);
-    }
+    };
+    if !should_prepare_console_output(app_config.debugLevel) {
+        return Ok(None);
+    };
 
     let (raw_read_fd, raw_write_fd) = pipe().map_err(|e| {
         Status::new_service_specific_error_str(-1, Some(format!("Failed to create pipe: {:?}", e)))

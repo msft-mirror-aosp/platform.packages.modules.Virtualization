@@ -22,30 +22,41 @@ use crate::{
     COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    CpuTopology::CpuTopology,
     IVirtualizationService::IVirtualizationService,
     VirtualMachineAppConfig::{DebugLevel::DebugLevel, Payload::Payload, VirtualMachineAppConfig},
     VirtualMachineConfig::VirtualMachineConfig,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use binder::{ParcelFileDescriptor, Strong};
 use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsService;
+use glob::glob;
 use log::{info, warn};
 use rustutils::system_properties;
-use std::fs::{self, File};
-use std::num::NonZeroU32;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use vmclient::{DeathReason, ErrorCode, VmInstance, VmWaitError};
 
 /// This owns an instance of the CompOS VM.
 pub struct ComposClient(VmInstance);
 
+/// CPU topology configuration for a virtual machine.
+#[derive(Default, Debug, Clone)]
+pub enum VmCpuTopology {
+    /// Run VM with 1 vCPU only.
+    #[default]
+    OneCpu,
+    /// Run VM vCPU topology matching that of the host.
+    MatchHost,
+}
+
 /// Parameters to be used when creating a virtual machine instance.
 #[derive(Default, Debug, Clone)]
 pub struct VmParameters {
     /// Whether the VM should be debuggable.
     pub debug_mode: bool,
-    /// Number of vCPUs to have in the VM. If None, defaults to 1.
-    pub cpus: Option<NonZeroU32>,
+    /// CPU topology of the VM. Defaults to 1 vCPU.
+    pub cpu_topology: VmCpuTopology,
     /// List of task profiles to apply to the VM
     pub task_profiles: Vec<String>,
     /// If present, overrides the amount of RAM to give the VM
@@ -111,6 +122,11 @@ impl ComposClient {
             (Some(console_fd), Some(log_fd))
         };
 
+        let cpu_topology = match parameters.cpu_topology {
+            VmCpuTopology::OneCpu => CpuTopology::ONE_CPU,
+            VmCpuTopology::MatchHost => CpuTopology::MATCH_HOST,
+        };
+
         let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
             name: String::from("Compos"),
             apk: Some(apk_fd),
@@ -122,8 +138,9 @@ impl ComposClient {
             extraIdsigs: extra_idsigs,
             protectedVm: protected_vm,
             memoryMib: parameters.memory_mib.unwrap_or(0), // 0 means use the default
-            numCpus: parameters.cpus.map_or(1, NonZeroU32::get) as i32,
+            cpuTopology: cpu_topology,
             taskProfiles: parameters.task_profiles.clone(),
+            gdbPort: 0, // Don't start gdb-server
         });
 
         let callback = Box::new(Callback {});
@@ -178,15 +195,19 @@ fn locate_config_apk(apex_dir: &Path) -> Result<PathBuf> {
     // Our config APK will be in a directory under app, but the name of the directory is at the
     // discretion of the build system. So just look in each sub-directory until we find it.
     // (In practice there will be exactly one directory, so this shouldn't take long.)
-    let app_dir = apex_dir.join("app");
-    for dir in fs::read_dir(app_dir).context("Reading app dir")? {
-        let apk_file = dir?.path().join("CompOSPayloadApp.apk");
-        if apk_file.is_file() {
-            return Ok(apk_file);
-        }
+    let app_glob = apex_dir.join("app").join("**").join("CompOSPayloadApp*.apk");
+    let mut entries: Vec<PathBuf> =
+        glob(app_glob.to_str().ok_or_else(|| anyhow!("Invalid path: {}", app_glob.display()))?)
+            .context("failed to glob")?
+            .filter_map(|e| e.ok())
+            .collect();
+    if entries.len() > 1 {
+        bail!("Found more than one apk matching {}", app_glob.display());
     }
-
-    bail!("Failed to locate CompOSPayloadApp.apk")
+    match entries.pop() {
+        Some(path) => Ok(path),
+        None => Err(anyhow!("No apks match {}", app_glob.display())),
+    }
 }
 
 fn prepare_idsig(
