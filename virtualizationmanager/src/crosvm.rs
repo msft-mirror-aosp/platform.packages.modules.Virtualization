@@ -16,6 +16,7 @@
 
 use crate::aidl::{remove_temporary_files, Cid, VirtualMachineCallbacks};
 use crate::atom::{get_num_cpus, write_vm_exited_stats};
+use crate::debug_config::should_prepare_console_output;
 use anyhow::{anyhow, bail, Context, Error, Result};
 use command_fds::CommandFdExt;
 use lazy_static::lazy_static;
@@ -41,7 +42,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 use std::thread::{self, JoinHandle};
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::DeathReason::DeathReason;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::MemoryTrimLevel::MemoryTrimLevel;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    MemoryTrimLevel::MemoryTrimLevel,
+    VirtualMachineAppConfig::DebugLevel::DebugLevel
+};
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
 use binder::Strong;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
@@ -68,6 +72,8 @@ const CROSVM_REBOOT_STATUS: i32 = 32;
 const CROSVM_CRASH_STATUS: i32 = 33;
 /// The exit status which crosvm returns when vcpu is stalled.
 const CROSVM_WATCHDOG_REBOOT_STATUS: i32 = 36;
+/// The size of memory (in MiB) reserved for ramdump
+const RAMDUMP_RESERVED_MIB: u32 = 17;
 
 const MILLIS_PER_SEC: i64 = 1000;
 
@@ -95,6 +101,7 @@ pub struct CrosvmConfig {
     pub disks: Vec<DiskFile>,
     pub params: Option<String>,
     pub protected: bool,
+    pub debug_level: DebugLevel,
     pub memory_mib: Option<NonZeroU32>,
     pub cpus: Option<NonZeroU32>,
     pub host_cpu_topology: bool,
@@ -530,6 +537,9 @@ impl VmInstance {
     /// Checks if ramdump has been created. If so, send it to tombstoned.
     fn handle_ramdump(&self) -> Result<(), Error> {
         let ramdump_path = self.temporary_directory.join("ramdump");
+        if !ramdump_path.as_path().try_exists()? {
+            return Ok(());
+        }
         if std::fs::metadata(&ramdump_path)?.len() > 0 {
             Self::send_ramdump_to_tombstoned(&ramdump_path)?;
         }
@@ -665,24 +675,6 @@ fn exit_signal(result: &Result<ExitStatus, io::Error>) -> Option<i32> {
     }
 }
 
-fn should_configure_ramdump(protected: bool) -> bool {
-    if protected {
-        // Protected VM needs ramdump configuration here.
-        // pvmfw will disable ramdump if unnecessary.
-        true
-    } else {
-        // For unprotected VM, ramdump should be handled here.
-        // ramdump wouldn't be enabled if ramdump is explicitly set to <1>.
-        if let Ok(mut file) = File::open("/proc/device-tree/avf/guest/common/ramdump") {
-            let mut ramdump: [u8; 4] = Default::default();
-            file.read_exact(&mut ramdump).map_err(|_| false).unwrap();
-            // DT spec uses big endian although Android is always little endian.
-            return u32::from_be_bytes(ramdump) == 1;
-        }
-        false
-    }
-}
-
 /// Starts an instance of `crosvm` to manage a new VM.
 fn run_vm(
     config: CrosvmConfig,
@@ -722,12 +714,32 @@ fn run_vm(
         let virtio_pci_device_count = 4 + config.disks.len();
         // crosvm virtio queue has 256 entries, so 2 MiB per device (2 pages per entry) should be
         // enough.
-        let swiotlb_size_mib = 2 * virtio_pci_device_count;
+        let swiotlb_size_mib = 2 * virtio_pci_device_count as u32;
         command.arg("--swiotlb").arg(swiotlb_size_mib.to_string());
 
         // Workaround to keep crash_dump from trying to read protected guest memory.
         // Context in b/238324526.
         command.arg("--unmap-guest-memory-on-fork");
+
+        if config.ramdump.is_some() {
+            // Protected VM needs to reserve memory for ramdump here. pvmfw will drop This
+            // if ramdump should be disabled (via debug policy). Note that we reserve more
+            // memory for the restricted dma pool.
+            let ramdump_reserve = RAMDUMP_RESERVED_MIB + swiotlb_size_mib;
+            command.arg("--params").arg(format!("crashkernel={ramdump_reserve}M"));
+        }
+    } else {
+        if config.ramdump.is_some() {
+            command.arg("--params").arg(format!("crashkernel={RAMDUMP_RESERVED_MIB}M"));
+        }
+        if config.debug_level == DebugLevel::NONE
+            && should_prepare_console_output(config.debug_level)
+        {
+            // bootconfig.normal will be used, but we need log.
+            // pvmfw will add following commands by itself, but non-protected VM should do so here.
+            command.arg("--params").arg("printk.devkmsg=on");
+            command.arg("--params").arg("console=hvc0");
+        }
     }
 
     if let Some(memory_mib) = config.memory_mib {
@@ -815,10 +827,6 @@ fn run_vm(
 
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);
-
-    if should_configure_ramdump(config.protected) {
-        command.arg("--params").arg("crashkernel=17M");
-    }
 
     print_crosvm_args(&command);
 

@@ -4,9 +4,6 @@
       "name": "MicrodroidHostTestCases"
     },
     {
-      "name": "ComposHostTestCases"
-    },
-    {
       "name": "MicrodroidTestApp"
     },
     {
@@ -36,6 +33,9 @@
       "name": "ComposBenchmarkApp"
     },
     {
+      "name": "ComposHostTestCases"
+    },
+    {
       "name": "AVFHostTestCases"
     }
   ],
@@ -47,9 +47,6 @@
   "imports": [
     {
       "path": "packages/modules/Virtualization/apkdmverity"
-    },
-    {
-      "path": "packages/modules/Virtualization/avmd"
     },
     {
       "path": "packages/modules/Virtualization/encryptedstore"

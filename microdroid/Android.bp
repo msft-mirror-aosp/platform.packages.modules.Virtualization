@@ -51,6 +51,7 @@ android_system_image {
     deps: [
         "init_second_stage",
         "microdroid_build_prop",
+        "microdroid_init_debug_policy",
         "microdroid_init_rc",
         "microdroid_ueventd_rc",
         "microdroid_launcher",
@@ -84,13 +85,6 @@ android_system_image {
         "microdroid_plat_sepolicy_and_mapping.sha256",
         "microdroid_property_contexts",
         "mke2fs.microdroid",
-
-        // Adding more libs manually for unbundled build.
-        // TODO(b/268557568) these should be added automatically.
-        "libcrypto",
-        "liblzma",
-        "libc++",
-        "libssl",
 
         "libvm_payload", // used by payload to interact with microdroid manager
 

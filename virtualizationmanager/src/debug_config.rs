@@ -15,20 +15,18 @@
 //! Functions for AVF debug policy and debug level
 
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    VirtualMachineAppConfig::DebugLevel::DebugLevel
+    VirtualMachineAppConfig::DebugLevel::DebugLevel, VirtualMachineConfig::VirtualMachineConfig,
 };
 use std::fs::File;
 use std::io::Read;
 
 /// Get debug policy value in bool. It's true iff the value is explicitly set to <1>.
 fn get_debug_policy_bool(path: &'static str) -> Option<bool> {
-    if let Ok(mut file) = File::open(path) {
-        let mut log: [u8; 4] = Default::default();
-        file.read_exact(&mut log).map_err(|_| false).unwrap();
-        // DT spec uses big endian although Android is always little endian.
-        return Some(u32::from_be_bytes(log) == 1);
-    }
-    None
+    let mut file = File::open(path).ok()?;
+    let mut log: [u8; 4] = Default::default();
+    file.read_exact(&mut log).ok()?;
+    // DT spec uses big endian although Android is always little endian.
+    Some(u32::from_be_bytes(log) == 1)
 }
 
 /// Get whether console output should be configred for VM to leave console and adb log.
@@ -36,4 +34,26 @@ fn get_debug_policy_bool(path: &'static str) -> Option<bool> {
 pub fn should_prepare_console_output(debug_level: DebugLevel) -> bool {
     debug_level != DebugLevel::NONE
         || get_debug_policy_bool("/proc/device-tree/avf/guest/common/log").unwrap_or_default()
+        || get_debug_policy_bool("/proc/device-tree/avf/guest/microdroid/adb").unwrap_or_default()
+}
+
+/// Get whether debug apexes (MICRODROID_REQUIRED_APEXES_DEBUG) are required.
+pub fn should_include_debug_apexes(debug_level: DebugLevel) -> bool {
+    debug_level != DebugLevel::NONE
+        || get_debug_policy_bool("/proc/device-tree/avf/guest/microdroid/adb").unwrap_or_default()
+}
+
+/// Decision to support ramdump
+pub fn is_ramdump_needed(config: &VirtualMachineConfig) -> bool {
+    let enabled_in_dp =
+        get_debug_policy_bool("/proc/device-tree/avf/guest/common/ramdump").unwrap_or_default();
+    let debuggable = match config {
+        VirtualMachineConfig::RawConfig(_) => {
+            // custom VMs are considered debuggable for flexibility
+            true
+        }
+        VirtualMachineConfig::AppConfig(config) => config.debugLevel == DebugLevel::FULL,
+    };
+
+    enabled_in_dp || debuggable
 }

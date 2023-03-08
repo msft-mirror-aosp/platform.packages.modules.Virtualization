@@ -20,6 +20,7 @@ import static java.util.Objects.requireNonNull;
 
 /** This class can be used in both host tests and device tests to get the device properties. */
 public final class DeviceProperties {
+
     /** PropertyGetter is used to get the property associated to a given key. */
     public interface PropertyGetter {
         String getProperty(String key) throws Exception;
