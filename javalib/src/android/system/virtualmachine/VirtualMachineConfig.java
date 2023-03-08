@@ -31,11 +31,13 @@ import android.annotation.TestApi;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.PersistableBundle;
 import android.sysprop.HypervisorProperties;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
 import android.system.virtualizationservice.VirtualMachinePayloadConfig;
+import android.util.Log;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -47,6 +49,7 @@ import java.io.OutputStream;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.Objects;
+import java.util.zip.ZipFile;
 
 /**
  * Represents a configuration of a virtual machine. A configuration consists of hardware
@@ -57,10 +60,11 @@ import java.util.Objects;
  */
 @SystemApi
 public final class VirtualMachineConfig {
+    private static final String TAG = "VirtualMachineConfig";
     private static final String[] EMPTY_STRING_ARRAY = {};
 
     // These define the schema of the config file persisted on disk.
-    private static final int VERSION = 5;
+    private static final int VERSION = 6;
     private static final String KEY_VERSION = "version";
     private static final String KEY_PACKAGENAME = "packageName";
     private static final String KEY_APKPATH = "apkPath";
@@ -69,7 +73,7 @@ public final class VirtualMachineConfig {
     private static final String KEY_DEBUGLEVEL = "debugLevel";
     private static final String KEY_PROTECTED_VM = "protectedVm";
     private static final String KEY_MEMORY_BYTES = "memoryBytes";
-    private static final String KEY_NUM_CPUS = "numCpus";
+    private static final String KEY_CPU_TOPOLOGY = "cpuTopology";
     private static final String KEY_ENCRYPTED_STORAGE_BYTES = "encryptedStorageBytes";
     private static final String KEY_VM_OUTPUT_CAPTURED = "vmOutputCaptured";
 
@@ -97,6 +101,33 @@ public final class VirtualMachineConfig {
      */
     @SystemApi public static final int DEBUG_LEVEL_FULL = 1;
 
+    /** @hide */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(
+            prefix = "CPU_TOPOLOGY_",
+            value = {
+                CPU_TOPOLOGY_ONE_CPU,
+                CPU_TOPOLOGY_MATCH_HOST,
+            })
+    public @interface CpuTopology {}
+
+    /**
+     * Run VM with 1 vCPU. This is the default option, usually the fastest to boot and consuming the
+     * least amount of resources. Typically the best option for small or ephemeral workloads.
+     *
+     * @hide
+     */
+    @SystemApi public static final int CPU_TOPOLOGY_ONE_CPU = 0;
+
+    /**
+     * Run VM with vCPU topology matching the physical CPU topology of the host. Usually takes
+     * longer to boot and cosumes more resources compared to a single vCPU. Typically a good option
+     * for long-running workloads that benefit from parallel execution.
+     *
+     * @hide
+     */
+    @SystemApi public static final int CPU_TOPOLOGY_MATCH_HOST = 1;
+
     /** Name of a package whose primary APK contains the VM payload. */
     @Nullable private final String mPackageName;
 
@@ -116,10 +147,8 @@ public final class VirtualMachineConfig {
      */
     private final long mMemoryBytes;
 
-    /**
-     * Number of vCPUs in the VM. Defaults to 1 when not specified.
-     */
-    private final int mNumCpus;
+    /** CPU topology configuration of the VM. */
+    @CpuTopology private final int mCpuTopology;
 
     /**
      * Path within the APK to the payload config file that defines software aspects of the VM.
@@ -143,7 +172,7 @@ public final class VirtualMachineConfig {
             @DebugLevel int debugLevel,
             boolean protectedVm,
             long memoryBytes,
-            int numCpus,
+            @CpuTopology int cpuTopology,
             long encryptedStorageBytes,
             boolean vmOutputCaptured) {
         // This is only called from Builder.build(); the builder handles parameter validation.
@@ -154,7 +183,7 @@ public final class VirtualMachineConfig {
         mDebugLevel = debugLevel;
         mProtectedVm = protectedVm;
         mMemoryBytes = memoryBytes;
-        mNumCpus = numCpus;
+        mCpuTopology = cpuTopology;
         mEncryptedStorageBytes = encryptedStorageBytes;
         mVmOutputCaptured = vmOutputCaptured;
     }
@@ -225,7 +254,7 @@ public final class VirtualMachineConfig {
         if (memoryBytes != 0) {
             builder.setMemoryBytes(memoryBytes);
         }
-        builder.setNumCpus(b.getInt(KEY_NUM_CPUS));
+        builder.setCpuTopology(b.getInt(KEY_CPU_TOPOLOGY));
         long encryptedStorageBytes = b.getLong(KEY_ENCRYPTED_STORAGE_BYTES);
         if (encryptedStorageBytes != 0) {
             builder.setEncryptedStorageBytes(encryptedStorageBytes);
@@ -258,7 +287,7 @@ public final class VirtualMachineConfig {
         b.putString(KEY_PAYLOADBINARYNAME, mPayloadBinaryName);
         b.putInt(KEY_DEBUGLEVEL, mDebugLevel);
         b.putBoolean(KEY_PROTECTED_VM, mProtectedVm);
-        b.putInt(KEY_NUM_CPUS, mNumCpus);
+        b.putInt(KEY_CPU_TOPOLOGY, mCpuTopology);
         if (mMemoryBytes > 0) {
             b.putLong(KEY_MEMORY_BYTES, mMemoryBytes);
         }
@@ -271,8 +300,7 @@ public final class VirtualMachineConfig {
 
     /**
      * Returns the absolute path of the APK which should contain the binary payload that will
-     * execute within the VM. Returns null if no specific path has been set, so the primary APK will
-     * be used.
+     * execute within the VM. Returns null if no specific path has been set.
      *
      * @hide
      */
@@ -312,7 +340,6 @@ public final class VirtualMachineConfig {
      * @hide
      */
     @SystemApi
-    @NonNull
     @DebugLevel
     public int getDebugLevel() {
         return mDebugLevel;
@@ -341,14 +368,14 @@ public final class VirtualMachineConfig {
     }
 
     /**
-     * Returns the number of vCPUs that the VM will have.
+     * Returns the CPU topology configuration of the VM.
      *
      * @hide
      */
     @SystemApi
-    @IntRange(from = 1)
-    public int getNumCpus() {
-        return mNumCpus;
+    @CpuTopology
+    public int getCpuTopology() {
+        return mCpuTopology;
     }
 
     /**
@@ -397,6 +424,9 @@ public final class VirtualMachineConfig {
      */
     @SystemApi
     public boolean isCompatibleWith(@NonNull VirtualMachineConfig other) {
+        if (this == other) {
+            return true;
+        }
         return this.mDebugLevel == other.mDebugLevel
                 && this.mProtectedVm == other.mProtectedVm
                 && this.mEncryptedStorageBytes == other.mEncryptedStorageBytes
@@ -418,18 +448,7 @@ public final class VirtualMachineConfig {
             throws VirtualMachineException {
         VirtualMachineAppConfig vsConfig = new VirtualMachineAppConfig();
 
-        String apkPath = mApkPath;
-        if (apkPath == null) {
-            try {
-                ApplicationInfo appInfo =
-                        packageManager.getApplicationInfo(
-                                mPackageName, PackageManager.ApplicationInfoFlags.of(0));
-                // This really is the path to the APK, not a directory.
-                apkPath = appInfo.sourceDir;
-            } catch (PackageManager.NameNotFoundException e) {
-                throw new VirtualMachineException("Package not found", e);
-            }
-        }
+        String apkPath = (mApkPath != null) ? mApkPath : findPayloadApk(packageManager);
 
         try {
             vsConfig.apk = ParcelFileDescriptor.open(new File(apkPath), MODE_READ_ONLY);
@@ -455,10 +474,56 @@ public final class VirtualMachineConfig {
         }
         vsConfig.protectedVm = mProtectedVm;
         vsConfig.memoryMib = bytesToMebiBytes(mMemoryBytes);
-        vsConfig.numCpus = mNumCpus;
+        switch (mCpuTopology) {
+            case CPU_TOPOLOGY_MATCH_HOST:
+                vsConfig.cpuTopology = android.system.virtualizationservice.CpuTopology.MATCH_HOST;
+                break;
+            default:
+                vsConfig.cpuTopology = android.system.virtualizationservice.CpuTopology.ONE_CPU;
+                break;
+        }
         // Don't allow apps to set task profiles ... at least for now.
         vsConfig.taskProfiles = EMPTY_STRING_ARRAY;
         return vsConfig;
+    }
+
+    private String findPayloadApk(PackageManager packageManager) throws VirtualMachineException {
+        ApplicationInfo appInfo;
+        try {
+            appInfo =
+                    packageManager.getApplicationInfo(
+                            mPackageName, PackageManager.ApplicationInfoFlags.of(0));
+        } catch (PackageManager.NameNotFoundException e) {
+            throw new VirtualMachineException("Package not found", e);
+        }
+
+        String[] splitApkPaths = appInfo.splitSourceDirs;
+        String[] abis = Build.SUPPORTED_64_BIT_ABIS;
+
+        // If there are split APKs, and we know the payload binary name, see if we can find a
+        // split APK containing the binary.
+        if (mPayloadBinaryName != null && splitApkPaths != null && abis.length != 0) {
+            String[] libraryNames = new String[abis.length];
+            for (int i = 0; i < abis.length; i++) {
+                libraryNames[i] = "lib/" + abis[i] + "/" + mPayloadBinaryName;
+            }
+
+            for (String path : splitApkPaths) {
+                try (ZipFile zip = new ZipFile(path)) {
+                    for (String name : libraryNames) {
+                        if (zip.getEntry(name) != null) {
+                            Log.i(TAG, "Found payload in " + path);
+                            return path;
+                        }
+                    }
+                } catch (IOException e) {
+                    Log.w(TAG, "Failed to scan split APK: " + path, e);
+                }
+            }
+        }
+
+        // This really is the path to the APK, not a directory.
+        return appInfo.sourceDir;
     }
 
     private int bytesToMebiBytes(long mMemoryBytes) {
@@ -486,7 +551,7 @@ public final class VirtualMachineConfig {
         private boolean mProtectedVm;
         private boolean mProtectedVmSet;
         private long mMemoryBytes;
-        private int mNumCpus = 1;
+        @CpuTopology private int mCpuTopology = CPU_TOPOLOGY_ONE_CPU;
         private long mEncryptedStorageBytes;
         private boolean mVmOutputCaptured = false;
 
@@ -555,14 +620,15 @@ public final class VirtualMachineConfig {
                     mDebugLevel,
                     mProtectedVm,
                     mMemoryBytes,
-                    mNumCpus,
+                    mCpuTopology,
                     mEncryptedStorageBytes,
                     mVmOutputCaptured);
         }
 
         /**
          * Sets the absolute path of the APK containing the binary payload that will execute within
-         * the VM. If not set explicitly, defaults to the primary APK of the context.
+         * the VM. If not set explicitly, defaults to the split APK containing the payload, if there
+         * is one, and otherwise the primary APK of the context.
          *
          * @hide
          */
@@ -687,25 +753,21 @@ public final class VirtualMachineConfig {
         }
 
         /**
-         * Sets the number of vCPUs in the VM. Defaults to 1. Cannot be more than the number of real
-         * CPUs (as returned by {@link Runtime#availableProcessors}).
+         * Sets the CPU topology configuration of the VM. Defaults to {@link #CPU_TOPOLOGY_ONE_CPU}.
+         *
+         * <p>This determines how many virtual CPUs will be created, and their performance and
+         * scheduling characteristics, such as affinity masks. Topology also has an effect on memory
+         * usage as each vCPU requires additional memory to keep its state.
          *
          * @hide
          */
         @SystemApi
         @NonNull
-        public Builder setNumCpus(@IntRange(from = 1) int numCpus) {
-            int availableCpus = Runtime.getRuntime().availableProcessors();
-            if (numCpus < 1 || numCpus > availableCpus) {
-                throw new IllegalArgumentException(
-                        "Number of vCPUs ("
-                                + numCpus
-                                + ") is out of "
-                                + "range [1, "
-                                + availableCpus
-                                + "]");
+        public Builder setCpuTopology(@CpuTopology int cpuTopology) {
+            if (cpuTopology != CPU_TOPOLOGY_ONE_CPU && cpuTopology != CPU_TOPOLOGY_MATCH_HOST) {
+                throw new IllegalArgumentException("Invalid cpuTopology: " + cpuTopology);
             }
-            mNumCpus = numCpus;
+            mCpuTopology = cpuTopology;
             return this;
         }
 

@@ -20,15 +20,18 @@ import static java.util.Objects.requireNonNull;
 
 /** This class can be used in both host tests and device tests to get the device properties. */
 public final class DeviceProperties {
+
     /** PropertyGetter is used to get the property associated to a given key. */
     public interface PropertyGetter {
         String getProperty(String key) throws Exception;
     }
 
     private static final String KEY_VENDOR_DEVICE = "ro.product.vendor.device";
+    private static final String KEY_BUILD_TYPE = "ro.build.type";
     private static final String KEY_METRICS_TAG = "debug.hypervisor.metrics_tag";
 
     private static final String CUTTLEFISH_DEVICE_PREFIX = "vsoc_";
+    private static final String USER_BUILD_TYPE = "user";
 
     private final PropertyGetter mPropertyGetter;
 
@@ -47,6 +50,13 @@ public final class DeviceProperties {
     public boolean isCuttlefish() {
         String vendorDeviceName = getProperty(KEY_VENDOR_DEVICE);
         return vendorDeviceName != null && vendorDeviceName.startsWith(CUTTLEFISH_DEVICE_PREFIX);
+    }
+
+    /**
+     * @return whether the device is user build.
+     */
+    public boolean isUserBuild() {
+        return USER_BUILD_TYPE.equals(getProperty(KEY_BUILD_TYPE));
     }
 
     public String getMetricsTag() {

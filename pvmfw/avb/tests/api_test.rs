@@ -18,7 +18,7 @@ mod utils;
 
 use anyhow::{anyhow, Result};
 use avb_bindgen::{AvbFooter, AvbVBMetaImageHeader};
-use pvmfw_avb::{verify_payload, AvbSlotVerifyError, DebugLevel};
+use pvmfw_avb::{verify_payload, AvbSlotVerifyError, DebugLevel, VerifiedBootData};
 use std::{fs, mem::size_of, ptr};
 use utils::*;
 
@@ -53,17 +53,23 @@ fn latest_debug_payload_passes_verification() -> Result<()> {
 
 #[test]
 fn payload_expecting_no_initrd_passes_verification_with_no_initrd() -> Result<()> {
+    let public_key = load_trusted_public_key()?;
     let verified_boot_data = verify_payload(
         &fs::read(TEST_IMG_WITH_ONE_HASHDESC_PATH)?,
         /*initrd=*/ None,
-        &load_trusted_public_key()?,
+        &public_key,
     )
     .map_err(|e| anyhow!("Verification failed. Error: {}", e))?;
 
-    assert_eq!(DebugLevel::None, verified_boot_data.debug_level);
-    let digest = hash(&[&hex::decode("1111")?, &fs::read(UNSIGNED_TEST_IMG_PATH)?]);
-    assert_eq!(digest, verified_boot_data.kernel_digest);
-    assert!(verified_boot_data.initrd_digest.is_none());
+    let kernel_digest = hash(&[&hex::decode("1111")?, &fs::read(UNSIGNED_TEST_IMG_PATH)?]);
+    let expected_boot_data = VerifiedBootData {
+        debug_level: DebugLevel::None,
+        kernel_digest,
+        initrd_digest: None,
+        public_key: &public_key,
+    };
+    assert_eq!(expected_boot_data, verified_boot_data);
+
     Ok(())
 }
 

@@ -22,10 +22,10 @@ use crate::helpers;
 use crate::memory::MemoryTracker;
 use crate::mmio_guard;
 use crate::mmu;
+use crate::rand;
 use core::arch::asm;
 use core::num::NonZeroUsize;
 use core::slice;
-use dice::bcc::Handover;
 use log::debug;
 use log::error;
 use log::info;
@@ -72,7 +72,7 @@ pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64
     // - can't access MMIO (therefore, no logging)
 
     match main_wrapper(fdt_address as usize, payload_start as usize, payload_size as usize) {
-        Ok(_) => jump_to_payload(fdt_address, payload_start),
+        Ok(entry) => jump_to_payload(fdt_address, entry.try_into().unwrap()),
         Err(_) => reboot(), // TODO(b/220071963) propagate the reason back to the host.
     }
 
@@ -193,7 +193,7 @@ impl<'a> MemorySlices<'a> {
 ///
 /// Provide the abstractions necessary for start() to abort the pVM boot and for main() to run with
 /// the assumption that its environment has been properly configured.
-fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), RebootReason> {
+fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<usize, RebootReason> {
     // Limitations in this function:
     // - only access MMIO once (and while) it has been mapped and configured
     // - only perform logging once the logger has been initialized
@@ -242,11 +242,7 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
         RebootReason::InvalidConfig
     })?;
 
-    let bcc_slice = appended.get_bcc_mut();
-    let bcc = Handover::new(bcc_slice).map_err(|e| {
-        error!("Invalid BCC Handover: {e:?}");
-        RebootReason::InvalidBcc
-    })?;
+    let (bcc_slice, debug_policy) = appended.get_entries();
 
     debug!("Activating dynamic page table...");
     // SAFETY - page_table duplicates the static mappings for everything that the Rust code is
@@ -257,15 +253,20 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
     let mut memory = MemoryTracker::new(page_table);
     let slices = MemorySlices::new(fdt, payload, payload_size, &mut memory)?;
 
+    rand::init().map_err(|e| {
+        error!("Failed to initialize rand: {e}");
+        RebootReason::InternalError
+    })?;
+
     // This wrapper allows main() to be blissfully ignorant of platform details.
-    crate::main(slices.fdt, slices.kernel, slices.ramdisk, &bcc, &mut memory)?;
+    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc_slice, &mut memory)?;
 
     helpers::flushed_zeroize(bcc_slice);
     helpers::flush(slices.fdt.as_slice());
 
     // SAFETY - As we `?` the result, there is no risk of using a bad `slices.fdt`.
     unsafe {
-        handle_debug_policy(slices.fdt, appended.get_debug_policy()).map_err(|e| {
+        handle_debug_policy(slices.fdt, debug_policy).map_err(|e| {
             error!("Unexpected error when handling debug policy: {e:?}");
             RebootReason::from(e)
         })?;
@@ -281,7 +282,7 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
         RebootReason::InternalError
     })?;
 
-    Ok(())
+    Ok(slices.kernel.as_ptr() as usize)
 }
 
 fn jump_to_payload(fdt_address: u64, payload_start: u64) -> ! {
@@ -396,18 +397,10 @@ impl<'a> AppendedPayload<'a> {
         }
     }
 
-    #[allow(dead_code)] // TODO(b/232900974)
-    fn get_debug_policy(&mut self) -> Option<&mut [u8]> {
+    fn get_entries(&mut self) -> (&mut [u8], Option<&mut [u8]>) {
         match self {
-            Self::Config(ref mut cfg) => cfg.get_debug_policy(),
-            Self::LegacyBcc(_) => None,
-        }
-    }
-
-    fn get_bcc_mut(&mut self) -> &mut [u8] {
-        match self {
-            Self::LegacyBcc(ref mut bcc) => bcc,
-            Self::Config(ref mut cfg) => cfg.get_bcc_mut(),
+            Self::Config(ref mut cfg) => cfg.get_entries(),
+            Self::LegacyBcc(ref mut bcc) => (bcc, None),
         }
     }
 }

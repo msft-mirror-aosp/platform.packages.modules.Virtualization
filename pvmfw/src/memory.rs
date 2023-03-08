@@ -267,7 +267,7 @@ impl Drop for MemoryTracker {
         for region in &self.regions {
             match region.mem_type {
                 MemoryType::ReadWrite => {
-                    // TODO: Use page table's dirty bit to only flush pages that were touched.
+                    // TODO(b/269738062): Use PT's dirty bit to only flush pages that were touched.
                     helpers::flush_region(region.range.start, region.range.len())
                 }
                 MemoryType::ReadOnly => {}
@@ -314,10 +314,7 @@ pub fn alloc_shared(size: usize) -> smccc::Result<NonNull<u8>> {
     // non-zero size.
     let buffer = unsafe { alloc_zeroed(layout) };
 
-    // TODO: Use let-else once we have Rust 1.65 in AOSP.
-    let buffer = if let Some(buffer) = NonNull::new(buffer) {
-        buffer
-    } else {
+    let Some(buffer) = NonNull::new(buffer) else {
         handle_alloc_error(layout);
     };
 

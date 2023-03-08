@@ -15,12 +15,15 @@
  */
 
 #include <aidl/com/android/microdroid/testservice/BnTestService.h>
+#include <aidl/com/android/microdroid/testservice/BnVmCallback.h>
+#include <aidl/com/android/microdroid/testservice/IAppCallback.h>
 #include <android-base/file.h>
 #include <android-base/properties.h>
 #include <android-base/result.h>
 #include <android-base/scopeguard.h>
 #include <android/log.h>
 #include <fcntl.h>
+#include <fstab/fstab.h>
 #include <fsverity_digests.pb.h>
 #include <linux/vm_sockets.h>
 #include <stdint.h>
@@ -40,8 +43,14 @@ using android::base::Error;
 using android::base::make_scope_guard;
 using android::base::Result;
 using android::base::unique_fd;
+using android::fs_mgr::Fstab;
+using android::fs_mgr::FstabEntry;
+using android::fs_mgr::GetEntryForMountPoint;
+using android::fs_mgr::ReadFstabFromFile;
 
 using aidl::com::android::microdroid::testservice::BnTestService;
+using aidl::com::android::microdroid::testservice::BnVmCallback;
+using aidl::com::android::microdroid::testservice::IAppCallback;
 using ndk::ScopedAStatus;
 
 extern void testlib_sub();
@@ -84,28 +93,26 @@ Result<void> run_echo_reverse_server(borrowed_fd listening_fd) {
         return ErrnoError() << "Failed to fdopen";
     }
 
-    char* line = nullptr;
-    size_t size = 0;
-    if (getline(&line, &size, input) < 0) {
-        return ErrnoError() << "Failed to read";
+    // Run forever, reverse one line at a time.
+    while (true) {
+        char* line = nullptr;
+        size_t size = 0;
+        if (getline(&line, &size, input) < 0) {
+            return ErrnoError() << "Failed to read";
+        }
+
+        std::string_view original = line;
+        if (!original.empty() && original.back() == '\n') {
+            original = original.substr(0, original.size() - 1);
+        }
+
+        std::string reversed(original.rbegin(), original.rend());
+        reversed += "\n";
+
+        if (write(connect_fd, reversed.data(), reversed.size()) < 0) {
+            return ErrnoError() << "Failed to write";
+        }
     }
-
-    if (fclose(input) != 0) {
-        return ErrnoError() << "Failed to fclose";
-    }
-
-    std::string_view original = line;
-    if (!original.empty() && original.back() == '\n') {
-        original = original.substr(0, original.size() - 1);
-    }
-
-    std::string reversed(original.rbegin(), original.rend());
-
-    if (write(connect_fd, reversed.data(), reversed.size()) < 0) {
-        return ErrnoError() << "Failed to write";
-    }
-
-    return {};
 }
 
 Result<void> start_echo_reverse_server() {
@@ -141,7 +148,25 @@ Result<void> start_echo_reverse_server() {
 }
 
 Result<void> start_test_service() {
+    class VmCallbackImpl : public BnVmCallback {
+    private:
+        std::shared_ptr<IAppCallback> mAppCallback;
+
+    public:
+        explicit VmCallbackImpl(const std::shared_ptr<IAppCallback>& appCallback)
+              : mAppCallback(appCallback) {}
+
+        ScopedAStatus echoMessage(const std::string& message) override {
+            std::thread callback_thread{[=, appCallback = mAppCallback] {
+                appCallback->onEchoRequestReceived("Received: " + message);
+            }};
+            callback_thread.detach();
+            return ScopedAStatus::ok();
+        }
+    };
+
     class TestService : public BnTestService {
+    public:
         ScopedAStatus addInteger(int32_t a, int32_t b, int32_t* out) override {
             *out = a + b;
             return ScopedAStatus::ok();
@@ -223,7 +248,7 @@ Result<void> start_test_service() {
             return ScopedAStatus::ok();
         }
 
-        virtual ::ScopedAStatus runEchoReverseServer() override {
+        ScopedAStatus runEchoReverseServer() override {
             auto result = start_echo_reverse_server();
             if (result.ok()) {
                 return ScopedAStatus::ok();
@@ -250,6 +275,41 @@ Result<void> start_test_service() {
                 return ScopedAStatus::fromExceptionCodeWithMessage(EX_SERVICE_SPECIFIC,
                                                                    msg.c_str());
             }
+            return ScopedAStatus::ok();
+        }
+
+        ScopedAStatus getFilePermissions(const std::string& path, int32_t* out) override {
+            struct stat sb;
+            if (stat(path.c_str(), &sb) != -1) {
+                *out = sb.st_mode;
+            } else {
+                std::string msg = "stat " + path + " failed :  " + std::strerror(errno);
+                return ScopedAStatus::fromExceptionCodeWithMessage(EX_SERVICE_SPECIFIC,
+                                                                   msg.c_str());
+            }
+            return ScopedAStatus::ok();
+        }
+
+        ScopedAStatus getMountFlags(const std::string& mount_point, int32_t* out) override {
+            Fstab fstab;
+            if (!ReadFstabFromFile("/proc/mounts", &fstab)) {
+                return ScopedAStatus::fromExceptionCodeWithMessage(EX_SERVICE_SPECIFIC,
+                                                                   "Failed to read /proc/mounts");
+            }
+            FstabEntry* entry = GetEntryForMountPoint(&fstab, mount_point);
+            if (entry == nullptr) {
+                std::string msg = mount_point + " not found in /proc/mounts";
+                return ScopedAStatus::fromExceptionCodeWithMessage(EX_SERVICE_SPECIFIC,
+                                                                   msg.c_str());
+            }
+            *out = entry->flags;
+            return ScopedAStatus::ok();
+        }
+
+        ScopedAStatus requestCallback(const std::shared_ptr<IAppCallback>& appCallback) {
+            auto vmCallback = ndk::SharedRefBase::make<VmCallbackImpl>(appCallback);
+            std::thread callback_thread{[=] { appCallback->setVmCallback(vmCallback); }};
+            callback_thread.detach();
             return ScopedAStatus::ok();
         }
 

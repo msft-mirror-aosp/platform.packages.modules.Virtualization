@@ -79,14 +79,16 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     private static final int ROUND_IGNORE_STARTUP_TIME = 3;
     private static final String APK_NAME = "MicrodroidTestApp.apk";
     private static final String PACKAGE_NAME = "com.android.microdroid.test";
-    private static final int NUM_VCPUS = 3;
 
     private MetricsProcessor mMetricsProcessor;
     @Rule public TestMetrics mMetrics = new TestMetrics();
 
+    private boolean mNeedTearDown = false;
+
     @Before
     public void setUp() throws Exception {
         testIfDeviceIsCapable(getDevice());
+        mNeedTearDown = true;
 
         getDevice().installPackage(findTestFile(APK_NAME), /* reinstall */ false);
 
@@ -95,6 +97,12 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
 
     @After
     public void tearDown() throws Exception {
+        if (!mNeedTearDown) {
+            // If we skipped setUp, we don't need to undo it, and that avoids potential exceptions
+            // incompatible hardware. (Note that tests can change what testIfDeviceIsCapable()
+            // sees, so we can't rely on that - b/268688303.)
+            return;
+        }
         // Set PKVM enable and reboot to prevent previous staged session.
         if (!isCuttlefish()) {
             setPKVMStatusWithRebootToBootloader(true);
@@ -247,7 +255,7 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(vm_mem_mb)
-                        .numCpus(NUM_VCPUS)
+                        .cpuTopology("match_host")
                         .build(device);
         microdroidDevice.waitForBootComplete(30000);
         microdroidDevice.enableAdbRoot();

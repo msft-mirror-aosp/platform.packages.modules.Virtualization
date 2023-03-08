@@ -16,6 +16,7 @@
 
 use crate::create_partition::command_create_partition;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    CpuTopology::CpuTopology,
     IVirtualizationService::IVirtualizationService,
     PartitionType::PartitionType,
     VirtualMachineAppConfig::{DebugLevel::DebugLevel, Payload::Payload, VirtualMachineAppConfig},
@@ -31,6 +32,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use std::fs;
 use std::fs::File;
 use std::io;
+use std::num::NonZeroU16;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use vmclient::{ErrorCode, VmInstance};
@@ -54,9 +56,10 @@ pub fn command_run_app(
     debug_level: DebugLevel,
     protected: bool,
     mem: Option<u32>,
-    cpus: Option<u32>,
+    cpu_topology: CpuTopology,
     task_profiles: Vec<String>,
     extra_idsigs: &[PathBuf],
+    gdb: Option<NonZeroU16>,
 ) -> Result<(), Error> {
     let apk_file = File::open(apk).context("Failed to open APK file")?;
 
@@ -141,14 +144,15 @@ pub fn command_run_app(
         debugLevel: debug_level,
         protectedVm: protected,
         memoryMib: mem.unwrap_or(0) as i32, // 0 means use the VM default
-        numCpus: cpus.unwrap_or(1) as i32,
+        cpuTopology: cpu_topology,
         taskProfiles: task_profiles,
+        gdbPort: gdb.map(u16::from).unwrap_or(0) as i32, // 0 means no gdb
     });
     run(service, &config, &payload_config_str, console_path, log_path)
 }
 
 fn find_empty_payload_apk_path() -> Result<PathBuf, Error> {
-    const GLOB_PATTERN: &str = "/apex/com.android.virt/app/**/EmptyPayloadApp.apk";
+    const GLOB_PATTERN: &str = "/apex/com.android.virt/app/**/EmptyPayloadApp*.apk";
     let mut entries: Vec<PathBuf> =
         glob(GLOB_PATTERN).context("failed to glob")?.filter_map(|e| e.ok()).collect();
     if entries.len() > 1 {
@@ -182,8 +186,9 @@ pub fn command_run_microdroid(
     debug_level: DebugLevel,
     protected: bool,
     mem: Option<u32>,
-    cpus: Option<u32>,
+    cpu_topology: CpuTopology,
     task_profiles: Vec<String>,
+    gdb: Option<NonZeroU16>,
 ) -> Result<(), Error> {
     let apk = find_empty_payload_apk_path()?;
     println!("found path {}", apk.display());
@@ -211,9 +216,10 @@ pub fn command_run_microdroid(
         debug_level,
         protected,
         mem,
-        cpus,
+        cpu_topology,
         task_profiles,
         &extra_sig,
+        gdb,
     )
 }
 
@@ -226,8 +232,9 @@ pub fn command_run(
     console_path: Option<&Path>,
     log_path: Option<&Path>,
     mem: Option<u32>,
-    cpus: Option<u32>,
+    cpu_topology: CpuTopology,
     task_profiles: Vec<String>,
+    gdb: Option<NonZeroU16>,
 ) -> Result<(), Error> {
     let config_file = File::open(config_path).context("Failed to open config file")?;
     let mut config =
@@ -235,14 +242,15 @@ pub fn command_run(
     if let Some(mem) = mem {
         config.memoryMib = mem as i32;
     }
-    if let Some(cpus) = cpus {
-        config.numCpus = cpus as i32;
-    }
     if let Some(name) = name {
         config.name = name;
     } else {
         config.name = String::from("VmRun");
     }
+    if let Some(gdb) = gdb {
+        config.gdbPort = gdb.get() as i32;
+    }
+    config.cpuTopology = cpu_topology;
     config.taskProfiles = task_profiles;
     run(
         service,
