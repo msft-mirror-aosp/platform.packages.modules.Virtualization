@@ -28,11 +28,16 @@ use compos_aidl_interface::aidl::com::android::compos::ICompOsService::{
     CompilationMode::CompilationMode, ICompOsService, OdrefreshArgs::OdrefreshArgs,
 };
 use compos_common::odrefresh::{
-    is_system_property_interesting, ExitCode, ODREFRESH_OUTPUT_ROOT_DIR,
+    is_system_property_interesting, ExitCode, CURRENT_ARTIFACTS_SUBDIR, ODREFRESH_OUTPUT_ROOT_DIR,
+    PENDING_ARTIFACTS_SUBDIR,
 };
+use compos_common::BUILD_MANIFEST_SYSTEM_EXT_APK_PATH;
 use log::{error, info, warn};
+use odsign_proto::odsign_info::OdsignInfo;
+use protobuf::Message;
 use rustutils::system_properties;
-use std::fs::{remove_dir_all, OpenOptions};
+use std::fs::{remove_dir_all, File, OpenOptions};
+use std::os::fd::AsFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::path::Path;
@@ -103,8 +108,21 @@ impl OdrefreshTask {
 
                 let result = match exit_code {
                     Ok(ExitCode::CompilationSuccess) => {
-                        info!("CompilationSuccess");
-                        callback.onSuccess()
+                        if compilation_mode == CompilationMode::TEST_COMPILE {
+                            info!("Compilation success");
+                            callback.onSuccess()
+                        } else {
+                            // compos.info is generated only during NORMAL_COMPILE
+                            if let Err(e) = enable_fsverity_to_all() {
+                                let message =
+                                    format!("Unexpected failure when enabling fs-verity: {:?}", e);
+                                error!("{}", message);
+                                callback.onFailure(FailureReason::FailedToEnableFsverity, &message)
+                            } else {
+                                info!("Compilation success, fs-verity enabled");
+                                callback.onSuccess()
+                            }
+                        }
                     }
                     Ok(exit_code) => {
                         let message = format!("Unexpected odrefresh result: {:?}", exit_code);
@@ -161,13 +179,20 @@ fn run_in_vm(
     let output_dir_raw_fd = output_dir_fd.as_raw_fd();
     let staging_dir_raw_fd = staging_dir_fd.as_raw_fd();
 
-    // Get the /system_ext FD differently because it may not exist.
-    let (system_ext_dir_raw_fd, ro_dir_fds) =
-        if let Ok(system_ext_dir_fd) = open_dir(Path::new("/system_ext")) {
-            (system_ext_dir_fd.as_raw_fd(), vec![system_dir_fd, system_ext_dir_fd])
-        } else {
-            (-1, vec![system_dir_fd])
-        };
+    // When the VM starts, it starts with or without mouting the extra build manifest APK from
+    // /system_ext. Later on request (here), we need to pass the directory FD of /system_ext, but
+    // only if the VM is configured to need it.
+    //
+    // It is possible to plumb the information from ComposClient to here, but it's extra complexity
+    // and feel slightly weird to encode the VM's state to the task itself, as it is a request to
+    // the VM.
+    let need_system_ext = Path::new(BUILD_MANIFEST_SYSTEM_EXT_APK_PATH).exists();
+    let (system_ext_dir_raw_fd, ro_dir_fds) = if need_system_ext {
+        let system_ext_dir_fd = open_dir(Path::new("/system_ext"))?;
+        (system_ext_dir_fd.as_raw_fd(), vec![system_dir_fd, system_ext_dir_fd])
+    } else {
+        (-1, vec![system_dir_fd])
+    };
 
     // Spawn a fd_server to serve the FDs.
     let fd_server_config = FdServerConfig {
@@ -195,6 +220,31 @@ fn run_in_vm(
 
     drop(fd_server_raii);
     ExitCode::from_i32(exit_code.into())
+}
+
+/// Enable fs-verity to output artifacts according to compos.info in the pending directory. Any
+/// error before the completion will just abort, leaving the previous files enabled.
+fn enable_fsverity_to_all() -> Result<()> {
+    let odrefresh_current_dir = Path::new(ODREFRESH_OUTPUT_ROOT_DIR).join(CURRENT_ARTIFACTS_SUBDIR);
+    let pending_dir = Path::new(ODREFRESH_OUTPUT_ROOT_DIR).join(PENDING_ARTIFACTS_SUBDIR);
+    let mut reader =
+        File::open(&pending_dir.join("compos.info")).context("Failed to open compos.info")?;
+    let compos_info = OdsignInfo::parse_from_reader(&mut reader).context("Failed to parse")?;
+
+    for path_str in compos_info.file_hashes.keys() {
+        // Need to rebase the directory on to compos-pending first
+        if let Ok(relpath) = Path::new(path_str).strip_prefix(&odrefresh_current_dir) {
+            let path = pending_dir.join(relpath);
+            let file = File::open(&path).with_context(|| format!("Failed to open {:?}", path))?;
+            // We don't expect error. But when it happens, don't bother handle it here. For
+            // simplicity, just let odsign do the regular check.
+            fsverity::enable(file.as_fd())
+                .with_context(|| format!("Failed to enable fs-verity to {:?}", path))?;
+        } else {
+            warn!("Skip due to unexpected path: {}", path_str);
+        }
+    }
+    Ok(())
 }
 
 /// Returns an `OwnedFD` of the directory.
