@@ -16,10 +16,12 @@ differences, e.g.:
 * Only boot clock is supported, and there is no way for user space to change the tracing_clock.
 * Hypervisor tracing periodically polls the data from the hypervisor, this is different from the
   regular ftrace instance which pushes the events into the ring buffer.
+* Resetting ring buffers (by clearing the trace file) is only supported when there are no active
+  readers. If the trace file is cleared while there are active readers, then the ring buffers will
+  be cleared after the last reader disconnects.
+* Changing the size of the ring buffer while the tracing session is active is also not supported.
 
 Note: the list above is not exhaustive.
-
-TODO(b/271412868): add more documentation on the user space interface.
 
 ### Perfetto integration
 
@@ -32,8 +34,15 @@ traces.
 Consider first familiarizing yourself with Perfetto documentation for recording traces on Android:
 https://perfetto.dev/docs/quickstart/android-tracing.
 
-So far it is only possible to capture hypervisor trace events by providing the full trace config
-file to Perfetto. Here is the minimal
+The [record_android_trace](
+https://cs.android.com/android/platform/superproject/+/master:external/perfetto/tools/record_android_trace)
+script supports a shortcut to capture all hypervisor events that are  known to Perfetto:
+
+```shell
+external/perfetto/tools/record_android_trace hyp -t 15s -b 32mb -o /tmp/hyp.pftrace
+```
+
+Alternatively you can use full trace config to capture hypervisor. Example usage:
 
 ```shell
 cat<<EOF>config.pbtx
@@ -66,9 +75,74 @@ https://perfetto.dev/docs/quickstart/android-tracing#recording-a-trace-through-t
 
 #### Capturing hypervisor traces on QEMU
 
-TODO(b/271412868): fill in this section
+Perfetto supports capturing traces on Linux: https://perfetto.dev/docs/quickstart/linux-tracing.
+However, since pKVM hypervisor is only supported on arm64, you will need to cross-compile Perfetto
+binaries for linux-arm64 (unless you have an arm64 workstation).
 
-TODO(b/271412868): Stay tuned, more docs coming soon!
+1. Checkout Perfetto repository: https://perfetto.dev/docs/contributing/getting-started
+2. Follow https://perfetto.dev/docs/contributing/build-instructions#cross-compiling-for-linux-arm-64
+  to compile Perfetto binaries for arm64 architecture.
+3. Copy the tracebox binary to QEMU
+4. Run `tracebox` binary on QEMU to capture traces, it's interface is very similar to the
+`record_android_trace` binary. E.g. to capture all hypervisor events run:
+```shell
+tracebox -t 15s -b 32mb hyp
+```
+
+### Analysing traces using SQL
+
+On top of visualisation, Perfetto also provides a SQL interface to analyse traces. More
+documentation is available at https://perfetto.dev/docs/quickstart/trace-analysis and
+https://perfetto.dev/docs/analysis/trace-processor.
+
+Hypervisor events can be queried via `pkvm_hypervisor_events` SQL view. You can load that view by
+calling `SELECT IMPORT("pkvm.hypervisor");`, e.g.:
+
+```sql
+SELECT IMPORT("pkvm.hypervisor");
+SELECT * FROM pkvm_hypervisor_events limit 5;
+```
+
+Below are some SQL queries that might be useful when analysing hypervisor traces.
+
+**What is the longest time CPU spent in hypervisor, grouped by the reason to enter hypervisor**
+```sql
+SELECT IMPORT("pkvm.hypervisor");
+
+SELECT
+  cpu,
+  reason,
+  ts,
+  dur
+FROM pkvm_hypervisor_events
+JOIN (
+  SELECT
+    MAX(dur) as dur2,
+    cpu as cpu2,
+    reason as reason2
+  FROM pkvm_hypervisor_events
+  GROUP BY 2, 3) AS sc
+ON
+  cpu = sc.cpu2
+  AND dur = sc.dur2
+  AND (reason = sc.reason2 OR (reason IS NULL AND sc.reason2 IS NULL))
+ORDER BY dur desc;
+```
+
+**What are the 10 longest times CPU spent in hypervisor because of host_mem_abort**
+```sql
+SELECT
+  hyp.dur as dur,
+  hyp.ts as ts,
+  EXTRACT_ARG(slices.arg_set_id, 'esr') as esr,
+  EXTRACT_ARG(slices.arg_set_id, 'addr') as addr
+FROM pkvm_hypervisor_events as hyp
+JOIN slices
+ON hyp.slice_id = slices.id
+WHERE hyp.reason = 'host_mem_abort'
+ORDER BY dur desc
+LIMIT 10;
+```
 
 ## Microdroid VM tracing
 
