@@ -492,10 +492,6 @@ impl VmInstance {
         // first, as monitor_vm_exit() takes it as well.
         monitor_vm_exit_thread.map(JoinHandle::join);
 
-        // Now that the VM has been killed, shut down the VirtualMachineService
-        // server to eagerly free up the server threads.
-        self.vm_context.vm_server.shutdown()?;
-
         Ok(())
     }
 
@@ -727,7 +723,8 @@ fn run_vm(
         command.arg("--unmap-guest-memory-on-fork");
 
         if config.ramdump.is_some() {
-            // Protected VM needs to reserve memory for ramdump here. Note that we reserve more
+            // Protected VM needs to reserve memory for ramdump here. pvmfw will drop This
+            // if ramdump should be disabled (via debug policy). Note that we reserve more
             // memory for the restricted dma pool.
             let ramdump_reserve = RAMDUMP_RESERVED_MIB + swiotlb_size_mib;
             command.arg("--params").arg(format!("crashkernel={ramdump_reserve}M"));
