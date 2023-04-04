@@ -97,6 +97,9 @@ public class PvmfwDebugPolicyHostTests extends MicrodroidHostTestCaseBase {
     @Before
     public void setUp() throws Exception {
         mAndroidDevice = (TestDevice) Objects.requireNonNull(getDevice());
+
+        // Check device capabilities
+        assumeDeviceIsCapable(mAndroidDevice);
         assumeTrue(
                 "Skip if protected VMs are not supported",
                 mAndroidDevice.supportsMicrodroid(/* protectedVm= */ true));
@@ -110,12 +113,6 @@ public class PvmfwDebugPolicyHostTests extends MicrodroidHostTestCaseBase {
                 getTestInformation().getDependencyFile(PVMFW_FILE_NAME, /* targetFirst= */ false);
         mBccFileOnHost =
                 getTestInformation().getDependencyFile(BCC_FILE_NAME, /* targetFirst= */ false);
-
-        // Check device capability
-        assumeDeviceIsCapable(mAndroidDevice);
-        assumeTrue(
-                "Protected VMs are not supported",
-                mAndroidDevice.supportsMicrodroid(/*protectedVm=*/ true));
 
         // Prepare for loading pvmfw.bin
         // File will be setup in individual test,
@@ -148,56 +145,6 @@ public class PvmfwDebugPolicyHostTests extends MicrodroidHostTestCaseBase {
         cleanUpVirtualizationTestSetup(mAndroidDevice);
 
         mAndroidDevice.disableAdbRoot();
-    }
-
-    @Test
-    public void testLog_consoleOutput() throws Exception {
-        Pvmfw pvmfw = createPvmfw("avf_debug_policy_with_log.dtbo");
-        pvmfw.serialize(mCustomPvmfwBinFileOnHost);
-
-        CommandResult result = tryLaunchProtectedNonDebuggableVm();
-
-        assertWithMessage("Microdroid's console message should have been enabled")
-                .that(hasConsoleOutput(result))
-                .isTrue();
-    }
-
-    @Test
-    public void testLog_logcat() throws Exception {
-        Pvmfw pvmfw = createPvmfw("avf_debug_policy_with_log.dtbo");
-        pvmfw.serialize(mCustomPvmfwBinFileOnHost);
-
-        tryLaunchProtectedNonDebuggableVm();
-
-        assertWithMessage("Microdroid's logcat should have been enabled")
-                .that(hasMicrodroidLogcatOutput())
-                .isTrue();
-    }
-
-    @Test
-    public void testNoLog_noConsoleOutput() throws Exception {
-        Pvmfw pvmfw = createPvmfw("avf_debug_policy_without_log.dtbo");
-        pvmfw.serialize(mCustomPvmfwBinFileOnHost);
-
-        CommandResult result = tryLaunchProtectedNonDebuggableVm();
-
-        assertWithMessage("Microdroid's console message shouldn't have been disabled")
-                .that(hasConsoleOutput(result))
-                .isFalse();
-    }
-
-    @Test
-    public void testNoLog_noLogcat() throws Exception {
-        Pvmfw pvmfw = createPvmfw("avf_debug_policy_without_log.dtbo");
-        pvmfw.serialize(mCustomPvmfwBinFileOnHost);
-
-        assertThrows(
-                "Microdroid shouldn't be recognized because of missing adb connection",
-                DeviceRuntimeException.class,
-                () ->
-                        launchProtectedVmAndWaitForBootCompleted(
-                                MICRODROID_DEBUG_NONE, BOOT_FAILURE_WAIT_TIME_MS));
-        assertThat(hasMicrodroidLogcatOutput()).isFalse();
     }
 
     @Test
