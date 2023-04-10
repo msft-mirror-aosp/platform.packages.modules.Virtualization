@@ -21,7 +21,7 @@ mod payload;
 mod swap;
 mod vm_payload_service;
 
-use crate::dice::{DiceContext, DiceDriver};
+use crate::dice::{DiceDriver, derive_sealing_key, format_payload_config_descriptor};
 use crate::instance::{ApexData, ApkData, InstanceDisk, MicrodroidData, RootHash};
 use crate::vm_payload_service::register_vm_payload_service;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::ErrorCode::ErrorCode;
@@ -34,11 +34,12 @@ use android_system_virtualization_payload::aidl::android::system::virtualization
 use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use apkverify::{get_public_key_der, verify, V4Signature};
 use binder::Strong;
-use diced_utils::cbor::{encode_header, encode_number};
+use diced_open_dice::OwnedDiceArtifacts;
 use glob::glob;
 use itertools::sorted;
 use libc::VMADDR_CID_HOST;
 use log::{error, info, warn};
+use keystore2_crypto::ZVec;
 use microdroid_metadata::{write_metadata, Metadata, PayloadMetadata};
 use microdroid_payload_config::{OsConfig, Task, TaskType, VmPayloadConfig};
 use nix::fcntl::{fcntl, F_SETFD, FdFlag};
@@ -53,8 +54,9 @@ use rustutils::system_properties::PropertyWatcher;
 use std::borrow::Cow::{Borrowed, Owned};
 use std::convert::TryInto;
 use std::env;
-use std::fs::{self, create_dir, OpenOptions};
-use std::io::Write;
+use std::ffi::CString;
+use std::fs::{self, create_dir, OpenOptions, File};
+use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -69,12 +71,15 @@ const MAIN_APK_DEVICE_NAME: &str = "microdroid-apk";
 const EXTRA_APK_PATH_PATTERN: &str = "/dev/block/by-name/extra-apk-*";
 const EXTRA_IDSIG_PATH_PATTERN: &str = "/dev/block/by-name/extra-idsig-*";
 const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
-const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
-const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
 const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
+const AVF_DEBUG_POLICY_RAMDUMP: &str = "/sys/firmware/devicetree/base/avf/guest/common/ramdump";
 const DEBUG_MICRODROID_NO_VERIFIED_BOOT: &str =
     "/sys/firmware/devicetree/base/virtualization/guest/debug-microdroid,no-verified-boot";
+
+const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
+const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
+const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
 const DEBUGGABLE_PROP: &str = "ro.boot.microdroid.debuggable";
@@ -82,11 +87,9 @@ const DEBUGGABLE_PROP: &str = "ro.boot.microdroid.debuggable";
 // SYNC WITH virtualizationservice/src/crosvm.rs
 const FAILURE_SERIAL_DEVICE: &str = "/dev/ttyS1";
 
-/// Identifier for the key used for encrypted store.
 const ENCRYPTEDSTORE_BACKING_DEVICE: &str = "/dev/block/by-name/encryptedstore";
-const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
 const ENCRYPTEDSTORE_KEY_IDENTIFIER: &str = "encryptedstore_key";
-const ENCRYPTEDSTORE_KEYSIZE: u32 = 32;
+const ENCRYPTEDSTORE_KEYSIZE: usize = 32;
 
 #[derive(thiserror::Error, Debug)]
 enum MicrodroidError {
@@ -215,13 +218,21 @@ fn try_main() -> Result<()> {
 
     match try_run_payload(&service) {
         Ok(code) => {
-            info!("notifying payload finished");
-            service.notifyPayloadFinished(code)?;
             if code == 0 {
                 info!("task successfully finished");
             } else {
                 error!("task exited with exit code: {}", code);
             }
+            if let Err(e) = post_payload_work() {
+                error!(
+                    "Failed to run post payload work. It is possible that certain tasks
+                    like syncing encrypted store might be incomplete. Error: {:?}",
+                    e
+                );
+            };
+
+            info!("notifying payload finished");
+            service.notifyPayloadFinished(code)?;
             Ok(())
         }
         Err(err) => {
@@ -232,11 +243,33 @@ fn try_main() -> Result<()> {
     }
 }
 
+fn post_payload_work() -> Result<()> {
+    // Sync the encrypted storage filesystem (flushes the filesystem caches).
+    if Path::new(ENCRYPTEDSTORE_BACKING_DEVICE).exists() {
+        let mountpoint = CString::new(ENCRYPTEDSTORE_MOUNTPOINT).unwrap();
+
+        let ret = unsafe {
+            let dirfd = libc::open(
+                mountpoint.as_ptr(),
+                libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC,
+            );
+            ensure!(dirfd >= 0, "Unable to open {:?}", mountpoint);
+            let ret = libc::syncfs(dirfd);
+            libc::close(dirfd);
+            ret
+        };
+        if ret != 0 {
+            error!("failed to sync encrypted storage.");
+            return Err(anyhow!(std::io::Error::last_os_error()));
+        }
+    }
+    Ok(())
+}
 fn dice_derivation(
     dice: DiceDriver,
     verified_data: &MicrodroidData,
     payload_metadata: &PayloadMetadata,
-) -> Result<DiceContext> {
+) -> Result<OwnedDiceArtifacts> {
     // Calculate compound digests of code and authorities
     let mut code_hash_ctx = Sha512::new();
     let mut authority_hash_ctx = Sha512::new();
@@ -253,54 +286,14 @@ fn dice_derivation(
     let code_hash = code_hash_ctx.finish();
     let authority_hash = authority_hash_ctx.finish();
 
-    // {
-    //   -70002: "Microdroid payload",
-    //   ? -71000: tstr // payload_config_path
-    //   ? -71001: PayloadConfig
-    // }
-    // PayloadConfig = {
-    //   1: tstr // payload_binary_name
-    // }
-
-    let mut config_desc = vec![
-        0xa2, // map(2)
-        0x3a, 0x00, 0x01, 0x11, 0x71, // -70002
-        0x72, 0x4d, 0x69, 0x63, 0x72, 0x6f, 0x64, 0x72, 0x6f, 0x69, 0x64, 0x20, 0x70, 0x61, 0x79,
-        0x6c, 0x6f, 0x61, 0x64, // "Microdroid payload"
-    ];
-
-    match payload_metadata {
-        PayloadMetadata::config_path(payload_config_path) => {
-            encode_negative_number(-71000, &mut config_desc)?;
-            encode_tstr(payload_config_path, &mut config_desc)?;
-        }
-        PayloadMetadata::config(payload_config) => {
-            encode_negative_number(-71001, &mut config_desc)?;
-            encode_header(5, 1, &mut config_desc)?; // map(1)
-            encode_number(1, &mut config_desc)?;
-            encode_tstr(&payload_config.payload_binary_name, &mut config_desc)?;
-        }
-    }
+    let config_descriptor = format_payload_config_descriptor(payload_metadata)?;
 
     // Check debuggability, conservatively assuming it is debuggable
     let debuggable = system_properties::read_bool(DEBUGGABLE_PROP, true)?;
 
     // Send the details to diced
     let hidden = verified_data.salt.clone().try_into().unwrap();
-    dice.derive(code_hash, &config_desc, authority_hash, debuggable, hidden)
-}
-
-fn encode_tstr(tstr: &str, buffer: &mut Vec<u8>) -> Result<()> {
-    let bytes = tstr.as_bytes();
-    encode_header(3, bytes.len().try_into().unwrap(), buffer)?;
-    buffer.extend_from_slice(bytes);
-    Ok(())
-}
-
-fn encode_negative_number(n: i64, buffer: &mut dyn Write) -> Result<()> {
-    ensure!(n < 0);
-    let n = -1 - n;
-    encode_header(1, n.try_into().unwrap(), buffer)
+    dice.derive(code_hash, &config_descriptor, authority_hash, debuggable, hidden)
 }
 
 fn is_strict_boot() -> bool {
@@ -313,6 +306,28 @@ fn is_new_instance() -> bool {
 
 fn is_verified_boot() -> bool {
     !Path::new(DEBUG_MICRODROID_NO_VERIFIED_BOOT).exists()
+}
+
+fn should_export_tombstones(config: &VmPayloadConfig) -> bool {
+    match config.export_tombstones {
+        Some(b) => b,
+        None => system_properties::read_bool(DEBUGGABLE_PROP, true).unwrap_or(false),
+    }
+}
+
+/// Get debug policy value in bool. It's true iff the value is explicitly set to <1>.
+fn get_debug_policy_bool(path: &'static str) -> Result<Option<bool>> {
+    let mut file = match File::open(path) {
+        Ok(dp) => dp,
+        Err(e) => {
+            info!("{e:?}. Assumes <0>");
+            return Ok(Some(false));
+        }
+    };
+    let mut log: [u8; 4] = Default::default();
+    file.read_exact(&mut log).context("Malformed data in {path}")?;
+    // DT spec uses big endian although Android is always little endian.
+    Ok(Some(u32::from_be_bytes(log) == 1))
 }
 
 fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
@@ -374,12 +389,12 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
 
     // To minimize the exposure to untrusted data, derive dice profile as soon as possible.
     info!("DICE derivation for payload");
-    let dice_context = dice_derivation(dice, &verified_data, &payload_metadata)?;
+    let dice_artifacts = dice_derivation(dice, &verified_data, &payload_metadata)?;
 
     // Run encryptedstore binary to prepare the storage
     let encryptedstore_child = if Path::new(ENCRYPTEDSTORE_BACKING_DEVICE).exists() {
         info!("Preparing encryptedstore ...");
-        Some(prepare_encryptedstore(&dice_context).context("encryptedstore run")?)
+        Some(prepare_encryptedstore(&dice_artifacts).context("encryptedstore run")?)
     } else {
         None
     };
@@ -423,17 +438,17 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
 
     setup_config_sysprops(&config)?;
 
-    // Start tombstone_transmit if enabled
-    if config.export_tombstones {
-        control_service("start", "tombstone_transmit")?;
-    } else {
-        control_service("stop", "tombstoned")?;
+    // Set export_tombstones if enabled
+    if should_export_tombstones(&config) {
+        // This property is read by tombstone_handler.
+        system_properties::write("microdroid_manager.export_tombstones.enabled", "1")
+            .context("set microdroid_manager.export_tombstones.enabled")?;
     }
 
     // Wait until zipfuse has mounted the APKs so we can access the payload
     zipfuse.wait_until_done()?;
 
-    register_vm_payload_service(allow_restricted_apis, service.clone(), dice_context)?;
+    register_vm_payload_service(allow_restricted_apis, service.clone(), dice_artifacts)?;
 
     // Wait for encryptedstore to finish mounting the storage (if enabled) before setting
     // microdroid_manager.init_done. Reason is init stops uneventd after that.
@@ -446,13 +461,9 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     wait_for_property_true("dev.bootcomplete").context("failed waiting for dev.bootcomplete")?;
     system_properties::write("microdroid_manager.init_done", "1")
         .context("set microdroid_manager.init_done")?;
+
     info!("boot completed, time to run payload");
     exec_task(task, service).context("Failed to run payload")
-}
-
-fn control_service(action: &str, service: &str) -> Result<()> {
-    system_properties::write(&format!("ctl.{}", action), service)
-        .with_context(|| format!("Failed to {} {}", action, service))
 }
 
 struct ApkDmverityArgument<'a> {
@@ -673,6 +684,9 @@ fn verify_payload(
     // Use the salt from a verified instance, or generate a salt for a new instance.
     let salt = if let Some(saved_data) = saved_data {
         saved_data.salt.clone()
+    } else if is_strict_boot() {
+        // No need to add more entropy as a previous stage must have used a new, random salt.
+        vec![0u8; 64]
     } else {
         let mut salt = vec![0u8; 64];
         salt.as_mut_slice().try_fill(&mut rand::thread_rng())?;
@@ -739,14 +753,21 @@ fn get_apk_root_hash_from_idsig<P: AsRef<Path>>(idsig_path: P) -> Result<Box<Roo
 }
 
 fn get_public_key_from_apk(apk: &str, root_hash_trustful: bool) -> Result<Box<[u8]>> {
+    let current_sdk = get_current_sdk()?;
     if !root_hash_trustful {
-        verify(apk).context(MicrodroidError::PayloadVerificationFailed(format!(
+        verify(apk, current_sdk).context(MicrodroidError::PayloadVerificationFailed(format!(
             "failed to verify {}",
             apk
         )))
     } else {
-        get_public_key_der(apk)
+        get_public_key_der(apk, current_sdk)
     }
+}
+
+fn get_current_sdk() -> Result<u32> {
+    let current_sdk = system_properties::read("ro.build.version.sdk")?;
+    let current_sdk = current_sdk.ok_or_else(|| anyhow!("SDK version missing"))?;
+    current_sdk.parse().context("Malformed SDK version")
 }
 
 fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
@@ -769,23 +790,34 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
                 apexes: vec![],
                 extra_apks: vec![],
                 prefer_staged: false,
-                export_tombstones: false,
+                export_tombstones: None,
                 enable_authfs: false,
             })
         }
     }
 }
 
-/// Loads the crashkernel into memory using kexec if the VM is loaded with `crashkernel=' parameter
-/// in the cmdline.
+/// Loads the crashkernel into memory using kexec if debuggable or debug policy says so.
+/// The VM should be loaded with `crashkernel=' parameter in the cmdline to allocate memory
+/// for crashkernel.
 fn load_crashkernel_if_supported() -> Result<()> {
     let supported = std::fs::read_to_string("/proc/cmdline")?.contains(" crashkernel=");
     info!("ramdump supported: {}", supported);
-    if supported {
+
+    if !supported {
+        return Ok(());
+    }
+
+    let debuggable = system_properties::read_bool(DEBUGGABLE_PROP, true)?;
+    let ramdump = get_debug_policy_bool(AVF_DEBUG_POLICY_RAMDUMP)?.unwrap_or_default();
+    let requested = debuggable | ramdump;
+
+    if requested {
         let status = Command::new("/system/bin/kexec_load").status()?;
         if !status.success() {
             return Err(anyhow!("Failed to load crashkernel: {:?}", status));
         }
+        info!("ramdump is loaded: debuggable={debuggable}, ramdump={ramdump}");
     }
     Ok(())
 }
@@ -856,7 +888,7 @@ fn to_hex_string(buf: &[u8]) -> String {
     buf.iter().map(|b| format!("{:02X}", b)).collect()
 }
 
-fn prepare_encryptedstore(dice: &DiceContext) -> Result<Child> {
+fn prepare_encryptedstore(dice_artifacts: &OwnedDiceArtifacts) -> Result<Child> {
     // Use a fixed salt to scope the derivation to this API.
     // Generated using hexdump -vn32 -e'14/1 "0x%02X, " 1 "\n"' /dev/urandom
     // TODO(b/241541860) : Move this (& other salts) to a salt container, i.e. a global enum
@@ -865,11 +897,8 @@ fn prepare_encryptedstore(dice: &DiceContext) -> Result<Child> {
         0x6F, 0xB3, 0xF9, 0x40, 0xCE, 0xDD, 0x99, 0x40, 0xAA, 0xA7, 0x0E, 0x92, 0x73, 0x90, 0x86,
         0x4A, 0x75,
     ];
-    let key = dice.get_sealing_key(
-        &salt,
-        ENCRYPTEDSTORE_KEY_IDENTIFIER.as_bytes(),
-        ENCRYPTEDSTORE_KEYSIZE,
-    )?;
+    let mut key = ZVec::new(ENCRYPTEDSTORE_KEYSIZE)?;
+    derive_sealing_key(dice_artifacts, &salt, ENCRYPTEDSTORE_KEY_IDENTIFIER.as_bytes(), &mut key)?;
 
     let mut cmd = Command::new(ENCRYPTEDSTORE_BIN);
     cmd.arg("--blkdevice")

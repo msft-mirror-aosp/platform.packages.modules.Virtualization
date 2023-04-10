@@ -15,7 +15,8 @@
 //! Functions for running instances of `crosvm`.
 
 use crate::aidl::{remove_temporary_files, Cid, VirtualMachineCallbacks};
-use crate::atom::write_vm_exited_stats;
+use crate::atom::{get_num_cpus, write_vm_exited_stats};
+use crate::debug_config::DebugConfig;
 use anyhow::{anyhow, bail, Context, Error, Result};
 use command_fds::CommandFdExt;
 use lazy_static::lazy_static;
@@ -32,7 +33,7 @@ use std::fmt;
 use std::fs::{read_to_string, File};
 use std::io::{self, Read};
 use std::mem;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::io::{AsRawFd, RawFd, FromRawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -41,7 +42,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 use std::thread::{self, JoinHandle};
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::DeathReason::DeathReason;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::MemoryTrimLevel::MemoryTrimLevel;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    MemoryTrimLevel::MemoryTrimLevel,
+    VirtualMachineAppConfig::DebugLevel::DebugLevel
+};
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
 use binder::Strong;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
@@ -49,6 +53,7 @@ use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
 use rpcbinder::RpcServer;
 
 /// external/crosvm
+use base::AsRawDescriptor;
 use base::UnixSeqpacketListener;
 use vm_control::{BalloonControlCommand, VmRequest, VmResponse};
 
@@ -68,6 +73,8 @@ const CROSVM_REBOOT_STATUS: i32 = 32;
 const CROSVM_CRASH_STATUS: i32 = 33;
 /// The exit status which crosvm returns when vcpu is stalled.
 const CROSVM_WATCHDOG_REBOOT_STATUS: i32 = 36;
+/// The size of memory (in MiB) reserved for ramdump
+const RAMDUMP_RESERVED_MIB: u32 = 17;
 
 const MILLIS_PER_SEC: i64 = 1000;
 
@@ -78,9 +85,9 @@ lazy_static! {
     /// triggered.
     static ref BOOT_HANGUP_TIMEOUT: Duration = if nested_virt::is_nested_virtualization().unwrap() {
         // Nested virtualization is slow, so we need a longer timeout.
-        Duration::from_secs(100)
+        Duration::from_secs(300)
     } else {
-        Duration::from_secs(10)
+        Duration::from_secs(30)
     };
 }
 
@@ -95,8 +102,10 @@ pub struct CrosvmConfig {
     pub disks: Vec<DiskFile>,
     pub params: Option<String>,
     pub protected: bool,
+    pub debug_config: DebugConfig,
     pub memory_mib: Option<NonZeroU32>,
     pub cpus: Option<NonZeroU32>,
+    pub host_cpu_topology: bool,
     pub task_profiles: Vec<String>,
     pub console_fd: Option<File>,
     pub log_fd: Option<File>,
@@ -104,6 +113,7 @@ pub struct CrosvmConfig {
     pub indirect_files: Vec<File>,
     pub platform_version: VersionReq,
     pub detect_hangup: bool,
+    pub gdb_port: Option<NonZeroU16>,
 }
 
 /// A disk image to pass to crosvm for a VM.
@@ -376,7 +386,7 @@ impl VmInstance {
             &self.name,
             death_reason,
             exit_signal,
-            &*vm_metric,
+            &vm_metric,
         );
 
         // Delete temporary files. The folder itself is removed by VirtualizationServiceInternal.
@@ -482,6 +492,10 @@ impl VmInstance {
         // first, as monitor_vm_exit() takes it as well.
         monitor_vm_exit_thread.map(JoinHandle::join);
 
+        // Now that the VM has been killed, shut down the VirtualMachineService
+        // server to eagerly free up the server threads.
+        self.vm_context.vm_server.shutdown()?;
+
         Ok(())
     }
 
@@ -528,6 +542,9 @@ impl VmInstance {
     /// Checks if ramdump has been created. If so, send it to tombstoned.
     fn handle_ramdump(&self) -> Result<(), Error> {
         let ramdump_path = self.temporary_directory.join("ramdump");
+        if !ramdump_path.as_path().try_exists()? {
+            return Ok(());
+        }
         if std::fs::metadata(&ramdump_path)?.len() > 0 {
             Self::send_ramdump_to_tombstoned(&ramdump_path)?;
         }
@@ -575,7 +592,7 @@ fn get_guest_time(pid: u32) -> Result<i64> {
 
     let guest_time_ticks = data_list[42].parse::<i64>()?;
     // SAFETY : It just returns an integer about CPU tick information.
-    let ticks_per_sec = unsafe { sysconf(_SC_CLK_TCK) } as i64;
+    let ticks_per_sec = unsafe { sysconf(_SC_CLK_TCK) };
     Ok(guest_time_ticks * MILLIS_PER_SEC / ticks_per_sec)
 }
 
@@ -678,7 +695,7 @@ fn run_vm(
         // Configure the logger for the crosvm process to silence logs from the disk crate which
         // don't provide much information to us (but do spamming us).
         .arg("--log-level")
-        .arg("info,disk=off")
+        .arg("info,disk=warn")
         .arg("run")
         .arg("--disable-sandbox")
         .arg("--cid")
@@ -702,8 +719,28 @@ fn run_vm(
         let virtio_pci_device_count = 4 + config.disks.len();
         // crosvm virtio queue has 256 entries, so 2 MiB per device (2 pages per entry) should be
         // enough.
-        let swiotlb_size_mib = 2 * virtio_pci_device_count;
+        let swiotlb_size_mib = 2 * virtio_pci_device_count as u32;
         command.arg("--swiotlb").arg(swiotlb_size_mib.to_string());
+
+        // Workaround to keep crash_dump from trying to read protected guest memory.
+        // Context in b/238324526.
+        command.arg("--unmap-guest-memory-on-fork");
+
+        if config.ramdump.is_some() {
+            // Protected VM needs to reserve memory for ramdump here. Note that we reserve more
+            // memory for the restricted dma pool.
+            let ramdump_reserve = RAMDUMP_RESERVED_MIB + swiotlb_size_mib;
+            command.arg("--params").arg(format!("crashkernel={ramdump_reserve}M"));
+        }
+    } else if config.ramdump.is_some() {
+        command.arg("--params").arg(format!("crashkernel={RAMDUMP_RESERVED_MIB}M"));
+    }
+    if config.debug_config.debug_level == DebugLevel::NONE
+        && config.debug_config.should_prepare_console_output()
+    {
+        // bootconfig.normal will be used, but we need log.
+        command.arg("--params").arg("printk.devkmsg=on");
+        command.arg("--params").arg("console=hvc0");
     }
 
     if let Some(memory_mib) = config.memory_mib {
@@ -714,8 +751,21 @@ fn run_vm(
         command.arg("--cpus").arg(cpus.to_string());
     }
 
+    if config.host_cpu_topology {
+        // TODO(b/266664564): replace with --host-cpu-topology once available
+        if let Some(cpus) = get_num_cpus() {
+            command.arg("--cpus").arg(cpus.to_string());
+        } else {
+            bail!("Could not determine the number of CPUs in the system");
+        }
+    }
+
     if !config.task_profiles.is_empty() {
         command.arg("--task-profiles").arg(config.task_profiles.join(","));
+    }
+
+    if let Some(gdb_port) = config.gdb_port {
+        command.arg("--gdb").arg(gdb_port.to_string());
     }
 
     // Keep track of what file descriptors should be mapped to the crosvm process.
@@ -774,12 +824,13 @@ fn run_vm(
 
     let control_server_socket = UnixSeqpacketListener::bind(crosvm_control_socket_path)
         .context("failed to create control server")?;
-    command.arg("--socket").arg(add_preserved_fd(&mut preserved_fds, &control_server_socket));
+    command
+        .arg("--socket")
+        .arg(add_preserved_fd(&mut preserved_fds, &control_server_socket.as_raw_descriptor()));
 
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);
 
-    command.arg("--params").arg("crashkernel=17M");
     print_crosvm_args(&command);
 
     let result = SharedChild::spawn(&mut command)?;

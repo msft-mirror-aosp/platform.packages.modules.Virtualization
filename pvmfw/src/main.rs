@@ -16,43 +16,47 @@
 
 #![no_main]
 #![no_std]
-#![feature(default_alloc_error_handler)]
-#![feature(ptr_const_cast)] // Stabilized in 1.65.0
 
 extern crate alloc;
 
-mod avb;
 mod config;
+mod crypto;
+mod debug_policy;
 mod dice;
 mod entry;
 mod exceptions;
 mod fdt;
+mod gpt;
 mod heap;
 mod helpers;
 mod hvc;
+mod hypervisor;
+mod instance;
 mod memory;
 mod mmio_guard;
 mod mmu;
+mod rand;
 mod smccc;
 mod virtio;
 
 use alloc::boxed::Box;
 
-use crate::{
-    avb::PUBLIC_KEY,
-    dice::derive_next_bcc,
-    entry::RebootReason,
-    fdt::add_dice_node,
-    helpers::flush,
-    helpers::GUEST_PAGE_SIZE,
-    memory::MemoryTracker,
-    virtio::pci::{find_virtio_devices, map_mmio},
-};
-use ::dice::bcc;
+use crate::dice::PartialInputs;
+use crate::entry::RebootReason;
+use crate::fdt::modify_for_next_stage;
+use crate::helpers::flush;
+use crate::helpers::GUEST_PAGE_SIZE;
+use crate::instance::get_or_generate_instance_salt;
+use crate::memory::MemoryTracker;
+use crate::virtio::pci;
+use diced_open_dice::bcc_handover_main_flow;
+use diced_open_dice::bcc_handover_parse;
+use diced_open_dice::DiceArtifacts;
 use fdtpci::{PciError, PciInfo};
 use libfdt::Fdt;
 use log::{debug, error, info, trace};
 use pvmfw_avb::verify_payload;
+use pvmfw_embedded_key::PUBLIC_KEY;
 
 const NEXT_BCC_SIZE: usize = GUEST_PAGE_SIZE;
 
@@ -60,11 +64,11 @@ fn main(
     fdt: &mut Fdt,
     signed_kernel: &[u8],
     ramdisk: Option<&[u8]>,
-    bcc: &bcc::Handover,
+    current_bcc_handover: &[u8],
     memory: &mut MemoryTracker,
 ) -> Result<(), RebootReason> {
     info!("pVM firmware");
-    debug!("FDT: {:?}", fdt as *const libfdt::Fdt);
+    debug!("FDT: {:?}", fdt.as_ptr());
     debug!("Signed kernel: {:?} ({:#x} bytes)", signed_kernel.as_ptr(), signed_kernel.len());
     debug!("AVB public key: addr={:?}, size={:#x} ({1})", PUBLIC_KEY.as_ptr(), PUBLIC_KEY.len());
     if let Some(rd) = ramdisk {
@@ -72,56 +76,54 @@ fn main(
     } else {
         debug!("Ramdisk: None");
     }
-    trace!("BCC: {bcc:x?}");
+    let bcc_handover = bcc_handover_parse(current_bcc_handover).map_err(|e| {
+        error!("Invalid BCC Handover: {e:?}");
+        RebootReason::InvalidBcc
+    })?;
+    trace!("BCC: {bcc_handover:x?}");
 
     // Set up PCI bus for VirtIO devices.
     let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;
     debug!("PCI: {:#x?}", pci_info);
-    map_mmio(&pci_info, memory)?;
-    // Safety: This is the only place where we call make_pci_root, and this main function is only
-    // called once.
-    let mut pci_root = unsafe { pci_info.make_pci_root() };
-    find_virtio_devices(&mut pci_root).map_err(handle_pci_error)?;
+    let mut pci_root = pci::initialise(pci_info, memory)?;
 
-    verify_payload(signed_kernel, ramdisk, PUBLIC_KEY).map_err(|e| {
+    let verified_boot_data = verify_payload(signed_kernel, ramdisk, PUBLIC_KEY).map_err(|e| {
         error!("Failed to verify the payload: {e}");
         RebootReason::PayloadVerificationError
     })?;
 
-    let debug_mode = false; // TODO(b/256148034): Derive the DICE mode from the received initrd.
-    const HASH_SIZE: usize = 64;
-    let mut hashes = [0; HASH_SIZE * 2]; // TODO(b/256148034): Extract AvbHashDescriptor digests.
-    hashes[..HASH_SIZE].copy_from_slice(&::dice::hash(signed_kernel).map_err(|_| {
-        error!("Failed to hash the kernel");
-        RebootReason::InternalError
-    })?);
-    // Note: Using signed_kernel currently makes the DICE code input depend on its VBMeta fields.
-    let code_hash = if let Some(rd) = ramdisk {
-        hashes[HASH_SIZE..].copy_from_slice(&::dice::hash(rd).map_err(|_| {
-            error!("Failed to hash the ramdisk");
-            RebootReason::InternalError
-        })?);
-        &hashes[..]
-    } else {
-        &hashes[..HASH_SIZE]
-    };
     let next_bcc = heap::aligned_boxed_slice(NEXT_BCC_SIZE, GUEST_PAGE_SIZE).ok_or_else(|| {
         error!("Failed to allocate the next-stage BCC");
         RebootReason::InternalError
     })?;
     // By leaking the slice, its content will be left behind for the next stage.
     let next_bcc = Box::leak(next_bcc);
-    let next_bcc_size =
-        derive_next_bcc(bcc, next_bcc, code_hash, debug_mode, PUBLIC_KEY).map_err(|e| {
-            error!("Failed to derive next-stage DICE secrets: {e:?}");
-            RebootReason::SecretDerivationError
-        })?;
-    trace!("Next BCC: {:x?}", bcc::Handover::new(&next_bcc[..next_bcc_size]));
 
+    let dice_inputs = PartialInputs::new(&verified_boot_data).map_err(|e| {
+        error!("Failed to compute partial DICE inputs: {e:?}");
+        RebootReason::InternalError
+    })?;
+    let cdi_seal = DiceArtifacts::cdi_seal(&bcc_handover);
+    let (new_instance, salt) = get_or_generate_instance_salt(&mut pci_root, &dice_inputs, cdi_seal)
+        .map_err(|e| {
+            error!("Failed to get instance.img salt: {e}");
+            RebootReason::InternalError
+        })?;
+    trace!("Got salt from instance.img: {salt:x?}");
+
+    let dice_inputs = dice_inputs.into_input_values(&salt).map_err(|e| {
+        error!("Failed to generate DICE inputs: {e:?}");
+        RebootReason::InternalError
+    })?;
+    let _ = bcc_handover_main_flow(current_bcc_handover, &dice_inputs, next_bcc).map_err(|e| {
+        error!("Failed to derive next-stage DICE secrets: {e:?}");
+        RebootReason::SecretDerivationError
+    })?;
     flush(next_bcc);
 
-    add_dice_node(fdt, next_bcc.as_ptr() as usize, NEXT_BCC_SIZE).map_err(|e| {
-        error!("Failed to add DICE node to device tree: {e}");
+    let strict_boot = true;
+    modify_for_next_stage(fdt, next_bcc, new_instance, strict_boot).map_err(|e| {
+        error!("Failed to configure device tree: {e}");
         RebootReason::InternalError
     })?;
 

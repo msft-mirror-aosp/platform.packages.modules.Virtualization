@@ -19,7 +19,7 @@
       "name": "compos_key_tests"
     },
     {
-      "name": "composd_verify.test"
+      "name": "compos_verify.test"
     },
     {
       "name": "initrd_bootconfig.test"
@@ -47,9 +47,6 @@
   "imports": [
     {
       "path": "packages/modules/Virtualization/apkdmverity"
-    },
-    {
-      "path": "packages/modules/Virtualization/avmd"
     },
     {
       "path": "packages/modules/Virtualization/encryptedstore"

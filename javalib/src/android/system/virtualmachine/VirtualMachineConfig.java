@@ -29,11 +29,15 @@ import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.PersistableBundle;
 import android.sysprop.HypervisorProperties;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
 import android.system.virtualizationservice.VirtualMachinePayloadConfig;
+import android.util.Log;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -45,6 +49,7 @@ import java.io.OutputStream;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.Objects;
+import java.util.zip.ZipFile;
 
 /**
  * Represents a configuration of a virtual machine. A configuration consists of hardware
@@ -55,19 +60,21 @@ import java.util.Objects;
  */
 @SystemApi
 public final class VirtualMachineConfig {
+    private static final String TAG = "VirtualMachineConfig";
     private static final String[] EMPTY_STRING_ARRAY = {};
 
     // These define the schema of the config file persisted on disk.
-    private static final int VERSION = 3;
+    private static final int VERSION = 6;
     private static final String KEY_VERSION = "version";
+    private static final String KEY_PACKAGENAME = "packageName";
     private static final String KEY_APKPATH = "apkPath";
     private static final String KEY_PAYLOADCONFIGPATH = "payloadConfigPath";
     private static final String KEY_PAYLOADBINARYNAME = "payloadBinaryPath";
     private static final String KEY_DEBUGLEVEL = "debugLevel";
     private static final String KEY_PROTECTED_VM = "protectedVm";
-    private static final String KEY_MEMORY_MIB = "memoryMib";
-    private static final String KEY_NUM_CPUS = "numCpus";
-    private static final String KEY_ENCRYPTED_STORAGE_KIB = "encryptedStorageKib";
+    private static final String KEY_MEMORY_BYTES = "memoryBytes";
+    private static final String KEY_CPU_TOPOLOGY = "cpuTopology";
+    private static final String KEY_ENCRYPTED_STORAGE_BYTES = "encryptedStorageBytes";
     private static final String KEY_VM_OUTPUT_CAPTURED = "vmOutputCaptured";
 
     /** @hide */
@@ -94,8 +101,38 @@ public final class VirtualMachineConfig {
      */
     @SystemApi public static final int DEBUG_LEVEL_FULL = 1;
 
+    /** @hide */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(
+            prefix = "CPU_TOPOLOGY_",
+            value = {
+                CPU_TOPOLOGY_ONE_CPU,
+                CPU_TOPOLOGY_MATCH_HOST,
+            })
+    public @interface CpuTopology {}
+
+    /**
+     * Run VM with 1 vCPU. This is the default option, usually the fastest to boot and consuming the
+     * least amount of resources. Typically the best option for small or ephemeral workloads.
+     *
+     * @hide
+     */
+    @SystemApi public static final int CPU_TOPOLOGY_ONE_CPU = 0;
+
+    /**
+     * Run VM with vCPU topology matching the physical CPU topology of the host. Usually takes
+     * longer to boot and cosumes more resources compared to a single vCPU. Typically a good option
+     * for long-running workloads that benefit from parallel execution.
+     *
+     * @hide
+     */
+    @SystemApi public static final int CPU_TOPOLOGY_MATCH_HOST = 1;
+
+    /** Name of a package whose primary APK contains the VM payload. */
+    @Nullable private final String mPackageName;
+
     /** Absolute path to the APK file containing the VM payload. */
-    @NonNull private final String mApkPath;
+    @Nullable private final String mApkPath;
 
     @DebugLevel private final int mDebugLevel;
 
@@ -105,14 +142,13 @@ public final class VirtualMachineConfig {
     private final boolean mProtectedVm;
 
     /**
-     * The amount of RAM to give the VM, in MiB. If this is 0 or negative the default will be used.
+     * The amount of RAM to give the VM, in bytes. If this is 0 or negative the default will be
+     * used.
      */
-    private final int mMemoryMib;
+    private final long mMemoryBytes;
 
-    /**
-     * Number of vCPUs in the VM. Defaults to 1 when not specified.
-     */
-    private final int mNumCpus;
+    /** CPU topology configuration of the VM. */
+    @CpuTopology private final int mCpuTopology;
 
     /**
      * Path within the APK to the payload config file that defines software aspects of the VM.
@@ -122,31 +158,33 @@ public final class VirtualMachineConfig {
     /** Name of the payload binary file within the APK that will be executed within the VM. */
     @Nullable private final String mPayloadBinaryName;
 
-    /** The size of storage in KiB. 0 indicates that encryptedStorage is not required */
-    private final long mEncryptedStorageKib;
+    /** The size of storage in bytes. 0 indicates that encryptedStorage is not required */
+    private final long mEncryptedStorageBytes;
 
     /** Whether the app can read console and log output. */
     private final boolean mVmOutputCaptured;
 
     private VirtualMachineConfig(
-            @NonNull String apkPath,
+            @Nullable String packageName,
+            @Nullable String apkPath,
             @Nullable String payloadConfigPath,
             @Nullable String payloadBinaryName,
             @DebugLevel int debugLevel,
             boolean protectedVm,
-            int memoryMib,
-            int numCpus,
-            long encryptedStorageKib,
+            long memoryBytes,
+            @CpuTopology int cpuTopology,
+            long encryptedStorageBytes,
             boolean vmOutputCaptured) {
         // This is only called from Builder.build(); the builder handles parameter validation.
+        mPackageName = packageName;
         mApkPath = apkPath;
         mPayloadConfigPath = payloadConfigPath;
         mPayloadBinaryName = payloadBinaryName;
         mDebugLevel = debugLevel;
         mProtectedVm = protectedVm;
-        mMemoryMib = memoryMib;
-        mNumCpus = numCpus;
-        mEncryptedStorageKib = encryptedStorageKib;
+        mMemoryBytes = memoryBytes;
+        mCpuTopology = cpuTopology;
+        mEncryptedStorageBytes = encryptedStorageBytes;
         mVmOutputCaptured = vmOutputCaptured;
     }
 
@@ -191,8 +229,13 @@ public final class VirtualMachineConfig {
                     "Version " + version + " too high; current is " + VERSION);
         }
 
-        Builder builder = new Builder();
-        builder.setApkPath(b.getString(KEY_APKPATH));
+        String packageName = b.getString(KEY_PACKAGENAME);
+        Builder builder = new Builder(packageName);
+
+        String apkPath = b.getString(KEY_APKPATH);
+        if (apkPath != null) {
+            builder.setApkPath(apkPath);
+        }
 
         String payloadConfigPath = b.getString(KEY_PAYLOADCONFIGPATH);
         if (payloadConfigPath == null) {
@@ -207,14 +250,14 @@ public final class VirtualMachineConfig {
         }
         builder.setDebugLevel(debugLevel);
         builder.setProtectedVm(b.getBoolean(KEY_PROTECTED_VM));
-        int memoryMib = b.getInt(KEY_MEMORY_MIB);
-        if (memoryMib != 0) {
-            builder.setMemoryMib(memoryMib);
+        long memoryBytes = b.getLong(KEY_MEMORY_BYTES);
+        if (memoryBytes != 0) {
+            builder.setMemoryBytes(memoryBytes);
         }
-        builder.setNumCpus(b.getInt(KEY_NUM_CPUS));
-        long encryptedStorageKib = b.getLong(KEY_ENCRYPTED_STORAGE_KIB);
-        if (encryptedStorageKib != 0) {
-            builder.setEncryptedStorageKib(encryptedStorageKib);
+        builder.setCpuTopology(b.getInt(KEY_CPU_TOPOLOGY));
+        long encryptedStorageBytes = b.getLong(KEY_ENCRYPTED_STORAGE_BYTES);
+        if (encryptedStorageBytes != 0) {
+            builder.setEncryptedStorageBytes(encryptedStorageBytes);
         }
         builder.setVmOutputCaptured(b.getBoolean(KEY_VM_OUTPUT_CAPTURED));
 
@@ -234,17 +277,22 @@ public final class VirtualMachineConfig {
     private void serializeOutputStream(@NonNull OutputStream output) throws IOException {
         PersistableBundle b = new PersistableBundle();
         b.putInt(KEY_VERSION, VERSION);
-        b.putString(KEY_APKPATH, mApkPath);
+        if (mPackageName != null) {
+            b.putString(KEY_PACKAGENAME, mPackageName);
+        }
+        if (mApkPath != null) {
+            b.putString(KEY_APKPATH, mApkPath);
+        }
         b.putString(KEY_PAYLOADCONFIGPATH, mPayloadConfigPath);
         b.putString(KEY_PAYLOADBINARYNAME, mPayloadBinaryName);
         b.putInt(KEY_DEBUGLEVEL, mDebugLevel);
         b.putBoolean(KEY_PROTECTED_VM, mProtectedVm);
-        b.putInt(KEY_NUM_CPUS, mNumCpus);
-        if (mMemoryMib > 0) {
-            b.putInt(KEY_MEMORY_MIB, mMemoryMib);
+        b.putInt(KEY_CPU_TOPOLOGY, mCpuTopology);
+        if (mMemoryBytes > 0) {
+            b.putLong(KEY_MEMORY_BYTES, mMemoryBytes);
         }
-        if (mEncryptedStorageKib > 0) {
-            b.putLong(KEY_ENCRYPTED_STORAGE_KIB, mEncryptedStorageKib);
+        if (mEncryptedStorageBytes > 0) {
+            b.putLong(KEY_ENCRYPTED_STORAGE_BYTES, mEncryptedStorageBytes);
         }
         b.putBoolean(KEY_VM_OUTPUT_CAPTURED, mVmOutputCaptured);
         b.writeToStream(output);
@@ -252,12 +300,12 @@ public final class VirtualMachineConfig {
 
     /**
      * Returns the absolute path of the APK which should contain the binary payload that will
-     * execute within the VM.
+     * execute within the VM. Returns null if no specific path has been set.
      *
      * @hide
      */
     @SystemApi
-    @NonNull
+    @Nullable
     public String getApkPath() {
         return mApkPath;
     }
@@ -292,7 +340,6 @@ public final class VirtualMachineConfig {
      * @hide
      */
     @SystemApi
-    @NonNull
     @DebugLevel
     public int getDebugLevel() {
         return mDebugLevel;
@@ -316,19 +363,19 @@ public final class VirtualMachineConfig {
      */
     @SystemApi
     @IntRange(from = 0)
-    public int getMemoryMib() {
-        return mMemoryMib;
+    public long getMemoryBytes() {
+        return mMemoryBytes;
     }
 
     /**
-     * Returns the number of vCPUs that the VM will have.
+     * Returns the CPU topology configuration of the VM.
      *
      * @hide
      */
     @SystemApi
-    @IntRange(from = 1)
-    public int getNumCpus() {
-        return mNumCpus;
+    @CpuTopology
+    public int getCpuTopology() {
+        return mCpuTopology;
     }
 
     /**
@@ -338,26 +385,26 @@ public final class VirtualMachineConfig {
      */
     @SystemApi
     public boolean isEncryptedStorageEnabled() {
-        return mEncryptedStorageKib > 0;
+        return mEncryptedStorageBytes > 0;
     }
 
     /**
-     * Returns the size of encrypted storage (in KiB) available in the VM, or 0 if encrypted storage
-     * is not enabled
+     * Returns the size of encrypted storage (in bytes) available in the VM, or 0 if encrypted
+     * storage is not enabled
      *
      * @hide
      */
     @SystemApi
     @IntRange(from = 0)
-    public long getEncryptedStorageKib() {
-        return mEncryptedStorageKib;
+    public long getEncryptedStorageBytes() {
+        return mEncryptedStorageBytes;
     }
 
     /**
      * Returns whether the app can read the VM console or log output. If not, the VM output is
      * automatically forwarded to the host logcat.
      *
-     * @see #setVmOutputCaptured
+     * @see Builder#setVmOutputCaptured
      * @hide
      */
     @SystemApi
@@ -377,13 +424,17 @@ public final class VirtualMachineConfig {
      */
     @SystemApi
     public boolean isCompatibleWith(@NonNull VirtualMachineConfig other) {
+        if (this == other) {
+            return true;
+        }
         return this.mDebugLevel == other.mDebugLevel
                 && this.mProtectedVm == other.mProtectedVm
-                && this.mEncryptedStorageKib == other.mEncryptedStorageKib
+                && this.mEncryptedStorageBytes == other.mEncryptedStorageBytes
                 && this.mVmOutputCaptured == other.mVmOutputCaptured
                 && Objects.equals(this.mPayloadConfigPath, other.mPayloadConfigPath)
                 && Objects.equals(this.mPayloadBinaryName, other.mPayloadBinaryName)
-                && this.mApkPath.equals(other.mApkPath);
+                && Objects.equals(this.mPackageName, other.mPackageName)
+                && Objects.equals(this.mApkPath, other.mApkPath);
     }
 
     /**
@@ -393,9 +444,17 @@ public final class VirtualMachineConfig {
      * app-owned files and that could be abused to run a VM with software that the calling
      * application doesn't own.
      */
-    VirtualMachineAppConfig toVsConfig() throws FileNotFoundException {
+    VirtualMachineAppConfig toVsConfig(@NonNull PackageManager packageManager)
+            throws VirtualMachineException {
         VirtualMachineAppConfig vsConfig = new VirtualMachineAppConfig();
-        vsConfig.apk = ParcelFileDescriptor.open(new File(mApkPath), MODE_READ_ONLY);
+
+        String apkPath = (mApkPath != null) ? mApkPath : findPayloadApk(packageManager);
+
+        try {
+            vsConfig.apk = ParcelFileDescriptor.open(new File(apkPath), MODE_READ_ONLY);
+        } catch (FileNotFoundException e) {
+            throw new VirtualMachineException("Failed to open APK", e);
+        }
         if (mPayloadBinaryName != null) {
             VirtualMachinePayloadConfig payloadConfig = new VirtualMachinePayloadConfig();
             payloadConfig.payloadBinaryName = mPayloadBinaryName;
@@ -414,11 +473,67 @@ public final class VirtualMachineConfig {
                 break;
         }
         vsConfig.protectedVm = mProtectedVm;
-        vsConfig.memoryMib = mMemoryMib;
-        vsConfig.numCpus = mNumCpus;
+        vsConfig.memoryMib = bytesToMebiBytes(mMemoryBytes);
+        switch (mCpuTopology) {
+            case CPU_TOPOLOGY_MATCH_HOST:
+                vsConfig.cpuTopology = android.system.virtualizationservice.CpuTopology.MATCH_HOST;
+                break;
+            default:
+                vsConfig.cpuTopology = android.system.virtualizationservice.CpuTopology.ONE_CPU;
+                break;
+        }
         // Don't allow apps to set task profiles ... at least for now.
         vsConfig.taskProfiles = EMPTY_STRING_ARRAY;
         return vsConfig;
+    }
+
+    private String findPayloadApk(PackageManager packageManager) throws VirtualMachineException {
+        ApplicationInfo appInfo;
+        try {
+            appInfo =
+                    packageManager.getApplicationInfo(
+                            mPackageName, PackageManager.ApplicationInfoFlags.of(0));
+        } catch (PackageManager.NameNotFoundException e) {
+            throw new VirtualMachineException("Package not found", e);
+        }
+
+        String[] splitApkPaths = appInfo.splitSourceDirs;
+        String[] abis = Build.SUPPORTED_64_BIT_ABIS;
+
+        // If there are split APKs, and we know the payload binary name, see if we can find a
+        // split APK containing the binary.
+        if (mPayloadBinaryName != null && splitApkPaths != null && abis.length != 0) {
+            String[] libraryNames = new String[abis.length];
+            for (int i = 0; i < abis.length; i++) {
+                libraryNames[i] = "lib/" + abis[i] + "/" + mPayloadBinaryName;
+            }
+
+            for (String path : splitApkPaths) {
+                try (ZipFile zip = new ZipFile(path)) {
+                    for (String name : libraryNames) {
+                        if (zip.getEntry(name) != null) {
+                            Log.i(TAG, "Found payload in " + path);
+                            return path;
+                        }
+                    }
+                } catch (IOException e) {
+                    Log.w(TAG, "Failed to scan split APK: " + path, e);
+                }
+            }
+        }
+
+        // This really is the path to the APK, not a directory.
+        return appInfo.sourceDir;
+    }
+
+    private int bytesToMebiBytes(long mMemoryBytes) {
+        long oneMebi = 1024 * 1024;
+        // We can't express requests for more than 2 exabytes, but then they're not going to succeed
+        // anyway.
+        if (mMemoryBytes > (Integer.MAX_VALUE - 1) * oneMebi) {
+            return Integer.MAX_VALUE;
+        }
+        return (int) ((mMemoryBytes + oneMebi - 1) / oneMebi);
     }
 
     /**
@@ -428,16 +543,16 @@ public final class VirtualMachineConfig {
      */
     @SystemApi
     public static final class Builder {
-        @Nullable private final Context mContext;
+        @Nullable private final String mPackageName;
         @Nullable private String mApkPath;
         @Nullable private String mPayloadConfigPath;
         @Nullable private String mPayloadBinaryName;
         @DebugLevel private int mDebugLevel = DEBUG_LEVEL_NONE;
         private boolean mProtectedVm;
         private boolean mProtectedVmSet;
-        private int mMemoryMib;
-        private int mNumCpus = 1;
-        private long mEncryptedStorageKib;
+        private long mMemoryBytes;
+        @CpuTopology private int mCpuTopology = CPU_TOPOLOGY_ONE_CPU;
+        private long mEncryptedStorageBytes;
         private boolean mVmOutputCaptured = false;
 
         /**
@@ -447,15 +562,15 @@ public final class VirtualMachineConfig {
          */
         @SystemApi
         public Builder(@NonNull Context context) {
-            mContext = requireNonNull(context, "context must not be null");
+            mPackageName = requireNonNull(context, "context must not be null").getPackageName();
         }
 
         /**
-         * Creates a builder with no associated context; {@link #setApkPath} must be called to
-         * specify which APK contains the payload.
+         * Creates a builder for a specific package. If packageName is null, {@link #setApkPath}
+         * must be called to specify the APK containing the payload.
          */
-        private Builder() {
-            mContext = null;
+        private Builder(@Nullable String packageName) {
+            mPackageName = packageName;
         }
 
         /**
@@ -466,14 +581,16 @@ public final class VirtualMachineConfig {
         @SystemApi
         @NonNull
         public VirtualMachineConfig build() {
-            String apkPath;
-            if (mApkPath == null) {
-                if (mContext == null) {
-                    throw new IllegalStateException("apkPath must be specified");
-                }
-                apkPath = mContext.getPackageCodePath();
-            } else {
+            String apkPath = null;
+            String packageName = null;
+
+            if (mApkPath != null) {
                 apkPath = mApkPath;
+            } else if (mPackageName != null) {
+                packageName = mPackageName;
+            } else {
+                // This should never happen, unless we're deserializing a bad config
+                throw new IllegalStateException("apkPath or packageName must be specified");
             }
 
             if (mPayloadBinaryName == null) {
@@ -496,20 +613,22 @@ public final class VirtualMachineConfig {
             }
 
             return new VirtualMachineConfig(
+                    packageName,
                     apkPath,
                     mPayloadConfigPath,
                     mPayloadBinaryName,
                     mDebugLevel,
                     mProtectedVm,
-                    mMemoryMib,
-                    mNumCpus,
-                    mEncryptedStorageKib,
+                    mMemoryBytes,
+                    mCpuTopology,
+                    mEncryptedStorageBytes,
                     mVmOutputCaptured);
         }
 
         /**
          * Sets the absolute path of the APK containing the binary payload that will execute within
-         * the VM. If not set explicitly, defaults to the primary APK of the context.
+         * the VM. If not set explicitly, defaults to the split APK containing the payload, if there
+         * is one, and otherwise the primary APK of the context.
          *
          * @hide
          */
@@ -618,47 +737,43 @@ public final class VirtualMachineConfig {
         }
 
         /**
-         * Sets the amount of RAM to give the VM, in mebibytes. If not explicitly set then a default
+         * Sets the amount of RAM to give the VM, in bytes. If not explicitly set then a default
          * size will be used.
          *
          * @hide
          */
         @SystemApi
         @NonNull
-        public Builder setMemoryMib(@IntRange(from = 1) int memoryMib) {
-            if (memoryMib <= 0) {
+        public Builder setMemoryBytes(@IntRange(from = 1) long memoryBytes) {
+            if (memoryBytes <= 0) {
                 throw new IllegalArgumentException("Memory size must be positive");
             }
-            mMemoryMib = memoryMib;
+            mMemoryBytes = memoryBytes;
             return this;
         }
 
         /**
-         * Sets the number of vCPUs in the VM. Defaults to 1. Cannot be more than the number of real
-         * CPUs (as returned by {@link Runtime#availableProcessors}).
+         * Sets the CPU topology configuration of the VM. Defaults to {@link #CPU_TOPOLOGY_ONE_CPU}.
+         *
+         * <p>This determines how many virtual CPUs will be created, and their performance and
+         * scheduling characteristics, such as affinity masks. Topology also has an effect on memory
+         * usage as each vCPU requires additional memory to keep its state.
          *
          * @hide
          */
         @SystemApi
         @NonNull
-        public Builder setNumCpus(@IntRange(from = 1) int numCpus) {
-            int availableCpus = Runtime.getRuntime().availableProcessors();
-            if (numCpus < 1 || numCpus > availableCpus) {
-                throw new IllegalArgumentException(
-                        "Number of vCPUs ("
-                                + numCpus
-                                + ") is out of "
-                                + "range [1, "
-                                + availableCpus
-                                + "]");
+        public Builder setCpuTopology(@CpuTopology int cpuTopology) {
+            if (cpuTopology != CPU_TOPOLOGY_ONE_CPU && cpuTopology != CPU_TOPOLOGY_MATCH_HOST) {
+                throw new IllegalArgumentException("Invalid cpuTopology: " + cpuTopology);
             }
-            mNumCpus = numCpus;
+            mCpuTopology = cpuTopology;
             return this;
         }
 
         /**
-         * Sets the size (in KiB) of encrypted storage available to the VM. If not set, no encrypted
-         * storage is provided.
+         * Sets the size (in bytes) of encrypted storage available to the VM. If not set, no
+         * encrypted storage is provided.
          *
          * <p>The storage is encrypted with a key deterministically derived from the VM identity
          *
@@ -674,11 +789,11 @@ public final class VirtualMachineConfig {
          */
         @SystemApi
         @NonNull
-        public Builder setEncryptedStorageKib(@IntRange(from = 1) long encryptedStorageKib) {
-            if (encryptedStorageKib <= 0) {
+        public Builder setEncryptedStorageBytes(@IntRange(from = 1) long encryptedStorageBytes) {
+            if (encryptedStorageBytes <= 0) {
                 throw new IllegalArgumentException("Encrypted Storage size must be positive");
             }
-            mEncryptedStorageKib = encryptedStorageKib;
+            mEncryptedStorageBytes = encryptedStorageBytes;
             return this;
         }
 

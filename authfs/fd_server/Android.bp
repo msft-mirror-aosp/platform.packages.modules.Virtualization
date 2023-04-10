@@ -12,15 +12,13 @@ rust_binary {
         "libauthfs_fsverity_metadata",
         "libbinder_rs",
         "libclap",
+        "libfsverity_rs",
         "liblibc",
         "liblog_rust",
         "libnix",
         "librpcbinder_rs",
     ],
     prefer_rlib: true,
-    shared_libs: [
-        "libbinder_rpc_unstable",
-    ],
     apex_available: ["com.android.virt"],
 }
 
@@ -34,14 +32,12 @@ rust_test {
         "libauthfs_fsverity_metadata",
         "libbinder_rs",
         "libclap",
+        "libfsverity_rs",
         "liblibc",
         "liblog_rust",
         "libnix",
         "librpcbinder_rs",
     ],
     prefer_rlib: true,
-    shared_libs: [
-        "libbinder_rpc_unstable",
-    ],
     test_suites: ["general-tests"],
 }

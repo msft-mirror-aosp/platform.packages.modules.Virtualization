@@ -17,7 +17,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use crate::helpers::{self, align_down, align_up, page_4kb_of, SIZE_4KB};
-use crate::hvc::{hyp_meminfo, mem_share, mem_unshare};
+use crate::hypervisor::{hyp_meminfo, mem_share, mem_unshare};
 use crate::mmio_guard;
 use crate::mmu;
 use crate::smccc;
@@ -34,6 +34,11 @@ use core::ptr::NonNull;
 use core::result;
 use log::error;
 use tinyvec::ArrayVec;
+
+/// Base of the system's contiguous "main" memory.
+pub const BASE_ADDR: usize = 0x8000_0000;
+/// First address that can't be translated by a level 1 TTBR0_EL1.
+pub const MAX_ADDR: usize = 1 << 40;
 
 pub type MemoryRange = Range<usize>;
 
@@ -129,15 +134,11 @@ type Result<T> = result::Result<T, MemoryTrackerError>;
 impl MemoryTracker {
     const CAPACITY: usize = 5;
     const MMIO_CAPACITY: usize = 5;
-    /// Base of the system's contiguous "main" memory.
-    const BASE: usize = 0x8000_0000;
-    /// First address that can't be translated by a level 1 TTBR0_EL1.
-    const MAX_ADDR: usize = 1 << 39;
 
     /// Create a new instance from an active page table, covering the maximum RAM size.
     pub fn new(page_table: mmu::PageTable) -> Self {
         Self {
-            total: Self::BASE..Self::MAX_ADDR,
+            total: BASE_ADDR..MAX_ADDR,
             page_table,
             regions: ArrayVec::new(),
             mmio_regions: ArrayVec::new(),
@@ -267,7 +268,7 @@ impl Drop for MemoryTracker {
         for region in &self.regions {
             match region.mem_type {
                 MemoryType::ReadWrite => {
-                    // TODO: Use page table's dirty bit to only flush pages that were touched.
+                    // TODO(b/269738062): Use PT's dirty bit to only flush pages that were touched.
                     helpers::flush_region(region.range.start, region.range.len())
                 }
                 MemoryType::ReadOnly => {}
@@ -314,15 +315,11 @@ pub fn alloc_shared(size: usize) -> smccc::Result<NonNull<u8>> {
     // non-zero size.
     let buffer = unsafe { alloc_zeroed(layout) };
 
-    // TODO: Use let-else once we have Rust 1.65 in AOSP.
-    let buffer = if let Some(buffer) = NonNull::new(buffer) {
-        buffer
-    } else {
+    let Some(buffer) = NonNull::new(buffer) else {
         handle_alloc_error(layout);
     };
 
-    let vaddr = buffer.as_ptr() as usize;
-    let paddr = virt_to_phys(vaddr);
+    let paddr = virt_to_phys(buffer);
     // If share_range fails then we will leak the allocation, but that seems better than having it
     // be reused while maybe still partially shared with the host.
     share_range(&(paddr..paddr + layout.size()), granule)?;
@@ -338,7 +335,7 @@ pub fn alloc_shared(size: usize) -> smccc::Result<NonNull<u8>> {
 ///
 /// The memory must have been allocated by `alloc_shared` with the same size, and not yet
 /// deallocated.
-pub unsafe fn dealloc_shared(vaddr: usize, size: usize) -> smccc::Result<()> {
+pub unsafe fn dealloc_shared(vaddr: NonNull<u8>, size: usize) -> smccc::Result<()> {
     let layout = shared_buffer_layout(size)?;
     let granule = layout.align();
 
@@ -346,7 +343,7 @@ pub unsafe fn dealloc_shared(vaddr: usize, size: usize) -> smccc::Result<()> {
     unshare_range(&(paddr..paddr + layout.size()), granule)?;
     // Safe because the memory was allocated by `alloc_shared` above using the same allocator, and
     // the layout is the same as was used then.
-    unsafe { dealloc(vaddr as *mut u8, layout) };
+    unsafe { dealloc(vaddr.as_ptr(), layout) };
 
     Ok(())
 }
@@ -372,8 +369,16 @@ fn page_iterator(range: &MemoryRange) -> impl Iterator<Item = usize> {
 
 /// Returns the intermediate physical address corresponding to the given virtual address.
 ///
-/// As we use identity mapping for everything, this is just the identity function, but it's useful
-/// to use it to be explicit about where we are converting from virtual to physical address.
-pub fn virt_to_phys(vaddr: usize) -> usize {
-    vaddr
+/// As we use identity mapping for everything, this is just a cast, but it's useful to use it to be
+/// explicit about where we are converting from virtual to physical address.
+pub fn virt_to_phys(vaddr: NonNull<u8>) -> usize {
+    vaddr.as_ptr() as _
+}
+
+/// Returns a pointer for the virtual address corresponding to the given non-zero intermediate
+/// physical address.
+///
+/// Panics if `paddr` is 0.
+pub fn phys_to_virt(paddr: usize) -> NonNull<u8> {
+    NonNull::new(paddr as _).unwrap()
 }

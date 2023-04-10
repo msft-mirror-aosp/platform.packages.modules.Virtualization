@@ -17,8 +17,10 @@ package com.android.compos.benchmark;
 
 import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentation;
 
+import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
 
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import android.app.Instrumentation;
@@ -68,7 +70,7 @@ public class ComposBenchmark extends MicrodroidDeviceTestBase {
     }
 
     @After
-    public void tearDown() throws Exception {
+    public void tearDown() {
         mInstrumentation.getUiAutomation().dropShellPermissionIdentity();
     }
 
@@ -95,7 +97,7 @@ public class ComposBenchmark extends MicrodroidDeviceTestBase {
             Long compileEndTime = System.nanoTime();
             Timestamp afterCompileLatestTime = getLatestDex2oatSuccessTime();
 
-            assertTrue(afterCompileLatestTime != null);
+            assertNotNull(afterCompileLatestTime);
             assertTrue(
                     beforeCompileLatestTime == null
                             || beforeCompileLatestTime.before(afterCompileLatestTime));
@@ -134,11 +136,9 @@ public class ComposBenchmark extends MicrodroidDeviceTestBase {
             threadGetMetrics.start();
 
             Long compileStartTime = System.nanoTime();
-            String output = executeCommand(command);
+            String output = runInShellWithStderr(TAG, mInstrumentation.getUiAutomation(), command);
             Long compileEndTime = System.nanoTime();
-            Pattern pattern = Pattern.compile("All Ok");
-            Matcher matcher = pattern.matcher(output);
-            assertTrue(matcher.find());
+            assertThat(output).containsMatch("All Ok");
             double elapsedSec = (compileEndTime - compileStartTime) / NANOS_IN_SEC;
             Log.i(TAG, "Compile time in guest took " + elapsedSec + "s");
             getMetricsRunnable.stop();

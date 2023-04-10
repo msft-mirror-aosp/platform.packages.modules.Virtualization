@@ -191,11 +191,13 @@ public class VirtualMachineManager {
      * Imports a virtual machine from an {@link VirtualMachineDescriptor} object and associates it
      * with the given name.
      *
-     * <p>The new virtual machine will be in the same state as the descriptor indicates.
+     * <p>The new virtual machine will be in the same state as the descriptor indicates. The
+     * descriptor is automatically closed and cannot be used again.
      *
      * <p>NOTE: This method may block and should not be called on the main thread.
      *
-     * @throws VirtualMachineException if the VM cannot be imported.
+     * @throws VirtualMachineException if the VM cannot be imported or the {@code
+     *     VirtualMachineDescriptor} has already been closed.
      * @hide
      */
     @NonNull

@@ -23,6 +23,8 @@ import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
+import static org.junit.Assume.assumeFalse;
+
 import android.platform.test.annotations.RootPermissionTest;
 
 import com.android.microdroid.test.host.CommandRunner;
@@ -80,7 +82,9 @@ public final class ComposTestCase extends MicrodroidHostTestCaseBase {
 
     @Before
     public void setUp() throws Exception {
-        testIfDeviceIsCapable(getDevice());
+        assumeDeviceIsCapable(getDevice());
+        // We get a very high level of (apparently bogus) OOM errors on Cuttlefish (b/264496291).
+        assumeFalse("Skipping test on Cuttlefish", isCuttlefish());
 
         String value = getDevice().getProperty(SYSTEM_SERVER_COMPILER_FILTER_PROP_NAME);
         if (value == null) {
@@ -93,11 +97,6 @@ public final class ComposTestCase extends MicrodroidHostTestCaseBase {
     @After
     public void tearDown() throws Exception {
         killVmAndReconnectAdb();
-
-        archiveLogThenDelete(mTestLogs, getDevice(), COMPOS_APEXDATA_DIR + "/vm_console.log",
-                "vm_console.log-" + mTestName.getMethodName());
-        archiveLogThenDelete(mTestLogs, getDevice(), COMPOS_APEXDATA_DIR + "/vm.log",
-                "vm.log-" + mTestName.getMethodName());
 
         CommandRunner android = new CommandRunner(getDevice());
 

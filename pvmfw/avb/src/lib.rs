@@ -15,11 +15,14 @@
 //! A library implementing the payload verification for pvmfw with libavb
 
 #![cfg_attr(not(test), no_std)]
-// For usize.checked_add_signed(isize), available in Rust 1.66.0
-#![feature(mixed_integer_ops)]
 
+mod descriptor;
 mod error;
+mod ops;
+mod partition;
+mod utils;
 mod verify;
 
+pub use descriptor::Digest;
 pub use error::AvbSlotVerifyError;
-pub use verify::verify_payload;
+pub use verify::{verify_payload, DebugLevel, VerifiedBootData};

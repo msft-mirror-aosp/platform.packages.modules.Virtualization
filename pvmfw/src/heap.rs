@@ -30,7 +30,9 @@ use buddy_system_allocator::LockedHeap;
 #[global_allocator]
 static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::new();
 
-static mut HEAP: [u8; 131072] = [0; 131072];
+/// 128 KiB
+const HEAP_SIZE: usize = 0x20000;
+static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 pub unsafe fn init() {
     HEAP_ALLOCATOR.lock().init(HEAP.as_mut_ptr() as usize, HEAP.len());
@@ -51,7 +53,15 @@ pub fn aligned_boxed_slice(size: usize, align: usize) -> Option<Box<[u8]>> {
 
 #[no_mangle]
 unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
-    malloc_(size).map_or(ptr::null_mut(), |p| p.cast::<c_void>().as_ptr())
+    malloc_(size, false).map_or(ptr::null_mut(), |p| p.cast::<c_void>().as_ptr())
+}
+
+#[no_mangle]
+unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
+    let Some(size) = nmemb.checked_mul(size) else {
+        return ptr::null_mut()
+    };
+    malloc_(size, true).map_or(ptr::null_mut(), |p| p.cast::<c_void>().as_ptr())
 }
 
 #[no_mangle]
@@ -65,9 +75,11 @@ unsafe extern "C" fn free(ptr: *mut c_void) {
     }
 }
 
-unsafe fn malloc_(size: usize) -> Option<NonNull<usize>> {
+unsafe fn malloc_(size: usize, zeroed: bool) -> Option<NonNull<usize>> {
     let size = NonZeroUsize::new(size)?.checked_add(mem::size_of::<usize>())?;
-    let ptr = HEAP_ALLOCATOR.alloc(malloc_layout(size)?);
+    let layout = malloc_layout(size)?;
+    let ptr =
+        if zeroed { HEAP_ALLOCATOR.alloc_zeroed(layout) } else { HEAP_ALLOCATOR.alloc(layout) };
     let ptr = NonNull::new(ptr)?.cast::<usize>().as_ptr();
     *ptr = size.get();
     NonNull::new(ptr.offset(1))

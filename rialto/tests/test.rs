@@ -16,7 +16,7 @@
 
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::{
-        VirtualMachineConfig::VirtualMachineConfig,
+        CpuTopology::CpuTopology, VirtualMachineConfig::VirtualMachineConfig,
         VirtualMachineRawConfig::VirtualMachineRawConfig,
     },
     binder::{ParcelFileDescriptor, ProcessState},
@@ -65,9 +65,10 @@ fn test_boots() -> Result<(), Error> {
         disks: vec![],
         protectedVm: false,
         memoryMib: 300,
-        numCpus: 1,
+        cpuTopology: CpuTopology::ONE_CPU,
         platformVersion: "~1.0".to_string(),
         taskProfiles: vec![],
+        gdbPort: 0, // No gdb
     });
     let vm = VmInstance::create(service.as_ref(), &config, Some(console), Some(log), None)
         .context("Failed to create VM")?;

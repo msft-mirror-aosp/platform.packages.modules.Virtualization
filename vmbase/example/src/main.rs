@@ -16,7 +16,6 @@
 
 #![no_main]
 #![no_std]
-#![feature(default_alloc_error_handler)]
 
 mod exceptions;
 mod layout;
@@ -225,7 +224,7 @@ fn check_alloc() {
 
 fn check_dice() {
     info!("Testing DICE integration...");
-    let hash = dice::hash("hello world".as_bytes()).expect("DiceHash failed");
+    let hash = diced_open_dice::hash("hello world".as_bytes()).expect("DiceHash failed");
     assert_eq!(
         hash,
         [

@@ -17,6 +17,7 @@ package com.android.microdroid.test.device;
 
 import static android.content.pm.PackageManager.FEATURE_VIRTUALIZATION_FRAMEWORK;
 
+import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
 
 import android.app.Instrumentation;
@@ -38,6 +39,7 @@ import androidx.test.platform.app.InstrumentationRegistry;
 
 import com.android.microdroid.test.common.DeviceProperties;
 import com.android.microdroid.test.common.MetricsProcessor;
+import com.android.microdroid.testservice.ITestService;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
@@ -51,15 +53,23 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public abstract class MicrodroidDeviceTestBase {
+    private static final String TAG = "MicrodroidDeviceTestBase";
     private final String MAX_PERFORMANCE_TASK_PROFILE = "CPUSET_SP_TOP_APP";
 
     public static boolean isCuttlefish() {
-        return DeviceProperties.create(SystemProperties::get).isCuttlefish();
+        return getDeviceProperties().isCuttlefish();
+    }
+
+    public static boolean isUserBuild() {
+        return getDeviceProperties().isUserBuild();
     }
 
     public static String getMetricPrefix() {
-        return MetricsProcessor.getMetricPrefix(
-                DeviceProperties.create(SystemProperties::get).getMetricsTag());
+        return MetricsProcessor.getMetricPrefix(getDeviceProperties().getMetricsTag());
+    }
+
+    private static DeviceProperties getDeviceProperties() {
+        return DeviceProperties.create(SystemProperties::get);
     }
 
     protected final void grantPermission(String permission) {
@@ -80,11 +90,20 @@ public abstract class MicrodroidDeviceTestBase {
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         UiAutomation uiAutomation = instrumentation.getUiAutomation();
         String cmd = "settaskprofile " + Os.gettid() + " " + MAX_PERFORMANCE_TASK_PROFILE;
-        String out = runInShell("MicrodroidDeviceTestBase", uiAutomation, cmd).trim();
+        String out = runInShell(TAG, uiAutomation, cmd).trim();
         String expect = "Profile " + MAX_PERFORMANCE_TASK_PROFILE + " is applied successfully!";
         if (!expect.equals(out)) {
             throw new IOException("Could not apply max performance task profile: " + out);
         }
+    }
+
+    public final boolean getDebugPolicyBoolean(String debugPolicy) throws IOException {
+        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
+        UiAutomation uiAutomation = instrumentation.getUiAutomation();
+        String debugPolicyFilePath = "/proc/device-tree" + debugPolicy;
+        String cmd = "su root xxd -p " + debugPolicyFilePath;
+        String dp = runInShell(TAG, uiAutomation, cmd).trim();
+        return "00000001".equals(dp);
     }
 
     private Context mCtx;
@@ -148,8 +167,9 @@ public abstract class MicrodroidDeviceTestBase {
         private OptionalLong mPayloadStartedNanoTime = OptionalLong.empty();
         private StringBuilder mConsoleOutput = new StringBuilder();
         private StringBuilder mLogOutput = new StringBuilder();
+        private boolean mProcessedBootTimeMetrics = false;
 
-        private void processBootEvents(String log) {
+        private void processBootTimeMetrics(String log) {
             if (!mVcpuStartedNanoTime.isPresent()) {
                 mVcpuStartedNanoTime = OptionalLong.of(System.nanoTime());
             }
@@ -165,12 +185,13 @@ public abstract class MicrodroidDeviceTestBase {
             }
         }
 
-        private void logVmOutputAndMonitorBootEvents(
+        private void logVmOutputAndMonitorBootTimeMetrics(
                 String tag,
                 InputStream vmOutputStream,
                 String name,
                 StringBuilder result,
                 boolean monitorEvents) {
+            mProcessedBootTimeMetrics |= monitorEvents;
             new Thread(
                             () -> {
                                 try {
@@ -180,7 +201,7 @@ public abstract class MicrodroidDeviceTestBase {
                                     String line;
                                     while ((line = reader.readLine()) != null
                                             && !Thread.interrupted()) {
-                                        if (monitorEvents) processBootEvents(line);
+                                        if (monitorEvents) processBootTimeMetrics(line);
                                         Log.i(tag, name + ": " + line);
                                         result.append(line + "\n");
                                     }
@@ -191,15 +212,15 @@ public abstract class MicrodroidDeviceTestBase {
                     .start();
         }
 
-        private void logVmOutputAndMonitorBootEvents(
+        private void logVmOutputAndMonitorBootTimeMetrics(
                 String tag, InputStream vmOutputStream, String name, StringBuilder result) {
-            logVmOutputAndMonitorBootEvents(tag, vmOutputStream, name, result, true);
+            logVmOutputAndMonitorBootTimeMetrics(tag, vmOutputStream, name, result, true);
         }
 
         /** Copy output from the VM to logcat. This is helpful when things go wrong. */
         protected void logVmOutput(
                 String tag, InputStream vmOutputStream, String name, StringBuilder result) {
-            logVmOutputAndMonitorBootEvents(tag, vmOutputStream, name, result, false);
+            logVmOutputAndMonitorBootTimeMetrics(tag, vmOutputStream, name, result, false);
         }
 
         public void runToFinish(String logTag, VirtualMachine vm)
@@ -207,7 +228,7 @@ public abstract class MicrodroidDeviceTestBase {
             vm.setCallback(mExecutorService, this);
             vm.run();
             if (vm.getConfig().isVmOutputCaptured()) {
-                logVmOutputAndMonitorBootEvents(
+                logVmOutputAndMonitorBootTimeMetrics(
                         logTag, vm.getConsoleOutput(), "Console", mConsoleOutput);
                 logVmOutput(logTag, vm.getLogOutput(), "Log", mLogOutput);
             }
@@ -238,6 +259,10 @@ public abstract class MicrodroidDeviceTestBase {
             return mLogOutput.toString();
         }
 
+        public boolean hasProcessedBootTimeMetrics() {
+            return mProcessedBootTimeMetrics;
+        }
+
         protected void forceStop(VirtualMachine vm) {
             try {
                 vm.stop();
@@ -266,12 +291,21 @@ public abstract class MicrodroidDeviceTestBase {
         }
     }
 
+    public enum BootTimeMetric {
+        TOTAL,
+        VM_START,
+        BOOTLOADER,
+        KERNEL,
+        USERSPACE,
+    }
+
     public static class BootResult {
         public final boolean payloadStarted;
         public final int deathReason;
         public final long apiCallNanoTime;
         public final long endToEndNanoTime;
 
+        public final boolean processedBootTimeMetrics;
         public final OptionalLong vcpuStartedNanoTime;
         public final OptionalLong kernelStartedNanoTime;
         public final OptionalLong initStartedNanoTime;
@@ -285,6 +319,7 @@ public abstract class MicrodroidDeviceTestBase {
                 int deathReason,
                 long apiCallNanoTime,
                 long endToEndNanoTime,
+                boolean processedBootTimeMetrics,
                 OptionalLong vcpuStartedNanoTime,
                 OptionalLong kernelStartedNanoTime,
                 OptionalLong initStartedNanoTime,
@@ -295,6 +330,7 @@ public abstract class MicrodroidDeviceTestBase {
             this.payloadStarted = payloadStarted;
             this.deathReason = deathReason;
             this.endToEndNanoTime = endToEndNanoTime;
+            this.processedBootTimeMetrics = processedBootTimeMetrics;
             this.vcpuStartedNanoTime = vcpuStartedNanoTime;
             this.kernelStartedNanoTime = kernelStartedNanoTime;
             this.initStartedNanoTime = initStartedNanoTime;
@@ -336,6 +372,27 @@ public abstract class MicrodroidDeviceTestBase {
         public long getUserspaceElapsedNanoTime() {
             return getPayloadStartedNanoTime() - getInitStartedNanoTime();
         }
+
+        public OptionalLong getBootTimeMetricNanoTime(BootTimeMetric metric) {
+            if (metric == BootTimeMetric.TOTAL) {
+                return OptionalLong.of(endToEndNanoTime);
+            }
+
+            if (processedBootTimeMetrics) {
+                switch (metric) {
+                    case VM_START:
+                        return OptionalLong.of(getVMStartingElapsedNanoTime());
+                    case BOOTLOADER:
+                        return OptionalLong.of(getBootloaderElapsedNanoTime());
+                    case KERNEL:
+                        return OptionalLong.of(getKernelElapsedNanoTime());
+                    case USERSPACE:
+                        return OptionalLong.of(getUserspaceElapsedNanoTime());
+                }
+            }
+
+            return OptionalLong.empty();
+        }
     }
 
     public BootResult tryBootVm(String logTag, String vmName)
@@ -366,6 +423,7 @@ public abstract class MicrodroidDeviceTestBase {
                 deathReason.getNow(VmEventListener.STOP_REASON_INFRASTRUCTURE_ERROR),
                 apiCallNanoTime,
                 endTime.getNow(apiCallNanoTime) - apiCallNanoTime,
+                listener.hasProcessedBootTimeMetrics(),
                 listener.getVcpuStartedNanoTime(),
                 listener.getKernelStartedNanoTime(),
                 listener.getInitStartedNanoTime(),
@@ -386,7 +444,127 @@ public abstract class MicrodroidDeviceTestBase {
             return stdout;
         } catch (IOException e) {
             Log.e(tag, "Error executing: " + command, e);
-            throw new RuntimeException("Failed to run the command.");
+            throw new RuntimeException("Failed to run the command.", e);
         }
+    }
+
+    /** Execute a command. Returns the concatenation of stdout and stderr. */
+    protected String runInShellWithStderr(String tag, UiAutomation uiAutomation, String command) {
+        ParcelFileDescriptor[] files = uiAutomation.executeShellCommandRwe(command);
+        try (InputStream stdout = new ParcelFileDescriptor.AutoCloseInputStream(files[0]);
+                InputStream stderr = new ParcelFileDescriptor.AutoCloseInputStream(files[2]);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            files[1].close(); // The command's stdin
+            stdout.transferTo(out);
+            stderr.transferTo(out);
+            String output = out.toString("UTF-8");
+            Log.i(tag, "Got output : " + stdout);
+            return output;
+        } catch (IOException e) {
+            Log.e(tag, "Error executing: " + command, e);
+            throw new RuntimeException("Failed to run the command.", e);
+        }
+    }
+
+    protected static class TestResults {
+        public Exception mException;
+        public Integer mAddInteger;
+        public String mAppRunProp;
+        public String mSublibRunProp;
+        public String mExtraApkTestProp;
+        public String mApkContentsPath;
+        public String mEncryptedStoragePath;
+        public String[] mEffectiveCapabilities;
+        public String mFileContent;
+        public byte[] mBcc;
+        public long[] mTimings;
+        public int mFileMode;
+        public int mMountFlags;
+
+        public void assertNoException() {
+            if (mException != null) {
+                // Rethrow, wrapped in a new exception, so we get stack traces of the original
+                // failure as well as the body of the test.
+                throw new RuntimeException(mException);
+            }
+        }
+    }
+
+    protected TestResults runVmTestService(
+            String logTag, VirtualMachine vm, RunTestsAgainstTestService testsToRun)
+            throws Exception {
+        CompletableFuture<Boolean> payloadStarted = new CompletableFuture<>();
+        CompletableFuture<Boolean> payloadReady = new CompletableFuture<>();
+        CompletableFuture<Boolean> payloadFinished = new CompletableFuture<>();
+        TestResults testResults = new TestResults();
+        VmEventListener listener =
+                new VmEventListener() {
+                    ITestService mTestService = null;
+
+                    private void initializeTestService(VirtualMachine vm) {
+                        try {
+                            mTestService =
+                                    ITestService.Stub.asInterface(
+                                            vm.connectToVsockServer(ITestService.SERVICE_PORT));
+                            // Make sure linkToDeath works, and include it in the log in case it's
+                            // helpful.
+                            mTestService
+                                    .asBinder()
+                                    .linkToDeath(
+                                            () -> Log.i(logTag, "ITestService binder died"), 0);
+                        } catch (Exception e) {
+                            testResults.mException = e;
+                        }
+                    }
+
+                    private void testVMService(VirtualMachine vm) {
+                        try {
+                            if (mTestService == null) initializeTestService(vm);
+                            testsToRun.runTests(mTestService, testResults);
+                        } catch (Exception e) {
+                            testResults.mException = e;
+                        }
+                    }
+
+                    private void quitVMService() {
+                        try {
+                            mTestService.quit();
+                        } catch (Exception e) {
+                            testResults.mException = e;
+                        }
+                    }
+
+                    @Override
+                    public void onPayloadReady(VirtualMachine vm) {
+                        Log.i(logTag, "onPayloadReady");
+                        payloadReady.complete(true);
+                        testVMService(vm);
+                        quitVMService();
+                    }
+
+                    @Override
+                    public void onPayloadStarted(VirtualMachine vm) {
+                        Log.i(logTag, "onPayloadStarted");
+                        payloadStarted.complete(true);
+                    }
+
+                    @Override
+                    public void onPayloadFinished(VirtualMachine vm, int exitCode) {
+                        Log.i(logTag, "onPayloadFinished: " + exitCode);
+                        payloadFinished.complete(true);
+                        forceStop(vm);
+                    }
+                };
+
+        listener.runToFinish(logTag, vm);
+        assertThat(payloadStarted.getNow(false)).isTrue();
+        assertThat(payloadReady.getNow(false)).isTrue();
+        assertThat(payloadFinished.getNow(false)).isTrue();
+        return testResults;
+    }
+
+    @FunctionalInterface
+    protected interface RunTestsAgainstTestService {
+        void runTests(ITestService testService, TestResults testResults) throws Exception;
     }
 }

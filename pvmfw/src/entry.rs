@@ -15,16 +15,18 @@
 //! Low-level entry and exit points of pvmfw.
 
 use crate::config;
+use crate::crypto;
+use crate::debug_policy::{handle_debug_policy, DebugPolicyError};
 use crate::fdt;
 use crate::heap;
 use crate::helpers;
 use crate::memory::MemoryTracker;
 use crate::mmio_guard;
 use crate::mmu;
+use crate::rand;
 use core::arch::asm;
 use core::num::NonZeroUsize;
 use core::slice;
-use dice::bcc::Handover;
 use log::debug;
 use log::error;
 use log::info;
@@ -52,6 +54,16 @@ pub enum RebootReason {
     SecretDerivationError,
 }
 
+impl From<DebugPolicyError> for RebootReason {
+    fn from(error: DebugPolicyError) -> Self {
+        match error {
+            DebugPolicyError::Fdt(_, _) => RebootReason::InvalidFdt,
+            DebugPolicyError::DebugPolicyFdt(_, _) => RebootReason::InvalidConfig,
+            DebugPolicyError::OverlaidFdt(_, _) => RebootReason::InternalError,
+        }
+    }
+}
+
 main!(start);
 
 /// Entry point for pVM firmware.
@@ -61,7 +73,7 @@ pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64
     // - can't access MMIO (therefore, no logging)
 
     match main_wrapper(fdt_address as usize, payload_start as usize, payload_size as usize) {
-        Ok(_) => jump_to_payload(fdt_address, payload_start),
+        Ok(entry) => jump_to_payload(fdt_address, entry.try_into().unwrap()),
         Err(_) => reboot(), // TODO(b/220071963) propagate the reason back to the host.
     }
 
@@ -98,37 +110,17 @@ impl<'a> MemorySlices<'a> {
             RebootReason::InvalidFdt
         })?;
 
+        let info = fdt::sanitize_device_tree(fdt)?;
         debug!("Fdt passed validation!");
 
-        let memory_range = fdt
-            .memory()
-            .map_err(|e| {
-                error!("Failed to get /memory from the DT: {e}");
-                RebootReason::InvalidFdt
-            })?
-            .ok_or_else(|| {
-                error!("Node /memory was found empty");
-                RebootReason::InvalidFdt
-            })?
-            .next()
-            .ok_or_else(|| {
-                error!("Failed to read the memory size from the FDT");
-                RebootReason::InternalError
-            })?;
-
+        let memory_range = info.memory_range;
         debug!("Resizing MemoryTracker to range {memory_range:#x?}");
-
         memory.shrink(&memory_range).map_err(|_| {
             error!("Failed to use memory range value from DT: {memory_range:#x?}");
             RebootReason::InvalidFdt
         })?;
 
-        let kernel_range = fdt::kernel_range(fdt).map_err(|e| {
-            error!("Error while attempting to read the kernel range from the DT: {e}");
-            RebootReason::InvalidFdt
-        })?;
-
-        let kernel_range = if let Some(r) = kernel_range {
+        let kernel_range = if let Some(r) = info.kernel_range {
             memory.alloc_range(&r).map_err(|e| {
                 error!("Failed to obtain the kernel range with DT range: {e}");
                 RebootReason::InternalError
@@ -154,12 +146,7 @@ impl<'a> MemorySlices<'a> {
         let kernel =
             unsafe { slice::from_raw_parts(kernel_range.start as *const u8, kernel_range.len()) };
 
-        let ramdisk_range = fdt::initrd_range(fdt).map_err(|e| {
-            error!("An error occurred while locating the ramdisk in the device tree: {e}");
-            RebootReason::InternalError
-        })?;
-
-        let ramdisk = if let Some(r) = ramdisk_range {
+        let ramdisk = if let Some(r) = info.initrd_range {
             debug!("Located ramdisk at {r:?}");
             let r = memory.alloc_range(&r).map_err(|e| {
                 error!("Failed to obtain the initrd range: {e}");
@@ -182,7 +169,7 @@ impl<'a> MemorySlices<'a> {
 ///
 /// Provide the abstractions necessary for start() to abort the pVM boot and for main() to run with
 /// the assumption that its environment has been properly configured.
-fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), RebootReason> {
+fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<usize, RebootReason> {
     // Limitations in this function:
     // - only access MMIO once (and while) it has been mapped and configured
     // - only perform logging once the logger has been initialized
@@ -205,6 +192,8 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
         debug!("Failed to configure the UART: {e}");
         RebootReason::InternalError
     })?;
+
+    crypto::init();
 
     // SAFETY - We only get the appended payload from here, once. It is mapped and the linker
     // script prevents it from overlapping with other objects.
@@ -231,11 +220,7 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
         RebootReason::InvalidConfig
     })?;
 
-    let bcc_slice = appended.get_bcc_mut();
-    let bcc = Handover::new(bcc_slice).map_err(|e| {
-        error!("Invalid BCC Handover: {e:?}");
-        RebootReason::InvalidBcc
-    })?;
+    let (bcc_slice, debug_policy) = appended.get_entries();
 
     debug!("Activating dynamic page table...");
     // SAFETY - page_table duplicates the static mappings for everything that the Rust code is
@@ -246,11 +231,24 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
     let mut memory = MemoryTracker::new(page_table);
     let slices = MemorySlices::new(fdt, payload, payload_size, &mut memory)?;
 
+    rand::init().map_err(|e| {
+        error!("Failed to initialize rand: {e}");
+        RebootReason::InternalError
+    })?;
+
     // This wrapper allows main() to be blissfully ignorant of platform details.
-    crate::main(slices.fdt, slices.kernel, slices.ramdisk, &bcc, &mut memory)?;
+    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc_slice, &mut memory)?;
 
     helpers::flushed_zeroize(bcc_slice);
     helpers::flush(slices.fdt.as_slice());
+
+    // SAFETY - As we `?` the result, there is no risk of using a bad `slices.fdt`.
+    unsafe {
+        handle_debug_policy(slices.fdt, debug_policy).map_err(|e| {
+            error!("Unexpected error when handling debug policy: {e:?}");
+            RebootReason::from(e)
+        })?;
+    }
 
     info!("Expecting a bug making MMIO_GUARD_UNMAP return NOT_SUPPORTED on success");
     memory.mmio_unmap_all().map_err(|e| {
@@ -262,7 +260,7 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<(), R
         RebootReason::InternalError
     })?;
 
-    Ok(())
+    Ok(slices.kernel.as_ptr() as usize)
 }
 
 fn jump_to_payload(fdt_address: u64, payload_start: u64) -> ! {
@@ -377,18 +375,10 @@ impl<'a> AppendedPayload<'a> {
         }
     }
 
-    #[allow(dead_code)] // TODO(b/232900974)
-    fn get_debug_policy(&mut self) -> Option<&mut [u8]> {
+    fn get_entries(&mut self) -> (&mut [u8], Option<&mut [u8]>) {
         match self {
-            Self::Config(ref mut cfg) => cfg.get_debug_policy(),
-            Self::LegacyBcc(_) => None,
-        }
-    }
-
-    fn get_bcc_mut(&mut self) -> &mut [u8] {
-        match self {
-            Self::LegacyBcc(ref mut bcc) => bcc,
-            Self::Config(ref mut cfg) => cfg.get_bcc_mut(),
+            Self::Config(ref mut cfg) => cfg.get_entries(),
+            Self::LegacyBcc(ref mut bcc) => (bcc, None),
         }
     }
 }
