@@ -197,16 +197,21 @@ next-stage secret, and a certificate chain, intended for pVM attestation. Note
 that it differs from the `BccHandover` defined by the specification in that its
 `Bcc` field is mandatory (while optional in the original).
 
-The handover expected by pvmfw can be generated as follows:
+Devices that fully implement DICE should provide a certificate rooted at the
+Unique Device Secret (UDS) in a boot stage preceding the pvmfw loader (typically
+ABL), in such a way that it would receive a valid `BccHandover`, that can be
+passed to [`BccHandoverMainFlow`][BccHandoverMainFlow] along with the inputs
+described below.
 
-- by passing a `BccHandover` received from a previous boot stage (_e.g._ Trusted
-  Firmware, ROM bootloader, ...) to
-  [`BccHandoverMainFlow`][BccHandoverMainFlow];
+Otherwise, as an intermediate step towards supporting DICE throughout the
+software stack of the device, incomplete implementations may root the BCC at the
+pvmfw loader, using an arbitrary constant as initial CDI. The pvmfw loader can
+easily do so by:
 
-- by generating a `BccHandover` (as an example, see [Trusty][Trusty-BCC]) with
-  both CDIs set to an arbitrary constant value and no `Bcc`, and pass it to
-  `BccHandoverMainFlow`, which will both derive the pvmfw CDIs and start a
-  valid certificate chain, making the pvmfw loader the root of the BCC.
+1. Building a BCC-less `BccHandover` using CBOR operations
+   ([example][Trusty-BCC]) and containing the constant CDIs
+1. Passing the resulting `BccHandover` to `BccHandoverMainFlow` as described
+   above
 
 The recommended DICE inputs at this stage are:
 
@@ -240,7 +245,10 @@ device tree node marked as [`compatible=”google,open-dice”`][dice-dt].
 Config header can provide a DTBO to be overlaid on top of the baseline device
 tree from crosvm.
 
-The DTBO may contain debug policies as follows.
+The DTBO may contain debug policies. Debug policies MUST NOT be provided for
+locked devices for security reasons.
+
+Here are an example of DTBO.
 
 ```
 / {
@@ -262,3 +270,166 @@ OS's device tree and config header of `pvmfw`. Both `virtualizationmanager` and
 
 For details about device tree properties for debug policies, see
 [microdroid's debugging policy guide](../microdroid/README.md#option-1-running-microdroid-on-avf-debug-policy-configured-device).
+
+### Platform Requirements
+
+pvmfw is intended to run in a virtualized environment according to the `crosvm`
+[memory layout][crosvm-mem] for protected VMs and so it expects to have been
+loaded at address `0x7fc0_0000` and uses the 2MiB region at address
+`0x7fe0_0000` as scratch memory. It makes use of the virtual PCI bus to obtain a
+virtio interface to the host and prints its logs through the 16550 UART (address
+`0x3f8`).
+
+At boot, pvmfw discovers the running hypervisor in order to select the
+appropriate hypervisor calls to share/unshare memory, mark IPA regions as MMIO,
+obtain trusted true entropy, and reboot the virtual machine. In particular, it
+makes use of the following hypervisor calls:
+
+- Arm [SMC Calling Convention][smccc] v1.1 or above:
+
+    - `SMCCC_VERSION`
+    - Vendor Specific Hypervisor Service Call UID Query
+
+- Arm [Power State Coordination Interface][psci] v1.0 or above:
+
+    - `PSCI_VERSION`
+    - `PSCI_FEATURES`
+    - `PSCI_SYSTEM_RESET`
+    - `PSCI_SYSTEM_SHUTDOWN`
+
+- Arm [True Random Number Generator Firmware Interface][smccc-trng] v1.0:
+
+    - `TRNG_VERSION`
+    - `TRNG_FEATURES`
+    - `TRNG_RND`
+
+- When running under KVM, the pKVM-specific hypervisor interface must provide:
+
+    - `MEMINFO` (function ID `0xc6000002`)
+    - `MEM_SHARE` (function ID `0xc6000003`)
+    - `MEM_UNSHARE` (function ID `0xc6000004`)
+    - `MMIO_GUARD_INFO` (function ID `0xc6000005`)
+    - `MMIO_GUARD_ENROLL` (function ID `0xc6000006`)
+    - `MMIO_GUARD_MAP` (function ID `0xc6000007`)
+    - `MMIO_GUARD_UNMAP` (function ID `0xc6000008`)
+
+[crosvm-mem]: https://crosvm.dev/book/appendix/memory_layout.html
+[psci]: https://developer.arm.com/documentation/den0022
+[smccc]: https://developer.arm.com/documentation/den0028
+[smccc-trng]: https://developer.arm.com/documentation/den0098
+
+## Booting Protected Virtual Machines
+
+### Boot Protocol
+
+As the hypervisor makes pvmfw the entry point of the VM, the initial value of
+the registers it receives is configured by the VMM and is expected to follow the
+[Linux ABI] _i.e._
+
+- x0 = physical address of device tree blob (dtb) in system RAM.
+- x1 = 0 (reserved for future use)
+- x2 = 0 (reserved for future use)
+- x3 = 0 (reserved for future use)
+
+Images to be verified, which have been loaded to guest memory by the VMM prior
+to booting the VM, are described to pvmfw using the device tree (x0):
+
+- the kernel in the `/config` DT node _e.g._
+
+    ```
+    / {
+        config {
+            kernel-address = <0x80200000>;
+            kernel-size = <0x1000000>;
+        };
+    };
+    ````
+
+- the (optional) ramdisk in the standard `/chosen` node _e.g._
+
+    ```
+    / {
+        chosen {
+            linux,initrd-start = <0x82000000>;
+            linux,initrd-end = <0x82800000>;
+        };
+    };
+    ```
+
+[Linux ABI]: https://www.kernel.org/doc/Documentation/arm64/booting.txt
+
+### Handover ABI
+
+After verifying the guest kernel, pvmfw boots it using the Linux ABI described
+above. It uses the device tree to pass the following:
+
+- a reserved memory node containing the produced BCC:
+
+    ```
+    / {
+        reserved-memory {
+            #address-cells = <0x02>;
+            #size-cells = <0x02>;
+            ranges;
+            dice {
+                compatible = "google,open-dice";
+                no-map;
+                reg = <0x0 0x7fe0000>, <0x0 0x1000>;
+            };
+        };
+    };
+    ```
+
+- the `/chosen/avf,new-instance` flag, set when pvmfw generated a new secret
+  (_i.e._ the pVM instance was booted for the first time). This should be used
+  by the next stages to ensure that an attacker isn't trying to force new
+  secrets to be generated by one stage, in isolation;
+
+- the `/chosen/avf,strict-boot` flag, always set and can be used by guests to
+  enable extra validation
+
+### Guest Image Signing
+
+pvmfw verifies the guest kernel image (loaded by the VMM) by re-using tools and
+formats introduced by the Android Verified Boot. In particular, it expects the
+kernel region (see `/config/kernel-{address,size}` described above) to contain
+an appended VBMeta structure, which can be generated as follows:
+
+```
+avbtool add_hash_footer --image <kernel.bin> \
+    --partition_name boot \
+    --dynamic_partition_size \
+    --key $KEY
+```
+
+In cases where a ramdisk is required by the guest, pvmfw must also verify it. To
+do so, it must be covered by a hash descriptor in the VBMeta of the kernel:
+
+```
+cp <initrd.bin> /tmp/
+avbtool add_hash_footer --image /tmp/<initrd.bin> \
+    --partition_name $INITRD_NAME \
+    --dynamic_partition_size \
+    --key $KEY
+avbtool add_hash_footer --image <kernel.bin> \
+    --partition_name boot \
+    --dynamic_partition_size \
+    --include_descriptor_from_image /tmp/<initrd.bin> \
+    --key $KEY
+```
+
+Note that the `/tmp/<initrd.bin>` file is only created to temporarily hold the
+hash descriptor to be added to the kernel footer and that the unsigned
+`<initrd.bin>` should be passed to the VMM when booting a pVM.
+
+The name of the AVB "partition" for the ramdisk (`$INITRD_NAME`) can be used by
+the signer to specify if pvmfw must consider the guest to be debuggable
+(`initrd_debug`) or not (`initrd_normal`), which will be reflected in the
+certificate of the guest and will affect the secrets being provisioned.
+
+If pVM guest kernels are built and/or packaged using the Android Build system,
+the signing described above is recommended to be done through an
+`avb_add_hash_footer` Soong module (see [how we sign the Microdroid
+kernel][soong-udroid]).
+
+[soong-udroid]: https://cs.android.com/android/platform/superproject/+/master:packages/modules/Virtualization/microdroid/Android.bp;l=427;drc=ca0049be4d84897b8c9956924cfae506773103eb

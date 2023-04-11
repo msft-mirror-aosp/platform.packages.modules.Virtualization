@@ -16,7 +16,6 @@
 
 #![no_main]
 #![no_std]
-#![feature(default_alloc_error_handler)]
 
 extern crate alloc;
 
@@ -45,7 +44,6 @@ use alloc::boxed::Box;
 use crate::dice::PartialInputs;
 use crate::entry::RebootReason;
 use crate::fdt::modify_for_next_stage;
-use crate::fdt::parse_device_tree;
 use crate::helpers::flush;
 use crate::helpers::GUEST_PAGE_SIZE;
 use crate::instance::get_or_generate_instance_salt;
@@ -83,11 +81,6 @@ fn main(
         RebootReason::InvalidBcc
     })?;
     trace!("BCC: {bcc_handover:x?}");
-
-    // This parsing step includes validation. So this effectively ensures that the DT can't be
-    // abused by the host to attack pvmfw in pci::initialize below.
-    let device_tree_info = parse_device_tree(fdt)?;
-    debug!("Device tree info: {:?}", device_tree_info);
 
     // Set up PCI bus for VirtIO devices.
     let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;

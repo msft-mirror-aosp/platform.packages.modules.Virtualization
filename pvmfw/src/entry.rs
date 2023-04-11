@@ -15,6 +15,7 @@
 //! Low-level entry and exit points of pvmfw.
 
 use crate::config;
+use crate::crypto;
 use crate::debug_policy::{handle_debug_policy, DebugPolicyError};
 use crate::fdt;
 use crate::heap;
@@ -109,37 +110,17 @@ impl<'a> MemorySlices<'a> {
             RebootReason::InvalidFdt
         })?;
 
+        let info = fdt::sanitize_device_tree(fdt)?;
         debug!("Fdt passed validation!");
 
-        let memory_range = fdt
-            .memory()
-            .map_err(|e| {
-                error!("Failed to get /memory from the DT: {e}");
-                RebootReason::InvalidFdt
-            })?
-            .ok_or_else(|| {
-                error!("Node /memory was found empty");
-                RebootReason::InvalidFdt
-            })?
-            .next()
-            .ok_or_else(|| {
-                error!("Failed to read the memory size from the FDT");
-                RebootReason::InternalError
-            })?;
-
+        let memory_range = info.memory_range;
         debug!("Resizing MemoryTracker to range {memory_range:#x?}");
-
         memory.shrink(&memory_range).map_err(|_| {
             error!("Failed to use memory range value from DT: {memory_range:#x?}");
             RebootReason::InvalidFdt
         })?;
 
-        let kernel_range = fdt::kernel_range(fdt).map_err(|e| {
-            error!("Error while attempting to read the kernel range from the DT: {e}");
-            RebootReason::InvalidFdt
-        })?;
-
-        let kernel_range = if let Some(r) = kernel_range {
+        let kernel_range = if let Some(r) = info.kernel_range {
             memory.alloc_range(&r).map_err(|e| {
                 error!("Failed to obtain the kernel range with DT range: {e}");
                 RebootReason::InternalError
@@ -165,12 +146,7 @@ impl<'a> MemorySlices<'a> {
         let kernel =
             unsafe { slice::from_raw_parts(kernel_range.start as *const u8, kernel_range.len()) };
 
-        let ramdisk_range = fdt::initrd_range(fdt).map_err(|e| {
-            error!("An error occurred while locating the ramdisk in the device tree: {e}");
-            RebootReason::InternalError
-        })?;
-
-        let ramdisk = if let Some(r) = ramdisk_range {
+        let ramdisk = if let Some(r) = info.initrd_range {
             debug!("Located ramdisk at {r:?}");
             let r = memory.alloc_range(&r).map_err(|e| {
                 error!("Failed to obtain the initrd range: {e}");
@@ -216,6 +192,8 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<usize
         debug!("Failed to configure the UART: {e}");
         RebootReason::InternalError
     })?;
+
+    crypto::init();
 
     // SAFETY - We only get the appended payload from here, once. It is mapped and the linker
     // script prevents it from overlapping with other objects.
