@@ -12,41 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Structs and functions for making SMCCC calls.
+
 use core::{fmt, result};
-
-// TODO(b/245889995): use psci-0.1.1 crate
-#[inline(always)]
-pub fn hvc64(function: u32, args: [u64; 17]) -> [u64; 18] {
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        let mut ret = [0; 18];
-
-        core::arch::asm!(
-            "hvc #0",
-            inout("x0") function as u64 => ret[0],
-            inout("x1") args[0] => ret[1],
-            inout("x2") args[1] => ret[2],
-            inout("x3") args[2] => ret[3],
-            inout("x4") args[3] => ret[4],
-            inout("x5") args[4] => ret[5],
-            inout("x6") args[5] => ret[6],
-            inout("x7") args[6] => ret[7],
-            inout("x8") args[7] => ret[8],
-            inout("x9") args[8] => ret[9],
-            inout("x10") args[9] => ret[10],
-            inout("x11") args[10] => ret[11],
-            inout("x12") args[11] => ret[12],
-            inout("x13") args[12] => ret[13],
-            inout("x14") args[13] => ret[14],
-            inout("x15") args[14] => ret[15],
-            inout("x16") args[15] => ret[16],
-            inout("x17") args[16] => ret[17],
-            options(nomem, nostack)
-        );
-
-        ret
-    }
-}
+// Ideally, smccc shouldn't depend on psci. Smccc isn't split as a separate
+// upstream crate currently mostly for maintenance consideration.
+// See b/245889995 for more context.
+pub use psci::smccc::hvc64;
 
 /// Standard SMCCC error values as described in DEN 0028E.
 #[derive(Debug, Clone)]
@@ -75,8 +47,11 @@ impl fmt::Display for Error {
     }
 }
 
+/// Result type with smccc::Error.
 pub type Result<T> = result::Result<T, Error>;
 
+/// Makes a checked HVC64 call to the hypervisor, following the SMC Calling Convention version 1.4.
+/// Returns Ok only when the return code is 0.
 pub fn checked_hvc64_expect_zero(function: u32, args: [u64; 17]) -> Result<()> {
     match checked_hvc64(function, args)? {
         0 => Ok(()),
@@ -84,6 +59,8 @@ pub fn checked_hvc64_expect_zero(function: u32, args: [u64; 17]) -> Result<()> {
     }
 }
 
+/// Makes a checked HVC64 call to the hypervisor, following the SMC Calling Convention version 1.4.
+/// Returns Ok with the return code only when the return code >= 0.
 pub fn checked_hvc64(function: u32, args: [u64; 17]) -> Result<u64> {
     match hvc64(function, args)[0] as i64 {
         ret if ret >= 0 => Ok(ret as u64),

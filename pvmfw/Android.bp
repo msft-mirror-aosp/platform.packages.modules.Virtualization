@@ -23,6 +23,7 @@ rust_ffi_static {
         "libpvmfw_avb_nostd",
         "libpvmfw_embedded_key",
         "libpvmfw_fdt_template",
+        "libsmccc",
         "libstatic_assertions",
         "libtinyvec_nostd",
         "libuuid_nostd",
@@ -30,6 +31,13 @@ rust_ffi_static {
         "libvmbase",
         "libzeroize_nostd",
     ],
+}
+
+// Generates an empty file.
+genrule {
+    name: "empty_file",
+    out: ["empty_file"],
+    cmd: "touch $(out)",
 }
 
 cc_binary {
@@ -81,7 +89,7 @@ prebuilt_etc {
             src: ":pvmfw_bin",
         },
     },
-    src: "empty_file",
+    src: ":empty_file",
     installable: false,
 }
 
