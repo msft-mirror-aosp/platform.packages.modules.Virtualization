@@ -17,6 +17,7 @@ rust_ffi_static {
         "libbuddy_system_allocator",
         "libdiced_open_dice_nostd",
         "libfdtpci",
+        "libhyp",
         "liblibfdt",
         "liblog_rust_nostd",
         "libonce_cell_nostd",
@@ -38,6 +39,20 @@ genrule {
     name: "empty_file",
     out: ["empty_file"],
     cmd: "touch $(out)",
+}
+
+rust_test {
+    name: "libpvmfw.bootargs.test",
+    host_supported: true,
+    // For now, only bootargs.rs is written to be conditionally compiled with std.
+    srcs: ["src/bootargs.rs"],
+    test_suites: ["general-tests"],
+    test_options: {
+        unit_test: true,
+    },
+    rustlibs: [
+        "libzeroize",
+    ],
 }
 
 cc_binary {
