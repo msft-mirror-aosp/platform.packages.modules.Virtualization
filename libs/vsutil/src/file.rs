@@ -12,11 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Structs and functions for making SMCCC calls following the SMC Calling
-//! Convention version 1.4.
+//! Functions to process files.
 
-#![no_std]
+use binder::{self, ExceptionCode, ParcelFileDescriptor, Status};
+use std::fs::File;
 
-mod smccc;
-
-pub use smccc::{checked_hvc64, checked_hvc64_expect_zero, hvc64, Error, Result};
+/// Converts a `&ParcelFileDescriptor` to a `File` by cloning the file.
+pub fn clone_file(fd: &ParcelFileDescriptor) -> binder::Result<File> {
+    fd.as_ref().try_clone().map_err(|e| {
+        Status::new_exception_str(
+            ExceptionCode::BAD_PARCELABLE,
+            Some(format!("Failed to clone File from ParcelFileDescriptor: {:?}", e)),
+        )
+    })
+}

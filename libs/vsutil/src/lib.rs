@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! This library provides wrappers around various hypervisor backends.
+//! This library provides utility functions used by both various
+//! Virtualization services.
 
-#![no_std]
+mod file;
+mod partition;
 
-mod error;
-mod hypervisor;
-mod util;
-
-pub use error::{Error, Result};
-pub use hypervisor::{get_hypervisor, Hypervisor, KvmError};
+pub use file::clone_file;
+pub use partition::init_writable_partition;
