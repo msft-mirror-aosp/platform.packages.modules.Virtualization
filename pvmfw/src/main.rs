@@ -16,13 +16,12 @@
 
 #![no_main]
 #![no_std]
-#![feature(default_alloc_error_handler)]
 
 extern crate alloc;
 
+mod bootargs;
 mod config;
 mod crypto;
-mod debug_policy;
 mod dice;
 mod entry;
 mod exceptions;
@@ -31,13 +30,10 @@ mod gpt;
 mod heap;
 mod helpers;
 mod hvc;
-mod hypervisor;
 mod instance;
 mod memory;
-mod mmio_guard;
 mod mmu;
 mod rand;
-mod smccc;
 mod virtio;
 
 use alloc::boxed::Box;
@@ -45,7 +41,6 @@ use alloc::boxed::Box;
 use crate::dice::PartialInputs;
 use crate::entry::RebootReason;
 use crate::fdt::modify_for_next_stage;
-use crate::fdt::parse_device_tree;
 use crate::helpers::flush;
 use crate::helpers::GUEST_PAGE_SIZE;
 use crate::instance::get_or_generate_instance_salt;
@@ -58,6 +53,7 @@ use fdtpci::{PciError, PciInfo};
 use libfdt::Fdt;
 use log::{debug, error, info, trace};
 use pvmfw_avb::verify_payload;
+use pvmfw_avb::DebugLevel;
 use pvmfw_embedded_key::PUBLIC_KEY;
 
 const NEXT_BCC_SIZE: usize = GUEST_PAGE_SIZE;
@@ -67,6 +63,7 @@ fn main(
     signed_kernel: &[u8],
     ramdisk: Option<&[u8]>,
     current_bcc_handover: &[u8],
+    debug_policy: Option<&mut [u8]>,
     memory: &mut MemoryTracker,
 ) -> Result<(), RebootReason> {
     info!("pVM firmware");
@@ -83,11 +80,6 @@ fn main(
         RebootReason::InvalidBcc
     })?;
     trace!("BCC: {bcc_handover:x?}");
-
-    // This parsing step includes validation. So this effectively ensures that the DT can't be
-    // abused by the host to attack pvmfw in pci::initialize below.
-    let device_tree_info = parse_device_tree(fdt)?;
-    debug!("Device tree info: {:?}", device_tree_info);
 
     // Set up PCI bus for VirtIO devices.
     let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;
@@ -129,10 +121,12 @@ fn main(
     flush(next_bcc);
 
     let strict_boot = true;
-    modify_for_next_stage(fdt, next_bcc, new_instance, strict_boot).map_err(|e| {
-        error!("Failed to configure device tree: {e}");
-        RebootReason::InternalError
-    })?;
+    let debuggable = verified_boot_data.debug_level != DebugLevel::None;
+    modify_for_next_stage(fdt, next_bcc, new_instance, strict_boot, debug_policy, debuggable)
+        .map_err(|e| {
+            error!("Failed to configure device tree: {e}");
+            RebootReason::InternalError
+        })?;
 
     info!("Starting payload...");
     Ok(())

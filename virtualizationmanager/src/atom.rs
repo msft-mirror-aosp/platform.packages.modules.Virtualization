@@ -32,7 +32,7 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
 };
 use anyhow::{anyhow, Result};
 use binder::ParcelFileDescriptor;
-use log::warn;
+use log::{info, warn};
 use microdroid_payload_config::VmPayloadConfig;
 use statslog_virtualization_rust::vm_creation_requested;
 use std::thread;
@@ -93,6 +93,7 @@ pub(crate) fn get_num_cpus() -> Option<usize> {
 }
 
 /// Write the stats of VMCreation to statsd
+/// The function creates a separate thread which waits for statsd to start to push atom
 pub fn write_vm_creation_stats(
     config: &VirtualMachineConfig,
     is_protected: bool,
@@ -149,6 +150,7 @@ pub fn write_vm_creation_stats(
         apexes,
     };
 
+    info!("Writing VmCreationRequested atom into statsd.");
     thread::spawn(move || {
         GLOBAL_SERVICE.atomVmCreationRequested(&atom).unwrap_or_else(|e| {
             warn!("Failed to write VmCreationRequested atom: {e}");
@@ -157,7 +159,7 @@ pub fn write_vm_creation_stats(
 }
 
 /// Write the stats of VM boot to statsd
-/// The function creates a separate thread which waits fro statsd to start to push atom
+/// The function creates a separate thread which waits for statsd to start to push atom
 pub fn write_vm_booted_stats(
     uid: i32,
     vm_identifier: &str,
@@ -172,16 +174,16 @@ pub fn write_vm_booted_stats(
         elapsedTimeMillis: duration.as_millis() as i64,
     };
 
+    info!("Writing VmBooted atom into statsd.");
     thread::spawn(move || {
         GLOBAL_SERVICE.atomVmBooted(&atom).unwrap_or_else(|e| {
-            warn!("Failed to write VmCreationRequested atom: {e}");
+            warn!("Failed to write VmBooted atom: {e}");
         });
     });
 }
 
 /// Write the stats of VM exit to statsd
-/// The function creates a separate thread which waits fro statsd to start to push atom
-pub fn write_vm_exited_stats(
+pub fn write_vm_exited_stats_sync(
     uid: i32,
     vm_identifier: &str,
     reason: DeathReason,
@@ -204,9 +206,8 @@ pub fn write_vm_exited_stats(
         exitSignal: exit_signal.unwrap_or_default(),
     };
 
-    thread::spawn(move || {
-        GLOBAL_SERVICE.atomVmExited(&atom).unwrap_or_else(|e| {
-            warn!("Failed to write VmExited atom: {e}");
-        });
+    info!("Writing VmExited atom into statsd.");
+    GLOBAL_SERVICE.atomVmExited(&atom).unwrap_or_else(|e| {
+        warn!("Failed to write VmExited atom: {e}");
     });
 }

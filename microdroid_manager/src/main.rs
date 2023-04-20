@@ -55,8 +55,8 @@ use std::borrow::Cow::{Borrowed, Owned};
 use std::convert::TryInto;
 use std::env;
 use std::ffi::CString;
-use std::fs::{self, create_dir, OpenOptions};
-use std::io::Write;
+use std::fs::{self, create_dir, OpenOptions, File};
+use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -73,6 +73,7 @@ const EXTRA_IDSIG_PATH_PATTERN: &str = "/dev/block/by-name/extra-idsig-*";
 const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
 const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
 const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
+const AVF_DEBUG_POLICY_RAMDUMP: &str = "/sys/firmware/devicetree/base/avf/guest/common/ramdump";
 const DEBUG_MICRODROID_NO_VERIFIED_BOOT: &str =
     "/sys/firmware/devicetree/base/virtualization/guest/debug-microdroid,no-verified-boot";
 
@@ -314,6 +315,21 @@ fn should_export_tombstones(config: &VmPayloadConfig) -> bool {
     }
 }
 
+/// Get debug policy value in bool. It's true iff the value is explicitly set to <1>.
+fn get_debug_policy_bool(path: &'static str) -> Result<Option<bool>> {
+    let mut file = match File::open(path) {
+        Ok(dp) => dp,
+        Err(e) => {
+            info!("{e:?}. Assumes <0>");
+            return Ok(Some(false));
+        }
+    };
+    let mut log: [u8; 4] = Default::default();
+    file.read_exact(&mut log).context("Malformed data in {path}")?;
+    // DT spec uses big endian although Android is always little endian.
+    Ok(Some(u32::from_be_bytes(log) == 1))
+}
+
 fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
     let metadata = load_metadata().context("Failed to load payload metadata")?;
     let dice = DiceDriver::new(Path::new("/dev/open-dice0")).context("Failed to load DICE")?;
@@ -408,13 +424,12 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
         .as_ref()
         .ok_or_else(|| MicrodroidError::InvalidConfig("No task in VM config".to_string()))?;
 
-    if config.extra_apks.len() != verified_data.extra_apks_data.len() {
-        return Err(anyhow!(
-            "config expects {} extra apks, but found {}",
-            config.extra_apks.len(),
-            verified_data.extra_apks_data.len()
-        ));
-    }
+    ensure!(
+        config.extra_apks.len() == verified_data.extra_apks_data.len(),
+        "config expects {} extra apks, but found {}",
+        config.extra_apks.len(),
+        verified_data.extra_apks_data.len()
+    );
     mount_extra_apks(&config, &mut zipfuse)?;
 
     // Wait until apex config is done. (e.g. linker configuration for apexes)
@@ -551,9 +566,9 @@ fn verify_payload(
     let start_time = SystemTime::now();
 
     // Verify main APK
-    let root_hash = saved_data.map(|d| &d.apk_data.root_hash);
     let root_hash_from_idsig = get_apk_root_hash_from_idsig(MAIN_APK_IDSIG_PATH)?;
-    let root_hash_trustful = root_hash == Some(&root_hash_from_idsig);
+    let root_hash_trustful =
+        saved_data.map(|d| d.apk_data.root_hash_eq(root_hash_from_idsig.as_ref())).unwrap_or(false);
 
     // If root_hash can be trusted, pass it to apkdmverity so that it uses the passed root_hash
     // instead of the value read from the idsig file.
@@ -581,42 +596,36 @@ fn verify_payload(
         sorted(glob(EXTRA_APK_PATH_PATTERN)?.collect::<Result<Vec<_>, _>>()?).collect::<Vec<_>>();
     let extra_idsigs =
         sorted(glob(EXTRA_IDSIG_PATH_PATTERN)?.collect::<Result<Vec<_>, _>>()?).collect::<Vec<_>>();
-    if extra_apks.len() != extra_idsigs.len() {
-        return Err(anyhow!(
-            "Extra apks/idsigs mismatch: {} apks but {} idsigs",
-            extra_apks.len(),
-            extra_idsigs.len()
-        ));
-    }
-    let extra_apks_count = extra_apks.len();
+    ensure!(
+        extra_apks.len() == extra_idsigs.len(),
+        "Extra apks/idsigs mismatch: {} apks but {} idsigs",
+        extra_apks.len(),
+        extra_idsigs.len()
+    );
 
-    let (extra_apk_names, extra_root_hashes_from_idsig): (Vec<_>, Vec<_>) = extra_idsigs
+    let extra_root_hashes_from_idsig: Vec<_> = extra_idsigs
         .iter()
-        .enumerate()
-        .map(|(i, extra_idsig)| {
-            (
-                format!("extra-apk-{}", i),
-                get_apk_root_hash_from_idsig(extra_idsig)
-                    .expect("Can't find root hash from extra idsig"),
-            )
-        })
-        .unzip();
-
-    let saved_extra_root_hashes: Vec<_> = saved_data
-        .map(|d| d.extra_apks_data.iter().map(|apk_data| &apk_data.root_hash).collect())
-        .unwrap_or_else(Vec::new);
-    let extra_root_hashes_trustful: Vec<_> = extra_root_hashes_from_idsig
-        .iter()
-        .enumerate()
-        .map(|(i, root_hash_from_idsig)| {
-            saved_extra_root_hashes.get(i).copied() == Some(root_hash_from_idsig)
+        .map(|idsig| {
+            get_apk_root_hash_from_idsig(idsig).expect("Can't find root hash from extra idsig")
         })
         .collect();
 
-    for i in 0..extra_apks_count {
+    let extra_root_hashes_trustful: Vec<_> = if let Some(data) = saved_data {
+        extra_root_hashes_from_idsig
+            .iter()
+            .enumerate()
+            .map(|(i, root_hash)| data.extra_apk_root_hash_eq(i, root_hash))
+            .collect()
+    } else {
+        vec![false; extra_root_hashes_from_idsig.len()]
+    };
+    let extra_apk_names: Vec<_> =
+        (0..extra_apks.len()).map(|i| format!("extra-apk-{}", i)).collect();
+
+    for (i, extra_apk) in extra_apks.iter().enumerate() {
         apkdmverity_arguments.push({
             ApkDmverityArgument {
-                apk: extra_apks[i].to_str().unwrap(),
+                apk: extra_apk.to_str().unwrap(),
                 idsig: extra_idsigs[i].to_str().unwrap(),
                 name: &extra_apk_names[i],
                 saved_root_hash: if extra_root_hashes_trustful[i] {
@@ -781,16 +790,27 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
     }
 }
 
-/// Loads the crashkernel into memory using kexec if the VM is loaded with `crashkernel=' parameter
-/// in the cmdline.
+/// Loads the crashkernel into memory using kexec if debuggable or debug policy says so.
+/// The VM should be loaded with `crashkernel=' parameter in the cmdline to allocate memory
+/// for crashkernel.
 fn load_crashkernel_if_supported() -> Result<()> {
     let supported = std::fs::read_to_string("/proc/cmdline")?.contains(" crashkernel=");
     info!("ramdump supported: {}", supported);
-    if supported {
+
+    if !supported {
+        return Ok(());
+    }
+
+    let debuggable = system_properties::read_bool(DEBUGGABLE_PROP, true)?;
+    let ramdump = get_debug_policy_bool(AVF_DEBUG_POLICY_RAMDUMP)?.unwrap_or_default();
+    let requested = debuggable | ramdump;
+
+    if requested {
         let status = Command::new("/system/bin/kexec_load").status()?;
         if !status.success() {
             return Err(anyhow!("Failed to load crashkernel: {:?}", status));
         }
+        info!("ramdump is loaded: debuggable={debuggable}, ramdump={ramdump}");
     }
     Ok(())
 }
