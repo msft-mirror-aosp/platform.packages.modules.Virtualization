@@ -15,8 +15,8 @@
 //! Functions for running instances of `crosvm`.
 
 use crate::aidl::{remove_temporary_files, Cid, VirtualMachineCallbacks};
-use crate::atom::{get_num_cpus, write_vm_exited_stats};
-use crate::debug_config::should_prepare_console_output;
+use crate::atom::{get_num_cpus, write_vm_exited_stats_sync};
+use crate::debug_config::DebugConfig;
 use anyhow::{anyhow, bail, Context, Error, Result};
 use command_fds::CommandFdExt;
 use lazy_static::lazy_static;
@@ -53,6 +53,7 @@ use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
 use rpcbinder::RpcServer;
 
 /// external/crosvm
+use base::AsRawDescriptor;
 use base::UnixSeqpacketListener;
 use vm_control::{BalloonControlCommand, VmRequest, VmResponse};
 
@@ -101,7 +102,7 @@ pub struct CrosvmConfig {
     pub disks: Vec<DiskFile>,
     pub params: Option<String>,
     pub protected: bool,
-    pub debug_level: DebugLevel,
+    pub debug_config: DebugConfig,
     pub memory_mib: Option<NonZeroU32>,
     pub cpus: Option<NonZeroU32>,
     pub host_cpu_topology: bool,
@@ -380,7 +381,7 @@ impl VmInstance {
         self.callbacks.callback_on_died(self.cid, death_reason);
 
         let vm_metric = self.vm_metric.lock().unwrap();
-        write_vm_exited_stats(
+        write_vm_exited_stats_sync(
             self.requester_uid as i32,
             &self.name,
             death_reason,
@@ -490,6 +491,10 @@ impl VmInstance {
         // Wait for monitor_vm_exit() to finish. Must release vm_state lock
         // first, as monitor_vm_exit() takes it as well.
         monitor_vm_exit_thread.map(JoinHandle::join);
+
+        // Now that the VM has been killed, shut down the VirtualMachineService
+        // server to eagerly free up the server threads.
+        self.vm_context.vm_server.shutdown()?;
 
         Ok(())
     }
@@ -634,10 +639,6 @@ fn death_reason(result: &Result<ExitStatus, io::Error>, mut failure_reason: &str
             "PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED" => {
                 return DeathReason::PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED
             }
-            "BOOTLOADER_PUBLIC_KEY_MISMATCH" => return DeathReason::BOOTLOADER_PUBLIC_KEY_MISMATCH,
-            "BOOTLOADER_INSTANCE_IMAGE_CHANGED" => {
-                return DeathReason::BOOTLOADER_INSTANCE_IMAGE_CHANGED
-            }
             "MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE" => {
                 return DeathReason::MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE
             }
@@ -722,24 +723,20 @@ fn run_vm(
         command.arg("--unmap-guest-memory-on-fork");
 
         if config.ramdump.is_some() {
-            // Protected VM needs to reserve memory for ramdump here. pvmfw will drop This
-            // if ramdump should be disabled (via debug policy). Note that we reserve more
+            // Protected VM needs to reserve memory for ramdump here. Note that we reserve more
             // memory for the restricted dma pool.
             let ramdump_reserve = RAMDUMP_RESERVED_MIB + swiotlb_size_mib;
             command.arg("--params").arg(format!("crashkernel={ramdump_reserve}M"));
         }
-    } else {
-        if config.ramdump.is_some() {
-            command.arg("--params").arg(format!("crashkernel={RAMDUMP_RESERVED_MIB}M"));
-        }
-        if config.debug_level == DebugLevel::NONE
-            && should_prepare_console_output(config.debug_level)
-        {
-            // bootconfig.normal will be used, but we need log.
-            // pvmfw will add following commands by itself, but non-protected VM should do so here.
-            command.arg("--params").arg("printk.devkmsg=on");
-            command.arg("--params").arg("console=hvc0");
-        }
+    } else if config.ramdump.is_some() {
+        command.arg("--params").arg(format!("crashkernel={RAMDUMP_RESERVED_MIB}M"));
+    }
+    if config.debug_config.debug_level == DebugLevel::NONE
+        && config.debug_config.should_prepare_console_output()
+    {
+        // bootconfig.normal will be used, but we need log.
+        command.arg("--params").arg("printk.devkmsg=on");
+        command.arg("--params").arg("console=hvc0");
     }
 
     if let Some(memory_mib) = config.memory_mib {
@@ -823,7 +820,9 @@ fn run_vm(
 
     let control_server_socket = UnixSeqpacketListener::bind(crosvm_control_socket_path)
         .context("failed to create control server")?;
-    command.arg("--socket").arg(add_preserved_fd(&mut preserved_fds, &control_server_socket));
+    command
+        .arg("--socket")
+        .arg(add_preserved_fd(&mut preserved_fds, &control_server_socket.as_raw_descriptor()));
 
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);

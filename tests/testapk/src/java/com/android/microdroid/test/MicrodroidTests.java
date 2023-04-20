@@ -28,12 +28,15 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
-import static org.junit.Assume.assumeFalse;
+import static org.junit.Assume.assumeTrue;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import com.google.common.base.Strings;
 import com.google.common.truth.BooleanSubject;
 
+import android.app.Instrumentation;
+import android.app.UiAutomation;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.ContextWrapper;
@@ -53,9 +56,11 @@ import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineDescriptor;
 import android.system.virtualmachine.VirtualMachineException;
 import android.system.virtualmachine.VirtualMachineManager;
-import android.util.Log;
+
+import androidx.test.platform.app.InstrumentationRegistry;
 
 import com.android.compatibility.common.util.CddTest;
+import com.android.compatibility.common.util.VsrTest;
 import com.android.microdroid.test.device.MicrodroidDeviceTestBase;
 import com.android.microdroid.test.vmshare.IVmShareTestService;
 import com.android.microdroid.testservice.IAppCallback;
@@ -64,7 +69,6 @@ import com.android.microdroid.testservice.IVmCallback;
 
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.function.ThrowingRunnable;
@@ -635,6 +639,14 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
+    public void testAvfRequiresUpdatableApex() throws Exception {
+        assertWithMessage("Devices that support AVF must also support updatable APEX")
+                .that(SystemProperties.getBoolean("ro.apex.updatable", false))
+                .isTrue();
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1"})
     public void vmmGetAndCreate() throws Exception {
         assumeSupportedDevice();
 
@@ -1173,7 +1185,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @Ignore("b/249723852")
     @CddTest(requirements = {
             "9.17/C-1-1",
             "9.17/C-2-7"
@@ -1575,22 +1586,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         }
     }
 
-    private boolean isConsoleOutputEnabledByDebugPolicy() {
-        if (isUserBuild()) {
-            Log.i(
-                    TAG,
-                    "Debug policy is inaccessible in user build. Assumes that console output is"
-                            + " disabled");
-            return false;
-        }
-        try {
-            return getDebugPolicyBoolean("/avf/guest/common/log");
-        } catch (IOException e) {
-            Log.w(TAG, "Fail to read debug policy. Assumes false", e);
-            return false;
-        }
-    }
-
     private boolean checkVmOutputIsRedirectedToLogcat(boolean debuggable) throws Exception {
         String time =
                 LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"));
@@ -1624,21 +1619,33 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     public void outputIsRedirectedToLogcatIfNotCaptured() throws Exception {
         assumeSupportedDevice();
-        assumeFalse(
-                "Debug policy would turn on console output. Perhaps userdebug build?",
-                isConsoleOutputEnabledByDebugPolicy());
 
         assertThat(checkVmOutputIsRedirectedToLogcat(true)).isTrue();
+    }
+
+    private boolean setSystemProperties(String name, String value) {
+        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
+        UiAutomation uiAutomation = instrumentation.getUiAutomation();
+        String cmd = "setprop " + name + " " + (value.isEmpty() ? "\"\"" : value);
+        return runInShellWithStderr(TAG, uiAutomation, cmd).trim().isEmpty();
     }
 
     @Test
     public void outputIsNotRedirectedToLogcatIfNotDebuggable() throws Exception {
         assumeSupportedDevice();
-        assumeFalse(
-                "Debug policy would turn on console output. Perhaps userdebug build?",
-                isConsoleOutputEnabledByDebugPolicy());
 
-        assertThat(checkVmOutputIsRedirectedToLogcat(false)).isFalse();
+        // Disable debug policy to ensure no log output.
+        String sysprop = "hypervisor.virtualizationmanager.debug_policy.path";
+        String old = SystemProperties.get(sysprop);
+        assumeTrue(
+                "Can't disable debug policy. Perhapse user build?",
+                setSystemProperties(sysprop, ""));
+
+        try {
+            assertThat(checkVmOutputIsRedirectedToLogcat(false)).isFalse();
+        } finally {
+            assertThat(setSystemProperties(sysprop, old)).isTrue();
+        }
     }
 
     @Test
@@ -1899,6 +1906,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     private static final int MS_NOEXEC = 8;
 
     @Test
+    @CddTest(requirements = {"9.17/C-1-5"})
     public void dataIsMountedWithNoExec() throws Exception {
         assumeSupportedDevice();
 
@@ -1921,6 +1929,52 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertWithMessage("/data should be mounted with MS_NOEXEC")
                 .that(testResults.mMountFlags & MS_NOEXEC)
                 .isEqualTo(MS_NOEXEC);
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-5"})
+    public void encryptedStoreIsMountedWithNoExec() throws Exception {
+        assumeSupportedDevice();
+
+        VirtualMachineConfig vmConfig =
+                newVmConfigBuilder()
+                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setEncryptedStorageBytes(4_000_000)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_encstore_no_exec", vmConfig);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mMountFlags = ts.getMountFlags("/mnt/encryptedstore");
+                        });
+
+        assertThat(testResults.mException).isNull();
+        assertWithMessage("/mnt/encryptedstore should be mounted with MS_NOEXEC")
+                .that(testResults.mMountFlags & MS_NOEXEC)
+                .isEqualTo(MS_NOEXEC);
+    }
+
+    @Test
+    @VsrTest(requirements = {"VSR-7.1-001.003"})
+    public void kernelVersionRequirement() throws Exception {
+        int firstApiLevel = SystemProperties.getInt("ro.product.first_api_level", 0);
+        assume().withMessage("Skip on devices launched before Android 14 (API level 34)")
+                .that(firstApiLevel)
+                .isAtLeast(34);
+
+        String[] tokens = KERNEL_VERSION.split("\\.");
+        int major = Integer.parseInt(tokens[0]);
+        int minor = Integer.parseInt(tokens[1]);
+
+        // Check kernel version >= 5.15
+        assertTrue(major >= 5);
+        if (major == 5) {
+            assertTrue(minor >= 15);
+        }
     }
 
     private static class VmShareServiceConnection implements ServiceConnection {
@@ -1997,11 +2051,5 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 .withMessage("Skip on 5.4 kernel. b/218303240")
                 .that(KERNEL_VERSION)
                 .isNotEqualTo("5.4");
-
-        if (isProtectedVm()) {
-            assume().withMessage("Protected VMs not supported on gs101 devices. b/270841564")
-                    .that(isGs101())
-                    .isFalse();
-        }
     }
 }

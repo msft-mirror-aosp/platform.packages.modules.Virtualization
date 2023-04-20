@@ -16,20 +16,21 @@
 
 #![no_main]
 #![no_std]
-#![feature(default_alloc_error_handler)]
 
+mod error;
 mod exceptions;
 
 extern crate alloc;
 
+use crate::error::{Error, Result};
 use aarch64_paging::{
     idmap::IdMap,
     paging::{Attributes, MemoryRegion},
-    MapError,
 };
 use buddy_system_allocator::LockedHeap;
-use log::{debug, info};
-use vmbase::main;
+use hyp::get_hypervisor;
+use log::{debug, error, info};
+use vmbase::{main, power::reboot};
 
 const SZ_1K: usize = 1024;
 const SZ_64K: usize = 64 * SZ_1K;
@@ -82,7 +83,7 @@ fn init_heap() {
     info!("Initialized heap.");
 }
 
-fn init_kernel_pgt(pgt: &mut IdMap) -> Result<(), MapError> {
+fn init_kernel_pgt(pgt: &mut IdMap) -> Result<()> {
     // The first 1 GiB of address space is used by crosvm for MMIO.
     let reg_dev = MemoryRegion::new(0, SZ_1G);
     // SAFETY: Taking addresses of kernel image sections to set up page table
@@ -107,15 +108,39 @@ fn init_kernel_pgt(pgt: &mut IdMap) -> Result<(), MapError> {
     Ok(())
 }
 
-/// Entry point for Rialto.
-pub fn main(_a0: u64, _a1: u64, _a2: u64, _a3: u64) {
-    vmbase::logger::init(log::LevelFilter::Debug).unwrap();
+fn try_init_logger() -> Result<()> {
+    match get_hypervisor().mmio_guard_init() {
+        // pKVM blocks MMIO by default, we need to enable MMIO guard to support logging.
+        Ok(()) => get_hypervisor().mmio_guard_map(vmbase::console::BASE_ADDRESS)?,
+        // MMIO guard enroll is not supported in unprotected VM.
+        Err(hyp::Error::MmioGuardNotsupported) => {}
+        Err(e) => return Err(e.into()),
+    };
+    vmbase::logger::init(log::LevelFilter::Debug).map_err(|_| Error::LoggerInit)
+}
 
+fn try_main() -> Result<()> {
     info!("Welcome to Rialto!");
     init_heap();
 
     let mut pgt = IdMap::new(PT_ASID, PT_ROOT_LEVEL);
-    init_kernel_pgt(&mut pgt).unwrap();
+    init_kernel_pgt(&mut pgt)?;
+    Ok(())
+}
+
+/// Entry point for Rialto.
+pub fn main(_a0: u64, _a1: u64, _a2: u64, _a3: u64) {
+    if try_init_logger().is_err() {
+        // Don't log anything if the logger initialization fails.
+        reboot();
+    }
+    match try_main() {
+        Ok(()) => info!("Rialto ends successfully."),
+        Err(e) => {
+            error!("Rialto failed with {e}");
+            reboot()
+        }
+    }
 }
 
 extern "C" {

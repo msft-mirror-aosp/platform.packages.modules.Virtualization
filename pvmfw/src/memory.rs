@@ -17,10 +17,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use crate::helpers::{self, align_down, align_up, page_4kb_of, SIZE_4KB};
-use crate::hvc::{hyp_meminfo, mem_share, mem_unshare};
-use crate::mmio_guard;
 use crate::mmu;
-use crate::smccc;
 use alloc::alloc::alloc_zeroed;
 use alloc::alloc::dealloc;
 use alloc::alloc::handle_alloc_error;
@@ -32,8 +29,14 @@ use core::num::NonZeroUsize;
 use core::ops::Range;
 use core::ptr::NonNull;
 use core::result;
+use hyp::get_hypervisor;
 use log::error;
 use tinyvec::ArrayVec;
+
+/// Base of the system's contiguous "main" memory.
+pub const BASE_ADDR: usize = 0x8000_0000;
+/// First address that can't be translated by a level 1 TTBR0_EL1.
+pub const MAX_ADDR: usize = 1 << 40;
 
 pub type MemoryRange = Range<usize>;
 
@@ -99,8 +102,8 @@ pub enum MemoryTrackerError {
     Overlaps,
     /// Region couldn't be mapped.
     FailedToMap,
-    /// Error from an MMIO guard call.
-    MmioGuard(mmio_guard::Error),
+    /// Error from the interaction with the hypervisor.
+    Hypervisor(hyp::Error),
 }
 
 impl fmt::Display for MemoryTrackerError {
@@ -113,14 +116,14 @@ impl fmt::Display for MemoryTrackerError {
             Self::OutOfRange => write!(f, "Region is out of the tracked memory address space"),
             Self::Overlaps => write!(f, "New region overlaps with tracked regions"),
             Self::FailedToMap => write!(f, "Failed to map the new region"),
-            Self::MmioGuard(e) => e.fmt(f),
+            Self::Hypervisor(e) => e.fmt(f),
         }
     }
 }
 
-impl From<mmio_guard::Error> for MemoryTrackerError {
-    fn from(e: mmio_guard::Error) -> Self {
-        Self::MmioGuard(e)
+impl From<hyp::Error> for MemoryTrackerError {
+    fn from(e: hyp::Error) -> Self {
+        Self::Hypervisor(e)
     }
 }
 
@@ -129,15 +132,11 @@ type Result<T> = result::Result<T, MemoryTrackerError>;
 impl MemoryTracker {
     const CAPACITY: usize = 5;
     const MMIO_CAPACITY: usize = 5;
-    /// Base of the system's contiguous "main" memory.
-    const BASE: usize = 0x8000_0000;
-    /// First address that can't be translated by a level 1 TTBR0_EL1.
-    const MAX_ADDR: usize = 1 << 39;
 
     /// Create a new instance from an active page table, covering the maximum RAM size.
     pub fn new(page_table: mmu::PageTable) -> Self {
         Self {
-            total: Self::BASE..Self::MAX_ADDR,
+            total: BASE_ADDR..MAX_ADDR,
             page_table,
             regions: ArrayVec::new(),
             mmio_regions: ArrayVec::new(),
@@ -214,7 +213,7 @@ impl MemoryTracker {
         })?;
 
         for page_base in page_iterator(&range) {
-            mmio_guard::map(page_base)?;
+            get_hypervisor().mmio_guard_map(page_base)?;
         }
 
         if self.mmio_regions.try_push(range).is_some() {
@@ -254,7 +253,7 @@ impl MemoryTracker {
     pub fn mmio_unmap_all(&self) -> Result<()> {
         for region in &self.mmio_regions {
             for page_base in page_iterator(region) {
-                mmio_guard::unmap(page_base)?;
+                get_hypervisor().mmio_guard_unmap(page_base)?;
             }
         }
 
@@ -279,12 +278,12 @@ impl Drop for MemoryTracker {
 /// Gives the KVM host read, write and execute permissions on the given memory range. If the range
 /// is not aligned with the memory protection granule then it will be extended on either end to
 /// align.
-fn share_range(range: &MemoryRange, granule: usize) -> smccc::Result<()> {
+fn share_range(range: &MemoryRange, granule: usize) -> hyp::Result<()> {
     for base in (align_down(range.start, granule)
         .expect("Memory protection granule was not a power of two")..range.end)
         .step_by(granule)
     {
-        mem_share(base as u64)?;
+        get_hypervisor().mem_share(base as u64)?;
     }
     Ok(())
 }
@@ -292,12 +291,12 @@ fn share_range(range: &MemoryRange, granule: usize) -> smccc::Result<()> {
 /// Removes permission from the KVM host to access the given memory range which was previously
 /// shared. If the range is not aligned with the memory protection granule then it will be extended
 /// on either end to align.
-fn unshare_range(range: &MemoryRange, granule: usize) -> smccc::Result<()> {
+fn unshare_range(range: &MemoryRange, granule: usize) -> hyp::Result<()> {
     for base in (align_down(range.start, granule)
         .expect("Memory protection granule was not a power of two")..range.end)
         .step_by(granule)
     {
-        mem_unshare(base as u64)?;
+        get_hypervisor().mem_unshare(base as u64)?;
     }
     Ok(())
 }
@@ -306,7 +305,7 @@ fn unshare_range(range: &MemoryRange, granule: usize) -> smccc::Result<()> {
 /// with the host. Returns a pointer to the buffer.
 ///
 /// It will be aligned to the memory sharing granule size supported by the hypervisor.
-pub fn alloc_shared(size: usize) -> smccc::Result<NonNull<u8>> {
+pub fn alloc_shared(size: usize) -> hyp::Result<NonNull<u8>> {
     let layout = shared_buffer_layout(size)?;
     let granule = layout.align();
 
@@ -334,7 +333,7 @@ pub fn alloc_shared(size: usize) -> smccc::Result<NonNull<u8>> {
 ///
 /// The memory must have been allocated by `alloc_shared` with the same size, and not yet
 /// deallocated.
-pub unsafe fn dealloc_shared(vaddr: NonNull<u8>, size: usize) -> smccc::Result<()> {
+pub unsafe fn dealloc_shared(vaddr: NonNull<u8>, size: usize) -> hyp::Result<()> {
     let layout = shared_buffer_layout(size)?;
     let granule = layout.align();
 
@@ -353,9 +352,9 @@ pub unsafe fn dealloc_shared(vaddr: NonNull<u8>, size: usize) -> smccc::Result<(
 /// It will be aligned to the memory sharing granule size supported by the hypervisor.
 ///
 /// Panics if `size` is 0.
-fn shared_buffer_layout(size: usize) -> smccc::Result<Layout> {
+fn shared_buffer_layout(size: usize) -> hyp::Result<Layout> {
     assert_ne!(size, 0);
-    let granule = hyp_meminfo()? as usize;
+    let granule = get_hypervisor().memory_protection_granule()?;
     let allocated_size =
         align_up(size, granule).expect("Memory protection granule was not a power of two");
     Ok(Layout::from_size_align(allocated_size, granule).unwrap())

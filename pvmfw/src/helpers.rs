@@ -22,6 +22,40 @@ pub const SIZE_2MB: usize = 2 << 20;
 
 pub const GUEST_PAGE_SIZE: usize = SIZE_4KB;
 
+/// Read a value from a system register.
+#[macro_export]
+macro_rules! read_sysreg {
+    ($sysreg:literal) => {{
+        let mut r: usize;
+        // Safe because it reads a system register and does not affect Rust.
+        unsafe {
+            core::arch::asm!(
+                concat!("mrs {}, ", $sysreg),
+                out(reg) r,
+                options(nomem, nostack, preserves_flags),
+            )
+        }
+        r
+    }};
+}
+
+/// Write a value to a system register.
+///
+/// # Safety
+///
+/// Callers must ensure that side effects of updating the system register are properly handled.
+#[macro_export]
+macro_rules! write_sysreg {
+    ($sysreg:literal, $val:expr) => {{
+        let value: usize = $val;
+        core::arch::asm!(
+            concat!("msr ", $sysreg, ", {}"),
+            in(reg) value,
+            options(nomem, nostack, preserves_flags),
+        )
+    }};
+}
+
 /// Computes the largest multiple of the provided alignment smaller or equal to the address.
 ///
 /// Note: the result is undefined if alignment isn't a power of two.
@@ -78,9 +112,7 @@ pub const fn page_4kb_of(addr: usize) -> usize {
 fn min_dcache_line_size() -> usize {
     const DMINLINE_SHIFT: usize = 16;
     const DMINLINE_MASK: usize = 0xf;
-    let ctr_el0: usize;
-
-    unsafe { asm!("mrs {x}, ctr_el0", x = out(reg) ctr_el0) }
+    let ctr_el0 = read_sysreg!("ctr_el0");
 
     // DminLine: log2 of the number of words in the smallest cache line of all the data caches.
     let dminline = (ctr_el0 >> DMINLINE_SHIFT) & DMINLINE_MASK;
@@ -97,7 +129,13 @@ pub fn flush_region(start: usize, size: usize) {
 
     for line in (start..end).step_by(line_size) {
         // SAFETY - Clearing cache lines shouldn't have Rust-visible side effects.
-        unsafe { asm!("dc cvau, {x}", x = in(reg) line) }
+        unsafe {
+            asm!(
+                "dc cvau, {x}",
+                x = in(reg) line,
+                options(nomem, nostack, preserves_flags),
+            )
+        }
     }
 }
 
@@ -112,4 +150,21 @@ pub fn flush(reg: &[u8]) {
 pub fn flushed_zeroize(reg: &mut [u8]) {
     reg.zeroize();
     flush(reg)
+}
+
+/// Flatten [[T; N]] into &[T]
+/// TODO: use slice::flatten when it graduates from experimental
+pub fn flatten<T, const N: usize>(original: &[[T; N]]) -> &[T] {
+    // SAFETY: no overflow because original (whose size is len()*N) is already in memory
+    let len = original.len() * N;
+    // SAFETY: [T] has the same layout as [T;N]
+    unsafe { core::slice::from_raw_parts(original.as_ptr().cast(), len) }
+}
+
+/// Create &CStr out of &str literal
+#[macro_export]
+macro_rules! cstr {
+    ($str:literal) => {{
+        CStr::from_bytes_with_nul(concat!($str, "\0").as_bytes()).unwrap()
+    }};
 }

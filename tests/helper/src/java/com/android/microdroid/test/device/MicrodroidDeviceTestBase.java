@@ -60,10 +60,6 @@ public abstract class MicrodroidDeviceTestBase {
         return getDeviceProperties().isCuttlefish();
     }
 
-    public static boolean isGs101() {
-        return getDeviceProperties().isGs101();
-    }
-
     public static boolean isUserBuild() {
         return getDeviceProperties().isUserBuild();
     }
@@ -99,15 +95,6 @@ public abstract class MicrodroidDeviceTestBase {
         if (!expect.equals(out)) {
             throw new IOException("Could not apply max performance task profile: " + out);
         }
-    }
-
-    public final boolean getDebugPolicyBoolean(String debugPolicy) throws IOException {
-        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
-        UiAutomation uiAutomation = instrumentation.getUiAutomation();
-        String debugPolicyFilePath = "/proc/device-tree" + debugPolicy;
-        String cmd = "su root xxd -p " + debugPolicyFilePath;
-        String dp = runInShell(TAG, uiAutomation, cmd).trim();
-        return "00000001".equals(dp);
     }
 
     private Context mCtx;
@@ -448,7 +435,25 @@ public abstract class MicrodroidDeviceTestBase {
             return stdout;
         } catch (IOException e) {
             Log.e(tag, "Error executing: " + command, e);
-            throw new RuntimeException("Failed to run the command.");
+            throw new RuntimeException("Failed to run the command.", e);
+        }
+    }
+
+    /** Execute a command. Returns the concatenation of stdout and stderr. */
+    protected String runInShellWithStderr(String tag, UiAutomation uiAutomation, String command) {
+        ParcelFileDescriptor[] files = uiAutomation.executeShellCommandRwe(command);
+        try (InputStream stdout = new ParcelFileDescriptor.AutoCloseInputStream(files[0]);
+                InputStream stderr = new ParcelFileDescriptor.AutoCloseInputStream(files[2]);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            files[1].close(); // The command's stdin
+            stdout.transferTo(out);
+            stderr.transferTo(out);
+            String output = out.toString("UTF-8");
+            Log.i(tag, "Got output : " + stdout);
+            return output;
+        } catch (IOException e) {
+            Log.e(tag, "Error executing: " + command, e);
+            throw new RuntimeException("Failed to run the command.", e);
         }
     }
 
