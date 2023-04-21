@@ -53,15 +53,23 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public abstract class MicrodroidDeviceTestBase {
+    private static final String TAG = "MicrodroidDeviceTestBase";
     private final String MAX_PERFORMANCE_TASK_PROFILE = "CPUSET_SP_TOP_APP";
 
     public static boolean isCuttlefish() {
-        return DeviceProperties.create(SystemProperties::get).isCuttlefish();
+        return getDeviceProperties().isCuttlefish();
+    }
+
+    public static boolean isUserBuild() {
+        return getDeviceProperties().isUserBuild();
     }
 
     public static String getMetricPrefix() {
-        return MetricsProcessor.getMetricPrefix(
-                DeviceProperties.create(SystemProperties::get).getMetricsTag());
+        return MetricsProcessor.getMetricPrefix(getDeviceProperties().getMetricsTag());
+    }
+
+    private static DeviceProperties getDeviceProperties() {
+        return DeviceProperties.create(SystemProperties::get);
     }
 
     protected final void grantPermission(String permission) {
@@ -82,7 +90,7 @@ public abstract class MicrodroidDeviceTestBase {
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         UiAutomation uiAutomation = instrumentation.getUiAutomation();
         String cmd = "settaskprofile " + Os.gettid() + " " + MAX_PERFORMANCE_TASK_PROFILE;
-        String out = runInShell("MicrodroidDeviceTestBase", uiAutomation, cmd).trim();
+        String out = runInShell(TAG, uiAutomation, cmd).trim();
         String expect = "Profile " + MAX_PERFORMANCE_TASK_PROFILE + " is applied successfully!";
         if (!expect.equals(out)) {
             throw new IOException("Could not apply max performance task profile: " + out);
@@ -427,7 +435,25 @@ public abstract class MicrodroidDeviceTestBase {
             return stdout;
         } catch (IOException e) {
             Log.e(tag, "Error executing: " + command, e);
-            throw new RuntimeException("Failed to run the command.");
+            throw new RuntimeException("Failed to run the command.", e);
+        }
+    }
+
+    /** Execute a command. Returns the concatenation of stdout and stderr. */
+    protected String runInShellWithStderr(String tag, UiAutomation uiAutomation, String command) {
+        ParcelFileDescriptor[] files = uiAutomation.executeShellCommandRwe(command);
+        try (InputStream stdout = new ParcelFileDescriptor.AutoCloseInputStream(files[0]);
+                InputStream stderr = new ParcelFileDescriptor.AutoCloseInputStream(files[2]);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            files[1].close(); // The command's stdin
+            stdout.transferTo(out);
+            stderr.transferTo(out);
+            String output = out.toString("UTF-8");
+            Log.i(tag, "Got output : " + stdout);
+            return output;
+        } catch (IOException e) {
+            Log.e(tag, "Error executing: " + command, e);
+            throw new RuntimeException("Failed to run the command.", e);
         }
     }
 
@@ -443,6 +469,8 @@ public abstract class MicrodroidDeviceTestBase {
         public String mFileContent;
         public byte[] mBcc;
         public long[] mTimings;
+        public int mFileMode;
+        public int mMountFlags;
 
         public void assertNoException() {
             if (mException != null) {

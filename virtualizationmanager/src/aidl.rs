@@ -19,7 +19,7 @@ use crate::atom::{
     write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmContext, VmInstance, VmState};
-use crate::debug_config::should_prepare_console_output;
+use crate::debug_config::DebugConfig;
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images};
 use crate::selinux::{getfilecon, SeContext};
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
@@ -47,7 +47,7 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
         BnVirtualMachineService, IVirtualMachineService,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use apkverify::{HashAlgorithm, V4Signature};
 use binder::{
     self, wait_for_interface, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor,
@@ -59,6 +59,7 @@ use log::{debug, error, info, warn};
 use microdroid_payload_config::{OsConfig, Task, TaskType, VmPayloadConfig};
 use nix::unistd::pipe;
 use rpcbinder::RpcServer;
+use rustutils::system_properties;
 use semver::VersionReq;
 use std::convert::TryInto;
 use std::ffi::CStr;
@@ -110,13 +111,20 @@ fn create_or_update_idsig_file(
     if !metadata.is_file() {
         bail!("input is not a regular file");
     }
-    let mut sig = V4Signature::create(&mut input, 4096, &[], HashAlgorithm::SHA256)
-        .context("failed to create idsig")?;
+    let mut sig =
+        V4Signature::create(&mut input, get_current_sdk()?, 4096, &[], HashAlgorithm::SHA256)
+            .context("failed to create idsig")?;
 
     let mut output = clone_file(idsig_fd)?;
     output.set_len(0).context("failed to set_len on the idsig output")?;
     sig.write_into(&mut output).context("failed to write idsig")?;
     Ok(())
+}
+
+fn get_current_sdk() -> Result<u32> {
+    let current_sdk = system_properties::read("ro.build.version.sdk")?;
+    let current_sdk = current_sdk.ok_or_else(|| anyhow!("SDK version missing"))?;
+    current_sdk.parse().context("Malformed SDK version")
 }
 
 pub fn remove_temporary_files(path: &PathBuf) -> Result<()> {
@@ -318,10 +326,22 @@ impl VirtualizationService {
             check_gdb_allowed(config)?;
         }
 
+        let debug_level = match config {
+            VirtualMachineConfig::AppConfig(config) => config.debugLevel,
+            _ => DebugLevel::NONE,
+        };
+        let debug_config = DebugConfig::new(debug_level);
+
+        let ramdump = if debug_config.is_ramdump_needed() {
+            Some(prepare_ramdump_file(&temporary_directory)?)
+        } else {
+            None
+        };
+
         let state = &mut *self.state.lock().unwrap();
         let console_fd =
-            clone_or_prepare_logger_fd(config, console_fd, format!("Console({})", cid))?;
-        let log_fd = clone_or_prepare_logger_fd(config, log_fd, format!("Log({})", cid))?;
+            clone_or_prepare_logger_fd(&debug_config, console_fd, format!("Console({})", cid))?;
+        let log_fd = clone_or_prepare_logger_fd(&debug_config, log_fd, format!("Log({})", cid))?;
 
         // Counter to generate unique IDs for temporary image files.
         let mut next_temporary_image_id = 0;
@@ -332,12 +352,13 @@ impl VirtualizationService {
         let (is_app_config, config) = match config {
             VirtualMachineConfig::RawConfig(config) => (false, BorrowedOrOwned::Borrowed(config)),
             VirtualMachineConfig::AppConfig(config) => {
-                let config = load_app_config(config, &temporary_directory).map_err(|e| {
-                    *is_protected = config.protectedVm;
-                    let message = format!("Failed to load app config: {:?}", e);
-                    error!("{}", message);
-                    Status::new_service_specific_error_str(-1, Some(message))
-                })?;
+                let config =
+                    load_app_config(config, &debug_config, &temporary_directory).map_err(|e| {
+                        *is_protected = config.protectedVm;
+                        let message = format!("Failed to load app config: {:?}", e);
+                        error!("{}", message);
+                        Status::new_service_specific_error_str(-1, Some(message))
+                    })?;
                 (true, BorrowedOrOwned::Owned(config))
             }
         };
@@ -408,19 +429,6 @@ impl VirtualizationService {
             }
         };
 
-        // Creating this ramdump file unconditionally is not harmful as ramdump will be created
-        // only when the VM is configured as such. `ramdump_write` is sent to crosvm and will
-        // be the backing store for the /dev/hvc1 where VM will emit ramdump to. `ramdump_read`
-        // will be sent back to the client (i.e. the VM owner) for readout.
-        let ramdump_path = temporary_directory.join("ramdump");
-        let ramdump = prepare_ramdump_file(&ramdump_path).map_err(|e| {
-            error!("Failed to prepare ramdump file: {:?}", e);
-            Status::new_service_specific_error_str(
-                -1,
-                Some(format!("Failed to prepare ramdump file: {:?}", e)),
-            )
-        })?;
-
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -431,13 +439,14 @@ impl VirtualizationService {
             disks,
             params: config.params.to_owned(),
             protected: *is_protected,
+            debug_config,
             memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
             cpus,
             host_cpu_topology,
             task_profiles: config.taskProfiles.clone(),
             console_fd,
             log_fd,
-            ramdump: Some(ramdump),
+            ramdump,
             indirect_files,
             platform_version: parse_platform_version_req(&config.platformVersion)?,
             detect_hangup: is_app_config,
@@ -484,10 +493,6 @@ fn format_as_android_vm_instance(part: &mut dyn Write) -> std::io::Result<()> {
 fn format_as_encryptedstore(part: &mut dyn Write) -> std::io::Result<()> {
     part.write_all(UNFORMATTED_STORAGE_MAGIC.as_bytes())?;
     part.flush()
-}
-
-fn prepare_ramdump_file(ramdump_path: &Path) -> Result<File> {
-    File::create(ramdump_path).context(format!("Failed to create ramdump file {:?}", &ramdump_path))
 }
 
 fn round_up(input: u64, granularity: u64) -> u64 {
@@ -555,6 +560,7 @@ fn assemble_disk_image(
 
 fn load_app_config(
     config: &VirtualMachineAppConfig,
+    debug_config: &DebugConfig,
     temporary_directory: &Path,
 ) -> Result<VirtualMachineRawConfig> {
     let apk_file = clone_file(config.apk.as_ref().unwrap())?;
@@ -603,6 +609,7 @@ fn load_app_config(
     // Include Microdroid payload disk (contains apks, idsigs) in vm config
     add_microdroid_payload_images(
         config,
+        debug_config,
         temporary_directory,
         apk_file,
         idsig_file,
@@ -721,10 +728,11 @@ fn is_safe_app_partition(label: &str) -> bool {
 /// user devices (W^X).
 fn check_label_is_allowed(context: &SeContext) -> Result<()> {
     match context.selinux_type()? {
-        | "system_file" // immutable dm-verity protected partition
         | "apk_data_file" // APKs of an installed app
-        | "staging_data_file" // updated/staged APEX images
         | "shell_data_file" // test files created via adb shell
+        | "staging_data_file" // updated/staged APEX images
+        | "system_file" // immutable dm-verity protected partition
+        | "virtualizationservice_data_file" // files created by VS / VirtMgr
          => Ok(()),
         _ => bail!("Label {} is not allowed", context),
     }
@@ -979,6 +987,22 @@ fn parse_platform_version_req(s: &str) -> Result<VersionReq, Status> {
     })
 }
 
+/// Create the empty ramdump file
+fn prepare_ramdump_file(temporary_directory: &Path) -> binder::Result<File> {
+    // `ramdump_write` is sent to crosvm and will be the backing store for the /dev/hvc1 where
+    // VM will emit ramdump to. `ramdump_read` will be sent back to the client (i.e. the VM
+    // owner) for readout.
+    let ramdump_path = temporary_directory.join("ramdump");
+    let ramdump = File::create(ramdump_path).map_err(|e| {
+        error!("Failed to prepare ramdump file: {:?}", e);
+        Status::new_service_specific_error_str(
+            -1,
+            Some(format!("Failed to prepare ramdump file: {:?}", e)),
+        )
+    })?;
+    Ok(ramdump)
+}
+
 fn is_protected(config: &VirtualMachineConfig) -> bool {
     match config {
         VirtualMachineConfig::RawConfig(config) => config.protectedVm,
@@ -1017,7 +1041,7 @@ fn extract_gdb_port(config: &VirtualMachineConfig) -> Option<NonZeroU16> {
 }
 
 fn clone_or_prepare_logger_fd(
-    config: &VirtualMachineConfig,
+    debug_config: &DebugConfig,
     fd: Option<&ParcelFileDescriptor>,
     tag: String,
 ) -> Result<Option<File>, Status> {
@@ -1025,10 +1049,7 @@ fn clone_or_prepare_logger_fd(
         return Ok(Some(clone_file(fd)?));
     }
 
-    let VirtualMachineConfig::AppConfig(app_config) = config else {
-        return Ok(None);
-    };
-    if !should_prepare_console_output(app_config.debugLevel) {
+    if !debug_config.should_prepare_console_output() {
         return Ok(None);
     };
 

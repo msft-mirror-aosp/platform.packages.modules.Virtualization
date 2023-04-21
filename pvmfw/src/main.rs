@@ -16,13 +16,12 @@
 
 #![no_main]
 #![no_std]
-#![feature(default_alloc_error_handler)]
 
 extern crate alloc;
 
+mod bootargs;
 mod config;
 mod crypto;
-mod debug_policy;
 mod dice;
 mod entry;
 mod exceptions;
@@ -33,10 +32,8 @@ mod helpers;
 mod hvc;
 mod instance;
 mod memory;
-mod mmio_guard;
 mod mmu;
 mod rand;
-mod smccc;
 mod virtio;
 
 use alloc::boxed::Box;
@@ -56,6 +53,7 @@ use fdtpci::{PciError, PciInfo};
 use libfdt::Fdt;
 use log::{debug, error, info, trace};
 use pvmfw_avb::verify_payload;
+use pvmfw_avb::DebugLevel;
 use pvmfw_embedded_key::PUBLIC_KEY;
 
 const NEXT_BCC_SIZE: usize = GUEST_PAGE_SIZE;
@@ -65,6 +63,7 @@ fn main(
     signed_kernel: &[u8],
     ramdisk: Option<&[u8]>,
     current_bcc_handover: &[u8],
+    debug_policy: Option<&mut [u8]>,
     memory: &mut MemoryTracker,
 ) -> Result<(), RebootReason> {
     info!("pVM firmware");
@@ -122,10 +121,12 @@ fn main(
     flush(next_bcc);
 
     let strict_boot = true;
-    modify_for_next_stage(fdt, next_bcc, new_instance, strict_boot).map_err(|e| {
-        error!("Failed to configure device tree: {e}");
-        RebootReason::InternalError
-    })?;
+    let debuggable = verified_boot_data.debug_level != DebugLevel::None;
+    modify_for_next_stage(fdt, next_bcc, new_instance, strict_boot, debug_policy, debuggable)
+        .map_err(|e| {
+            error!("Failed to configure device tree: {e}");
+            RebootReason::InternalError
+        })?;
 
     info!("Starting payload...");
     Ok(())

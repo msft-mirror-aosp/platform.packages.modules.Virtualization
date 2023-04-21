@@ -15,7 +15,8 @@
 //! Functions for running instances of `crosvm`.
 
 use crate::aidl::{remove_temporary_files, Cid, VirtualMachineCallbacks};
-use crate::atom::{get_num_cpus, write_vm_exited_stats};
+use crate::atom::{get_num_cpus, write_vm_exited_stats_sync};
+use crate::debug_config::DebugConfig;
 use anyhow::{anyhow, bail, Context, Error, Result};
 use command_fds::CommandFdExt;
 use lazy_static::lazy_static;
@@ -41,7 +42,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 use std::thread::{self, JoinHandle};
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::DeathReason::DeathReason;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::MemoryTrimLevel::MemoryTrimLevel;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    MemoryTrimLevel::MemoryTrimLevel,
+    VirtualMachineAppConfig::DebugLevel::DebugLevel
+};
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
 use binder::Strong;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
@@ -49,6 +53,7 @@ use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
 use rpcbinder::RpcServer;
 
 /// external/crosvm
+use base::AsRawDescriptor;
 use base::UnixSeqpacketListener;
 use vm_control::{BalloonControlCommand, VmRequest, VmResponse};
 
@@ -97,6 +102,7 @@ pub struct CrosvmConfig {
     pub disks: Vec<DiskFile>,
     pub params: Option<String>,
     pub protected: bool,
+    pub debug_config: DebugConfig,
     pub memory_mib: Option<NonZeroU32>,
     pub cpus: Option<NonZeroU32>,
     pub host_cpu_topology: bool,
@@ -375,7 +381,7 @@ impl VmInstance {
         self.callbacks.callback_on_died(self.cid, death_reason);
 
         let vm_metric = self.vm_metric.lock().unwrap();
-        write_vm_exited_stats(
+        write_vm_exited_stats_sync(
             self.requester_uid as i32,
             &self.name,
             death_reason,
@@ -486,6 +492,10 @@ impl VmInstance {
         // first, as monitor_vm_exit() takes it as well.
         monitor_vm_exit_thread.map(JoinHandle::join);
 
+        // Now that the VM has been killed, shut down the VirtualMachineService
+        // server to eagerly free up the server threads.
+        self.vm_context.vm_server.shutdown()?;
+
         Ok(())
     }
 
@@ -532,6 +542,9 @@ impl VmInstance {
     /// Checks if ramdump has been created. If so, send it to tombstoned.
     fn handle_ramdump(&self) -> Result<(), Error> {
         let ramdump_path = self.temporary_directory.join("ramdump");
+        if !ramdump_path.as_path().try_exists()? {
+            return Ok(());
+        }
         if std::fs::metadata(&ramdump_path)?.len() > 0 {
             Self::send_ramdump_to_tombstoned(&ramdump_path)?;
         }
@@ -626,10 +639,6 @@ fn death_reason(result: &Result<ExitStatus, io::Error>, mut failure_reason: &str
             "PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED" => {
                 return DeathReason::PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED
             }
-            "BOOTLOADER_PUBLIC_KEY_MISMATCH" => return DeathReason::BOOTLOADER_PUBLIC_KEY_MISMATCH,
-            "BOOTLOADER_INSTANCE_IMAGE_CHANGED" => {
-                return DeathReason::BOOTLOADER_INSTANCE_IMAGE_CHANGED
-            }
             "MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE" => {
                 return DeathReason::MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE
             }
@@ -665,16 +674,6 @@ fn exit_signal(result: &Result<ExitStatus, io::Error>) -> Option<i32> {
         Ok(status) => status.signal(),
         Err(_) => None,
     }
-}
-
-fn ramdump_enabled() -> bool {
-    if let Ok(mut file) = File::open("/proc/device-tree/avf/guest/common/ramdump") {
-        let mut ramdump: [u8; 4] = Default::default();
-        file.read_exact(&mut ramdump).map_err(|_| false).unwrap();
-        // DT spec uses big endian although Android is always little endian.
-        return u32::from_be_bytes(ramdump) == 1;
-    }
-    false
 }
 
 /// Starts an instance of `crosvm` to manage a new VM.
@@ -723,13 +722,21 @@ fn run_vm(
         // Context in b/238324526.
         command.arg("--unmap-guest-memory-on-fork");
 
-        // Protected VM needs to reserve memory for ramdump here. pvmfw will drop This
-        // if ramdump should be disabled (via debug policy). Note that we reserve more
-        // memory for the restricted dma pool.
-        let ramdump_reserve = RAMDUMP_RESERVED_MIB + swiotlb_size_mib;
-        command.arg("--params").arg(format!("crashkernel={ramdump_reserve}M"));
-    } else if ramdump_enabled() {
+        if config.ramdump.is_some() {
+            // Protected VM needs to reserve memory for ramdump here. Note that we reserve more
+            // memory for the restricted dma pool.
+            let ramdump_reserve = RAMDUMP_RESERVED_MIB + swiotlb_size_mib;
+            command.arg("--params").arg(format!("crashkernel={ramdump_reserve}M"));
+        }
+    } else if config.ramdump.is_some() {
         command.arg("--params").arg(format!("crashkernel={RAMDUMP_RESERVED_MIB}M"));
+    }
+    if config.debug_config.debug_level == DebugLevel::NONE
+        && config.debug_config.should_prepare_console_output()
+    {
+        // bootconfig.normal will be used, but we need log.
+        command.arg("--params").arg("printk.devkmsg=on");
+        command.arg("--params").arg("console=hvc0");
     }
 
     if let Some(memory_mib) = config.memory_mib {
@@ -813,7 +820,9 @@ fn run_vm(
 
     let control_server_socket = UnixSeqpacketListener::bind(crosvm_control_socket_path)
         .context("failed to create control server")?;
-    command.arg("--socket").arg(add_preserved_fd(&mut preserved_fds, &control_server_socket));
+    command
+        .arg("--socket")
+        .arg(add_preserved_fd(&mut preserved_fds, &control_server_socket.as_raw_descriptor()));
 
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);

@@ -21,7 +21,7 @@ mod payload;
 mod swap;
 mod vm_payload_service;
 
-use crate::dice::{DiceDriver, derive_sealing_key};
+use crate::dice::{DiceDriver, derive_sealing_key, format_payload_config_descriptor};
 use crate::instance::{ApexData, ApkData, InstanceDisk, MicrodroidData, RootHash};
 use crate::vm_payload_service::register_vm_payload_service;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::ErrorCode::ErrorCode;
@@ -35,7 +35,6 @@ use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use apkverify::{get_public_key_der, verify, V4Signature};
 use binder::Strong;
 use diced_open_dice::OwnedDiceArtifacts;
-use diced_utils::cbor::{encode_header, encode_number};
 use glob::glob;
 use itertools::sorted;
 use libc::VMADDR_CID_HOST;
@@ -56,8 +55,8 @@ use std::borrow::Cow::{Borrowed, Owned};
 use std::convert::TryInto;
 use std::env;
 use std::ffi::CString;
-use std::fs::{self, create_dir, OpenOptions};
-use std::io::Write;
+use std::fs::{self, create_dir, OpenOptions, File};
+use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -74,6 +73,7 @@ const EXTRA_IDSIG_PATH_PATTERN: &str = "/dev/block/by-name/extra-idsig-*";
 const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
 const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
 const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
+const AVF_DEBUG_POLICY_RAMDUMP: &str = "/sys/firmware/devicetree/base/avf/guest/common/ramdump";
 const DEBUG_MICRODROID_NO_VERIFIED_BOOT: &str =
     "/sys/firmware/devicetree/base/virtualization/guest/debug-microdroid,no-verified-boot";
 
@@ -82,7 +82,6 @@ const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
 const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 
 const APEX_CONFIG_DONE_PROP: &str = "apex_config.done";
-const TOMBSTONE_TRANSMIT_DONE_PROP: &str = "tombstone_transmit.init_done";
 const DEBUGGABLE_PROP: &str = "ro.boot.microdroid.debuggable";
 
 // SYNC WITH virtualizationservice/src/crosvm.rs
@@ -287,54 +286,14 @@ fn dice_derivation(
     let code_hash = code_hash_ctx.finish();
     let authority_hash = authority_hash_ctx.finish();
 
-    // {
-    //   -70002: "Microdroid payload",
-    //   ? -71000: tstr // payload_config_path
-    //   ? -71001: PayloadConfig
-    // }
-    // PayloadConfig = {
-    //   1: tstr // payload_binary_name
-    // }
-
-    let mut config_desc = vec![
-        0xa2, // map(2)
-        0x3a, 0x00, 0x01, 0x11, 0x71, // -70002
-        0x72, 0x4d, 0x69, 0x63, 0x72, 0x6f, 0x64, 0x72, 0x6f, 0x69, 0x64, 0x20, 0x70, 0x61, 0x79,
-        0x6c, 0x6f, 0x61, 0x64, // "Microdroid payload"
-    ];
-
-    match payload_metadata {
-        PayloadMetadata::config_path(payload_config_path) => {
-            encode_negative_number(-71000, &mut config_desc)?;
-            encode_tstr(payload_config_path, &mut config_desc)?;
-        }
-        PayloadMetadata::config(payload_config) => {
-            encode_negative_number(-71001, &mut config_desc)?;
-            encode_header(5, 1, &mut config_desc)?; // map(1)
-            encode_number(1, &mut config_desc)?;
-            encode_tstr(&payload_config.payload_binary_name, &mut config_desc)?;
-        }
-    }
+    let config_descriptor = format_payload_config_descriptor(payload_metadata)?;
 
     // Check debuggability, conservatively assuming it is debuggable
     let debuggable = system_properties::read_bool(DEBUGGABLE_PROP, true)?;
 
     // Send the details to diced
     let hidden = verified_data.salt.clone().try_into().unwrap();
-    dice.derive(code_hash, &config_desc, authority_hash, debuggable, hidden)
-}
-
-fn encode_tstr(tstr: &str, buffer: &mut Vec<u8>) -> Result<()> {
-    let bytes = tstr.as_bytes();
-    encode_header(3, bytes.len().try_into().unwrap(), buffer)?;
-    buffer.extend_from_slice(bytes);
-    Ok(())
-}
-
-fn encode_negative_number(n: i64, buffer: &mut dyn Write) -> Result<()> {
-    ensure!(n < 0);
-    let n = -1 - n;
-    encode_header(1, n.try_into().unwrap(), buffer)
+    dice.derive(code_hash, &config_descriptor, authority_hash, debuggable, hidden)
 }
 
 fn is_strict_boot() -> bool {
@@ -354,6 +313,21 @@ fn should_export_tombstones(config: &VmPayloadConfig) -> bool {
         Some(b) => b,
         None => system_properties::read_bool(DEBUGGABLE_PROP, true).unwrap_or(false),
     }
+}
+
+/// Get debug policy value in bool. It's true iff the value is explicitly set to <1>.
+fn get_debug_policy_bool(path: &'static str) -> Result<Option<bool>> {
+    let mut file = match File::open(path) {
+        Ok(dp) => dp,
+        Err(e) => {
+            info!("{e:?}. Assumes <0>");
+            return Ok(Some(false));
+        }
+    };
+    let mut log: [u8; 4] = Default::default();
+    file.read_exact(&mut log).context("Malformed data in {path}")?;
+    // DT spec uses big endian although Android is always little endian.
+    Ok(Some(u32::from_be_bytes(log) == 1))
 }
 
 fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
@@ -450,13 +424,12 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
         .as_ref()
         .ok_or_else(|| MicrodroidError::InvalidConfig("No task in VM config".to_string()))?;
 
-    if config.extra_apks.len() != verified_data.extra_apks_data.len() {
-        return Err(anyhow!(
-            "config expects {} extra apks, but found {}",
-            config.extra_apks.len(),
-            verified_data.extra_apks_data.len()
-        ));
-    }
+    ensure!(
+        config.extra_apks.len() == verified_data.extra_apks_data.len(),
+        "config expects {} extra apks, but found {}",
+        config.extra_apks.len(),
+        verified_data.extra_apks_data.len()
+    );
     mount_extra_apks(&config, &mut zipfuse)?;
 
     // Wait until apex config is done. (e.g. linker configuration for apexes)
@@ -464,12 +437,11 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
 
     setup_config_sysprops(&config)?;
 
-    // Start tombstone_transmit if enabled
+    // Set export_tombstones if enabled
     if should_export_tombstones(&config) {
-        system_properties::write("tombstone_transmit.start", "1")
-            .context("set tombstone_transmit.start")?;
-    } else {
-        control_service("stop", "tombstoned")?;
+        // This property is read by tombstone_handler.
+        system_properties::write("microdroid_manager.export_tombstones.enabled", "1")
+            .context("set microdroid_manager.export_tombstones.enabled")?;
     }
 
     // Wait until zipfuse has mounted the APKs so we can access the payload
@@ -489,18 +461,8 @@ fn try_run_payload(service: &Strong<dyn IVirtualMachineService>) -> Result<i32> 
     system_properties::write("microdroid_manager.init_done", "1")
         .context("set microdroid_manager.init_done")?;
 
-    // Wait for tombstone_transmit to init
-    if should_export_tombstones(&config) {
-        wait_for_tombstone_transmit_done()?;
-    }
-
     info!("boot completed, time to run payload");
     exec_task(task, service).context("Failed to run payload")
-}
-
-fn control_service(action: &str, service: &str) -> Result<()> {
-    system_properties::write(&format!("ctl.{}", action), service)
-        .with_context(|| format!("Failed to {} {}", action, service))
 }
 
 struct ApkDmverityArgument<'a> {
@@ -604,9 +566,9 @@ fn verify_payload(
     let start_time = SystemTime::now();
 
     // Verify main APK
-    let root_hash = saved_data.map(|d| &d.apk_data.root_hash);
     let root_hash_from_idsig = get_apk_root_hash_from_idsig(MAIN_APK_IDSIG_PATH)?;
-    let root_hash_trustful = root_hash == Some(&root_hash_from_idsig);
+    let root_hash_trustful =
+        saved_data.map(|d| d.apk_data.root_hash_eq(root_hash_from_idsig.as_ref())).unwrap_or(false);
 
     // If root_hash can be trusted, pass it to apkdmverity so that it uses the passed root_hash
     // instead of the value read from the idsig file.
@@ -634,42 +596,36 @@ fn verify_payload(
         sorted(glob(EXTRA_APK_PATH_PATTERN)?.collect::<Result<Vec<_>, _>>()?).collect::<Vec<_>>();
     let extra_idsigs =
         sorted(glob(EXTRA_IDSIG_PATH_PATTERN)?.collect::<Result<Vec<_>, _>>()?).collect::<Vec<_>>();
-    if extra_apks.len() != extra_idsigs.len() {
-        return Err(anyhow!(
-            "Extra apks/idsigs mismatch: {} apks but {} idsigs",
-            extra_apks.len(),
-            extra_idsigs.len()
-        ));
-    }
-    let extra_apks_count = extra_apks.len();
+    ensure!(
+        extra_apks.len() == extra_idsigs.len(),
+        "Extra apks/idsigs mismatch: {} apks but {} idsigs",
+        extra_apks.len(),
+        extra_idsigs.len()
+    );
 
-    let (extra_apk_names, extra_root_hashes_from_idsig): (Vec<_>, Vec<_>) = extra_idsigs
+    let extra_root_hashes_from_idsig: Vec<_> = extra_idsigs
         .iter()
-        .enumerate()
-        .map(|(i, extra_idsig)| {
-            (
-                format!("extra-apk-{}", i),
-                get_apk_root_hash_from_idsig(extra_idsig)
-                    .expect("Can't find root hash from extra idsig"),
-            )
-        })
-        .unzip();
-
-    let saved_extra_root_hashes: Vec<_> = saved_data
-        .map(|d| d.extra_apks_data.iter().map(|apk_data| &apk_data.root_hash).collect())
-        .unwrap_or_else(Vec::new);
-    let extra_root_hashes_trustful: Vec<_> = extra_root_hashes_from_idsig
-        .iter()
-        .enumerate()
-        .map(|(i, root_hash_from_idsig)| {
-            saved_extra_root_hashes.get(i).copied() == Some(root_hash_from_idsig)
+        .map(|idsig| {
+            get_apk_root_hash_from_idsig(idsig).expect("Can't find root hash from extra idsig")
         })
         .collect();
 
-    for i in 0..extra_apks_count {
+    let extra_root_hashes_trustful: Vec<_> = if let Some(data) = saved_data {
+        extra_root_hashes_from_idsig
+            .iter()
+            .enumerate()
+            .map(|(i, root_hash)| data.extra_apk_root_hash_eq(i, root_hash))
+            .collect()
+    } else {
+        vec![false; extra_root_hashes_from_idsig.len()]
+    };
+    let extra_apk_names: Vec<_> =
+        (0..extra_apks.len()).map(|i| format!("extra-apk-{}", i)).collect();
+
+    for (i, extra_apk) in extra_apks.iter().enumerate() {
         apkdmverity_arguments.push({
             ApkDmverityArgument {
-                apk: extra_apks[i].to_str().unwrap(),
+                apk: extra_apk.to_str().unwrap(),
                 idsig: extra_idsigs[i].to_str().unwrap(),
                 name: &extra_apk_names[i],
                 saved_root_hash: if extra_root_hashes_trustful[i] {
@@ -774,11 +730,6 @@ fn wait_for_apex_config_done() -> Result<()> {
     wait_for_property_true(APEX_CONFIG_DONE_PROP).context("Failed waiting for apex config done")
 }
 
-fn wait_for_tombstone_transmit_done() -> Result<()> {
-    wait_for_property_true(TOMBSTONE_TRANSMIT_DONE_PROP)
-        .context("Failed waiting for tombstone transmit done")
-}
-
 fn wait_for_property_true(property_name: &str) -> Result<()> {
     let mut prop = PropertyWatcher::new(property_name)?;
     loop {
@@ -795,14 +746,21 @@ fn get_apk_root_hash_from_idsig<P: AsRef<Path>>(idsig_path: P) -> Result<Box<Roo
 }
 
 fn get_public_key_from_apk(apk: &str, root_hash_trustful: bool) -> Result<Box<[u8]>> {
+    let current_sdk = get_current_sdk()?;
     if !root_hash_trustful {
-        verify(apk).context(MicrodroidError::PayloadVerificationFailed(format!(
+        verify(apk, current_sdk).context(MicrodroidError::PayloadVerificationFailed(format!(
             "failed to verify {}",
             apk
         )))
     } else {
-        get_public_key_der(apk)
+        get_public_key_der(apk, current_sdk)
     }
+}
+
+fn get_current_sdk() -> Result<u32> {
+    let current_sdk = system_properties::read("ro.build.version.sdk")?;
+    let current_sdk = current_sdk.ok_or_else(|| anyhow!("SDK version missing"))?;
+    current_sdk.parse().context("Malformed SDK version")
 }
 
 fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
@@ -832,16 +790,27 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
     }
 }
 
-/// Loads the crashkernel into memory using kexec if the VM is loaded with `crashkernel=' parameter
-/// in the cmdline.
+/// Loads the crashkernel into memory using kexec if debuggable or debug policy says so.
+/// The VM should be loaded with `crashkernel=' parameter in the cmdline to allocate memory
+/// for crashkernel.
 fn load_crashkernel_if_supported() -> Result<()> {
     let supported = std::fs::read_to_string("/proc/cmdline")?.contains(" crashkernel=");
     info!("ramdump supported: {}", supported);
-    if supported {
+
+    if !supported {
+        return Ok(());
+    }
+
+    let debuggable = system_properties::read_bool(DEBUGGABLE_PROP, true)?;
+    let ramdump = get_debug_policy_bool(AVF_DEBUG_POLICY_RAMDUMP)?.unwrap_or_default();
+    let requested = debuggable | ramdump;
+
+    if requested {
         let status = Command::new("/system/bin/kexec_load").status()?;
         if !status.success() {
             return Err(anyhow!("Failed to load crashkernel: {:?}", status));
         }
+        info!("ramdump is loaded: debuggable={debuggable}, ramdump={ramdump}");
     }
     Ok(())
 }

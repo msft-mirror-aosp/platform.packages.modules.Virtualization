@@ -28,11 +28,15 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
+import static org.junit.Assume.assumeTrue;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import com.google.common.base.Strings;
 import com.google.common.truth.BooleanSubject;
 
+import android.app.Instrumentation;
+import android.app.UiAutomation;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.ContextWrapper;
@@ -45,6 +49,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.ParcelFileDescriptor.AutoCloseInputStream;
 import android.os.ParcelFileDescriptor.AutoCloseOutputStream;
 import android.os.SystemProperties;
+import android.system.OsConstants;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineCallback;
 import android.system.virtualmachine.VirtualMachineConfig;
@@ -52,14 +57,18 @@ import android.system.virtualmachine.VirtualMachineDescriptor;
 import android.system.virtualmachine.VirtualMachineException;
 import android.system.virtualmachine.VirtualMachineManager;
 
+import androidx.test.platform.app.InstrumentationRegistry;
+
 import com.android.compatibility.common.util.CddTest;
+import com.android.compatibility.common.util.VsrTest;
 import com.android.microdroid.test.device.MicrodroidDeviceTestBase;
 import com.android.microdroid.test.vmshare.IVmShareTestService;
+import com.android.microdroid.testservice.IAppCallback;
 import com.android.microdroid.testservice.ITestService;
+import com.android.microdroid.testservice.IVmCallback;
 
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.function.ThrowingRunnable;
@@ -133,7 +142,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     private static final String VM_SHARE_APP_PACKAGE_NAME = "com.android.microdroid.vmshare_app";
 
     private void createAndConnectToVmHelper(int cpuTopology) throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -178,7 +187,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
     public void createAndRunNoDebugVm() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         // For most of our tests we use a debug VM so failures can be diagnosed.
         // But we do need non-debug VMs to work, so run one.
@@ -205,7 +214,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 "9.17/C-1-4",
             })
     public void createVmRequiresPermission() {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         revokePermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
 
@@ -226,7 +235,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
     public void autoCloseVm() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -311,7 +320,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
     public void vmLifecycleChecks() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -360,7 +369,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
     public void connectVsock() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -394,6 +403,59 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         });
         testResults.assertNoException();
         assertThat(response.get()).isEqualTo(new StringBuilder(request).reverse().toString());
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1"})
+    public void binderCallbacksWork() throws Exception {
+        assumeSupportedDevice();
+
+        VirtualMachineConfig config =
+                newVmConfigBuilder()
+                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                        .setMemoryBytes(minMemoryRequired())
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_vm", config);
+
+        String request = "Hello";
+        CompletableFuture<String> response = new CompletableFuture<>();
+
+        IAppCallback appCallback =
+                new IAppCallback.Stub() {
+                    @Override
+                    public void setVmCallback(IVmCallback vmCallback) {
+                        // Do this on a separate thread to simulate an asynchronous trigger,
+                        // and to make sure it doesn't happen in the context of an inbound binder
+                        // call.
+                        new Thread() {
+                            @Override
+                            public void run() {
+                                try {
+                                    vmCallback.echoMessage(request);
+                                } catch (Exception e) {
+                                    response.completeExceptionally(e);
+                                }
+                            }
+                        }.start();
+                    }
+
+                    @Override
+                    public void onEchoRequestReceived(String message) {
+                        response.complete(message);
+                    }
+                };
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (service, results) -> {
+                            service.requestCallback(appCallback);
+                            response.get(10, TimeUnit.SECONDS);
+                        });
+        testResults.assertNoException();
+        assertThat(response.getNow("no response")).isEqualTo("Received: " + request);
     }
 
     @Test
@@ -577,8 +639,16 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
+    public void testAvfRequiresUpdatableApex() throws Exception {
+        assertWithMessage("Devices that support AVF must also support updatable APEX")
+                .that(SystemProperties.getBoolean("ro.apex.updatable", false))
+                .isTrue();
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1"})
     public void vmmGetAndCreate() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -676,7 +746,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-1-4",
     })
     public void createVmWithConfigRequiresPermission() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -699,7 +769,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-1-1",
     })
     public void deleteVm() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -727,7 +797,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 "9.17/C-1-1",
             })
     public void deleteVmFiles() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -760,7 +830,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-1-1",
     })
     public void validApkPathIsAccepted() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -797,7 +867,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-2-1"
     })
     public void extraApk() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig config =
@@ -865,7 +935,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     private void changeDebugLevel(int fromLevel, int toLevel) throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig.Builder builder =
                 newVmConfigBuilder()
@@ -936,7 +1006,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-2-7"
     })
     public void instancesOfSameVmHaveDifferentCdis() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig normalConfig =
@@ -962,7 +1032,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-2-7"
     })
     public void sameInstanceKeepsSameCdis() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
         assume().withMessage("Skip on CF. Too Slow. b/257270529").that(isCuttlefish()).isFalse();
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
@@ -987,7 +1057,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-2-7"
     })
     public void bccIsSuperficiallyWellFormed() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig normalConfig =
@@ -1026,7 +1096,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-1-2"
     })
     public void accessToCdisIsRestricted() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -1115,7 +1185,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @Ignore("b/249723852")
     @CddTest(requirements = {
             "9.17/C-1-1",
             "9.17/C-2-7"
@@ -1226,7 +1295,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     public void importedVmAndOriginalVmHaveTheSameCdi() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
         // Arrange
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig config =
@@ -1325,7 +1394,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
     public void encryptedStorageAvailable() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -1349,7 +1418,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
     public void encryptedStorageIsInaccessibleToDifferentVm() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -1410,7 +1479,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
     public void microdroidLauncherHasEmptyCapabilities() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         final VirtualMachineConfig vmConfig =
                 newVmConfigBuilder()
@@ -1435,7 +1504,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
     public void encryptedStorageIsPersistent() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -1472,7 +1541,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
     public void canReadFileFromAssets_debugFull() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -1496,7 +1565,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     public void outputShouldBeExplicitlyCaptured() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         final VirtualMachineConfig vmConfig =
                 new VirtualMachineConfig.Builder(getContext())
@@ -1549,21 +1618,39 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     public void outputIsRedirectedToLogcatIfNotCaptured() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         assertThat(checkVmOutputIsRedirectedToLogcat(true)).isTrue();
     }
 
+    private boolean setSystemProperties(String name, String value) {
+        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
+        UiAutomation uiAutomation = instrumentation.getUiAutomation();
+        String cmd = "setprop " + name + " " + (value.isEmpty() ? "\"\"" : value);
+        return runInShellWithStderr(TAG, uiAutomation, cmd).trim().isEmpty();
+    }
+
     @Test
     public void outputIsNotRedirectedToLogcatIfNotDebuggable() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
-        assertThat(checkVmOutputIsRedirectedToLogcat(false)).isFalse();
+        // Disable debug policy to ensure no log output.
+        String sysprop = "hypervisor.virtualizationmanager.debug_policy.path";
+        String old = SystemProperties.get(sysprop);
+        assumeTrue(
+                "Can't disable debug policy. Perhapse user build?",
+                setSystemProperties(sysprop, ""));
+
+        try {
+            assertThat(checkVmOutputIsRedirectedToLogcat(false)).isFalse();
+        } finally {
+            assertThat(setSystemProperties(sysprop, old)).isTrue();
+        }
     }
 
     @Test
     public void testStartVmWithPayloadOfAnotherApp() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         Context ctx = getContext();
         Context otherAppCtx = ctx.createPackageContext(VM_SHARE_APP_PACKAGE_NAME, 0);
@@ -1591,7 +1678,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     public void testVmDescriptorParcelUnparcel_noTrustedStorage() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -1625,7 +1712,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     public void testVmDescriptorParcelUnparcel_withTrustedStorage() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         VirtualMachineConfig config =
                 newVmConfigBuilder()
@@ -1679,7 +1766,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     public void testShareVmWithAnotherApp() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         Context ctx = getContext();
         Context otherAppCtx = ctx.createPackageContext(VM_SHARE_APP_PACKAGE_NAME, 0);
@@ -1727,7 +1814,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     public void testShareVmWithAnotherApp_encryptedStorage() throws Exception {
-        assumeSupportedKernel();
+        assumeSupportedDevice();
 
         Context ctx = getContext();
         Context otherAppCtx = ctx.createPackageContext(VM_SHARE_APP_PACKAGE_NAME, 0);
@@ -1776,6 +1863,117 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             assertThat(result).isEqualTo(EXAMPLE_STRING);
         } finally {
             ctx.unbindService(connection);
+        }
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-5"})
+    public void testFileUnderBinHasExecutePermission() throws Exception {
+        assumeSupportedDevice();
+
+        VirtualMachineConfig vmConfig =
+                newVmConfigBuilder()
+                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                        .setMemoryBytes(minMemoryRequired())
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_perms", vmConfig);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mFileMode = ts.getFilePermissions("/mnt/apk/bin/measure_io");
+                        });
+
+        testResults.assertNoException();
+        int allPermissionsMask =
+                OsConstants.S_IRUSR
+                        | OsConstants.S_IWUSR
+                        | OsConstants.S_IXUSR
+                        | OsConstants.S_IRGRP
+                        | OsConstants.S_IWGRP
+                        | OsConstants.S_IXGRP
+                        | OsConstants.S_IROTH
+                        | OsConstants.S_IWOTH
+                        | OsConstants.S_IXOTH;
+        assertThat(testResults.mFileMode & allPermissionsMask)
+                .isEqualTo(OsConstants.S_IRUSR | OsConstants.S_IXUSR);
+    }
+
+    // Taken from bionic/libs/kernel/uapi/linux/mounth.h.
+    private static final int MS_NOEXEC = 8;
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-5"})
+    public void dataIsMountedWithNoExec() throws Exception {
+        assumeSupportedDevice();
+
+        VirtualMachineConfig vmConfig =
+                newVmConfigBuilder()
+                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_data_mount", vmConfig);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mMountFlags = ts.getMountFlags("/data");
+                        });
+
+        assertThat(testResults.mException).isNull();
+        assertWithMessage("/data should be mounted with MS_NOEXEC")
+                .that(testResults.mMountFlags & MS_NOEXEC)
+                .isEqualTo(MS_NOEXEC);
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-5"})
+    public void encryptedStoreIsMountedWithNoExec() throws Exception {
+        assumeSupportedDevice();
+
+        VirtualMachineConfig vmConfig =
+                newVmConfigBuilder()
+                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setEncryptedStorageBytes(4_000_000)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_encstore_no_exec", vmConfig);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mMountFlags = ts.getMountFlags("/mnt/encryptedstore");
+                        });
+
+        assertThat(testResults.mException).isNull();
+        assertWithMessage("/mnt/encryptedstore should be mounted with MS_NOEXEC")
+                .that(testResults.mMountFlags & MS_NOEXEC)
+                .isEqualTo(MS_NOEXEC);
+    }
+
+    @Test
+    @VsrTest(requirements = {"VSR-7.1-001.003"})
+    public void kernelVersionRequirement() throws Exception {
+        int firstApiLevel = SystemProperties.getInt("ro.product.first_api_level", 0);
+        assume().withMessage("Skip on devices launched before Android 14 (API level 34)")
+                .that(firstApiLevel)
+                .isAtLeast(34);
+
+        String[] tokens = KERNEL_VERSION.split("\\.");
+        int major = Integer.parseInt(tokens[0]);
+        int minor = Integer.parseInt(tokens[1]);
+
+        // Check kernel version >= 5.15
+        assertTrue(major >= 5);
+        if (major == 5) {
+            assertTrue(minor >= 15);
         }
     }
 
@@ -1848,7 +2046,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         return 0;
     }
 
-    private void assumeSupportedKernel() {
+    private void assumeSupportedDevice() {
         assume()
                 .withMessage("Skip on 5.4 kernel. b/218303240")
                 .that(KERNEL_VERSION)

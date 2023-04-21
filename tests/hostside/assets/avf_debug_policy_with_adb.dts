@@ -8,8 +8,8 @@
         __overlay__ {
             avf {
                 guest {
-                    common {
-                        log = <1>;
+                    microdroid {
+                        adb = <1>;
                     };
                 };
             };

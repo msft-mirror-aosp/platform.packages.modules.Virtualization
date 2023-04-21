@@ -21,6 +21,9 @@ use core::mem::MaybeUninit;
 use core::num::NonZeroU32;
 use core::ptr;
 
+use crate::cstr;
+
+use bssl_ffi::CRYPTO_library_init;
 use bssl_ffi::ERR_get_error_line;
 use bssl_ffi::ERR_lib_error_string;
 use bssl_ffi::ERR_reason_error_string;
@@ -81,14 +84,10 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let unknown_library = CStr::from_bytes_with_nul(b"{unknown library}\0").unwrap();
-        let unknown_reason = CStr::from_bytes_with_nul(b"{unknown reason}\0").unwrap();
-        let unknown_file = CStr::from_bytes_with_nul(b"??\0").unwrap();
-
         let packed = self.packed_value();
-        let library = self.library_name().unwrap_or(unknown_library).to_str().unwrap();
-        let reason = self.reason().unwrap_or(unknown_reason).to_str().unwrap();
-        let file = self.file.unwrap_or(unknown_file).to_str().unwrap();
+        let library = self.library_name().unwrap_or(cstr!("{unknown library}")).to_str().unwrap();
+        let reason = self.reason().unwrap_or(cstr!("{unknown reason}")).to_str().unwrap();
+        let file = self.file.unwrap_or(cstr!("??")).to_str().unwrap();
         let line = self.line;
 
         write!(f, "{file}:{line}: {library}: {reason} ({packed:#x})")
@@ -249,13 +248,14 @@ impl AeadCtx {
 ///
 /// # Safety
 ///
-/// The caller needs to ensure that the pointer points to a valid C string and that the C lifetime
-/// of the string is compatible with a static Rust lifetime.
+/// The caller needs to ensure that the pointer is null or points to a valid C string and that the
+/// C lifetime of the string is compatible with a static Rust lifetime.
 unsafe fn as_static_cstr(p: *const c_char) -> Option<&'static CStr> {
     if p.is_null() {
         None
     } else {
-        Some(CStr::from_ptr(p))
+        // Safety: Safe given the requirements of this function.
+        Some(unsafe { CStr::from_ptr(p) })
     }
 }
 
@@ -299,4 +299,9 @@ pub fn hkdf_sh512<const N: usize>(secret: &[u8], salt: &[u8], info: &[u8]) -> Re
     } else {
         Err(ErrorIterator {})
     }
+}
+
+pub fn init() {
+    // SAFETY - Configures the internal state of the library - may be called multiple times.
+    unsafe { CRYPTO_library_init() }
 }

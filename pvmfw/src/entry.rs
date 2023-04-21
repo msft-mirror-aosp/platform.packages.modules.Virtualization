@@ -15,17 +15,17 @@
 //! Low-level entry and exit points of pvmfw.
 
 use crate::config;
-use crate::debug_policy::{handle_debug_policy, DebugPolicyError};
+use crate::crypto;
 use crate::fdt;
 use crate::heap;
 use crate::helpers;
-use crate::memory::MemoryTracker;
-use crate::mmio_guard;
+use crate::memory::{MemoryTracker, MEMORY};
 use crate::mmu;
 use crate::rand;
 use core::arch::asm;
 use core::num::NonZeroUsize;
 use core::slice;
+use hyp::get_hypervisor;
 use log::debug;
 use log::error;
 use log::info;
@@ -51,16 +51,6 @@ pub enum RebootReason {
     PayloadVerificationError,
     /// DICE layering process failed.
     SecretDerivationError,
-}
-
-impl From<DebugPolicyError> for RebootReason {
-    fn from(error: DebugPolicyError) -> Self {
-        match error {
-            DebugPolicyError::Fdt(_, _) => RebootReason::InvalidFdt,
-            DebugPolicyError::DebugPolicyFdt(_, _) => RebootReason::InvalidConfig,
-            DebugPolicyError::OverlaidFdt(_, _) => RebootReason::InternalError,
-        }
-    }
 }
 
 main!(start);
@@ -109,37 +99,17 @@ impl<'a> MemorySlices<'a> {
             RebootReason::InvalidFdt
         })?;
 
+        let info = fdt::sanitize_device_tree(fdt)?;
         debug!("Fdt passed validation!");
 
-        let memory_range = fdt
-            .memory()
-            .map_err(|e| {
-                error!("Failed to get /memory from the DT: {e}");
-                RebootReason::InvalidFdt
-            })?
-            .ok_or_else(|| {
-                error!("Node /memory was found empty");
-                RebootReason::InvalidFdt
-            })?
-            .next()
-            .ok_or_else(|| {
-                error!("Failed to read the memory size from the FDT");
-                RebootReason::InternalError
-            })?;
-
+        let memory_range = info.memory_range;
         debug!("Resizing MemoryTracker to range {memory_range:#x?}");
-
         memory.shrink(&memory_range).map_err(|_| {
             error!("Failed to use memory range value from DT: {memory_range:#x?}");
             RebootReason::InvalidFdt
         })?;
 
-        let kernel_range = fdt::kernel_range(fdt).map_err(|e| {
-            error!("Error while attempting to read the kernel range from the DT: {e}");
-            RebootReason::InvalidFdt
-        })?;
-
-        let kernel_range = if let Some(r) = kernel_range {
+        let kernel_range = if let Some(r) = info.kernel_range {
             memory.alloc_range(&r).map_err(|e| {
                 error!("Failed to obtain the kernel range with DT range: {e}");
                 RebootReason::InternalError
@@ -165,12 +135,7 @@ impl<'a> MemorySlices<'a> {
         let kernel =
             unsafe { slice::from_raw_parts(kernel_range.start as *const u8, kernel_range.len()) };
 
-        let ramdisk_range = fdt::initrd_range(fdt).map_err(|e| {
-            error!("An error occurred while locating the ramdisk in the device tree: {e}");
-            RebootReason::InternalError
-        })?;
-
-        let ramdisk = if let Some(r) = ramdisk_range {
+        let ramdisk = if let Some(r) = info.initrd_range {
             debug!("Located ramdisk at {r:?}");
             let r = memory.alloc_range(&r).map_err(|e| {
                 error!("Failed to obtain the initrd range: {e}");
@@ -207,15 +172,17 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<usize
     // Use debug!() to avoid printing to the UART if we failed to configure it as only local
     // builds that have tweaked the logger::init() call will actually attempt to log the message.
 
-    mmio_guard::init().map_err(|e| {
+    get_hypervisor().mmio_guard_init().map_err(|e| {
         debug!("{e}");
         RebootReason::InternalError
     })?;
 
-    mmio_guard::map(console::BASE_ADDRESS).map_err(|e| {
+    get_hypervisor().mmio_guard_map(console::BASE_ADDRESS).map_err(|e| {
         debug!("Failed to configure the UART: {e}");
         RebootReason::InternalError
     })?;
+
+    crypto::init();
 
     // SAFETY - We only get the appended payload from here, once. It is mapped and the linker
     // script prevents it from overlapping with other objects.
@@ -250,8 +217,8 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<usize
     unsafe { page_table.activate() };
     debug!("... Success!");
 
-    let mut memory = MemoryTracker::new(page_table);
-    let slices = MemorySlices::new(fdt, payload, payload_size, &mut memory)?;
+    MEMORY.lock().replace(MemoryTracker::new(page_table));
+    let slices = MemorySlices::new(fdt, payload, payload_size, MEMORY.lock().as_mut().unwrap())?;
 
     rand::init().map_err(|e| {
         error!("Failed to initialize rand: {e}");
@@ -259,28 +226,28 @@ fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<usize
     })?;
 
     // This wrapper allows main() to be blissfully ignorant of platform details.
-    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc_slice, &mut memory)?;
+    crate::main(
+        slices.fdt,
+        slices.kernel,
+        slices.ramdisk,
+        bcc_slice,
+        debug_policy,
+        MEMORY.lock().as_mut().unwrap(),
+    )?;
 
     helpers::flushed_zeroize(bcc_slice);
     helpers::flush(slices.fdt.as_slice());
 
-    // SAFETY - As we `?` the result, there is no risk of using a bad `slices.fdt`.
-    unsafe {
-        handle_debug_policy(slices.fdt, debug_policy).map_err(|e| {
-            error!("Unexpected error when handling debug policy: {e:?}");
-            RebootReason::from(e)
-        })?;
-    }
-
     info!("Expecting a bug making MMIO_GUARD_UNMAP return NOT_SUPPORTED on success");
-    memory.mmio_unmap_all().map_err(|e| {
+    MEMORY.lock().as_mut().unwrap().mmio_unmap_all().map_err(|e| {
         error!("Failed to unshare MMIO ranges: {e}");
         RebootReason::InternalError
     })?;
-    mmio_guard::unmap(console::BASE_ADDRESS).map_err(|e| {
+    get_hypervisor().mmio_guard_unmap(console::BASE_ADDRESS).map_err(|e| {
         error!("Failed to unshare the UART: {e}");
         RebootReason::InternalError
     })?;
+    MEMORY.lock().take().unwrap();
 
     Ok(slices.kernel.as_ptr() as usize)
 }
@@ -350,7 +317,9 @@ unsafe fn get_appended_data_slice() -> &'static mut [u8] {
     // pvmfw is contained in a 2MiB region so the payload can't be larger than the 2MiB alignment.
     let size = helpers::align_up(base, helpers::SIZE_2MB).unwrap() - base;
 
-    slice::from_raw_parts_mut(base as *mut u8, size)
+    // SAFETY: This region is mapped and the linker script prevents it from overlapping with other
+    // objects.
+    unsafe { slice::from_raw_parts_mut(base as *mut u8, size) }
 }
 
 enum AppendedConfigType {
@@ -369,8 +338,13 @@ enum AppendedPayload<'a> {
 impl<'a> AppendedPayload<'a> {
     /// SAFETY - 'data' should respect the alignment of config::Header.
     unsafe fn new(data: &'a mut [u8]) -> Option<Self> {
-        match Self::guess_config_type(data) {
-            AppendedConfigType::Valid => Some(Self::Config(config::Config::new(data).unwrap())),
+        // Safety: This fn has the same constraint as us.
+        match unsafe { Self::guess_config_type(data) } {
+            AppendedConfigType::Valid => {
+                // Safety: This fn has the same constraint as us.
+                let config = unsafe { config::Config::new(data) };
+                Some(Self::Config(config.unwrap()))
+            }
             AppendedConfigType::NotFound if cfg!(feature = "legacy") => {
                 const BCC_SIZE: usize = helpers::SIZE_4KB;
                 warn!("Assuming the appended data at {:?} to be a raw BCC", data.as_ptr());
@@ -380,11 +354,14 @@ impl<'a> AppendedPayload<'a> {
         }
     }
 
+    /// SAFETY - 'data' should respect the alignment of config::Header.
     unsafe fn guess_config_type(data: &mut [u8]) -> AppendedConfigType {
         // This function is necessary to prevent the borrow checker from getting confused
         // about the ownership of data in new(); see https://users.rust-lang.org/t/78467.
         let addr = data.as_ptr();
-        match config::Config::new(data) {
+
+        // Safety: This fn has the same constraint as us.
+        match unsafe { config::Config::new(data) } {
             Err(config::Error::InvalidMagic) => {
                 warn!("No configuration data found at {addr:?}");
                 AppendedConfigType::NotFound

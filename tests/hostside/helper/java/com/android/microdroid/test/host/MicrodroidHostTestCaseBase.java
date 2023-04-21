@@ -67,6 +67,8 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
 
         // remove any leftover files under test root
         android.tryRun("rm", "-rf", TEST_ROOT + "*");
+
+        android.tryRun("mkdir " + TEST_ROOT);
     }
 
     public static void cleanUpVirtualizationTestSetup(ITestDevice androidDevice)
@@ -95,7 +97,7 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
                 DeviceProperties.create(getDevice()::getProperty).getMetricsTag());
     }
 
-    public static void testIfDeviceIsCapable(ITestDevice androidDevice) throws Exception {
+    public static void assumeDeviceIsCapable(ITestDevice androidDevice) throws Exception {
         assumeTrue("Need an actual TestDevice", androidDevice instanceof TestDevice);
         TestDevice testDevice = (TestDevice) androidDevice;
         assumeTrue(
