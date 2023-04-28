@@ -19,6 +19,7 @@ use zeroize::Zeroize;
 
 pub const SIZE_4KB: usize = 4 << 10;
 pub const SIZE_2MB: usize = 2 << 20;
+pub const SIZE_4MB: usize = 4 << 20;
 
 pub const GUEST_PAGE_SIZE: usize = SIZE_4KB;
 
@@ -40,18 +41,19 @@ macro_rules! read_sysreg {
 }
 
 /// Write a value to a system register.
+///
+/// # Safety
+///
+/// Callers must ensure that side effects of updating the system register are properly handled.
 #[macro_export]
 macro_rules! write_sysreg {
     ($sysreg:literal, $val:expr) => {{
         let value: usize = $val;
-        // Safe because it writes a system register and does not affect Rust.
-        unsafe {
-            core::arch::asm!(
-                concat!("msr ", $sysreg, ", {}"),
-                in(reg) value,
-                options(nomem, nostack, preserves_flags),
-            )
-        }
+        core::arch::asm!(
+            concat!("msr ", $sysreg, ", {}"),
+            in(reg) value,
+            options(nomem, nostack, preserves_flags),
+        )
     }};
 }
 
