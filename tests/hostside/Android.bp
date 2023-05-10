@@ -9,34 +9,6 @@ genrule_defaults {
 }
 
 genrule {
-    name: "test_avf_debug_policy_with_ramdump",
-    defaults: ["test_avf_debug_policy_overlay"],
-    srcs: ["assets/avf_debug_policy_with_ramdump.dts"],
-    out: ["avf_debug_policy_with_ramdump.dtbo"],
-}
-
-genrule {
-    name: "test_avf_debug_policy_without_ramdump",
-    defaults: ["test_avf_debug_policy_overlay"],
-    srcs: ["assets/avf_debug_policy_without_ramdump.dts"],
-    out: ["avf_debug_policy_without_ramdump.dtbo"],
-}
-
-genrule {
-    name: "test_avf_debug_policy_with_console_output",
-    defaults: ["test_avf_debug_policy_overlay"],
-    srcs: ["assets/avf_debug_policy_with_console_output.dts"],
-    out: ["avf_debug_policy_with_console_output.dtbo"],
-}
-
-genrule {
-    name: "test_avf_debug_policy_without_console_output",
-    defaults: ["test_avf_debug_policy_overlay"],
-    srcs: ["assets/avf_debug_policy_without_console_output.dts"],
-    out: ["avf_debug_policy_without_console_output.dtbo"],
-}
-
-genrule {
     name: "test_avf_debug_policy_with_adb",
     defaults: ["test_avf_debug_policy_overlay"],
     srcs: ["assets/avf_debug_policy_with_adb.dts"],
@@ -66,6 +38,7 @@ java_test_host {
         "compatibility-host-util",
         "cts-statsd-atom-host-test-utils",
         "microdroid_payload_metadata",
+        "MicrodroidTestPreparer", // Workaround for sandboxed test environment to install this
     ],
     per_testcase_directory: true,
     data: [
@@ -74,10 +47,6 @@ java_test_host {
         ":test.com.android.virt.pem",
         ":test2.com.android.virt.pem",
         ":pvmfw_test",
-        ":test_avf_debug_policy_with_ramdump",
-        ":test_avf_debug_policy_without_ramdump",
-        ":test_avf_debug_policy_with_console_output",
-        ":test_avf_debug_policy_without_console_output",
         ":test_avf_debug_policy_with_adb",
         ":test_avf_debug_policy_without_adb",
         "assets/bcc.dat",
@@ -107,4 +76,5 @@ java_test_host {
         "libsparse",
         "libz",
     ],
+    required: ["MicrodroidTestPreparer"],
 }
