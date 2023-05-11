@@ -15,6 +15,7 @@
 //! Miscellaneous helper functions.
 
 use core::arch::asm;
+use core::ops::Range;
 use zeroize::Zeroize;
 
 pub const SIZE_4KB: usize = 4 << 10;
@@ -22,6 +23,7 @@ pub const SIZE_2MB: usize = 2 << 20;
 pub const SIZE_4MB: usize = 4 << 20;
 
 pub const GUEST_PAGE_SIZE: usize = SIZE_4KB;
+pub const PVMFW_PAGE_SIZE: usize = SIZE_4KB;
 
 /// Read a value from a system register.
 #[macro_export]
@@ -160,6 +162,18 @@ pub fn flatten<T, const N: usize>(original: &[[T; N]]) -> &[T] {
     let len = original.len() * N;
     // SAFETY: [T] has the same layout as [T;N]
     unsafe { core::slice::from_raw_parts(original.as_ptr().cast(), len) }
+}
+
+/// Trait to check containment of one range within another.
+pub(crate) trait RangeExt {
+    /// Returns true if `self` is contained within the `other` range.
+    fn is_within(&self, other: &Self) -> bool;
+}
+
+impl<T: PartialOrd> RangeExt for Range<T> {
+    fn is_within(&self, other: &Self) -> bool {
+        self.start >= other.start && self.end <= other.end
+    }
 }
 
 /// Create &CStr out of &str literal
