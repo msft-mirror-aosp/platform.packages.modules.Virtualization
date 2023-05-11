@@ -15,7 +15,7 @@
 //! Functions for running instances of `crosvm`.
 
 use crate::aidl::{remove_temporary_files, Cid, VirtualMachineCallbacks};
-use crate::atom::{get_num_cpus, write_vm_exited_stats};
+use crate::atom::{get_num_cpus, write_vm_exited_stats_sync};
 use crate::debug_config::DebugConfig;
 use anyhow::{anyhow, bail, Context, Error, Result};
 use command_fds::CommandFdExt;
@@ -381,7 +381,7 @@ impl VmInstance {
         self.callbacks.callback_on_died(self.cid, death_reason);
 
         let vm_metric = self.vm_metric.lock().unwrap();
-        write_vm_exited_stats(
+        write_vm_exited_stats_sync(
             self.requester_uid as i32,
             &self.name,
             death_reason,
@@ -638,10 +638,6 @@ fn death_reason(result: &Result<ExitStatus, io::Error>, mut failure_reason: &str
             }
             "PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED" => {
                 return DeathReason::PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED
-            }
-            "BOOTLOADER_PUBLIC_KEY_MISMATCH" => return DeathReason::BOOTLOADER_PUBLIC_KEY_MISMATCH,
-            "BOOTLOADER_INSTANCE_IMAGE_CHANGED" => {
-                return DeathReason::BOOTLOADER_INSTANCE_IMAGE_CHANGED
             }
             "MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE" => {
                 return DeathReason::MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE

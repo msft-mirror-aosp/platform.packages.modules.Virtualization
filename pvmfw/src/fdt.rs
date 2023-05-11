@@ -14,14 +14,17 @@
 
 //! High-level FDT functions.
 
+use crate::bootargs::BootArgsIterator;
 use crate::cstr;
 use crate::helpers::flatten;
 use crate::helpers::GUEST_PAGE_SIZE;
 use crate::helpers::SIZE_4KB;
 use crate::memory::BASE_ADDR;
 use crate::memory::MAX_ADDR;
+use crate::Box;
 use crate::RebootReason;
 use alloc::ffi::CString;
+use alloc::vec::Vec;
 use core::cmp::max;
 use core::cmp::min;
 use core::ffi::CStr;
@@ -36,6 +39,7 @@ use libfdt::FdtError;
 use libfdt::FdtNode;
 use log::debug;
 use log::error;
+use log::info;
 use tinyvec::ArrayVec;
 
 /// Extract from /config the address range containing the pre-loaded kernel. Absence of /config is
@@ -95,7 +99,9 @@ fn read_bootargs_from(fdt: &Fdt) -> libfdt::Result<Option<CString>> {
 
 fn patch_bootargs(fdt: &mut Fdt, bootargs: &CStr) -> libfdt::Result<()> {
     let mut node = fdt.chosen_mut()?.ok_or(FdtError::NotFound)?;
-    // TODO(b/275306568) filter out dangerous options
+    // This function is called before the verification is done. So, we just copy the bootargs to
+    // the new FDT unmodified. This will be filtered again in the modify_for_next_stage function
+    // if the VM is not debuggable.
     node.setprop(cstr!("bootargs"), bootargs.to_bytes_with_nul())
 }
 
@@ -672,6 +678,8 @@ pub fn modify_for_next_stage(
     bcc: &[u8],
     new_instance: bool,
     strict_boot: bool,
+    debug_policy: Option<&mut [u8]>,
+    debuggable: bool,
 ) -> libfdt::Result<()> {
     fdt.unpack()?;
 
@@ -679,6 +687,19 @@ pub fn modify_for_next_stage(
 
     set_or_clear_chosen_flag(fdt, cstr!("avf,strict-boot"), strict_boot)?;
     set_or_clear_chosen_flag(fdt, cstr!("avf,new-instance"), new_instance)?;
+
+    if let Some(debug_policy) = debug_policy {
+        apply_debug_policy(fdt, debug_policy)?;
+        info!("Debug policy applied.");
+    } else {
+        info!("No debug policy found.");
+    }
+
+    if debuggable {
+        if let Some(bootargs) = read_bootargs_from(fdt)? {
+            filter_out_dangerous_bootargs(fdt, &bootargs)?;
+        }
+    }
 
     fdt.pack()?;
 
@@ -711,4 +732,72 @@ fn set_or_clear_chosen_flag(fdt: &mut Fdt, flag: &CStr, value: bool) -> libfdt::
     }
 
     Ok(())
+}
+
+fn apply_debug_policy(fdt: &mut Fdt, debug_policy: &mut [u8]) -> libfdt::Result<()> {
+    let backup_fdt = Vec::from(fdt.as_slice());
+
+    let overlay = match Fdt::from_mut_slice(debug_policy) {
+        Ok(overlay) => overlay,
+        Err(e) => {
+            info!("Corrupted debug policy found: {e}. Not applying.");
+            return Ok(());
+        }
+    };
+    let backup_overlay = Vec::from(overlay.as_slice());
+
+    // SAFETY - on failure, the corrupted fdts are discarded and are restored using the backups.
+    if let Err(e) = unsafe { fdt.apply_overlay(overlay) } {
+        error!("Failed to apply debug policy: {e}. Recovering...");
+        fdt.copy_from_slice(backup_fdt.as_slice())?;
+        overlay.copy_from_slice(backup_overlay.as_slice())?;
+        // A successful restoration is considered success because an invalid debug policy
+        // shouldn't DOS the pvmfw
+    }
+    Ok(())
+}
+
+fn read_common_debug_policy(fdt: &Fdt, debug_feature_name: &CStr) -> libfdt::Result<bool> {
+    if let Some(node) = fdt.node(cstr!("/avf/guest/common"))? {
+        if let Some(value) = node.getprop_u32(debug_feature_name)? {
+            return Ok(value == 1);
+        }
+    }
+    Ok(false) // if the policy doesn't exist or not 1, don't enable the debug feature
+}
+
+fn filter_out_dangerous_bootargs(fdt: &mut Fdt, bootargs: &CStr) -> libfdt::Result<()> {
+    let has_crashkernel = read_common_debug_policy(fdt, cstr!("ramdump"))?;
+    let has_console = read_common_debug_policy(fdt, cstr!("log"))?;
+
+    let accepted: &[(&str, Box<dyn Fn(Option<&str>) -> bool>)] = &[
+        ("panic", Box::new(|v| if let Some(v) = v { v == "=-1" } else { false })),
+        ("crashkernel", Box::new(|_| has_crashkernel)),
+        ("console", Box::new(|_| has_console)),
+    ];
+
+    // parse and filter out unwanted
+    let mut filtered = Vec::new();
+    for arg in BootArgsIterator::new(bootargs).map_err(|e| {
+        info!("Invalid bootarg: {e}");
+        FdtError::BadValue
+    })? {
+        match accepted.iter().find(|&t| t.0 == arg.name()) {
+            Some((_, pred)) if pred(arg.value()) => filtered.push(arg),
+            _ => debug!("Rejected bootarg {}", arg.as_ref()),
+        }
+    }
+
+    // flatten into a new C-string
+    let mut new_bootargs = Vec::new();
+    for (i, arg) in filtered.iter().enumerate() {
+        if i != 0 {
+            new_bootargs.push(b' '); // separator
+        }
+        new_bootargs.extend_from_slice(arg.as_ref().as_bytes());
+    }
+    new_bootargs.push(b'\0');
+
+    let mut node = fdt.chosen_mut()?.ok_or(FdtError::NotFound)?;
+    node.setprop(cstr!("bootargs"), new_bootargs.as_slice())
 }

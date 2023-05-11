@@ -14,33 +14,28 @@
 
 //! Wrappers around hypervisor back-ends.
 
-use crate::hvc;
-use crate::smccc;
+mod common;
+mod kvm;
 
-pub fn hyp_meminfo() -> smccc::Result<u64> {
-    hvc::kvm_hyp_meminfo()
+pub use common::Hypervisor;
+pub use kvm::KvmError;
+use kvm::KvmHypervisor;
+
+static HYPERVISOR: HypervisorBackend = HypervisorBackend::Kvm;
+
+enum HypervisorBackend {
+    Kvm,
 }
 
-pub fn mem_share(base_ipa: u64) -> smccc::Result<()> {
-    hvc::kvm_mem_share(base_ipa)
+impl HypervisorBackend {
+    fn get_hypervisor(&self) -> &'static dyn Hypervisor {
+        match self {
+            Self::Kvm => &KvmHypervisor,
+        }
+    }
 }
 
-pub fn mem_unshare(base_ipa: u64) -> smccc::Result<()> {
-    hvc::kvm_mem_unshare(base_ipa)
-}
-
-pub fn mmio_guard_info() -> smccc::Result<u64> {
-    hvc::kvm_mmio_guard_info()
-}
-
-pub fn mmio_guard_enroll() -> smccc::Result<()> {
-    hvc::kvm_mmio_guard_enroll()
-}
-
-pub fn mmio_guard_map(ipa: u64) -> smccc::Result<()> {
-    hvc::kvm_mmio_guard_map(ipa)
-}
-
-pub fn mmio_guard_unmap(ipa: u64) -> smccc::Result<()> {
-    hvc::kvm_mmio_guard_unmap(ipa)
+/// Gets the hypervisor singleton.
+pub fn get_hypervisor() -> &'static dyn Hypervisor {
+    HYPERVISOR.get_hypervisor()
 }
