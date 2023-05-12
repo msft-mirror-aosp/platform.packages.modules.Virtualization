@@ -98,6 +98,7 @@ pub const fn ceiling_div(num: usize, den: usize) -> Option<usize> {
 /// Aligns the given address to the given alignment, if it is a power of two.
 ///
 /// Returns `None` if the alignment isn't a power of two.
+#[allow(dead_code)] // Currently unused but might be needed again.
 pub const fn align_down(addr: usize, alignment: usize) -> Option<usize> {
     if !alignment.is_power_of_two() {
         None
@@ -112,7 +113,8 @@ pub const fn page_4kb_of(addr: usize) -> usize {
 }
 
 #[inline]
-fn min_dcache_line_size() -> usize {
+/// Read the number of words in the smallest cache line of all the data caches and unified caches.
+pub fn min_dcache_line_size() -> usize {
     const DMINLINE_SHIFT: usize = 16;
     const DMINLINE_MASK: usize = 0xf;
     let ctr_el0 = read_sysreg!("ctr_el0");
