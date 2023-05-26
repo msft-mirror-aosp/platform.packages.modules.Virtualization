@@ -23,11 +23,12 @@ import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
+import static org.junit.Assume.assumeFalse;
+
 import android.platform.test.annotations.RootPermissionTest;
 
 import com.android.microdroid.test.host.CommandRunner;
 import com.android.microdroid.test.host.MicrodroidHostTestCaseBase;
-import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.log.LogUtil.CLog;
 import com.android.tradefed.result.FileInputStreamSource;
 import com.android.tradefed.result.LogDataType;
@@ -81,7 +82,9 @@ public final class ComposTestCase extends MicrodroidHostTestCaseBase {
 
     @Before
     public void setUp() throws Exception {
-        testIfDeviceIsCapable(getDevice());
+        assumeDeviceIsCapable(getDevice());
+        // We get a very high level of (apparently bogus) OOM errors on Cuttlefish (b/264496291).
+        assumeFalse("Skipping test on Cuttlefish", isCuttlefish());
 
         String value = getDevice().getProperty(SYSTEM_SERVER_COMPILER_FILTER_PROP_NAME);
         if (value == null) {
@@ -94,8 +97,6 @@ public final class ComposTestCase extends MicrodroidHostTestCaseBase {
     @After
     public void tearDown() throws Exception {
         killVmAndReconnectAdb();
-
-        archiveVmLogsThenDelete("teardown");
 
         CommandRunner android = new CommandRunner(getDevice());
 
@@ -111,19 +112,6 @@ public final class ComposTestCase extends MicrodroidHostTestCaseBase {
             getDevice().setProperty(SYSTEM_SERVER_COMPILER_FILTER_PROP_NAME,
                     mBackupSystemServerCompilerFilter);
         }
-    }
-
-    private void archiveVmLogsThenDelete(String suffix) throws DeviceNotAvailableException {
-        archiveLogThenDelete(
-                mTestLogs,
-                getDevice(),
-                COMPOS_APEXDATA_DIR + "/vm_console.log",
-                "vm_console.log-" + suffix + "-" + mTestName.getMethodName());
-        archiveLogThenDelete(
-                mTestLogs,
-                getDevice(),
-                COMPOS_APEXDATA_DIR + "/vm.log",
-                "vm.log-" + suffix + "-" + mTestName.getMethodName());
     }
 
     @Test
@@ -169,10 +157,6 @@ public final class ComposTestCase extends MicrodroidHostTestCaseBase {
             CLog.i("Comp OS compilation took " + elapsed + "ms");
         }
         killVmAndReconnectAdb();
-
-        // These logs are potentially useful, capture them before they are overwritten by
-        // compos_verify.
-        archiveVmLogsThenDelete("compile");
 
         // Expect the BCC extracted from the BCC to be well-formed.
         assertVmBccIsValid();
