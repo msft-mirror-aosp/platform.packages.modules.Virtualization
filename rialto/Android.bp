@@ -12,6 +12,8 @@ rust_ffi_static {
         "libaarch64_paging",
         "libbuddy_system_allocator",
         "libhyp",
+        "libfdtpci",
+        "liblibfdt",
         "liblog_rust_nostd",
         "libvmbase",
     ],
@@ -62,6 +64,12 @@ avb_add_hash_footer {
     partition_name: "boot",
     private_key: ":rialto_sign_key",
     salt: rialto_salt,
+    props: [
+        {
+            name: "com.android.virt.cap",
+            value: "remote_attest",
+        },
+    ],
     enabled: false,
     arch: {
         arm64: {
