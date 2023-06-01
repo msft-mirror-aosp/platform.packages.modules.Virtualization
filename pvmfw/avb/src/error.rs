@@ -39,6 +39,10 @@ pub enum AvbSlotVerifyError {
     UnsupportedVersion,
     /// AVB_SLOT_VERIFY_RESULT_ERROR_VERIFICATION
     Verification,
+    /// VBMeta has invalid descriptors.
+    InvalidDescriptors(AvbIOError),
+    /// Unknown vbmeta property
+    UnknownVbmetaProperty,
 }
 
 impl fmt::Display for AvbSlotVerifyError {
@@ -55,6 +59,10 @@ impl fmt::Display for AvbSlotVerifyError {
                 "Some of the metadata requires a newer version of libavb than what is in use."
             ),
             Self::Verification => write!(f, "Data does not verify."),
+            Self::InvalidDescriptors(e) => {
+                write!(f, "VBMeta has invalid descriptors. Error: {:?}", e)
+            }
+            Self::UnknownVbmetaProperty => write!(f, "Unknown vbmeta property"),
         }
     }
 }
@@ -87,13 +95,13 @@ pub(crate) fn slot_verify_result_to_verify_payload_result(
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum AvbIOError {
+/// AVB IO Error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AvbIOError {
     /// AVB_IO_RESULT_ERROR_OOM,
     #[allow(dead_code)]
     Oom,
     /// AVB_IO_RESULT_ERROR_IO,
-    #[allow(dead_code)]
     Io,
     /// AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION,
     NoSuchPartition,

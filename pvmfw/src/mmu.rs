@@ -15,47 +15,64 @@
 //! Memory management.
 
 use crate::helpers;
+use crate::helpers::PVMFW_PAGE_SIZE;
 use aarch64_paging::idmap::IdMap;
-use aarch64_paging::paging::Attributes;
-use aarch64_paging::paging::MemoryRegion;
+use aarch64_paging::paging::{Attributes, MemoryRegion, PteUpdater};
 use aarch64_paging::MapError;
 use core::ops::Range;
 use vmbase::layout;
 
+/// Software bit used to indicate a device that should be lazily mapped.
+pub const MMIO_LAZY_MAP_FLAG: Attributes = Attributes::SWFLAG_0;
+
 // We assume that:
 // - MAIR_EL1.Attr0 = "Device-nGnRE memory" (0b0000_0100)
 // - MAIR_EL1.Attr1 = "Normal memory, Outer & Inner WB Non-transient, R/W-Allocate" (0b1111_1111)
-const MEMORY: Attributes = Attributes::NORMAL.union(Attributes::NON_GLOBAL);
-const DEVICE: Attributes = Attributes::DEVICE_NGNRE.union(Attributes::EXECUTE_NEVER);
+const MEMORY: Attributes =
+    Attributes::VALID.union(Attributes::NORMAL).union(Attributes::NON_GLOBAL);
+const DEVICE_LAZY: Attributes =
+    MMIO_LAZY_MAP_FLAG.union(Attributes::DEVICE_NGNRE).union(Attributes::EXECUTE_NEVER);
+const DEVICE: Attributes = DEVICE_LAZY.union(Attributes::VALID);
 const CODE: Attributes = MEMORY.union(Attributes::READ_ONLY);
 const DATA: Attributes = MEMORY.union(Attributes::EXECUTE_NEVER);
 const RODATA: Attributes = DATA.union(Attributes::READ_ONLY);
+const DATA_DBM: Attributes = RODATA.union(Attributes::DBM);
 
 /// High-level API for managing MMU mappings.
 pub struct PageTable {
     idmap: IdMap,
 }
 
-fn appended_payload_range() -> Range<usize> {
-    let start = helpers::align_up(layout::binary_end(), helpers::SIZE_4KB).unwrap();
-    // pvmfw is contained in a 2MiB region so the payload can't be larger than the 2MiB alignment.
-    let end = helpers::align_up(start, helpers::SIZE_2MB).unwrap();
+/// Region allocated for the stack.
+pub fn stack_range() -> Range<usize> {
+    const STACK_PAGES: usize = 8;
 
-    start..end
+    layout::stack_range(STACK_PAGES * PVMFW_PAGE_SIZE)
 }
 
 impl PageTable {
-    const ASID: usize = 1;
+    pub const ASID: usize = 1;
     const ROOT_LEVEL: usize = 1;
+
+    /// Returns memory range reserved for the appended payload.
+    pub fn appended_payload_range() -> Range<usize> {
+        let start = helpers::align_up(layout::binary_end(), helpers::SIZE_4KB).unwrap();
+        // pvmfw is contained in a 2MiB region so the payload can't be larger than the 2MiB alignment.
+        let end = helpers::align_up(start, helpers::SIZE_2MB).unwrap();
+        start..end
+    }
 
     /// Creates an instance pre-populated with pvmfw's binary layout.
     pub fn from_static_layout() -> Result<Self, MapError> {
         let mut page_table = Self { idmap: IdMap::new(Self::ASID, Self::ROOT_LEVEL) };
 
+        // Stack and scratch ranges are explicitly zeroed and flushed before jumping to payload,
+        // so dirty state management can be omitted.
+        page_table.map_range(&layout::scratch_range(), DATA)?;
+        page_table.map_range(&stack_range(), DATA)?;
         page_table.map_code(&layout::text_range())?;
-        page_table.map_data(&layout::writable_region())?;
         page_table.map_rodata(&layout::rodata_range())?;
-        page_table.map_data(&appended_payload_range())?;
+        page_table.map_data(&Self::appended_payload_range())?;
 
         Ok(page_table)
     }
@@ -64,12 +81,16 @@ impl PageTable {
         self.idmap.activate()
     }
 
+    pub fn map_device_lazy(&mut self, range: &Range<usize>) -> Result<(), MapError> {
+        self.map_range(range, DEVICE_LAZY)
+    }
+
     pub fn map_device(&mut self, range: &Range<usize>) -> Result<(), MapError> {
         self.map_range(range, DEVICE)
     }
 
     pub fn map_data(&mut self, range: &Range<usize>) -> Result<(), MapError> {
-        self.map_range(range, DATA)
+        self.map_range(range, DATA_DBM)
     }
 
     pub fn map_code(&mut self, range: &Range<usize>) -> Result<(), MapError> {
@@ -82,5 +103,9 @@ impl PageTable {
 
     fn map_range(&mut self, range: &Range<usize>, attr: Attributes) -> Result<(), MapError> {
         self.idmap.map_range(&MemoryRegion::new(range.start, range.end), attr)
+    }
+
+    pub fn modify_range(&mut self, range: &Range<usize>, f: &PteUpdater) -> Result<(), MapError> {
+        self.idmap.modify_range(&MemoryRegion::new(range.start, range.end), f)
     }
 }

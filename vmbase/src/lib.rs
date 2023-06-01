@@ -16,12 +16,14 @@
 
 #![no_std]
 
+pub mod arch;
 mod bionic;
 pub mod console;
 mod entry;
 pub mod layout;
 mod linker;
 pub mod logger;
+pub mod memory;
 pub mod power;
 pub mod uart;
 

@@ -15,46 +15,16 @@
 //! Miscellaneous helper functions.
 
 use core::arch::asm;
+use core::ops::Range;
+use vmbase::read_sysreg;
 use zeroize::Zeroize;
 
 pub const SIZE_4KB: usize = 4 << 10;
 pub const SIZE_2MB: usize = 2 << 20;
+pub const SIZE_4MB: usize = 4 << 20;
 
 pub const GUEST_PAGE_SIZE: usize = SIZE_4KB;
-
-/// Read a value from a system register.
-#[macro_export]
-macro_rules! read_sysreg {
-    ($sysreg:literal) => {{
-        let mut r: usize;
-        // Safe because it reads a system register and does not affect Rust.
-        unsafe {
-            core::arch::asm!(
-                concat!("mrs {}, ", $sysreg),
-                out(reg) r,
-                options(nomem, nostack, preserves_flags),
-            )
-        }
-        r
-    }};
-}
-
-/// Write a value to a system register.
-///
-/// # Safety
-///
-/// Callers must ensure that side effects of updating the system register are properly handled.
-#[macro_export]
-macro_rules! write_sysreg {
-    ($sysreg:literal, $val:expr) => {{
-        let value: usize = $val;
-        core::arch::asm!(
-            concat!("msr ", $sysreg, ", {}"),
-            in(reg) value,
-            options(nomem, nostack, preserves_flags),
-        )
-    }};
-}
+pub const PVMFW_PAGE_SIZE: usize = SIZE_4KB;
 
 /// Computes the largest multiple of the provided alignment smaller or equal to the address.
 ///
@@ -95,6 +65,7 @@ pub const fn ceiling_div(num: usize, den: usize) -> Option<usize> {
 /// Aligns the given address to the given alignment, if it is a power of two.
 ///
 /// Returns `None` if the alignment isn't a power of two.
+#[allow(dead_code)] // Currently unused but might be needed again.
 pub const fn align_down(addr: usize, alignment: usize) -> Option<usize> {
     if !alignment.is_power_of_two() {
         None
@@ -109,7 +80,8 @@ pub const fn page_4kb_of(addr: usize) -> usize {
 }
 
 #[inline]
-fn min_dcache_line_size() -> usize {
+/// Read the number of words in the smallest cache line of all the data caches and unified caches.
+pub fn min_dcache_line_size() -> usize {
     const DMINLINE_SHIFT: usize = 16;
     const DMINLINE_MASK: usize = 0xf;
     let ctr_el0 = read_sysreg!("ctr_el0");
@@ -161,10 +133,22 @@ pub fn flatten<T, const N: usize>(original: &[[T; N]]) -> &[T] {
     unsafe { core::slice::from_raw_parts(original.as_ptr().cast(), len) }
 }
 
+/// Trait to check containment of one range within another.
+pub(crate) trait RangeExt {
+    /// Returns true if `self` is contained within the `other` range.
+    fn is_within(&self, other: &Self) -> bool;
+}
+
+impl<T: PartialOrd> RangeExt for Range<T> {
+    fn is_within(&self, other: &Self) -> bool {
+        self.start >= other.start && self.end <= other.end
+    }
+}
+
 /// Create &CStr out of &str literal
 #[macro_export]
 macro_rules! cstr {
     ($str:literal) => {{
-        CStr::from_bytes_with_nul(concat!($str, "\0").as_bytes()).unwrap()
+        core::ffi::CStr::from_bytes_with_nul(concat!($str, "\0").as_bytes()).unwrap()
     }};
 }

@@ -14,9 +14,6 @@
 
 //! This module handles the interaction with virtual machine payload service.
 
-// We're implementing unsafe functions, but we still want warnings on unsafe usage within them.
-#![warn(unsafe_op_in_unsafe_fn)]
-
 use android_system_virtualization_payload::aidl::android::system::virtualization::payload::IVmPayloadService::{
     ENCRYPTEDSTORE_MOUNTPOINT, IVmPayloadService, VM_PAYLOAD_SERVICE_SOCKET_NAME, VM_APK_CONTENTS_PATH};
 use anyhow::{ensure, bail, Context, Result};
@@ -254,6 +251,52 @@ pub unsafe extern "C" fn AVmPayload_getDiceAttestationCdi(data: *mut u8, size: u
 
 fn try_get_dice_attestation_cdi() -> Result<Vec<u8>> {
     get_vm_payload_service()?.getDiceAttestationCdi().context("Cannot get attestation CDI")
+}
+
+/// Requests a certificate using the provided certificate signing request (CSR).
+/// Panics on failure.
+///
+/// # Safety
+///
+/// Behavior is undefined if any of the following conditions are violated:
+///
+/// * `csr` must be [valid] for reads of `csr_size` bytes.
+/// * `buffer` must be [valid] for writes of `size` bytes. `buffer` can be null if `size` is 0.
+///
+/// [valid]: ptr#safety
+#[no_mangle]
+pub unsafe extern "C" fn AVmPayload_requestCertificate(
+    csr: *const u8,
+    csr_size: usize,
+    buffer: *mut u8,
+    size: usize,
+) -> usize {
+    initialize_logging();
+
+    // SAFETY: See the requirements on `csr` above.
+    let csr = unsafe { std::slice::from_raw_parts(csr, csr_size) };
+    let certificate = unwrap_or_abort(try_request_certificate(csr));
+
+    if size != 0 || buffer.is_null() {
+        // SAFETY: See the requirements on `buffer` above. The number of bytes copied doesn't exceed
+        // the length of either buffer, and `certificate` cannot overlap `buffer` because we just
+        // allocated it.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                certificate.as_ptr(),
+                buffer,
+                std::cmp::min(certificate.len(), size),
+            );
+        }
+    }
+    certificate.len()
+}
+
+fn try_request_certificate(csr: &[u8]) -> Result<Vec<u8>> {
+    let certificate = get_vm_payload_service()?
+        .requestCertificate(csr)
+        .context("Failed to request certificate")?;
+    Ok(certificate)
 }
 
 /// Gets the path to the APK contents.

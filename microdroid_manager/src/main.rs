@@ -200,7 +200,7 @@ fn set_cloexec_on_vm_payload_service_socket() -> Result<()> {
 }
 
 fn try_main() -> Result<()> {
-    let _ = kernlog::init();
+    let _ignored = kernlog::init();
     info!("started.");
 
     if let Err(e) = set_cloexec_on_vm_payload_service_socket() {
@@ -733,7 +733,7 @@ fn wait_for_apex_config_done() -> Result<()> {
 fn wait_for_property_true(property_name: &str) -> Result<()> {
     let mut prop = PropertyWatcher::new(property_name)?;
     loop {
-        prop.wait()?;
+        prop.wait(None)?;
         if system_properties::read_bool(property_name, false)? {
             break;
         }

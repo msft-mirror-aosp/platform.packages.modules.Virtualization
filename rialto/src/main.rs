@@ -28,11 +28,14 @@ use aarch64_paging::{
     paging::{Attributes, MemoryRegion},
 };
 use buddy_system_allocator::LockedHeap;
+use core::{ops::Range, slice};
+use fdtpci::PciInfo;
 use hyp::get_hypervisor;
 use log::{debug, error, info};
-use vmbase::{main, power::reboot};
+use vmbase::{layout, main, power::reboot};
 
 const SZ_1K: usize = 1024;
+const SZ_4K: usize = 4 * SZ_1K;
 const SZ_64K: usize = 64 * SZ_1K;
 const SZ_1M: usize = 1024 * SZ_1K;
 const SZ_1G: usize = 1024 * SZ_1M;
@@ -42,37 +45,29 @@ const SZ_1G: usize = 1024 * SZ_1M;
 const PT_ROOT_LEVEL: usize = 1;
 const PT_ASID: usize = 1;
 
-const PROT_DEV: Attributes = Attributes::from_bits_truncate(
-    Attributes::DEVICE_NGNRE.bits() | Attributes::EXECUTE_NEVER.bits(),
-);
-const PROT_RX: Attributes = Attributes::from_bits_truncate(
-    Attributes::NORMAL.bits() | Attributes::NON_GLOBAL.bits() | Attributes::READ_ONLY.bits(),
-);
-const PROT_RO: Attributes = Attributes::from_bits_truncate(
-    Attributes::NORMAL.bits()
-        | Attributes::NON_GLOBAL.bits()
-        | Attributes::READ_ONLY.bits()
-        | Attributes::EXECUTE_NEVER.bits(),
-);
-const PROT_RW: Attributes = Attributes::from_bits_truncate(
-    Attributes::NORMAL.bits() | Attributes::NON_GLOBAL.bits() | Attributes::EXECUTE_NEVER.bits(),
-);
+const PROT_DEV: Attributes =
+    Attributes::DEVICE_NGNRE.union(Attributes::EXECUTE_NEVER).union(Attributes::VALID);
+const PROT_RX: Attributes = Attributes::NORMAL
+    .union(Attributes::NON_GLOBAL)
+    .union(Attributes::READ_ONLY)
+    .union(Attributes::VALID);
+const PROT_RO: Attributes = Attributes::NORMAL
+    .union(Attributes::NON_GLOBAL)
+    .union(Attributes::READ_ONLY)
+    .union(Attributes::EXECUTE_NEVER)
+    .union(Attributes::VALID);
+const PROT_RW: Attributes = Attributes::NORMAL
+    .union(Attributes::NON_GLOBAL)
+    .union(Attributes::EXECUTE_NEVER)
+    .union(Attributes::VALID);
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::new();
 
 static mut HEAP: [u8; SZ_64K] = [0; SZ_64K];
 
-unsafe fn kimg_ptr(sym: &u8) -> *const u8 {
-    sym as *const u8
-}
-
-unsafe fn kimg_addr(sym: &u8) -> usize {
-    kimg_ptr(sym) as usize
-}
-
-unsafe fn kimg_region(begin: &u8, end: &u8) -> MemoryRegion {
-    MemoryRegion::new(kimg_addr(begin), kimg_addr(end))
+fn into_memreg(r: &Range<usize>) -> MemoryRegion {
+    MemoryRegion::new(r.start, r.end)
 }
 
 fn init_heap() {
@@ -80,28 +75,28 @@ fn init_heap() {
     unsafe {
         HEAP_ALLOCATOR.lock().init(&mut HEAP as *mut u8 as usize, HEAP.len());
     }
-    info!("Initialized heap.");
 }
 
 fn init_kernel_pgt(pgt: &mut IdMap) -> Result<()> {
     // The first 1 GiB of address space is used by crosvm for MMIO.
     let reg_dev = MemoryRegion::new(0, SZ_1G);
-    // SAFETY: Taking addresses of kernel image sections to set up page table
-    // mappings. Not taking ownerhip of the memory.
-    let reg_text = unsafe { kimg_region(&text_begin, &text_end) };
-    let reg_rodata = unsafe { kimg_region(&rodata_begin, &rodata_end) };
-    let reg_data = unsafe { kimg_region(&data_begin, &boot_stack_end) };
+    let reg_text = into_memreg(&layout::text_range());
+    let reg_rodata = into_memreg(&layout::rodata_range());
+    let reg_scratch = into_memreg(&layout::scratch_range());
+    let reg_stack = into_memreg(&layout::stack_range(40 * SZ_4K));
 
     debug!("Preparing kernel page table.");
     debug!("  dev:    {}-{}", reg_dev.start(), reg_dev.end());
     debug!("  text:   {}-{}", reg_text.start(), reg_text.end());
     debug!("  rodata: {}-{}", reg_rodata.start(), reg_rodata.end());
-    debug!("  data:   {}-{}", reg_data.start(), reg_data.end());
+    debug!("  scratch:{}-{}", reg_scratch.start(), reg_scratch.end());
+    debug!("  stack:  {}-{}", reg_stack.start(), reg_stack.end());
 
     pgt.map_range(&reg_dev, PROT_DEV)?;
     pgt.map_range(&reg_text, PROT_RX)?;
     pgt.map_range(&reg_rodata, PROT_RO)?;
-    pgt.map_range(&reg_data, PROT_RW)?;
+    pgt.map_range(&reg_scratch, PROT_RW)?;
+    pgt.map_range(&reg_stack, PROT_RW)?;
 
     pgt.activate();
     info!("Activated kernel page table.");
@@ -119,9 +114,17 @@ fn try_init_logger() -> Result<()> {
     vmbase::logger::init(log::LevelFilter::Debug).map_err(|_| Error::LoggerInit)
 }
 
-fn try_main() -> Result<()> {
+/// # Safety
+///
+/// Behavior is undefined if any of the following conditions are violated:
+/// * The `fdt_addr` must be a valid pointer and points to a valid `Fdt`.
+unsafe fn try_main(fdt_addr: usize) -> Result<()> {
     info!("Welcome to Rialto!");
-    init_heap();
+    // SAFETY: The caller ensures that `fdt_addr` is valid.
+    let fdt = unsafe { slice::from_raw_parts(fdt_addr as *mut u8, SZ_1M) };
+    let fdt = libfdt::Fdt::from_slice(fdt)?;
+    let pci_info = PciInfo::from_fdt(fdt)?;
+    debug!("PCI: {:#x?}", pci_info);
 
     let mut pgt = IdMap::new(PT_ASID, PT_ROOT_LEVEL);
     init_kernel_pgt(&mut pgt)?;
@@ -129,27 +132,21 @@ fn try_main() -> Result<()> {
 }
 
 /// Entry point for Rialto.
-pub fn main(_a0: u64, _a1: u64, _a2: u64, _a3: u64) {
+pub fn main(fdt_addr: u64, _a1: u64, _a2: u64, _a3: u64) {
+    init_heap();
     if try_init_logger().is_err() {
         // Don't log anything if the logger initialization fails.
         reboot();
     }
-    match try_main() {
+    // SAFETY: `fdt_addr` is supposed to be a valid pointer and points to
+    // a valid `Fdt`.
+    match unsafe { try_main(fdt_addr as usize) } {
         Ok(()) => info!("Rialto ends successfully."),
         Err(e) => {
             error!("Rialto failed with {e}");
             reboot()
         }
     }
-}
-
-extern "C" {
-    static text_begin: u8;
-    static text_end: u8;
-    static rodata_begin: u8;
-    static rodata_end: u8;
-    static data_begin: u8;
-    static boot_stack_end: u8;
 }
 
 main!(main);
