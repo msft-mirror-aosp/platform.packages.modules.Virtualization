@@ -16,19 +16,14 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use crate::helpers::{self, dbm_available, page_4kb_of, RangeExt, PVMFW_PAGE_SIZE, SIZE_4MB};
-use crate::mmu;
-use crate::{dsb, isb, read_sysreg, tlbi, write_sysreg};
+use crate::helpers::{RangeExt, PVMFW_PAGE_SIZE};
+use aarch64_paging::idmap::IdMap;
 use aarch64_paging::paging::{Attributes, Descriptor, MemoryRegion as VaRange};
-use alloc::alloc::alloc_zeroed;
-use alloc::alloc::dealloc;
+use aarch64_paging::MapError;
 use alloc::alloc::handle_alloc_error;
 use alloc::boxed::Box;
-use alloc::vec::Vec;
-use buddy_system_allocator::{FrameAllocator, LockedFrameAllocator};
+use buddy_system_allocator::LockedFrameAllocator;
 use core::alloc::Layout;
-use core::cmp::max;
-use core::cmp::min;
 use core::fmt;
 use core::iter::once;
 use core::num::NonZeroUsize;
@@ -41,11 +36,22 @@ use log::{debug, error};
 use once_cell::race::OnceBox;
 use spin::mutex::SpinMutex;
 use tinyvec::ArrayVec;
+use vmbase::{
+    dsb, isb,
+    layout::{self, crosvm::MEM_START},
+    memory::{
+        flush_dirty_range, is_leaf_pte, page_4kb_of, set_dbm_enabled, MemorySharer, PageTable,
+        MMIO_LAZY_MAP_FLAG, SIZE_2MB, SIZE_4KB, SIZE_4MB,
+    },
+    tlbi,
+    util::align_up,
+};
 
-/// Base of the system's contiguous "main" memory.
-pub const BASE_ADDR: usize = 0x8000_0000;
 /// First address that can't be translated by a level 1 TTBR0_EL1.
 pub const MAX_ADDR: usize = 1 << 40;
+
+const PT_ROOT_LEVEL: usize = 1;
+const PT_ASID: usize = 1;
 
 pub type MemoryRange = Range<usize>;
 
@@ -65,33 +71,10 @@ struct MemoryRegion {
     mem_type: MemoryType,
 }
 
-impl MemoryRegion {
-    /// True if the instance overlaps with the passed range.
-    pub fn overlaps(&self, range: &MemoryRange) -> bool {
-        overlaps(&self.range, range)
-    }
-
-    /// True if the instance is fully contained within the passed range.
-    pub fn is_within(&self, range: &MemoryRange) -> bool {
-        self.as_ref().is_within(range)
-    }
-}
-
-impl AsRef<MemoryRange> for MemoryRegion {
-    fn as_ref(&self) -> &MemoryRange {
-        &self.range
-    }
-}
-
-/// Returns true if one range overlaps with the other at all.
-fn overlaps<T: Copy + Ord>(a: &Range<T>, b: &Range<T>) -> bool {
-    max(a.start, b.start) < min(a.end, b.end)
-}
-
 /// Tracks non-overlapping slices of main memory.
 pub struct MemoryTracker {
     total: MemoryRange,
-    page_table: mmu::PageTable,
+    page_table: PageTable,
     regions: ArrayVec<[MemoryRegion; MemoryTracker::CAPACITY]>,
     mmio_regions: ArrayVec<[MemoryRange; MemoryTracker::MMIO_CAPACITY]>,
 }
@@ -161,82 +144,26 @@ type Result<T> = result::Result<T, MemoryTrackerError>;
 static SHARED_POOL: OnceBox<LockedFrameAllocator<32>> = OnceBox::new();
 static SHARED_MEMORY: SpinMutex<Option<MemorySharer>> = SpinMutex::new(None);
 
-/// Allocates memory on the heap and shares it with the host.
-///
-/// Unshares all pages when dropped.
-pub struct MemorySharer {
-    granule: usize,
-    shared_regions: Vec<(usize, Layout)>,
-}
-
-impl MemorySharer {
-    const INIT_CAP: usize = 10;
-
-    pub fn new(granule: usize) -> Self {
-        assert!(granule.is_power_of_two());
-        Self { granule, shared_regions: Vec::with_capacity(Self::INIT_CAP) }
-    }
-
-    /// Get from the global allocator a granule-aligned region that suits `hint` and share it.
-    pub fn refill(&mut self, pool: &mut FrameAllocator<32>, hint: Layout) {
-        let layout = hint.align_to(self.granule).unwrap().pad_to_align();
-        assert_ne!(layout.size(), 0);
-        // SAFETY - layout has non-zero size.
-        let Some(shared) = NonNull::new(unsafe { alloc_zeroed(layout) }) else {
-            handle_alloc_error(layout);
-        };
-
-        let base = shared.as_ptr() as usize;
-        let end = base.checked_add(layout.size()).unwrap();
-        trace!("Sharing memory region {:#x?}", base..end);
-        for vaddr in (base..end).step_by(self.granule) {
-            let vaddr = NonNull::new(vaddr as *mut _).unwrap();
-            get_hypervisor().mem_share(virt_to_phys(vaddr).try_into().unwrap()).unwrap();
-        }
-        self.shared_regions.push((base, layout));
-
-        pool.add_frame(base, end);
-    }
-}
-
-impl Drop for MemorySharer {
-    fn drop(&mut self) {
-        while let Some((base, layout)) = self.shared_regions.pop() {
-            let end = base.checked_add(layout.size()).unwrap();
-            trace!("Unsharing memory region {:#x?}", base..end);
-            for vaddr in (base..end).step_by(self.granule) {
-                let vaddr = NonNull::new(vaddr as *mut _).unwrap();
-                get_hypervisor().mem_unshare(virt_to_phys(vaddr).try_into().unwrap()).unwrap();
-            }
-
-            // SAFETY - The region was obtained from alloc_zeroed() with the recorded layout.
-            unsafe { dealloc(base as *mut _, layout) };
-        }
-    }
-}
-
 impl MemoryTracker {
     const CAPACITY: usize = 5;
     const MMIO_CAPACITY: usize = 5;
-    const PVMFW_RANGE: MemoryRange = (BASE_ADDR - SIZE_4MB)..BASE_ADDR;
-    // TCR_EL1.{HA,HD} bits controlling hardware management of access and dirty state
-    const TCR_EL1_HA_HD_BITS: usize = 3 << 39;
+    const PVMFW_RANGE: MemoryRange = (MEM_START - SIZE_4MB)..MEM_START;
 
     /// Create a new instance from an active page table, covering the maximum RAM size.
-    pub fn new(mut page_table: mmu::PageTable) -> Self {
+    pub fn new(mut page_table: PageTable) -> Self {
         // Activate dirty state management first, otherwise we may get permission faults immediately
         // after activating the new page table. This has no effect before the new page table is
         // activated because none of the entries in the initial idmap have the DBM flag.
-        Self::set_dbm_enabled(true);
+        set_dbm_enabled(true);
 
         debug!("Activating dynamic page table...");
         // SAFETY - page_table duplicates the static mappings for everything that the Rust code is
         // aware of so activating it shouldn't have any visible effect.
-        unsafe { page_table.activate() };
+        unsafe { page_table.activate() }
         debug!("... Success!");
 
         Self {
-            total: BASE_ADDR..MAX_ADDR,
+            total: MEM_START..MAX_ADDR,
             page_table,
             regions: ArrayVec::new(),
             mmio_regions: ArrayVec::new(),
@@ -253,7 +180,7 @@ impl MemoryTracker {
         if self.total.end < range.end {
             return Err(MemoryTrackerError::SizeTooLarge);
         }
-        if !self.regions.iter().all(|r| r.is_within(range)) {
+        if !self.regions.iter().all(|r| r.range.is_within(range)) {
             return Err(MemoryTrackerError::SizeTooSmall);
         }
 
@@ -276,7 +203,7 @@ impl MemoryTracker {
     pub fn alloc_range_mut(&mut self, range: &MemoryRange) -> Result<MemoryRange> {
         let region = MemoryRegion { range: range.clone(), mem_type: MemoryType::ReadWrite };
         self.check(&region)?;
-        self.page_table.map_data(range).map_err(|e| {
+        self.page_table.map_data_dbm(range).map_err(|e| {
             error!("Error during mutable range allocation: {e}");
             MemoryTrackerError::FailedToMap
         })?;
@@ -297,10 +224,10 @@ impl MemoryTracker {
     /// appropriately.
     pub fn map_mmio_range(&mut self, range: MemoryRange) -> Result<()> {
         // MMIO space is below the main memory region.
-        if range.end > self.total.start || overlaps(&Self::PVMFW_RANGE, &range) {
+        if range.end > self.total.start || range.overlaps(&Self::PVMFW_RANGE) {
             return Err(MemoryTrackerError::OutOfRange);
         }
-        if self.mmio_regions.iter().any(|r| overlaps(r, &range)) {
+        if self.mmio_regions.iter().any(|r| range.overlaps(r)) {
             return Err(MemoryTrackerError::Overlaps);
         }
         if self.mmio_regions.len() == self.mmio_regions.capacity() {
@@ -323,10 +250,10 @@ impl MemoryTracker {
     /// with any other previously allocated regions, and that the regions ArrayVec has capacity to
     /// add it.
     fn check(&self, region: &MemoryRegion) -> Result<()> {
-        if !region.is_within(&self.total) {
+        if !region.range.is_within(&self.total) {
             return Err(MemoryTrackerError::OutOfRange);
         }
-        if self.regions.iter().any(|r| r.overlaps(&region.range)) {
+        if self.regions.iter().any(|r| region.range.overlaps(&r.range)) {
             return Err(MemoryTrackerError::Overlaps);
         }
         if self.regions.len() == self.regions.capacity() {
@@ -340,7 +267,7 @@ impl MemoryTracker {
             return Err(MemoryTrackerError::Full);
         }
 
-        Ok(self.regions.last().unwrap().as_ref().clone())
+        Ok(self.regions.last().unwrap().range.clone())
     }
 
     /// Unmaps all tracked MMIO regions from the MMIO guard.
@@ -357,8 +284,10 @@ impl MemoryTracker {
 
     /// Initialize the shared heap to dynamically share memory from the global allocator.
     pub fn init_dynamic_shared_pool(&mut self) -> Result<()> {
+        const INIT_CAP: usize = 10;
+
         let granule = get_hypervisor().memory_protection_granule()?;
-        let previous = SHARED_MEMORY.lock().replace(MemorySharer::new(granule));
+        let previous = SHARED_MEMORY.lock().replace(MemorySharer::new(granule, INIT_CAP));
         if previous.is_some() {
             return Err(MemoryTrackerError::SharedMemorySetFailure);
         }
@@ -413,7 +342,7 @@ impl MemoryTracker {
         // Collect memory ranges for which dirty state is tracked.
         let writable_regions =
             self.regions.iter().filter(|r| r.mem_type == MemoryType::ReadWrite).map(|r| &r.range);
-        let payload_range = mmu::PageTable::appended_payload_range();
+        let payload_range = appended_payload_range();
         // Execute a barrier instruction to ensure all hardware updates to the page table have been
         // observed before reading PTE flags to determine dirty state.
         dsb!("ish");
@@ -434,25 +363,11 @@ impl MemoryTracker {
             .modify_range(&(addr..addr + 1), &mark_dirty_block)
             .map_err(|_| MemoryTrackerError::SetPteDirtyFailed)
     }
-
-    fn set_dbm_enabled(enabled: bool) {
-        if dbm_available() {
-            let mut tcr = read_sysreg!("tcr_el1");
-            if enabled {
-                tcr |= Self::TCR_EL1_HA_HD_BITS
-            } else {
-                tcr &= !Self::TCR_EL1_HA_HD_BITS
-            };
-            // Safe because it writes to a system register and does not affect Rust.
-            unsafe { write_sysreg!("tcr_el1", tcr) }
-            isb!();
-        }
-    }
 }
 
 impl Drop for MemoryTracker {
     fn drop(&mut self) {
-        Self::set_dbm_enabled(false);
+        set_dbm_enabled(false);
         self.flush_dirty_pages().unwrap();
         self.unshare_all_memory();
     }
@@ -498,33 +413,6 @@ pub unsafe fn dealloc_shared(vaddr: NonNull<u8>, layout: Layout) -> hyp::Result<
     Ok(())
 }
 
-/// Returns the intermediate physical address corresponding to the given virtual address.
-///
-/// As we use identity mapping for everything, this is just a cast, but it's useful to use it to be
-/// explicit about where we are converting from virtual to physical address.
-pub fn virt_to_phys(vaddr: NonNull<u8>) -> usize {
-    vaddr.as_ptr() as _
-}
-
-/// Returns a pointer for the virtual address corresponding to the given non-zero intermediate
-/// physical address.
-///
-/// Panics if `paddr` is 0.
-pub fn phys_to_virt(paddr: usize) -> NonNull<u8> {
-    NonNull::new(paddr as _).unwrap()
-}
-
-/// Checks whether a PTE at given level is a page or block descriptor.
-#[inline]
-fn is_leaf_pte(flags: &Attributes, level: usize) -> bool {
-    const LEAF_PTE_LEVEL: usize = 3;
-    if flags.contains(Attributes::TABLE_OR_PAGE) {
-        level == LEAF_PTE_LEVEL
-    } else {
-        level < LEAF_PTE_LEVEL
-    }
-}
-
 /// Checks whether block flags indicate it should be MMIO guard mapped.
 fn verify_lazy_mapped_block(
     _range: &VaRange,
@@ -535,7 +423,7 @@ fn verify_lazy_mapped_block(
     if !is_leaf_pte(&flags, level) {
         return Ok(()); // Skip table PTEs as they aren't tagged with MMIO_LAZY_MAP_FLAG.
     }
-    if flags.contains(mmu::MMIO_LAZY_MAP_FLAG) && !flags.contains(Attributes::VALID) {
+    if flags.contains(MMIO_LAZY_MAP_FLAG) && !flags.contains(Attributes::VALID) {
         Ok(())
     } else {
         Err(())
@@ -558,7 +446,7 @@ fn mmio_guard_unmap_page(
     // mapped anyway.
     if flags.contains(Attributes::VALID) {
         assert!(
-            flags.contains(mmu::MMIO_LAZY_MAP_FLAG),
+            flags.contains(MMIO_LAZY_MAP_FLAG),
             "Attempting MMIO guard unmap for non-device pages"
         );
         assert_eq!(
@@ -574,23 +462,6 @@ fn mmio_guard_unmap_page(
         get_hypervisor().mmio_guard_unmap(page_base).map_err(|e| {
             error!("Error MMIO guard unmapping: {e}");
         })?;
-    }
-    Ok(())
-}
-
-/// Flushes a memory range the descriptor refers to, if the descriptor is in writable-dirty state.
-fn flush_dirty_range(
-    va_range: &VaRange,
-    desc: &mut Descriptor,
-    level: usize,
-) -> result::Result<(), ()> {
-    // Only flush ranges corresponding to dirty leaf PTEs.
-    let flags = desc.flags().ok_or(())?;
-    if !is_leaf_pte(&flags, level) {
-        return Ok(());
-    }
-    if !flags.contains(Attributes::READ_ONLY) {
-        helpers::flush_region(va_range.start().0, va_range.len());
     }
     Ok(())
 }
@@ -614,11 +485,43 @@ fn mark_dirty_block(
         // An ISB instruction is required to ensure the effects of completed TLB maintenance
         // instructions are visible to instructions fetched afterwards.
         // See ARM ARM E2.3.10, and G5.9.
-        tlbi!("vale1", mmu::PageTable::ASID, va_range.start().0);
+        tlbi!("vale1", PT_ASID, va_range.start().0);
         dsb!("ish");
         isb!();
         Ok(())
     } else {
         Err(())
     }
+}
+
+/// Returns memory range reserved for the appended payload.
+pub fn appended_payload_range() -> Range<usize> {
+    let start = align_up(layout::binary_end(), SIZE_4KB).unwrap();
+    // pvmfw is contained in a 2MiB region so the payload can't be larger than the 2MiB alignment.
+    let end = align_up(start, SIZE_2MB).unwrap();
+    start..end
+}
+
+/// Region allocated for the stack.
+pub fn stack_range() -> Range<usize> {
+    const STACK_PAGES: usize = 8;
+
+    layout::stack_range(STACK_PAGES * PVMFW_PAGE_SIZE)
+}
+
+pub fn init_page_table() -> result::Result<PageTable, MapError> {
+    let mut page_table: PageTable = IdMap::new(PT_ASID, PT_ROOT_LEVEL).into();
+
+    // Stack and scratch ranges are explicitly zeroed and flushed before jumping to payload,
+    // so dirty state management can be omitted.
+    page_table.map_data(&layout::scratch_range())?;
+    page_table.map_data(&stack_range())?;
+    page_table.map_code(&layout::text_range())?;
+    page_table.map_rodata(&layout::rodata_range())?;
+    page_table.map_data_dbm(&appended_payload_range())?;
+    if let Err(e) = page_table.map_device(&layout::console_uart_range()) {
+        error!("Failed to remap the UART as a dynamic page table entry: {e}");
+        return Err(e);
+    }
+    Ok(page_table)
 }

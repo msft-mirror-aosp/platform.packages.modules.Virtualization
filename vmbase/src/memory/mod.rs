@@ -1,4 +1,4 @@
-// Copyright 2022, The Android Open Source Project
+// Copyright 2023, The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,31 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Basic functionality for bare-metal binaries to run in a VM under crosvm.
+//! Memory management.
 
-#![no_std]
+mod dbm;
+mod page_table;
+mod shared;
+mod util;
 
-extern crate alloc;
-
-pub mod arch;
-mod bionic;
-pub mod console;
-mod entry;
-pub mod layout;
-mod linker;
-pub mod logger;
-pub mod memory;
-pub mod power;
-pub mod uart;
-pub mod util;
-
-pub use bionic::STACK_CHK_GUARD;
-
-use core::panic::PanicInfo;
-use power::reboot;
-
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    eprintln!("{}", info);
-    reboot()
-}
+pub use dbm::{flush_dirty_range, set_dbm_enabled};
+pub use page_table::{is_leaf_pte, PageTable, MMIO_LAZY_MAP_FLAG};
+pub use shared::MemorySharer;
+pub use util::{
+    flush, flushed_zeroize, min_dcache_line_size, page_4kb_of, phys_to_virt, virt_to_phys,
+    PAGE_SIZE, SIZE_2MB, SIZE_4KB, SIZE_4MB,
+};

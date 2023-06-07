@@ -16,11 +16,8 @@
 
 use crate::bootargs::BootArgsIterator;
 use crate::cstr;
-use crate::helpers::flatten;
 use crate::helpers::RangeExt as _;
 use crate::helpers::GUEST_PAGE_SIZE;
-use crate::helpers::SIZE_4KB;
-use crate::memory::BASE_ADDR;
 use crate::memory::MAX_ADDR;
 use crate::Box;
 use crate::RebootReason;
@@ -43,6 +40,9 @@ use log::error;
 use log::info;
 use log::warn;
 use tinyvec::ArrayVec;
+use vmbase::layout::crosvm::MEM_START;
+use vmbase::memory::SIZE_4KB;
+use vmbase::util::flatten;
 
 /// Extract from /config the address range containing the pre-loaded kernel. Absence of /config is
 /// not an error.
@@ -115,8 +115,8 @@ fn read_memory_range_from(fdt: &Fdt) -> libfdt::Result<Range<usize>> {
 /// Check if memory range is ok
 fn validate_memory_range(range: &Range<usize>) -> Result<(), RebootReason> {
     let base = range.start;
-    if base != BASE_ADDR {
-        error!("Memory base address {:#x} is not {:#x}", base, BASE_ADDR);
+    if base != MEM_START {
+        error!("Memory base address {:#x} is not {:#x}", base, MEM_START);
         return Err(RebootReason::InvalidFdt);
     }
 
@@ -137,7 +137,7 @@ fn patch_memory_range(fdt: &mut Fdt, memory_range: &Range<usize>) -> libfdt::Res
     let size = memory_range.len() as u64;
     fdt.node_mut(cstr!("/memory"))?
         .ok_or(FdtError::NotFound)?
-        .setprop_inplace(cstr!("reg"), flatten(&[BASE_ADDR.to_be_bytes(), size.to_be_bytes()]))
+        .setprop_inplace(cstr!("reg"), flatten(&[MEM_START.to_be_bytes(), size.to_be_bytes()]))
 }
 
 /// Read the number of CPUs from DT

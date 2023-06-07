@@ -1,4 +1,4 @@
-// Copyright 2022, The Android Open Source Project
+// Copyright 2023, The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,31 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Basic functionality for bare-metal binaries to run in a VM under crosvm.
+//! Memory layout for crosvm for aarch64 architecture.
+//!
+//! https://crosvm.dev/book/appendix/memory_layout.html#common-layout
 
-#![no_std]
-
-extern crate alloc;
-
-pub mod arch;
-mod bionic;
-pub mod console;
-mod entry;
-pub mod layout;
-mod linker;
-pub mod logger;
-pub mod memory;
-pub mod power;
-pub mod uart;
-pub mod util;
-
-pub use bionic::STACK_CHK_GUARD;
-
-use core::panic::PanicInfo;
-use power::reboot;
-
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    eprintln!("{}", info);
-    reboot()
-}
+/// The start of the system's contiguous "main" memory.
+pub const MEM_START: usize = 0x8000_0000;

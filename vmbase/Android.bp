@@ -63,12 +63,19 @@ rust_library_rlib {
     crate_name: "vmbase",
     srcs: ["src/lib.rs"],
     rustlibs: [
+        "libaarch64_paging",
+        "libbuddy_system_allocator",
+        "libhyp",
         "liblog_rust_nostd",
-        "libpsci",
+        "libsmccc",
         "libspin_nostd",
+        "libzeroize_nostd",
     ],
     whole_static_libs: [
         "librust_baremetal",
+    ],
+    features: [
+        "cpu_feat_hafdbs",
     ],
     apex_available: ["com.android.virt"],
 }
