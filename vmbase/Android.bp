@@ -63,9 +63,17 @@ rust_library_rlib {
     crate_name: "vmbase",
     srcs: ["src/lib.rs"],
     rustlibs: [
+        "libaarch64_paging",
+        "libbuddy_system_allocator",
+        "libfdtpci",
+        "libhyp",
         "liblog_rust_nostd",
-        "libpsci",
+        "libonce_cell_nostd",
+        "libsmccc",
         "libspin_nostd",
+        "libtinyvec_nostd",
+        "libvirtio_drivers",
+        "libzeroize_nostd",
     ],
     whole_static_libs: [
         "librust_baremetal",

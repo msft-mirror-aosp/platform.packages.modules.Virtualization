@@ -18,10 +18,7 @@ use crate::config;
 use crate::crypto;
 use crate::fdt;
 use crate::heap;
-use crate::helpers;
-use crate::helpers::RangeExt as _;
-use crate::memory::{MemoryTracker, MEMORY};
-use crate::mmu;
+use crate::memory;
 use crate::rand;
 use core::arch::asm;
 use core::mem::{drop, size_of};
@@ -34,7 +31,14 @@ use log::error;
 use log::info;
 use log::warn;
 use log::LevelFilter;
-use vmbase::{console, layout, logger, main, power::reboot};
+use vmbase::util::RangeExt as _;
+use vmbase::{
+    console,
+    layout::{self, crosvm},
+    logger, main,
+    memory::{min_dcache_line_size, MemoryTracker, MEMORY, SIZE_4KB},
+    power::reboot,
+};
 use zeroize::Zeroize;
 
 #[derive(Debug, Clone)]
@@ -85,7 +89,7 @@ struct MemorySlices<'a> {
 impl<'a> MemorySlices<'a> {
     fn new(fdt: usize, kernel: usize, kernel_size: usize) -> Result<Self, RebootReason> {
         // SAFETY - SIZE_2MB is non-zero.
-        const FDT_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(helpers::SIZE_2MB) };
+        const FDT_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(crosvm::FDT_MAX_SIZE) };
         // TODO - Only map the FDT as read-only, until we modify it right before jump_to_payload()
         // e.g. by generating a DTBO for a template DT in main() and, on return, re-map DT as RW,
         // overwrite with the template DT and apply the DTBO.
@@ -204,25 +208,16 @@ fn main_wrapper(
 
     crypto::init();
 
-    // SAFETY - We only get the appended payload from here, once. It is mapped and the linker
-    // script prevents it from overlapping with other objects.
-    let appended_data = unsafe { get_appended_data_slice() };
-
-    let mut page_table = mmu::PageTable::from_static_layout().map_err(|e| {
+    let page_table = memory::init_page_table().map_err(|e| {
         error!("Failed to set up the dynamic page tables: {e}");
         RebootReason::InternalError
     })?;
 
-    const CONSOLE_LEN: usize = 1; // vmbase::uart::Uart only uses one u8 register.
-    let uart_range = console::BASE_ADDRESS..(console::BASE_ADDRESS + CONSOLE_LEN);
-    page_table.map_device(&uart_range).map_err(|e| {
-        error!("Failed to remap the UART as a dynamic page table entry: {e}");
-        RebootReason::InternalError
-    })?;
+    // SAFETY - We only get the appended payload from here, once. The region was statically mapped,
+    // then remapped by `init_page_table()`.
+    let appended_data = unsafe { get_appended_data_slice() };
 
-    // SAFETY - We only get the appended payload from here, once. It is statically mapped and the
-    // linker script prevents it from overlapping with other objects.
-    let mut appended = unsafe { AppendedPayload::new(appended_data) }.ok_or_else(|| {
+    let mut appended = AppendedPayload::new(appended_data).ok_or_else(|| {
         error!("No valid configuration found");
         RebootReason::InvalidConfig
     })?;
@@ -230,7 +225,12 @@ fn main_wrapper(
     let (bcc_slice, debug_policy) = appended.get_entries();
 
     // Up to this point, we were using the built-in static (from .rodata) page tables.
-    MEMORY.lock().replace(MemoryTracker::new(page_table));
+    MEMORY.lock().replace(MemoryTracker::new(
+        page_table,
+        crosvm::MEM_START..layout::MAX_VIRT_ADDR,
+        crosvm::MMIO_RANGE,
+        Some(memory::appended_payload_range()),
+    ));
 
     let slices = MemorySlices::new(fdt, payload, payload_size)?;
 
@@ -285,7 +285,7 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
     assert_eq!(bcc.start % ASM_STP_ALIGN, 0, "Misaligned guest BCC.");
     assert_eq!(bcc.end % ASM_STP_ALIGN, 0, "Misaligned guest BCC.");
 
-    let stack = mmu::stack_range();
+    let stack = memory::stack_range();
 
     assert_ne!(stack.len(), 0, "stack region is empty.");
     assert_eq!(stack.start % ASM_STP_ALIGN, 0, "Misaligned stack region.");
@@ -379,7 +379,7 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
             scratch_end = in(reg) u64::try_from(scratch.end).unwrap(),
             stack = in(reg) u64::try_from(stack.start).unwrap(),
             stack_end = in(reg) u64::try_from(stack.end).unwrap(),
-            dcache_line_size = in(reg) u64::try_from(helpers::min_dcache_line_size()).unwrap(),
+            dcache_line_size = in(reg) u64::try_from(min_dcache_line_size()).unwrap(),
             in("x0") fdt_address,
             in("x30") payload_start,
             options(noreturn),
@@ -387,8 +387,12 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
     };
 }
 
+/// # Safety
+///
+/// This must only be called once, since we are returning a mutable reference.
+/// The appended data region must be mapped.
 unsafe fn get_appended_data_slice() -> &'static mut [u8] {
-    let range = mmu::PageTable::appended_payload_range();
+    let range = memory::appended_payload_range();
     // SAFETY: This region is mapped and the linker script prevents it from overlapping with other
     // objects.
     unsafe { slice::from_raw_parts_mut(range.start as *mut u8, range.len()) }
@@ -408,17 +412,14 @@ enum AppendedPayload<'a> {
 }
 
 impl<'a> AppendedPayload<'a> {
-    /// SAFETY - 'data' should respect the alignment of config::Header.
-    unsafe fn new(data: &'a mut [u8]) -> Option<Self> {
-        // Safety: This fn has the same constraint as us.
-        match unsafe { Self::guess_config_type(data) } {
+    fn new(data: &'a mut [u8]) -> Option<Self> {
+        match Self::guess_config_type(data) {
             AppendedConfigType::Valid => {
-                // Safety: This fn has the same constraint as us.
-                let config = unsafe { config::Config::new(data) };
+                let config = config::Config::new(data);
                 Some(Self::Config(config.unwrap()))
             }
             AppendedConfigType::NotFound if cfg!(feature = "legacy") => {
-                const BCC_SIZE: usize = helpers::SIZE_4KB;
+                const BCC_SIZE: usize = SIZE_4KB;
                 warn!("Assuming the appended data at {:?} to be a raw BCC", data.as_ptr());
                 Some(Self::LegacyBcc(&mut data[..BCC_SIZE]))
             }
@@ -426,14 +427,12 @@ impl<'a> AppendedPayload<'a> {
         }
     }
 
-    /// SAFETY - 'data' should respect the alignment of config::Header.
-    unsafe fn guess_config_type(data: &mut [u8]) -> AppendedConfigType {
+    fn guess_config_type(data: &mut [u8]) -> AppendedConfigType {
         // This function is necessary to prevent the borrow checker from getting confused
         // about the ownership of data in new(); see https://users.rust-lang.org/t/78467.
         let addr = data.as_ptr();
 
-        // Safety: This fn has the same constraint as us.
-        match unsafe { config::Config::new(data) } {
+        match config::Config::new(data) {
             Err(config::Error::InvalidMagic) => {
                 warn!("No configuration data found at {addr:?}");
                 AppendedConfigType::NotFound

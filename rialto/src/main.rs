@@ -23,52 +23,25 @@ mod exceptions;
 extern crate alloc;
 
 use crate::error::{Error, Result};
-use aarch64_paging::{
-    idmap::IdMap,
-    paging::{Attributes, MemoryRegion},
-};
 use buddy_system_allocator::LockedHeap;
-use core::{ops::Range, slice};
+use core::slice;
 use fdtpci::PciInfo;
 use hyp::get_hypervisor;
 use log::{debug, error, info};
-use vmbase::{layout, main, power::reboot};
+use vmbase::{
+    layout::{self, crosvm},
+    main,
+    memory::{MemoryTracker, PageTable, MEMORY, PAGE_SIZE},
+    power::reboot,
+};
 
 const SZ_1K: usize = 1024;
-const SZ_4K: usize = 4 * SZ_1K;
 const SZ_64K: usize = 64 * SZ_1K;
-const SZ_1M: usize = 1024 * SZ_1K;
-const SZ_1G: usize = 1024 * SZ_1M;
-
-// Root level is given by the value of TCR_EL1.TG0 and TCR_EL1.T0SZ, set in
-// entry.S. For 4KB granule and 39-bit VA, the root level is 1.
-const PT_ROOT_LEVEL: usize = 1;
-const PT_ASID: usize = 1;
-
-const PROT_DEV: Attributes =
-    Attributes::DEVICE_NGNRE.union(Attributes::EXECUTE_NEVER).union(Attributes::VALID);
-const PROT_RX: Attributes = Attributes::NORMAL
-    .union(Attributes::NON_GLOBAL)
-    .union(Attributes::READ_ONLY)
-    .union(Attributes::VALID);
-const PROT_RO: Attributes = Attributes::NORMAL
-    .union(Attributes::NON_GLOBAL)
-    .union(Attributes::READ_ONLY)
-    .union(Attributes::EXECUTE_NEVER)
-    .union(Attributes::VALID);
-const PROT_RW: Attributes = Attributes::NORMAL
-    .union(Attributes::NON_GLOBAL)
-    .union(Attributes::EXECUTE_NEVER)
-    .union(Attributes::VALID);
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::new();
 
 static mut HEAP: [u8; SZ_64K] = [0; SZ_64K];
-
-fn into_memreg(r: &Range<usize>) -> MemoryRegion {
-    MemoryRegion::new(r.start, r.end)
-}
 
 fn init_heap() {
     // SAFETY: Allocator set to otherwise unused, static memory.
@@ -77,41 +50,32 @@ fn init_heap() {
     }
 }
 
-fn init_kernel_pgt(pgt: &mut IdMap) -> Result<()> {
-    // The first 1 GiB of address space is used by crosvm for MMIO.
-    let reg_dev = MemoryRegion::new(0, SZ_1G);
-    let reg_text = into_memreg(&layout::text_range());
-    let reg_rodata = into_memreg(&layout::rodata_range());
-    let reg_scratch = into_memreg(&layout::scratch_range());
-    let reg_stack = into_memreg(&layout::stack_range(40 * SZ_4K));
+fn new_page_table() -> Result<PageTable> {
+    let mut page_table = PageTable::default();
 
-    debug!("Preparing kernel page table.");
-    debug!("  dev:    {}-{}", reg_dev.start(), reg_dev.end());
-    debug!("  text:   {}-{}", reg_text.start(), reg_text.end());
-    debug!("  rodata: {}-{}", reg_rodata.start(), reg_rodata.end());
-    debug!("  scratch:{}-{}", reg_scratch.start(), reg_scratch.end());
-    debug!("  stack:  {}-{}", reg_stack.start(), reg_stack.end());
+    page_table.map_device(&crosvm::MMIO_RANGE)?;
+    page_table.map_data(&layout::scratch_range())?;
+    page_table.map_data(&layout::stack_range(40 * PAGE_SIZE))?;
+    page_table.map_code(&layout::text_range())?;
+    page_table.map_rodata(&layout::rodata_range())?;
+    page_table.map_device(&layout::console_uart_range())?;
 
-    pgt.map_range(&reg_dev, PROT_DEV)?;
-    pgt.map_range(&reg_text, PROT_RX)?;
-    pgt.map_range(&reg_rodata, PROT_RO)?;
-    pgt.map_range(&reg_scratch, PROT_RW)?;
-    pgt.map_range(&reg_stack, PROT_RW)?;
-
-    pgt.activate();
-    info!("Activated kernel page table.");
-    Ok(())
+    Ok(page_table)
 }
 
-fn try_init_logger() -> Result<()> {
-    match get_hypervisor().mmio_guard_init() {
+fn try_init_logger() -> Result<bool> {
+    let mmio_guard_supported = match get_hypervisor().mmio_guard_init() {
         // pKVM blocks MMIO by default, we need to enable MMIO guard to support logging.
-        Ok(()) => get_hypervisor().mmio_guard_map(vmbase::console::BASE_ADDRESS)?,
+        Ok(()) => {
+            get_hypervisor().mmio_guard_map(vmbase::console::BASE_ADDRESS)?;
+            true
+        }
         // MMIO guard enroll is not supported in unprotected VM.
-        Err(hyp::Error::MmioGuardNotsupported) => {}
+        Err(hyp::Error::MmioGuardNotsupported) => false,
         Err(e) => return Err(e.into()),
     };
-    vmbase::logger::init(log::LevelFilter::Debug).map_err(|_| Error::LoggerInit)
+    vmbase::logger::init(log::LevelFilter::Debug).map_err(|_| Error::LoggerInit)?;
+    Ok(mmio_guard_supported)
 }
 
 /// # Safety
@@ -121,29 +85,54 @@ fn try_init_logger() -> Result<()> {
 unsafe fn try_main(fdt_addr: usize) -> Result<()> {
     info!("Welcome to Rialto!");
     // SAFETY: The caller ensures that `fdt_addr` is valid.
-    let fdt = unsafe { slice::from_raw_parts(fdt_addr as *mut u8, SZ_1M) };
+    let fdt = unsafe { slice::from_raw_parts(fdt_addr as *mut u8, crosvm::FDT_MAX_SIZE) };
     let fdt = libfdt::Fdt::from_slice(fdt)?;
     let pci_info = PciInfo::from_fdt(fdt)?;
     debug!("PCI: {:#x?}", pci_info);
 
-    let mut pgt = IdMap::new(PT_ASID, PT_ROOT_LEVEL);
-    init_kernel_pgt(&mut pgt)?;
+    let page_table = new_page_table()?;
+
+    MEMORY.lock().replace(MemoryTracker::new(
+        page_table,
+        crosvm::MEM_START..layout::MAX_VIRT_ADDR,
+        crosvm::MMIO_RANGE,
+        None, // Rialto doesn't have any payload for now.
+    ));
     Ok(())
+}
+
+fn try_unshare_all_memory(mmio_guard_supported: bool) -> Result<()> {
+    info!("Starting unsharing memory...");
+
+    // No logging after unmapping UART.
+    if mmio_guard_supported {
+        get_hypervisor().mmio_guard_unmap(vmbase::console::BASE_ADDRESS)?;
+    }
+    // Unshares all memory and deactivates page table.
+    drop(MEMORY.lock().take());
+    Ok(())
+}
+
+fn unshare_all_memory(mmio_guard_supported: bool) {
+    if let Err(e) = try_unshare_all_memory(mmio_guard_supported) {
+        error!("Failed to unshare the memory: {e}");
+    }
 }
 
 /// Entry point for Rialto.
 pub fn main(fdt_addr: u64, _a1: u64, _a2: u64, _a3: u64) {
     init_heap();
-    if try_init_logger().is_err() {
+    let Ok(mmio_guard_supported) = try_init_logger() else {
         // Don't log anything if the logger initialization fails.
         reboot();
-    }
+    };
     // SAFETY: `fdt_addr` is supposed to be a valid pointer and points to
     // a valid `Fdt`.
     match unsafe { try_main(fdt_addr as usize) } {
-        Ok(()) => info!("Rialto ends successfully."),
+        Ok(()) => unshare_all_memory(mmio_guard_supported),
         Err(e) => {
             error!("Rialto failed with {e}");
+            unshare_all_memory(mmio_guard_supported);
             reboot()
         }
     }

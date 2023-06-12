@@ -24,11 +24,12 @@ use crate::error::{Error, Result};
 use alloc::boxed::Box;
 pub use common::Hypervisor;
 pub use common::HypervisorCap;
+pub use common::MMIO_GUARD_GRANULE_SIZE;
 use gunyah::GunyahHypervisor;
 pub use kvm::KvmError;
 use kvm::KvmHypervisor;
 use once_cell::race::OnceBox;
-use psci::smccc::hvc64;
+use smccc::hvc64;
 use uuid::Uuid;
 
 enum HypervisorBackend {

@@ -14,11 +14,11 @@
 
 //! Support for the pvmfw configuration data format.
 
-use crate::helpers;
 use core::fmt;
 use core::mem;
 use core::ops::Range;
 use core::result;
+use vmbase::util::unchecked_align_up;
 use zerocopy::{FromBytes, LayoutVerified};
 
 /// Configuration data header.
@@ -101,8 +101,7 @@ impl fmt::Display for EntryError {
 impl Header {
     const MAGIC: u32 = u32::from_ne_bytes(*b"pvmf");
     const VERSION_1_0: u32 = Self::version(1, 0);
-    const PADDED_SIZE: usize =
-        helpers::unchecked_align_up(mem::size_of::<Self>(), mem::size_of::<u64>());
+    const PADDED_SIZE: usize = unchecked_align_up(mem::size_of::<Self>(), mem::size_of::<u64>());
 
     pub const fn version(major: u16, minor: u16) -> u32 {
         ((major as u32) << 16) | (minor as u32)
@@ -186,9 +185,7 @@ pub struct Config<'a> {
 
 impl<'a> Config<'a> {
     /// Take ownership of a pvmfw configuration consisting of its header and following entries.
-    ///
-    /// SAFETY - 'data' should respect the alignment of Header.
-    pub unsafe fn new(data: &'a mut [u8]) -> Result<Self> {
+    pub fn new(data: &'a mut [u8]) -> Result<Self> {
         let header = data.get(..Header::PADDED_SIZE).ok_or(Error::BufferTooSmall)?;
 
         let (header, _) =

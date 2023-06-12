@@ -14,11 +14,14 @@
 
 //! Hardware management of the access flag and dirty state.
 
-use crate::{isb, read_sysreg, write_sysreg};
+use super::page_table::{is_leaf_pte, PageTable};
+use super::util::flush_region;
+use crate::{dsb, isb, read_sysreg, tlbi, write_sysreg};
+use aarch64_paging::paging::{Attributes, Descriptor, MemoryRegion};
 
 /// Sets whether the hardware management of access and dirty state is enabled with
 /// the given boolean.
-pub fn set_dbm_enabled(enabled: bool) {
+pub(super) fn set_dbm_enabled(enabled: bool) {
     if !dbm_available() {
         return;
     }
@@ -44,4 +47,49 @@ fn dbm_available() -> bool {
     // Hardware dirty bit management available flag (ID_AA64MMFR1_EL1.HAFDBS[1])
     const DBM_AVAILABLE: usize = 1 << 1;
     read_sysreg!("id_aa64mmfr1_el1") & DBM_AVAILABLE != 0
+}
+
+/// Flushes a memory range the descriptor refers to, if the descriptor is in writable-dirty state.
+pub(super) fn flush_dirty_range(
+    va_range: &MemoryRegion,
+    desc: &mut Descriptor,
+    level: usize,
+) -> Result<(), ()> {
+    // Only flush ranges corresponding to dirty leaf PTEs.
+    let flags = desc.flags().ok_or(())?;
+    if !is_leaf_pte(&flags, level) {
+        return Ok(());
+    }
+    if !flags.contains(Attributes::READ_ONLY) {
+        flush_region(va_range.start().0, va_range.len());
+    }
+    Ok(())
+}
+
+/// Clears read-only flag on a PTE, making it writable-dirty. Used when dirty state is managed
+/// in software to handle permission faults on read-only descriptors.
+pub(super) fn mark_dirty_block(
+    va_range: &MemoryRegion,
+    desc: &mut Descriptor,
+    level: usize,
+) -> Result<(), ()> {
+    let flags = desc.flags().ok_or(())?;
+    if !is_leaf_pte(&flags, level) {
+        return Ok(());
+    }
+    if flags.contains(Attributes::DBM) {
+        assert!(flags.contains(Attributes::READ_ONLY), "unexpected PTE writable state");
+        desc.modify_flags(Attributes::empty(), Attributes::READ_ONLY);
+        // Updating the read-only bit of a PTE requires TLB invalidation.
+        // A TLB maintenance instruction is only guaranteed to be complete after a DSB instruction.
+        // An ISB instruction is required to ensure the effects of completed TLB maintenance
+        // instructions are visible to instructions fetched afterwards.
+        // See ARM ARM E2.3.10, and G5.9.
+        tlbi!("vale1", PageTable::ASID, va_range.start().0);
+        dsb!("ish");
+        isb!();
+        Ok(())
+    } else {
+        Err(())
+    }
 }

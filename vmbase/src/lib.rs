@@ -16,6 +16,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 pub mod arch;
 mod bionic;
 pub mod console;
@@ -26,6 +28,8 @@ pub mod logger;
 pub mod memory;
 pub mod power;
 pub mod uart;
+pub mod util;
+pub mod virtio;
 
 pub use bionic::STACK_CHK_GUARD;
 
