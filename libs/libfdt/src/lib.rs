@@ -25,6 +25,7 @@ use core::cmp::max;
 use core::ffi::{c_int, c_void, CStr};
 use core::fmt;
 use core::mem;
+use core::ops::Range;
 use core::result;
 use zerocopy::AsBytes as _;
 
@@ -191,7 +192,7 @@ impl TryFrom<c_int> for SizeCells {
 }
 
 /// DT node.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct FdtNode<'a> {
     fdt: &'a Fdt,
     offset: c_int,
@@ -599,6 +600,7 @@ impl<'a> Iterator for CompatibleIterator<'a> {
 }
 
 /// Wrapper around low-level libfdt functions.
+#[derive(Debug)]
 #[repr(transparent)]
 pub struct Fdt {
     buffer: [u8],
@@ -715,23 +717,24 @@ impl Fdt {
         Ok(self)
     }
 
-    /// Return an iterator of memory banks specified the "/memory" node.
+    /// Returns an iterator of memory banks specified the "/memory" node.
+    /// Throws an error when the "/memory" is not found in the device tree.
     ///
     /// NOTE: This does not support individual "/memory@XXXX" banks.
-    pub fn memory(&self) -> Result<Option<MemRegIterator>> {
-        let memory = CStr::from_bytes_with_nul(b"/memory\0").unwrap();
-        let device_type = CStr::from_bytes_with_nul(b"memory\0").unwrap();
+    pub fn memory(&self) -> Result<MemRegIterator> {
+        let memory_node_name = CStr::from_bytes_with_nul(b"/memory\0").unwrap();
+        let memory_device_type = CStr::from_bytes_with_nul(b"memory\0").unwrap();
 
-        if let Some(node) = self.node(memory)? {
-            if node.device_type()? != Some(device_type) {
-                return Err(FdtError::BadValue);
-            }
-            let reg = node.reg()?.ok_or(FdtError::BadValue)?;
-
-            Ok(Some(MemRegIterator::new(reg)))
-        } else {
-            Ok(None)
+        let node = self.node(memory_node_name)?.ok_or(FdtError::NotFound)?;
+        if node.device_type()? != Some(memory_device_type) {
+            return Err(FdtError::BadValue);
         }
+        node.reg()?.ok_or(FdtError::BadValue).map(MemRegIterator::new)
+    }
+
+    /// Returns the first memory range in the `/memory` node.
+    pub fn first_memory_range(&self) -> Result<Range<usize>> {
+        self.memory()?.next().ok_or(FdtError::NotFound)
     }
 
     /// Retrieve the standard /chosen node.

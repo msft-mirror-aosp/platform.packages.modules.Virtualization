@@ -30,11 +30,8 @@ mod fdt;
 mod gpt;
 mod heap;
 mod helpers;
-mod hvc;
 mod instance;
 mod memory;
-mod rand;
-mod virtio;
 
 use crate::bcc::Bcc;
 use crate::dice::PartialInputs;
@@ -42,8 +39,6 @@ use crate::entry::RebootReason;
 use crate::fdt::modify_for_next_stage;
 use crate::helpers::GUEST_PAGE_SIZE;
 use crate::instance::get_or_generate_instance_salt;
-use crate::memory::MEMORY;
-use crate::virtio::pci;
 use alloc::boxed::Box;
 use core::ops::Range;
 use diced_open_dice::{bcc_handover_parse, DiceArtifacts};
@@ -55,6 +50,8 @@ use pvmfw_avb::Capability;
 use pvmfw_avb::DebugLevel;
 use pvmfw_embedded_key::PUBLIC_KEY;
 use vmbase::memory::flush;
+use vmbase::memory::MEMORY;
+use vmbase::virtio::pci;
 
 const NEXT_BCC_SIZE: usize = GUEST_PAGE_SIZE;
 
@@ -98,12 +95,20 @@ fn main(
     // Set up PCI bus for VirtIO devices.
     let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;
     debug!("PCI: {:#x?}", pci_info);
-    let mut pci_root = pci::initialise(pci_info, MEMORY.lock().as_mut().unwrap())?;
+    let mut pci_root = pci::initialise(pci_info, MEMORY.lock().as_mut().unwrap()).map_err(|e| {
+        error!("Failed to initialise PCI: {e}");
+        RebootReason::InternalError
+    })?;
 
     let verified_boot_data = verify_payload(signed_kernel, ramdisk, PUBLIC_KEY).map_err(|e| {
         error!("Failed to verify the payload: {e}");
         RebootReason::PayloadVerificationError
     })?;
+    let debuggable = verified_boot_data.debug_level != DebugLevel::None;
+    if debuggable {
+        info!("Successfully verified a debuggable payload.");
+        info!("Please disregard any previous libavb ERROR about initrd_normal.");
+    }
 
     if verified_boot_data.capabilities.contains(&Capability::RemoteAttest) {
         info!("Service VM capable of remote attestation detected");
@@ -146,7 +151,6 @@ fn main(
     flush(next_bcc);
 
     let strict_boot = true;
-    let debuggable = verified_boot_data.debug_level != DebugLevel::None;
     modify_for_next_stage(fdt, next_bcc, new_instance, strict_boot, debug_policy, debuggable)
         .map_err(|e| {
             error!("Failed to configure device tree: {e}");

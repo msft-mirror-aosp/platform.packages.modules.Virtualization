@@ -56,7 +56,6 @@ There are various tests that spawn guest VMs and check different aspects of the 
 all can run via `atest`.
 
 ```shell
-atest VirtualizationTestCases.64
 atest MicrodroidHostTestCases
 atest MicrodroidTestApp
 ```
@@ -104,8 +103,11 @@ adb shell setprop hypervisor.pvmfw.path /data/local/tmp/pvmfw.img
 on pVM. You can run a Microdroid with empty payload using the following command:
 
 ```shell
-adb shell /apex/com.android.virt/bin/vm run-microdroid --debug full
+adb shell /apex/com.android.virt/bin/vm run-microdroid
 ```
+
+which spawns a "debuggable" VM by default to allow access to guest kernel logs.
+To run a production non-debuggable VM, pass `--debug none`.
 
 ## Building and updating CrosVM and VirtualizationService {#building-and-updating}
 

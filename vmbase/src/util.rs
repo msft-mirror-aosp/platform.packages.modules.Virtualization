@@ -14,6 +14,16 @@
 
 //! Utility functions.
 
+use core::ops::Range;
+
+/// Create &CStr out of &str literal
+#[macro_export]
+macro_rules! cstr {
+    ($str:literal) => {{
+        core::ffi::CStr::from_bytes_with_nul(concat!($str, "\0").as_bytes()).unwrap()
+    }};
+}
+
 /// Flatten [[T; N]] into &[T]
 /// TODO: use slice::flatten when it graduates from experimental
 pub fn flatten<T, const N: usize>(original: &[[T; N]]) -> &[T] {
@@ -69,4 +79,23 @@ pub const fn ceiling_div(num: usize, den: usize) -> Option<usize> {
     };
 
     r.checked_div(den)
+}
+
+/// Trait to check containment of one range within another.
+pub trait RangeExt {
+    /// Returns true if `self` is contained within the `other` range.
+    fn is_within(&self, other: &Self) -> bool;
+
+    /// Returns true if `self` overlaps with the `other` range.
+    fn overlaps(&self, other: &Self) -> bool;
+}
+
+impl<T: PartialOrd> RangeExt for Range<T> {
+    fn is_within(&self, other: &Self) -> bool {
+        self.start >= other.start && self.end <= other.end
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        self.start < other.end && other.start < self.end
+    }
 }

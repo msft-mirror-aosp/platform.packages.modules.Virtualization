@@ -22,13 +22,17 @@ pub mod arch;
 mod bionic;
 pub mod console;
 mod entry;
+pub mod fdt;
+mod hvc;
 pub mod layout;
 mod linker;
 pub mod logger;
 pub mod memory;
 pub mod power;
+pub mod rand;
 pub mod uart;
 pub mod util;
+pub mod virtio;
 
 pub use bionic::STACK_CHK_GUARD;
 

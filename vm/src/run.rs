@@ -19,7 +19,10 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     CpuTopology::CpuTopology,
     IVirtualizationService::IVirtualizationService,
     PartitionType::PartitionType,
-    VirtualMachineAppConfig::{DebugLevel::DebugLevel, Payload::Payload, VirtualMachineAppConfig},
+    VirtualMachineAppConfig::{
+        CustomConfig::CustomConfig, DebugLevel::DebugLevel, Payload::Payload,
+        VirtualMachineAppConfig,
+    },
     VirtualMachineConfig::VirtualMachineConfig,
     VirtualMachinePayloadConfig::VirtualMachinePayloadConfig,
     VirtualMachineState::VirtualMachineState,
@@ -60,6 +63,7 @@ pub fn command_run_app(
     task_profiles: Vec<String>,
     extra_idsigs: &[PathBuf],
     gdb: Option<NonZeroU16>,
+    kernel: Option<&Path>,
 ) -> Result<(), Error> {
     let apk_file = File::open(apk).context("Failed to open APK file")?;
 
@@ -115,6 +119,8 @@ pub fn command_run_app(
         None
     };
 
+    let kernel = kernel.map(|p| open_parcel_file(p, false)).transpose()?;
+
     let extra_idsig_files: Result<Vec<File>, _> = extra_idsigs.iter().map(File::open).collect();
     let extra_idsig_fds = extra_idsig_files?.into_iter().map(ParcelFileDescriptor::new).collect();
 
@@ -133,6 +139,12 @@ pub fn command_run_app(
 
     let payload_config_str = format!("{:?}!{:?}", apk, payload);
 
+    let custom_config = CustomConfig {
+        customKernelImage: kernel,
+        gdbPort: gdb.map(u16::from).unwrap_or(0) as i32, // 0 means no gdb
+        taskProfiles: task_profiles,
+    };
+
     let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
         name: name.unwrap_or_else(|| String::from("VmRunApp")),
         apk: apk_fd.into(),
@@ -145,8 +157,7 @@ pub fn command_run_app(
         protectedVm: protected,
         memoryMib: mem.unwrap_or(0) as i32, // 0 means use the VM default
         cpuTopology: cpu_topology,
-        taskProfiles: task_profiles,
-        gdbPort: gdb.map(u16::from).unwrap_or(0) as i32, // 0 means no gdb
+        customConfig: Some(custom_config),
     });
     run(service, &config, &payload_config_str, console_path, log_path)
 }
@@ -189,6 +200,7 @@ pub fn command_run_microdroid(
     cpu_topology: CpuTopology,
     task_profiles: Vec<String>,
     gdb: Option<NonZeroU16>,
+    kernel: Option<&Path>,
 ) -> Result<(), Error> {
     let apk = find_empty_payload_apk_path()?;
     println!("found path {}", apk.display());
@@ -220,6 +232,7 @@ pub fn command_run_microdroid(
         task_profiles,
         &extra_sig,
         gdb,
+        kernel,
     )
 }
 

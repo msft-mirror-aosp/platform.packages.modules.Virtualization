@@ -15,12 +15,11 @@
 //! Low-level entry and exit points of pvmfw.
 
 use crate::config;
+use crate::configure_global_allocator_size;
 use crate::crypto;
 use crate::fdt;
 use crate::heap;
-use crate::helpers::RangeExt as _;
-use crate::memory::{self, MemoryTracker, MEMORY};
-use crate::rand;
+use crate::memory;
 use core::arch::asm;
 use core::mem::{drop, size_of};
 use core::num::NonZeroUsize;
@@ -32,10 +31,14 @@ use log::error;
 use log::info;
 use log::warn;
 use log::LevelFilter;
+use vmbase::util::RangeExt as _;
 use vmbase::{
-    console, layout, logger, main,
-    memory::{min_dcache_line_size, SIZE_2MB, SIZE_4KB},
+    console,
+    layout::{self, crosvm},
+    logger, main,
+    memory::{min_dcache_line_size, MemoryTracker, MEMORY, SIZE_128KB, SIZE_4KB},
     power::reboot,
+    rand,
 };
 use zeroize::Zeroize;
 
@@ -60,6 +63,7 @@ pub enum RebootReason {
 }
 
 main!(start);
+configure_global_allocator_size!(SIZE_128KB);
 
 /// Entry point for pVM firmware.
 pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64) {
@@ -87,7 +91,7 @@ struct MemorySlices<'a> {
 impl<'a> MemorySlices<'a> {
     fn new(fdt: usize, kernel: usize, kernel_size: usize) -> Result<Self, RebootReason> {
         // SAFETY - SIZE_2MB is non-zero.
-        const FDT_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(SIZE_2MB) };
+        const FDT_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(crosvm::FDT_MAX_SIZE) };
         // TODO - Only map the FDT as read-only, until we modify it right before jump_to_payload()
         // e.g. by generating a DTBO for a template DT in main() and, on return, re-map DT as RW,
         // overwrite with the template DT and apply the DTBO.
@@ -114,7 +118,11 @@ impl<'a> MemorySlices<'a> {
         })?;
 
         if get_hypervisor().has_cap(HypervisorCap::DYNAMIC_MEM_SHARE) {
-            MEMORY.lock().as_mut().unwrap().init_dynamic_shared_pool().map_err(|e| {
+            let granule = get_hypervisor().memory_protection_granule().map_err(|e| {
+                error!("Failed to get memory protection granule: {e}");
+                RebootReason::InternalError
+            })?;
+            MEMORY.lock().as_mut().unwrap().init_dynamic_shared_pool(granule).map_err(|e| {
                 error!("Failed to initialize dynamically shared pool: {e}");
                 RebootReason::InternalError
             })?;
@@ -223,7 +231,12 @@ fn main_wrapper(
     let (bcc_slice, debug_policy) = appended.get_entries();
 
     // Up to this point, we were using the built-in static (from .rodata) page tables.
-    MEMORY.lock().replace(MemoryTracker::new(page_table));
+    MEMORY.lock().replace(MemoryTracker::new(
+        page_table,
+        crosvm::MEM_START..layout::MAX_VIRT_ADDR,
+        crosvm::MMIO_RANGE,
+        Some(memory::appended_payload_range()),
+    ));
 
     let slices = MemorySlices::new(fdt, payload, payload_size)?;
 

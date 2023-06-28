@@ -15,14 +15,15 @@
 //! Memory management.
 
 mod dbm;
+mod error;
 mod page_table;
 mod shared;
 mod util;
 
-pub use dbm::{flush_dirty_range, set_dbm_enabled};
-pub use page_table::{is_leaf_pte, PageTable, MMIO_LAZY_MAP_FLAG};
-pub use shared::MemorySharer;
+pub use error::MemoryTrackerError;
+pub use page_table::PageTable;
+pub use shared::{alloc_shared, dealloc_shared, MemoryRange, MemoryTracker, MEMORY};
 pub use util::{
     flush, flushed_zeroize, min_dcache_line_size, page_4kb_of, phys_to_virt, virt_to_phys,
-    PAGE_SIZE, SIZE_2MB, SIZE_4KB, SIZE_4MB,
+    PAGE_SIZE, SIZE_128KB, SIZE_2MB, SIZE_4KB, SIZE_4MB,
 };

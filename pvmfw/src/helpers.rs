@@ -14,35 +14,7 @@
 
 //! Miscellaneous helper functions.
 
-use core::ops::Range;
 use vmbase::memory::{PAGE_SIZE, SIZE_4KB};
 
 pub const GUEST_PAGE_SIZE: usize = SIZE_4KB;
 pub const PVMFW_PAGE_SIZE: usize = PAGE_SIZE;
-
-/// Trait to check containment of one range within another.
-pub(crate) trait RangeExt {
-    /// Returns true if `self` is contained within the `other` range.
-    fn is_within(&self, other: &Self) -> bool;
-
-    /// Returns true if `self` overlaps with the `other` range.
-    fn overlaps(&self, other: &Self) -> bool;
-}
-
-impl<T: PartialOrd> RangeExt for Range<T> {
-    fn is_within(&self, other: &Self) -> bool {
-        self.start >= other.start && self.end <= other.end
-    }
-
-    fn overlaps(&self, other: &Self) -> bool {
-        self.start < other.end && other.start < self.end
-    }
-}
-
-/// Create &CStr out of &str literal
-#[macro_export]
-macro_rules! cstr {
-    ($str:literal) => {{
-        core::ffi::CStr::from_bytes_with_nul(concat!($str, "\0").as_bytes()).unwrap()
-    }};
-}

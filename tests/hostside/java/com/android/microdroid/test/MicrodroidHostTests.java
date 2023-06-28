@@ -55,6 +55,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
@@ -472,7 +473,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         key, keyOverrides, /*isProtected=*/ false, /*updateBootconfigs=*/ true);
         assertThatEventually(
                 100000,
-                () -> getDevice().pullFileContents(CONSOLE_PATH),
+                () -> getDevice().pullFileContents(LOG_PATH),
                 containsString("boot completed, time to run payload"));
 
         vmInfo.mProcess.destroy();
@@ -842,43 +843,6 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         stat.getValue().toString());
             }
         }
-    }
-
-    @Test
-    public void testCustomVirtualMachinePermission() throws Exception {
-        assumeTrue(
-                "Protected VMs are not supported",
-                getAndroidDevice().supportsMicrodroid(/*protectedVm=*/ true));
-        assumeTrue("Test requires adb unroot", getDevice().disableAdbRoot());
-        CommandRunner android = new CommandRunner(getDevice());
-
-        // Pull etc/microdroid.json
-        File virtApexDir = FileUtil.createTempDir("virt_apex");
-        File microdroidConfigFile = new File(virtApexDir, "microdroid.json");
-        assertThat(getDevice().pullFile(VIRT_APEX + "etc/microdroid.json", microdroidConfigFile))
-                .isTrue();
-        JSONObject config = new JSONObject(FileUtil.readStringFromFile(microdroidConfigFile));
-
-        // USE_CUSTOM_VIRTUAL_MACHINE is enforced only on protected mode
-        config.put("protected", true);
-
-        // Write updated config
-        final String configPath = TEST_ROOT + "raw_config.json";
-        getDevice().pushString(config.toString(), configPath);
-
-        // temporarily revoke the permission
-        android.run(
-                "pm",
-                "revoke",
-                SHELL_PACKAGE_NAME,
-                "android.permission.USE_CUSTOM_VIRTUAL_MACHINE");
-        final String ret =
-                android.runForResult(VIRT_APEX + "bin/vm run", configPath).getStderr().trim();
-
-        assertThat(ret)
-                .contains(
-                        "does not have the android.permission.USE_CUSTOM_VIRTUAL_MACHINE"
-                                + " permission");
     }
 
     @Test

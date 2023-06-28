@@ -16,5 +16,17 @@
 //!
 //! https://crosvm.dev/book/appendix/memory_layout.html#common-layout
 
+use core::ops::Range;
+
+/// The start address of MMIO space.
+pub const MMIO_START: usize = 0x0;
+/// The end address of MMIO space.
+pub const MMIO_END: usize = 0x4000_0000;
+/// MMIO range.
+pub const MMIO_RANGE: Range<usize> = MMIO_START..MMIO_END;
+
 /// The start of the system's contiguous "main" memory.
 pub const MEM_START: usize = 0x8000_0000;
+
+/// Size of the FDT region as defined by crosvm, both in kernel and BIOS modes.
+pub const FDT_MAX_SIZE: usize = 2 << 20;
