@@ -19,7 +19,7 @@
 use crate::timeouts::TIMEOUTS;
 use crate::{
     get_vm_config_path, BUILD_MANIFEST_APK_PATH, BUILD_MANIFEST_SYSTEM_EXT_APK_PATH,
-    COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT,
+    COMPOS_APEX_ROOT, COMPOS_VSOCK_PORT,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     CpuTopology::CpuTopology,
@@ -27,12 +27,13 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     VirtualMachineAppConfig::{DebugLevel::DebugLevel, Payload::Payload, VirtualMachineAppConfig},
     VirtualMachineConfig::VirtualMachineConfig,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use binder::{ParcelFileDescriptor, Strong};
 use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsService;
+use glob::glob;
 use log::{info, warn};
 use rustutils::system_properties;
-use std::fs::{self, File};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use vmclient::{DeathReason, ErrorCode, VmInstance, VmWaitError};
 
@@ -52,6 +53,8 @@ pub enum VmCpuTopology {
 /// Parameters to be used when creating a virtual machine instance.
 #[derive(Default, Debug, Clone)]
 pub struct VmParameters {
+    /// The name of VM for identifying.
+    pub name: String,
     /// Whether the VM should be debuggable.
     pub debug_mode: bool,
     /// CPU topology of the VM. Defaults to 1 vCPU.
@@ -79,7 +82,6 @@ impl ComposClient {
         let instance_fd = ParcelFileDescriptor::new(instance_image);
 
         let apex_dir = Path::new(COMPOS_APEX_ROOT);
-        let data_dir = Path::new(COMPOS_DATA_ROOT);
 
         let config_apk = locate_config_apk(apex_dir)?;
         let apk_fd = File::open(config_apk).context("Failed to open config APK file")?;
@@ -109,25 +111,13 @@ impl ComposClient {
 
         let debug_level = if parameters.debug_mode { DebugLevel::FULL } else { DebugLevel::NONE };
 
-        let (console_fd, log_fd) = if debug_level == DebugLevel::NONE {
-            (None, None)
-        } else {
-            // Console output and the system log output from the VM are redirected to file.
-            let console_fd = File::create(data_dir.join("vm_console.log"))
-                .context("Failed to create console log file")?;
-            let log_fd = File::create(data_dir.join("vm.log"))
-                .context("Failed to create system log file")?;
-            info!("Running in debug level {:?}", debug_level);
-            (Some(console_fd), Some(log_fd))
-        };
-
         let cpu_topology = match parameters.cpu_topology {
             VmCpuTopology::OneCpu => CpuTopology::ONE_CPU,
             VmCpuTopology::MatchHost => CpuTopology::MATCH_HOST,
         };
 
         let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
-            name: String::from("Compos"),
+            name: parameters.name.clone(),
             apk: Some(apk_fd),
             idsig: Some(idsig_fd),
             instanceImage: Some(instance_fd),
@@ -142,6 +132,8 @@ impl ComposClient {
             gdbPort: 0, // Don't start gdb-server
         });
 
+        // Let logs go to logcat.
+        let (console_fd, log_fd) = (None, None);
         let callback = Box::new(Callback {});
         let instance = VmInstance::create(service, &config, console_fd, log_fd, Some(callback))
             .context("Failed to create VM")?;
@@ -194,15 +186,19 @@ fn locate_config_apk(apex_dir: &Path) -> Result<PathBuf> {
     // Our config APK will be in a directory under app, but the name of the directory is at the
     // discretion of the build system. So just look in each sub-directory until we find it.
     // (In practice there will be exactly one directory, so this shouldn't take long.)
-    let app_dir = apex_dir.join("app");
-    for dir in fs::read_dir(app_dir).context("Reading app dir")? {
-        let apk_file = dir?.path().join("CompOSPayloadApp.apk");
-        if apk_file.is_file() {
-            return Ok(apk_file);
-        }
+    let app_glob = apex_dir.join("app").join("**").join("CompOSPayloadApp*.apk");
+    let mut entries: Vec<PathBuf> =
+        glob(app_glob.to_str().ok_or_else(|| anyhow!("Invalid path: {}", app_glob.display()))?)
+            .context("failed to glob")?
+            .filter_map(|e| e.ok())
+            .collect();
+    if entries.len() > 1 {
+        bail!("Found more than one apk matching {}", app_glob.display());
     }
-
-    bail!("Failed to locate CompOSPayloadApp.apk")
+    match entries.pop() {
+        Some(path) => Ok(path),
+        None => Err(anyhow!("No apks match {}", app_glob.display())),
+    }
 }
 
 fn prepare_idsig(

@@ -15,8 +15,21 @@ java_library_static {
     static_libs: [
         "androidx.test.runner",
         "androidx.test.ext.junit",
+        "com.android.microdroid.testservice-java",
         "MicrodroidTestHelper",
         "truth-prebuilt",
     ],
-    sdk_version: "system_current",
+    sdk_version: "test_current",
+}
+
+java_test_helper_library {
+    name: "MicrodroidTestPreparer",
+    srcs: ["src/java/com/android/microdroid/test/preparer/*.java"],
+    libs: ["tradefed"],
+    test_suites: [
+        "cts",
+        "general-tests",
+    ],
+    host_supported: true,
+    device_supported: false,
 }

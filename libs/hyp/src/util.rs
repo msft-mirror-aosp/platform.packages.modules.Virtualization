@@ -1,4 +1,4 @@
-// Copyright 2022, The Android Open Source Project
+// Copyright 2023, The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Library for handling AVMD blobs.
+//! Utility functions.
 
-#![no_std]
+pub(crate) const SIZE_4KB: usize = 4 << 10;
 
-mod avmd;
-
-pub use avmd::{ApkDescriptor, Avmd, Descriptor, ResourceIdentifier, VbMetaDescriptor};
+/// Computes the low memory page address of the 4KiB page containing a given address.
+pub(crate) fn page_address(addr: usize) -> u64 {
+    (addr & !(SIZE_4KB - 1)).try_into().unwrap()
+}

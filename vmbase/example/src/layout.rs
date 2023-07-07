@@ -17,8 +17,8 @@
 use aarch64_paging::paging::{MemoryRegion, VirtualAddress};
 use core::arch::asm;
 use core::ops::Range;
+use log::info;
 use vmbase::layout;
-use vmbase::println;
 use vmbase::STACK_CHK_GUARD;
 
 /// The first 1 GiB of memory are used for MMIO.
@@ -55,13 +55,13 @@ pub fn bss_range() -> Range<VirtualAddress> {
 
 /// Writable data region for the stack.
 pub fn boot_stack_range() -> Range<VirtualAddress> {
-    into_va_range(layout::boot_stack_range())
+    const PAGE_SIZE: usize = 4 << 10;
+    into_va_range(layout::stack_range(40 * PAGE_SIZE))
 }
 
-/// Writable data, including the stack.
-pub fn writable_region() -> MemoryRegion {
-    let r = layout::writable_region();
-    MemoryRegion::new(r.start, r.end)
+/// Writable data region for allocations.
+pub fn scratch_range() -> Range<VirtualAddress> {
+    into_va_range(layout::scratch_range())
 }
 
 fn data_load_address() -> VirtualAddress {
@@ -74,14 +74,14 @@ fn binary_end() -> VirtualAddress {
 
 pub fn print_addresses() {
     let dtb = dtb_range();
-    println!("dtb:        {}..{} ({} bytes)", dtb.start, dtb.end, dtb.end - dtb.start);
+    info!("dtb:        {}..{} ({} bytes)", dtb.start, dtb.end, dtb.end - dtb.start);
     let text = text_range();
-    println!("text:       {}..{} ({} bytes)", text.start, text.end, text.end - text.start);
+    info!("text:       {}..{} ({} bytes)", text.start, text.end, text.end - text.start);
     let rodata = rodata_range();
-    println!("rodata:     {}..{} ({} bytes)", rodata.start, rodata.end, rodata.end - rodata.start);
-    println!("binary end: {}", binary_end());
+    info!("rodata:     {}..{} ({} bytes)", rodata.start, rodata.end, rodata.end - rodata.start);
+    info!("binary end: {}", binary_end());
     let data = data_range();
-    println!(
+    info!(
         "data:       {}..{} ({} bytes, loaded at {})",
         data.start,
         data.end,
@@ -89,9 +89,9 @@ pub fn print_addresses() {
         data_load_address(),
     );
     let bss = bss_range();
-    println!("bss:        {}..{} ({} bytes)", bss.start, bss.end, bss.end - bss.start);
+    info!("bss:        {}..{} ({} bytes)", bss.start, bss.end, bss.end - bss.start);
     let boot_stack = boot_stack_range();
-    println!(
+    info!(
         "boot_stack: {}..{} ({} bytes)",
         boot_stack.start,
         boot_stack.end,

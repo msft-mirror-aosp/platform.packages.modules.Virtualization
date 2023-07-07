@@ -14,6 +14,7 @@
 
 //! Support for DICE derivation and BCC generation.
 
+use crate::cstr;
 use crate::helpers::flushed_zeroize;
 use core::ffi::c_void;
 use core::ffi::CStr;
@@ -42,9 +43,9 @@ fn to_dice_hash(verified_boot_data: &VerifiedBootData) -> diced_open_dice::Resul
 }
 
 pub struct PartialInputs {
-    code_hash: Hash,
-    auth_hash: Hash,
-    mode: DiceMode,
+    pub code_hash: Hash,
+    pub auth_hash: Hash,
+    pub mode: DiceMode,
 }
 
 impl PartialInputs {
@@ -59,14 +60,13 @@ impl PartialInputs {
     pub fn into_input_values(
         self,
         salt: &[u8; HIDDEN_SIZE],
+        config_descriptor_buffer: &mut [u8],
     ) -> diced_open_dice::Result<InputValues> {
-        let component_name = CStr::from_bytes_with_nul(b"vm_entry\0").unwrap();
-        let mut config_descriptor_buffer = [0; 128];
         let config_descriptor_size = bcc_format_config_descriptor(
-            Some(component_name),
+            Some(cstr!("vm_entry")),
             None,  // component_version
             false, // resettable
-            &mut config_descriptor_buffer,
+            config_descriptor_buffer,
         )?;
         let config = &config_descriptor_buffer[..config_descriptor_size];
 

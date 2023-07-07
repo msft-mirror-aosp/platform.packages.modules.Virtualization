@@ -51,6 +51,7 @@ android_system_image {
     deps: [
         "init_second_stage",
         "microdroid_build_prop",
+        "microdroid_init_debug_policy",
         "microdroid_init_rc",
         "microdroid_ueventd_rc",
         "microdroid_launcher",
@@ -69,11 +70,8 @@ android_system_image {
         "libartpalette-system",
 
         "apexd.microdroid",
-        "atrace",
         "debuggerd",
         "linker",
-        "tombstoned.microdroid",
-        "tombstone_transmit.microdroid",
         "cgroups.json",
         "task_profiles.json",
         "public.libraries.android.txt",
@@ -85,16 +83,15 @@ android_system_image {
         "microdroid_property_contexts",
         "mke2fs.microdroid",
 
-        // Adding more libs manually for unbundled build.
-        // TODO(b/268557568) these should be added automatically.
-        "libcrypto",
-        "liblzma",
-        "libc++",
-        "libssl",
-
         "libvm_payload", // used by payload to interact with microdroid manager
 
         "prng_seeder_microdroid",
+
+        // Binaries required to capture traces in Microdroid.
+        "atrace",
+        "traced",
+        "traced_probes",
+        "perfetto",
     ] + microdroid_shell_and_utilities,
     multilib: {
         common: {
@@ -113,10 +110,23 @@ android_system_image {
                 "authfs",
                 "authfs_service",
                 "encryptedstore",
-                "microdroid_crashdump_kernel",
                 "microdroid_kexec",
                 "microdroid_manager",
                 "zipfuse",
+            ],
+        },
+    },
+    arch: {
+        // b/273792258: These could be in multilib.lib64 except that
+        // microdroid_crashdump_kernel doesn't exist for riscv64 yet
+        arm64: {
+            deps: [
+                "microdroid_crashdump_kernel",
+            ],
+        },
+        x86_64: {
+            deps: [
+                "microdroid_crashdump_kernel",
             ],
         },
     },
@@ -416,7 +426,7 @@ avb_gen_vbmeta_image {
 
 avb_add_hash_footer {
     name: "microdroid_kernel_signed",
-    src: "empty_kernel",
+    src: ":empty_file",
     filename: "microdroid_kernel",
     partition_name: "boot",
     private_key: ":microdroid_sign_key",
@@ -440,7 +450,7 @@ avb_add_hash_footer {
 
 prebuilt_etc {
     name: "microdroid_kernel",
-    src: "empty_kernel",
+    src: ":empty_file",
     relative_install_path: "fs",
     arch: {
         arm64: {
