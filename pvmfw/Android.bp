@@ -17,6 +17,8 @@ rust_ffi_static {
         "libaarch64_paging",
         "libbssl_ffi_nostd",
         "libbuddy_system_allocator",
+        "libciborium_nostd",
+        "libciborium_io_nostd",
         "libdiced_open_dice_nostd",
         "libfdtpci",
         "libhyp",
@@ -156,7 +158,7 @@ genrule {
     ],
     out: ["lib.rs"],
     tools: ["dtc"],
-    cmd: "prebuilts/clang/host/linux-x86/clang-r487747/bin/clang " + // UGLY!!!
+    cmd: "prebuilts/clang/host/linux-x86/clang-r487747c/bin/clang " + // UGLY!!!
         "-E -P -x assembler-with-cpp -I external/arm-trusted-firmware/include " +
         "-o $(genDir)/preprocessed.dts $(location platform.dts) && " +
         "$(location dtc) -I dts -O dtb -o $(genDir)/compiled.dtbo $(genDir)/preprocessed.dts && " +
