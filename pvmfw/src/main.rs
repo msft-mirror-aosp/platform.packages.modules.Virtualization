@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+mod bcc;
 mod bootargs;
 mod config;
 mod crypto;
@@ -36,8 +37,7 @@ mod mmu;
 mod rand;
 mod virtio;
 
-use alloc::boxed::Box;
-
+use crate::bcc::Bcc;
 use crate::dice::PartialInputs;
 use crate::entry::RebootReason;
 use crate::fdt::modify_for_next_stage;
@@ -46,12 +46,12 @@ use crate::helpers::GUEST_PAGE_SIZE;
 use crate::instance::get_or_generate_instance_salt;
 use crate::memory::MemoryTracker;
 use crate::virtio::pci;
-use diced_open_dice::bcc_handover_main_flow;
-use diced_open_dice::bcc_handover_parse;
-use diced_open_dice::DiceArtifacts;
+use alloc::boxed::Box;
+use core::ops::Range;
+use diced_open_dice::{bcc_handover_main_flow, bcc_handover_parse, DiceArtifacts};
 use fdtpci::{PciError, PciInfo};
 use libfdt::Fdt;
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use pvmfw_avb::verify_payload;
 use pvmfw_avb::DebugLevel;
 use pvmfw_embedded_key::PUBLIC_KEY;
@@ -63,9 +63,9 @@ fn main(
     signed_kernel: &[u8],
     ramdisk: Option<&[u8]>,
     current_bcc_handover: &[u8],
-    debug_policy: Option<&mut [u8]>,
+    mut debug_policy: Option<&mut [u8]>,
     memory: &mut MemoryTracker,
-) -> Result<(), RebootReason> {
+) -> Result<Range<usize>, RebootReason> {
     info!("pVM firmware");
     debug!("FDT: {:?}", fdt.as_ptr());
     debug!("Signed kernel: {:?} ({:#x} bytes)", signed_kernel.as_ptr(), signed_kernel.len());
@@ -75,11 +75,26 @@ fn main(
     } else {
         debug!("Ramdisk: None");
     }
+
     let bcc_handover = bcc_handover_parse(current_bcc_handover).map_err(|e| {
         error!("Invalid BCC Handover: {e:?}");
         RebootReason::InvalidBcc
     })?;
     trace!("BCC: {bcc_handover:x?}");
+
+    let cdi_seal = bcc_handover.cdi_seal();
+
+    let bcc = Bcc::new(bcc_handover.bcc()).map_err(|e| {
+        error!("{e}");
+        RebootReason::InvalidBcc
+    })?;
+
+    // The bootloader should never pass us a debug policy when the boot is secure (the bootloader
+    // is locked). If it gets it wrong, disregard it & log it, to avoid it causing problems.
+    if debug_policy.is_some() && !bcc.is_debug_mode() {
+        warn!("Ignoring debug policy, BCC does not indicate Debug mode");
+        debug_policy = None;
+    }
 
     // Set up PCI bus for VirtIO devices.
     let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;
@@ -102,7 +117,6 @@ fn main(
         error!("Failed to compute partial DICE inputs: {e:?}");
         RebootReason::InternalError
     })?;
-    let cdi_seal = DiceArtifacts::cdi_seal(&bcc_handover);
     let (new_instance, salt) = get_or_generate_instance_salt(&mut pci_root, &dice_inputs, cdi_seal)
         .map_err(|e| {
             error!("Failed to get instance.img salt: {e}");
@@ -110,14 +124,28 @@ fn main(
         })?;
     trace!("Got salt from instance.img: {salt:x?}");
 
-    let dice_inputs = dice_inputs.into_input_values(&salt).map_err(|e| {
-        error!("Failed to generate DICE inputs: {e:?}");
+    let mut config_descriptor_buffer = [0; 128];
+    let dice_inputs =
+        dice_inputs.into_input_values(&salt, &mut config_descriptor_buffer).map_err(|e| {
+            error!("Failed to generate DICE inputs: {e:?}");
+            RebootReason::InternalError
+        })?;
+
+    // It is possible that the DICE chain we were given is rooted in the UDS. We do not want to give
+    // such a chain to the payload, or even the associated CDIs. So remove the entire chain we
+    // were given and taint the CDIs. Note that the resulting CDIs are still deterministically
+    // derived from those we received, so will vary iff they do.
+    // TODO(b/280405545): Remove this post Android 14.
+    let truncated_bcc_handover = bcc::truncate(bcc_handover).map_err(|e| {
+        error!("{e}");
         RebootReason::InternalError
     })?;
-    let _ = bcc_handover_main_flow(current_bcc_handover, &dice_inputs, next_bcc).map_err(|e| {
-        error!("Failed to derive next-stage DICE secrets: {e:?}");
-        RebootReason::SecretDerivationError
-    })?;
+
+    let _ = bcc_handover_main_flow(truncated_bcc_handover.as_slice(), &dice_inputs, next_bcc)
+        .map_err(|e| {
+            error!("Failed to derive next-stage DICE secrets: {e:?}");
+            RebootReason::SecretDerivationError
+        })?;
     flush(next_bcc);
 
     let strict_boot = true;
@@ -129,7 +157,13 @@ fn main(
         })?;
 
     info!("Starting payload...");
-    Ok(())
+
+    let bcc_range = {
+        let r = next_bcc.as_ptr_range();
+        (r.start as usize)..(r.end as usize)
+    };
+
+    Ok(bcc_range)
 }
 
 /// Logs the given PCI error and returns the appropriate `RebootReason`.
