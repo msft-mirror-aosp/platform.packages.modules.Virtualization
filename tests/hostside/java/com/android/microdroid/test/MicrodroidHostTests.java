@@ -472,7 +472,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         key, keyOverrides, /*isProtected=*/ false, /*updateBootconfigs=*/ true);
         assertThatEventually(
                 100000,
-                () -> getDevice().pullFileContents(CONSOLE_PATH),
+                () -> getDevice().pullFileContents(LOG_PATH),
                 containsString("boot completed, time to run payload"));
 
         vmInfo.mProcess.destroy();
@@ -495,7 +495,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         vmInfo.mProcess.destroy();
     }
 
-    private void waitForCrosvmExit(CommandRunner android) throws Exception {
+    private void waitForCrosvmExit(CommandRunner android, String testStartTime) throws Exception {
         // TODO: improve crosvm exit check. b/258848245
         android.runWithTimeout(
                 15000,
@@ -503,10 +503,12 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 "-m",
                 "1",
                 "-e",
-                "'virtualizationmanager::crosvm.*exited with status exit status:'");
+                "'virtualizationmanager::crosvm.*exited with status exit status:'",
+                "-T",
+                "'" + testStartTime + "'");
     }
 
-    private boolean isTombstoneReceivedFromHostLogcat() throws Exception {
+    private boolean isTombstoneReceivedFromHostLogcat(String testStartTime) throws Exception {
         // Note this method relies on logcat values being printed by the receiver on host
         // userspace crash log: virtualizationservice/src/aidl.rs
         // kernel ramdump log: virtualizationmanager/src/crosvm.rs
@@ -525,12 +527,17 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         "-m",
                         "1",
                         "-e",
-                        ramdumpRegex);
+                        ramdumpRegex,
+                        "-T",
+                        testStartTime);
         return !result.trim().isEmpty();
     }
 
     private boolean isTombstoneGeneratedWithCmd(
             boolean protectedVm, String configPath, String... crashCommand) throws Exception {
+        CommandRunner android = new CommandRunner(getDevice());
+        String testStartTime = android.runWithTimeout(1000, "date", "'+%Y-%m-%d %H:%M:%S.%N'");
+
         mMicrodroidDevice =
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
@@ -545,10 +552,9 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         microdroid.run(crashCommand);
 
         // check until microdroid is shut down
-        CommandRunner android = new CommandRunner(getDevice());
-        waitForCrosvmExit(android);
+        waitForCrosvmExit(android, testStartTime);
 
-        return isTombstoneReceivedFromHostLogcat();
+        return isTombstoneReceivedFromHostLogcat(testStartTime);
     }
 
     @Test
@@ -606,6 +612,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
             throws Exception {
         // we can't use microdroid builder as it wants ADB connection (debuggable)
         CommandRunner android = new CommandRunner(getDevice());
+        String testStartTime = android.runWithTimeout(1000, "date", "'+%Y-%m-%d %H:%M:%S.%N'");
 
         android.run("rm", "-rf", TEST_ROOT + "*");
         android.run("mkdir", "-p", TEST_ROOT + "*");
@@ -626,7 +633,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         Collections.addAll(cmd, additionalArgs);
 
         android.run(cmd.toArray(new String[0]));
-        return isTombstoneReceivedFromHostLogcat();
+        return isTombstoneReceivedFromHostLogcat(testStartTime);
     }
 
     private boolean isTombstoneGeneratedWithCrashPayload(boolean debuggable) throws Exception {
@@ -845,43 +852,6 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
-    public void testCustomVirtualMachinePermission() throws Exception {
-        assumeTrue(
-                "Protected VMs are not supported",
-                getAndroidDevice().supportsMicrodroid(/*protectedVm=*/ true));
-        assumeTrue("Test requires adb unroot", getDevice().disableAdbRoot());
-        CommandRunner android = new CommandRunner(getDevice());
-
-        // Pull etc/microdroid.json
-        File virtApexDir = FileUtil.createTempDir("virt_apex");
-        File microdroidConfigFile = new File(virtApexDir, "microdroid.json");
-        assertThat(getDevice().pullFile(VIRT_APEX + "etc/microdroid.json", microdroidConfigFile))
-                .isTrue();
-        JSONObject config = new JSONObject(FileUtil.readStringFromFile(microdroidConfigFile));
-
-        // USE_CUSTOM_VIRTUAL_MACHINE is enforced only on protected mode
-        config.put("protected", true);
-
-        // Write updated config
-        final String configPath = TEST_ROOT + "raw_config.json";
-        getDevice().pushString(config.toString(), configPath);
-
-        // temporarily revoke the permission
-        android.run(
-                "pm",
-                "revoke",
-                SHELL_PACKAGE_NAME,
-                "android.permission.USE_CUSTOM_VIRTUAL_MACHINE");
-        final String ret =
-                android.runForResult(VIRT_APEX + "bin/vm run", configPath).getStderr().trim();
-
-        assertThat(ret)
-                .contains(
-                        "does not have the android.permission.USE_CUSTOM_VIRTUAL_MACHINE"
-                                + " permission");
-    }
-
-    @Test
     public void testPathToBinaryIsRejected() throws Exception {
         CommandRunner android = new CommandRunner(getDevice());
 
@@ -996,9 +966,6 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         prepareVirtualizationTestSetup(getDevice());
 
         getDevice().installPackage(findTestFile(APK_NAME), /* reinstall */ false);
-
-        // clear the log
-        getDevice().executeShellV2Command("logcat -c");
     }
 
     @After

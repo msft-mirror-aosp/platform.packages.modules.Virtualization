@@ -15,6 +15,8 @@
 //! Basic functionality for bare-metal binaries to run in a VM under crosvm.
 
 #![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 extern crate alloc;
 
@@ -22,16 +24,18 @@ pub mod arch;
 mod bionic;
 pub mod console;
 mod entry;
+pub mod fdt;
+pub mod heap;
+mod hvc;
 pub mod layout;
 mod linker;
 pub mod logger;
 pub mod memory;
 pub mod power;
+pub mod rand;
 pub mod uart;
 pub mod util;
 pub mod virtio;
-
-pub use bionic::STACK_CHK_GUARD;
 
 use core::panic::PanicInfo;
 use power::reboot;

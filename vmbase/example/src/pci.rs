@@ -15,18 +15,19 @@
 //! Functions to scan the PCI bus for VirtIO device.
 
 use aarch64_paging::paging::MemoryRegion;
-use alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+use alloc::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use core::{mem::size_of, ptr::NonNull};
 use fdtpci::PciInfo;
 use log::{debug, info};
 use virtio_drivers::{
-    device::{blk::VirtIOBlk, console::VirtIOConsole},
+    device::console::VirtIOConsole,
     transport::{
-        pci::{bus::PciRoot, virtio_device_type, PciTransport},
+        pci::{bus::PciRoot, PciTransport},
         DeviceType, Transport,
     },
-    BufferDirection, Hal, PhysAddr, PAGE_SIZE,
+    BufferDirection, Error, Hal, PhysAddr, PAGE_SIZE,
 };
+use vmbase::virtio::pci::{self, PciTransportIterator};
 
 /// The standard sector size of a VirtIO block device, in bytes.
 const SECTOR_SIZE_BYTES: usize = 512;
@@ -36,35 +37,44 @@ const EXPECTED_SECTOR_COUNT: usize = 4;
 
 pub fn check_pci(pci_root: &mut PciRoot) {
     let mut checked_virtio_device_count = 0;
-    for (device_function, info) in pci_root.enumerate_bus(0) {
-        let (status, command) = pci_root.get_status_command(device_function);
-        info!("Found {} at {}, status {:?} command {:?}", info, device_function, status, command);
-        if let Some(virtio_type) = virtio_device_type(&info) {
-            info!("  VirtIO {:?}", virtio_type);
-            let mut transport = PciTransport::new::<HalImpl>(pci_root, device_function).unwrap();
-            info!(
-                "Detected virtio PCI device with device type {:?}, features {:#018x}",
-                transport.device_type(),
-                transport.read_device_features(),
-            );
-            if check_virtio_device(transport, virtio_type) {
+    let mut block_device_count = 0;
+    let mut socket_device_count = 0;
+    for mut transport in PciTransportIterator::<HalImpl>::new(pci_root) {
+        info!(
+            "Detected virtio PCI device with device type {:?}, features {:#018x}",
+            transport.device_type(),
+            transport.read_device_features(),
+        );
+        match transport.device_type() {
+            DeviceType::Block => {
+                check_virtio_block_device(transport, block_device_count);
+                block_device_count += 1;
                 checked_virtio_device_count += 1;
             }
+            DeviceType::Console => {
+                check_virtio_console_device(transport);
+                checked_virtio_device_count += 1;
+            }
+            DeviceType::Socket => {
+                check_virtio_socket_device(transport);
+                socket_device_count += 1;
+                checked_virtio_device_count += 1;
+            }
+            _ => {}
         }
     }
 
-    assert_eq!(checked_virtio_device_count, 4);
+    assert_eq!(checked_virtio_device_count, 6);
+    assert_eq!(block_device_count, 2);
+    assert_eq!(socket_device_count, 1);
 }
 
-/// Checks the given VirtIO device, if we know how to.
-///
-/// Returns true if the device was checked, or false if it was ignored.
-fn check_virtio_device(transport: impl Transport, device_type: DeviceType) -> bool {
-    match device_type {
-        DeviceType::Block => {
-            let mut blk =
-                VirtIOBlk::<HalImpl, _>::new(transport).expect("failed to create blk driver");
-            info!("Found {} KiB block device.", blk.capacity() * SECTOR_SIZE_BYTES as u64 / 1024);
+/// Checks the given VirtIO block device.
+fn check_virtio_block_device(transport: PciTransport, index: usize) {
+    let mut blk = pci::VirtIOBlk::<HalImpl>::new(transport).expect("failed to create blk driver");
+    info!("Found {} KiB block device.", blk.capacity() * SECTOR_SIZE_BYTES as u64 / 1024);
+    match index {
+        0 => {
             assert_eq!(blk.capacity(), EXPECTED_SECTOR_COUNT as u64);
             let mut data = [0; SECTOR_SIZE_BYTES * EXPECTED_SECTOR_COUNT];
             for i in 0..EXPECTED_SECTOR_COUNT {
@@ -75,20 +85,32 @@ fn check_virtio_device(transport: impl Transport, device_type: DeviceType) -> bo
                 assert_eq!(chunk, &(i as u32).to_le_bytes());
             }
             info!("Read expected data from block device.");
-            true
         }
-        DeviceType::Console => {
-            let mut console = VirtIOConsole::<HalImpl, _>::new(transport)
-                .expect("Failed to create VirtIO console driver");
-            info!("Found console device: {:?}", console.info());
-            for &c in b"Hello VirtIO console\n" {
-                console.send(c).expect("Failed to send character to VirtIO console device");
-            }
-            info!("Wrote to VirtIO console.");
-            true
+        1 => {
+            assert_eq!(blk.capacity(), 0);
+            let mut data = [0; SECTOR_SIZE_BYTES];
+            assert_eq!(blk.read_block(0, &mut data), Err(Error::IoError));
         }
-        _ => false,
+        _ => panic!("Unexpected VirtIO block device index {}.", index),
     }
+}
+
+/// Checks the given VirtIO socket device.
+fn check_virtio_socket_device(transport: PciTransport) {
+    let socket = pci::VirtIOSocket::<HalImpl>::new(transport)
+        .expect("Failed to create VirtIO socket driver");
+    info!("Found socket device: guest_cid={}", socket.guest_cid());
+}
+
+/// Checks the given VirtIO console device.
+fn check_virtio_console_device(transport: PciTransport) {
+    let mut console = VirtIOConsole::<HalImpl, PciTransport>::new(transport)
+        .expect("Failed to create VirtIO console driver");
+    info!("Found console device: {:?}", console.info());
+    for &c in b"Hello VirtIO console\n" {
+        console.send(c).expect("Failed to send character to VirtIO console device");
+    }
+    info!("Wrote to VirtIO console.");
 }
 
 /// Gets the memory region in which BARs are allocated.
@@ -103,7 +125,7 @@ unsafe impl Hal for HalImpl {
         debug!("dma_alloc: pages={}", pages);
         let layout = Layout::from_size_align(pages * PAGE_SIZE, PAGE_SIZE).unwrap();
         // Safe because the layout has a non-zero size.
-        let vaddr = unsafe { alloc(layout) };
+        let vaddr = unsafe { alloc_zeroed(layout) };
         let vaddr =
             if let Some(vaddr) = NonNull::new(vaddr) { vaddr } else { handle_alloc_error(layout) };
         let paddr = virt_to_phys(vaddr);

@@ -14,6 +14,7 @@
 
 //! Exception handlers.
 
+use aarch64_paging::paging::VirtualAddress;
 use core::fmt;
 use vmbase::console;
 use vmbase::logger;
@@ -90,49 +91,77 @@ impl fmt::Display for Esr {
 }
 
 #[inline]
-fn handle_translation_fault(far: usize) -> Result<(), HandleExceptionError> {
+fn handle_translation_fault(far: VirtualAddress) -> Result<(), HandleExceptionError> {
     let mut guard = MEMORY.try_lock().ok_or(HandleExceptionError::PageTableUnavailable)?;
     let memory = guard.as_mut().ok_or(HandleExceptionError::PageTableNotInitialized)?;
     Ok(memory.handle_mmio_fault(far)?)
 }
 
 #[inline]
-fn handle_permission_fault(far: usize) -> Result<(), HandleExceptionError> {
+fn handle_permission_fault(far: VirtualAddress) -> Result<(), HandleExceptionError> {
     let mut guard = MEMORY.try_lock().ok_or(HandleExceptionError::PageTableUnavailable)?;
     let memory = guard.as_mut().ok_or(HandleExceptionError::PageTableNotInitialized)?;
     Ok(memory.handle_permission_fault(far)?)
 }
 
-fn handle_exception(esr: Esr, far: usize) -> Result<(), HandleExceptionError> {
+fn handle_exception(exception: &ArmException) -> Result<(), HandleExceptionError> {
     // Handle all translation faults on both read and write, and MMIO guard map
     // flagged invalid pages or blocks that caused the exception.
     // Handle permission faults for DBM flagged entries, and flag them as dirty on write.
-    match esr {
-        Esr::DataAbortTranslationFault => handle_translation_fault(far),
-        Esr::DataAbortPermissionFault => handle_permission_fault(far),
+    match exception.esr {
+        Esr::DataAbortTranslationFault => handle_translation_fault(exception.far),
+        Esr::DataAbortPermissionFault => handle_permission_fault(exception.far),
         _ => Err(HandleExceptionError::UnknownException),
     }
 }
 
-#[inline]
-fn handling_uart_exception(esr: Esr, far: usize) -> bool {
-    esr == Esr::DataAbortSyncExternalAbort && page_4kb_of(far) == UART_PAGE
+/// A struct representing an Armv8 exception.
+struct ArmException {
+    /// The value of the exception syndrome register.
+    esr: Esr,
+    /// The faulting virtual address read from the fault address register.
+    far: VirtualAddress,
+}
+
+impl fmt::Display for ArmException {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ArmException: esr={}, far={}", self.esr, self.far)
+    }
+}
+
+impl ArmException {
+    /// Reads the values of the EL1 exception syndrome register (`esr_el1`)
+    /// and fault address register (`far_el1`) and returns a new instance of
+    /// `ArmException` with these values.
+    fn from_el1_regs() -> Self {
+        let esr: Esr = read_sysreg!("esr_el1").into();
+        let far = read_sysreg!("far_el1");
+        Self { esr, far: VirtualAddress(far) }
+    }
+
+    /// Prints the details of an obj and the exception, excluding UART exceptions.
+    fn print<T: fmt::Display>(&self, exception_name: &str, obj: T, elr: u64) {
+        // Don't print to the UART if we are handling an exception it could raise.
+        if !self.is_uart_exception() {
+            eprintln!("{exception_name}");
+            eprintln!("{obj}");
+            eprintln!("{}, elr={:#08x}", self, elr);
+        }
+    }
+
+    fn is_uart_exception(&self) -> bool {
+        self.esr == Esr::DataAbortSyncExternalAbort && page_4kb_of(self.far.0) == UART_PAGE
+    }
 }
 
 #[no_mangle]
 extern "C" fn sync_exception_current(elr: u64, _spsr: u64) {
     // Disable logging in exception handler to prevent unsafe writes to UART.
     let _guard = logger::suppress();
-    let esr: Esr = read_sysreg!("esr_el1").into();
-    let far = read_sysreg!("far_el1");
 
-    if let Err(e) = handle_exception(esr, far) {
-        // Don't print to the UART if we are handling an exception it could raise.
-        if !handling_uart_exception(esr, far) {
-            eprintln!("sync_exception_current");
-            eprintln!("{e}");
-            eprintln!("{esr}, far={far:#08x}, elr={elr:#08x}");
-        }
+    let exception = ArmException::from_el1_regs();
+    if let Err(e) = handle_exception(&exception) {
+        exception.print("sync_exception_current", e, elr);
         reboot()
     }
 }

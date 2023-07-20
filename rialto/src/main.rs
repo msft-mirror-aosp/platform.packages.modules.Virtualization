@@ -23,42 +23,31 @@ mod exceptions;
 extern crate alloc;
 
 use crate::error::{Error, Result};
-use buddy_system_allocator::LockedHeap;
+use core::num::NonZeroUsize;
+use core::result;
 use core::slice;
 use fdtpci::PciInfo;
-use hyp::get_hypervisor;
+use hyp::{get_hypervisor, HypervisorCap, KvmError};
+use libfdt::FdtError;
 use log::{debug, error, info};
 use vmbase::{
+    configure_heap,
+    fdt::SwiotlbInfo,
     layout::{self, crosvm},
     main,
-    memory::{MemoryTracker, PageTable, MEMORY, PAGE_SIZE},
+    memory::{MemoryTracker, PageTable, MEMORY, PAGE_SIZE, SIZE_64KB},
     power::reboot,
+    virtio::pci,
 };
-
-const SZ_1K: usize = 1024;
-const SZ_64K: usize = 64 * SZ_1K;
-
-#[global_allocator]
-static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::new();
-
-static mut HEAP: [u8; SZ_64K] = [0; SZ_64K];
-
-fn init_heap() {
-    // SAFETY: Allocator set to otherwise unused, static memory.
-    unsafe {
-        HEAP_ALLOCATOR.lock().init(&mut HEAP as *mut u8 as usize, HEAP.len());
-    }
-}
 
 fn new_page_table() -> Result<PageTable> {
     let mut page_table = PageTable::default();
 
-    page_table.map_device(&crosvm::MMIO_RANGE)?;
-    page_table.map_data(&layout::scratch_range())?;
-    page_table.map_data(&layout::stack_range(40 * PAGE_SIZE))?;
-    page_table.map_code(&layout::text_range())?;
-    page_table.map_rodata(&layout::rodata_range())?;
-    page_table.map_device(&layout::console_uart_range())?;
+    page_table.map_data(&layout::scratch_range().into())?;
+    page_table.map_data(&layout::stack_range(40 * PAGE_SIZE).into())?;
+    page_table.map_code(&layout::text_range().into())?;
+    page_table.map_rodata(&layout::rodata_range().into())?;
+    page_table.map_device(&layout::console_uart_range().into())?;
 
     Ok(page_table)
 }
@@ -84,12 +73,6 @@ fn try_init_logger() -> Result<bool> {
 /// * The `fdt_addr` must be a valid pointer and points to a valid `Fdt`.
 unsafe fn try_main(fdt_addr: usize) -> Result<()> {
     info!("Welcome to Rialto!");
-    // SAFETY: The caller ensures that `fdt_addr` is valid.
-    let fdt = unsafe { slice::from_raw_parts(fdt_addr as *mut u8, crosvm::FDT_MAX_SIZE) };
-    let fdt = libfdt::Fdt::from_slice(fdt)?;
-    let pci_info = PciInfo::from_fdt(fdt)?;
-    debug!("PCI: {:#x?}", pci_info);
-
     let page_table = new_page_table()?;
 
     MEMORY.lock().replace(MemoryTracker::new(
@@ -98,7 +81,55 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
         crosvm::MMIO_RANGE,
         None, // Rialto doesn't have any payload for now.
     ));
+
+    let fdt_range = MEMORY
+        .lock()
+        .as_mut()
+        .unwrap()
+        .alloc(fdt_addr, NonZeroUsize::new(crosvm::FDT_MAX_SIZE).unwrap())?;
+    // SAFETY: The tracker validated the range to be in main memory, mapped, and not overlap.
+    let fdt = unsafe { slice::from_raw_parts(fdt_range.start as *mut u8, fdt_range.len()) };
+    // We do not need to validate the DT since it is already validated in pvmfw.
+    let fdt = libfdt::Fdt::from_slice(fdt)?;
+
+    let memory_range = fdt.first_memory_range()?;
+    MEMORY.lock().as_mut().unwrap().shrink(&memory_range).map_err(|e| {
+        error!("Failed to use memory range value from DT: {memory_range:#x?}");
+        e
+    })?;
+
+    if get_hypervisor().has_cap(HypervisorCap::DYNAMIC_MEM_SHARE) {
+        let granule = memory_protection_granule()?;
+        MEMORY.lock().as_mut().unwrap().init_dynamic_shared_pool(granule).map_err(|e| {
+            error!("Failed to initialize dynamically shared pool.");
+            e
+        })?;
+    } else {
+        let range = SwiotlbInfo::new_from_fdt(fdt)?.fixed_range().ok_or_else(|| {
+            error!("Pre-shared pool range not specified in swiotlb node");
+            Error::from(FdtError::BadValue)
+        })?;
+        MEMORY.lock().as_mut().unwrap().init_static_shared_pool(range).map_err(|e| {
+            error!("Failed to initialize pre-shared pool.");
+            e
+        })?;
+    }
+
+    let pci_info = PciInfo::from_fdt(fdt)?;
+    debug!("PCI: {pci_info:#x?}");
+    let pci_root = pci::initialize(pci_info, MEMORY.lock().as_mut().unwrap())
+        .map_err(Error::PciInitializationFailed)?;
+    debug!("PCI root: {pci_root:#x?}");
     Ok(())
+}
+
+fn memory_protection_granule() -> result::Result<usize, hyp::Error> {
+    match get_hypervisor().memory_protection_granule() {
+        Ok(granule) => Ok(granule),
+        // Take the default page size when KVM call is not supported in non-protected VMs.
+        Err(hyp::Error::KvmError(KvmError::NotSupported, _)) => Ok(PAGE_SIZE),
+        Err(e) => Err(e),
+    }
 }
 
 fn try_unshare_all_memory(mmio_guard_supported: bool) -> Result<()> {
@@ -121,7 +152,6 @@ fn unshare_all_memory(mmio_guard_supported: bool) {
 
 /// Entry point for Rialto.
 pub fn main(fdt_addr: u64, _a1: u64, _a2: u64, _a3: u64) {
-    init_heap();
     let Ok(mmio_guard_supported) = try_init_logger() else {
         // Don't log anything if the logger initialization fails.
         reboot();
@@ -139,3 +169,4 @@ pub fn main(fdt_addr: u64, _a1: u64, _a2: u64, _a3: u64) {
 }
 
 main!(main);
+configure_heap!(SIZE_64KB);

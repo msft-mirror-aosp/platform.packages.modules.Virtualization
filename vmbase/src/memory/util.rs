@@ -22,6 +22,10 @@ use zeroize::Zeroize;
 
 /// The size of a 4KB memory in bytes.
 pub const SIZE_4KB: usize = 4 << 10;
+/// The size of a 64KB memory in bytes.
+pub const SIZE_64KB: usize = 64 << 10;
+/// The size of a 128KB memory in bytes.
+pub const SIZE_128KB: usize = 128 << 10;
 /// The size of a 2MB memory in bytes.
 pub const SIZE_2MB: usize = 2 << 20;
 /// The size of a 4MB memory in bytes.
@@ -51,7 +55,7 @@ pub(super) fn flush_region(start: usize, size: usize) {
     let start = unchecked_align_down(start, line_size);
 
     for line in (start..end).step_by(line_size) {
-        // SAFETY - Clearing cache lines shouldn't have Rust-visible side effects.
+        // SAFETY: Clearing cache lines shouldn't have Rust-visible side effects.
         unsafe {
             asm!(
                 "dc cvau, {x}",

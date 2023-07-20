@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Functions and drivers for obtaining true entropy.
+
 use crate::hvc;
 use core::fmt;
 use core::mem::size_of;
 
+/// Error type for rand operations.
 pub enum Error {
     /// Error during SMCCC TRNG call.
     Trng(hvc::trng::Error),
@@ -29,6 +32,7 @@ impl From<hvc::trng::Error> for Error {
     }
 }
 
+/// Result type for rand operations.
 pub type Result<T> = core::result::Result<T, Error>;
 
 impl fmt::Display for Error {
@@ -39,6 +43,12 @@ impl fmt::Display for Error {
                 write!(f, "Unsupported SMCCC TRNG version v{x}.{y}")
             }
         }
+    }
+}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{self}")
     }
 }
 
@@ -90,6 +100,7 @@ fn repeat_trng_rnd(n_bytes: usize) -> hvc::trng::Result<hvc::TrngRng64Entropy> {
     }
 }
 
+/// Generate an array of fixed-size initialized with true-random bytes.
 pub fn random_array<const N: usize>() -> Result<[u8; N]> {
     let mut arr = [0; N];
     fill_with_entropy(&mut arr)?;
@@ -103,7 +114,7 @@ extern "C" fn CRYPTO_sysrand_for_seed(out: *mut u8, req: usize) {
 
 #[no_mangle]
 extern "C" fn CRYPTO_sysrand(out: *mut u8, req: usize) {
-    // SAFETY - We need to assume that out points to valid memory of size req.
+    // SAFETY: We need to assume that out points to valid memory of size req.
     let s = unsafe { core::slice::from_raw_parts_mut(out, req) };
-    let _ = fill_with_entropy(s);
+    fill_with_entropy(s).unwrap()
 }
