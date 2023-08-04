@@ -193,7 +193,7 @@ fn main() -> Result<()> {
 
 /// Prepares a socket file descriptor for the vm payload service.
 ///
-/// # Safety requirement
+/// # Safety
 ///
 /// The caller must ensure that this function is the only place that claims ownership
 /// of the file descriptor and it is called only once.
@@ -267,6 +267,8 @@ fn post_payload_work() -> Result<()> {
     if Path::new(ENCRYPTEDSTORE_BACKING_DEVICE).exists() {
         let mountpoint = CString::new(ENCRYPTEDSTORE_MOUNTPOINT).unwrap();
 
+        // SAFETY: `mountpoint` is a valid C string. `syncfs` and `close` are safe for any parameter
+        // values.
         let ret = unsafe {
             let dirfd = libc::open(
                 mountpoint.as_ptr(),
@@ -856,19 +858,15 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
         }
     };
 
+    // SAFETY: We are not accessing any resource of the parent process. This means we can't make any
+    // log calls inside the closure.
     unsafe {
-        // SAFETY: we are not accessing any resource of the parent process.
         command.pre_exec(|| {
-            info!("dropping capabilities before executing payload");
             // It is OK to continue with payload execution even if the calls below fail, since
             // whether process can use a capability is controlled by the SELinux. Dropping the
             // capabilities here is just another defense-in-depth layer.
-            if let Err(e) = cap::drop_inheritable_caps() {
-                error!("failed to drop inheritable capabilities: {:?}", e);
-            }
-            if let Err(e) = cap::drop_bounding_set() {
-                error!("failed to drop bounding set: {:?}", e);
-            }
+            let _ = cap::drop_inheritable_caps();
+            let _ = cap::drop_bounding_set();
             Ok(())
         });
     }

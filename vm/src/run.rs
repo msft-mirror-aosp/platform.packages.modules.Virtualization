@@ -65,6 +65,8 @@ pub fn command_run_app(
     extra_idsigs: &[PathBuf],
     gdb: Option<NonZeroU16>,
     kernel: Option<&Path>,
+    vendor: Option<&Path>,
+    devices: Vec<PathBuf>,
 ) -> Result<(), Error> {
     let apk_file = File::open(apk).context("Failed to open APK file")?;
 
@@ -122,6 +124,8 @@ pub fn command_run_app(
 
     let kernel = kernel.map(|p| open_parcel_file(p, false)).transpose()?;
 
+    let vendor = vendor.map(|p| open_parcel_file(p, false)).transpose()?;
+
     let extra_idsig_files: Result<Vec<File>, _> = extra_idsigs.iter().map(File::open).collect();
     let extra_idsig_fds = extra_idsig_files?.into_iter().map(ParcelFileDescriptor::new).collect();
 
@@ -144,6 +148,13 @@ pub fn command_run_app(
         customKernelImage: kernel,
         gdbPort: gdb.map(u16::from).unwrap_or(0) as i32, // 0 means no gdb
         taskProfiles: task_profiles,
+        vendorImage: vendor,
+        devices: devices
+            .iter()
+            .map(|x| {
+                x.to_str().map(String::from).ok_or(anyhow!("Failed to convert {x:?} to String"))
+            })
+            .collect::<Result<_, _>>()?,
     };
 
     let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
@@ -203,6 +214,8 @@ pub fn command_run_microdroid(
     task_profiles: Vec<String>,
     gdb: Option<NonZeroU16>,
     kernel: Option<&Path>,
+    vendor: Option<&Path>,
+    devices: Vec<PathBuf>,
 ) -> Result<(), Error> {
     let apk = find_empty_payload_apk_path()?;
     println!("found path {}", apk.display());
@@ -236,6 +249,8 @@ pub fn command_run_microdroid(
         &extra_sig,
         gdb,
         kernel,
+        vendor,
+        devices,
     )
 }
 
@@ -376,14 +391,14 @@ impl vmclient::VmCallback for Callback {
 /// Safely duplicate the file descriptor.
 fn duplicate_fd<T: AsRawFd>(file: T) -> io::Result<File> {
     let fd = file.as_raw_fd();
-    // Safe because this just duplicates a file descriptor which we know to be valid, and we check
-    // for an error.
+    // SAFETY: This just duplicates a file descriptor which we know to be valid, and we check for an
+    // an error.
     let dup_fd = unsafe { libc::dup(fd) };
     if dup_fd < 0 {
         Err(io::Error::last_os_error())
     } else {
-        // Safe because we have just duplicated the file descriptor so we own it, and `from_raw_fd`
-        // takes ownership of it.
+        // SAFETY: We have just duplicated the file descriptor so we own it, and `from_raw_fd` takes
+        // ownership of it.
         Ok(unsafe { File::from_raw_fd(dup_fd) })
     }
 }

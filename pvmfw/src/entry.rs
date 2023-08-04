@@ -23,7 +23,7 @@ use core::mem::{drop, size_of};
 use core::num::NonZeroUsize;
 use core::ops::Range;
 use core::slice;
-use hyp::{get_hypervisor, HypervisorCap};
+use hyp::{get_mem_sharer, get_mmio_guard};
 use log::debug;
 use log::error;
 use log::info;
@@ -33,10 +33,9 @@ use vmbase::util::RangeExt as _;
 use vmbase::{
     configure_heap, console,
     layout::{self, crosvm},
-    logger, main,
+    main,
     memory::{min_dcache_line_size, MemoryTracker, MEMORY, SIZE_128KB, SIZE_4KB},
     power::reboot,
-    rand,
 };
 use zeroize::Zeroize;
 
@@ -85,17 +84,16 @@ struct MemorySlices<'a> {
 
 impl<'a> MemorySlices<'a> {
     fn new(fdt: usize, kernel: usize, kernel_size: usize) -> Result<Self, RebootReason> {
-        // SAFETY - SIZE_2MB is non-zero.
-        const FDT_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(crosvm::FDT_MAX_SIZE) };
+        let fdt_size = NonZeroUsize::new(crosvm::FDT_MAX_SIZE).unwrap();
         // TODO - Only map the FDT as read-only, until we modify it right before jump_to_payload()
         // e.g. by generating a DTBO for a template DT in main() and, on return, re-map DT as RW,
         // overwrite with the template DT and apply the DTBO.
-        let range = MEMORY.lock().as_mut().unwrap().alloc_mut(fdt, FDT_SIZE).map_err(|e| {
+        let range = MEMORY.lock().as_mut().unwrap().alloc_mut(fdt, fdt_size).map_err(|e| {
             error!("Failed to allocate the FDT range: {e}");
             RebootReason::InternalError
         })?;
 
-        // SAFETY - The tracker validated the range to be in main memory, mapped, and not overlap.
+        // SAFETY: The tracker validated the range to be in main memory, mapped, and not overlap.
         let fdt = unsafe { slice::from_raw_parts_mut(range.start as *mut u8, range.len()) };
         let fdt = libfdt::Fdt::from_mut_slice(fdt).map_err(|e| {
             error!("Failed to spawn the FDT wrapper: {e}");
@@ -112,8 +110,8 @@ impl<'a> MemorySlices<'a> {
             RebootReason::InvalidFdt
         })?;
 
-        if get_hypervisor().has_cap(HypervisorCap::DYNAMIC_MEM_SHARE) {
-            let granule = get_hypervisor().memory_protection_granule().map_err(|e| {
+        if let Some(mem_sharer) = get_mem_sharer() {
+            let granule = mem_sharer.granule().map_err(|e| {
                 error!("Failed to get memory protection granule: {e}");
                 RebootReason::InternalError
             })?;
@@ -155,9 +153,9 @@ impl<'a> MemorySlices<'a> {
             return Err(RebootReason::InvalidPayload);
         };
 
-        // SAFETY - The tracker validated the range to be in main memory, mapped, and not overlap.
-        let kernel =
-            unsafe { slice::from_raw_parts(kernel_range.start as *const u8, kernel_range.len()) };
+        let kernel = kernel_range.start as *const u8;
+        // SAFETY: The tracker validated the range to be in main memory, mapped, and not overlap.
+        let kernel = unsafe { slice::from_raw_parts(kernel, kernel_range.len()) };
 
         let ramdisk = if let Some(r) = info.initrd_range {
             debug!("Located ramdisk at {r:?}");
@@ -166,7 +164,7 @@ impl<'a> MemorySlices<'a> {
                 RebootReason::InvalidRamdisk
             })?;
 
-            // SAFETY - The region was validated by memory to be in main memory, mapped, and
+            // SAFETY: The region was validated by memory to be in main memory, mapped, and
             // not overlap.
             Some(unsafe { slice::from_raw_parts(r.start as *const u8, r.len()) })
         } else {
@@ -192,21 +190,7 @@ fn main_wrapper(
     // - only perform logging once the logger has been initialized
     // - only access non-pvmfw memory once (and while) it has been mapped
 
-    logger::init(LevelFilter::Info).map_err(|_| RebootReason::InternalError)?;
-
-    // Use debug!() to avoid printing to the UART if we failed to configure it as only local
-    // builds that have tweaked the logger::init() call will actually attempt to log the message.
-
-    get_hypervisor().mmio_guard_init().map_err(|e| {
-        debug!("{e}");
-        RebootReason::InternalError
-    })?;
-
-    get_hypervisor().mmio_guard_map(console::BASE_ADDRESS).map_err(|e| {
-        debug!("Failed to configure the UART: {e}");
-        RebootReason::InternalError
-    })?;
-
+    log::set_max_level(LevelFilter::Info);
     crypto::init();
 
     let page_table = memory::init_page_table().map_err(|e| {
@@ -214,7 +198,7 @@ fn main_wrapper(
         RebootReason::InternalError
     })?;
 
-    // SAFETY - We only get the appended payload from here, once. The region was statically mapped,
+    // SAFETY: We only get the appended payload from here, once. The region was statically mapped,
     // then remapped by `init_page_table()`.
     let appended_data = unsafe { get_appended_data_slice() };
 
@@ -235,11 +219,6 @@ fn main_wrapper(
 
     let slices = MemorySlices::new(fdt, payload, payload_size)?;
 
-    rand::init().map_err(|e| {
-        error!("Failed to initialize rand: {e}");
-        RebootReason::InternalError
-    })?;
-
     // This wrapper allows main() to be blissfully ignorant of platform details.
     let next_bcc = crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc_slice, debug_policy)?;
 
@@ -253,10 +232,12 @@ fn main_wrapper(
     })?;
     // Call unshare_all_memory here (instead of relying on the dtor) while UART is still mapped.
     MEMORY.lock().as_mut().unwrap().unshare_all_memory();
-    get_hypervisor().mmio_guard_unmap(console::BASE_ADDRESS).map_err(|e| {
-        error!("Failed to unshare the UART: {e}");
-        RebootReason::InternalError
-    })?;
+    if let Some(mmio_guard) = get_mmio_guard() {
+        mmio_guard.unmap(console::BASE_ADDRESS).map_err(|e| {
+            error!("Failed to unshare the UART: {e}");
+            RebootReason::InternalError
+        })?;
+    }
 
     // Drop MemoryTracker and deactivate page table.
     drop(MEMORY.lock().take());
@@ -296,7 +277,7 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
     // Disable the exception vector, caches and page table and then jump to the payload at the
     // given address, passing it the given FDT pointer.
     //
-    // SAFETY - We're exiting pvmfw by passing the register values we need to a noreturn asm!().
+    // SAFETY: We're exiting pvmfw by passing the register values we need to a noreturn asm!().
     unsafe {
         asm!(
             "cmp {scratch}, {bcc}",

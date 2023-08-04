@@ -19,6 +19,7 @@ use crate::atom::{forward_vm_booted_atom, forward_vm_creation_atom, forward_vm_e
 use crate::rkpvm::request_certificate;
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationservice::{
+    aidl::android::system::virtualizationservice::AssignableDevice::AssignableDevice,
     aidl::android::system::virtualizationservice::VirtualMachineDebugInfo::VirtualMachineDebugInfo,
     binder::ParcelFileDescriptor,
 };
@@ -28,10 +29,11 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
     AtomVmExited::AtomVmExited,
     IGlobalVmContext::{BnGlobalVmContext, IGlobalVmContext},
     IVirtualizationServiceInternal::IVirtualizationServiceInternal,
+    IVfioHandler::{BpVfioHandler, IVfioHandler},
 };
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::VM_TOMBSTONES_SERVICE_PORT;
 use anyhow::{anyhow, ensure, Context, Result};
-use binder::{self, BinderFeatures, ExceptionCode, Interface, LazyServiceGuard, Status, Strong};
+use binder::{self, wait_for_interface, BinderFeatures, ExceptionCode, Interface, LazyServiceGuard, Status, Strong};
 use libc::VMADDR_CID_HOST;
 use log::{error, info, warn};
 use rustutils::system_properties;
@@ -95,7 +97,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         let pid = get_calling_pid();
         let lim = libc::rlimit { rlim_cur: libc::RLIM_INFINITY, rlim_max: libc::RLIM_INFINITY };
 
-        // SAFETY - borrowing the new limit struct only
+        // SAFETY: borrowing the new limit struct only
         let ret = unsafe { libc::prlimit(pid, libc::RLIMIT_MEMLOCK, &lim, std::ptr::null_mut()) };
 
         match ret {
@@ -169,6 +171,24 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             error!("Failed to get certificate. Error: {e:?}");
             Status::new_exception_str(ExceptionCode::SERVICE_SPECIFIC, Some(e.to_string()))
         })
+    }
+
+    fn getAssignableDevices(&self) -> binder::Result<Vec<AssignableDevice>> {
+        check_use_custom_virtual_machine()?;
+
+        // TODO(b/291191362): read VM DTBO to find assignable devices.
+        Ok(vec![AssignableDevice {
+            kind: "eh".to_owned(),
+            node: "/sys/bus/platform/devices/16d00000.eh".to_owned(),
+        }])
+    }
+
+    fn bindDevicesToVfioDriver(&self, devices: &[String]) -> binder::Result<ParcelFileDescriptor> {
+        check_use_custom_virtual_machine()?;
+
+        let vfio_service: Strong<dyn IVfioHandler> =
+            wait_for_interface(<BpVfioHandler as IVfioHandler>::get_descriptor())?;
+        vfio_service.bindDevicesToVfioDriver(devices)
     }
 }
 
@@ -392,4 +412,9 @@ fn check_debug_access() -> binder::Result<()> {
 /// Check whether the caller of the current Binder method is allowed to manage VMs
 fn check_manage_access() -> binder::Result<()> {
     check_permission("android.permission.MANAGE_VIRTUAL_MACHINE")
+}
+
+/// Check whether the caller of the current Binder method is allowed to use custom VMs
+fn check_use_custom_virtual_machine() -> binder::Result<()> {
+    check_permission("android.permission.USE_CUSTOM_VIRTUAL_MACHINE")
 }

@@ -29,8 +29,6 @@ pub enum Error {
     Hypervisor(HypervisorError),
     /// Failed when attempting to map some range in the page table.
     PageTableMapping(MapError),
-    /// Failed to initialize the logger.
-    LoggerInit,
     /// Invalid FDT.
     InvalidFdt(FdtError),
     /// Invalid PCI.
@@ -39,6 +37,14 @@ pub enum Error {
     MemoryOperationFailed(MemoryTrackerError),
     /// Failed to initialize PCI.
     PciInitializationFailed(pci::PciError),
+    /// Failed to create VirtIO Socket device.
+    VirtIOSocketCreationFailed(virtio_drivers::Error),
+    /// Missing socket device.
+    MissingVirtIOSocketDevice,
+    /// Failed VirtIO driver operation.
+    VirtIODriverOperationFailed(virtio_drivers::Error),
+    /// Failed to receive data.
+    ReceivingDataFailed(virtio_drivers::Error),
 }
 
 impl fmt::Display for Error {
@@ -48,11 +54,18 @@ impl fmt::Display for Error {
             Self::PageTableMapping(e) => {
                 write!(f, "Failed when attempting to map some range in the page table: {e}.")
             }
-            Self::LoggerInit => write!(f, "Failed to initialize the logger."),
             Self::InvalidFdt(e) => write!(f, "Invalid FDT: {e}"),
             Self::InvalidPci(e) => write!(f, "Invalid PCI: {e}"),
             Self::MemoryOperationFailed(e) => write!(f, "Failed memory operation: {e}"),
             Self::PciInitializationFailed(e) => write!(f, "Failed to initialize PCI: {e}"),
+            Self::VirtIOSocketCreationFailed(e) => {
+                write!(f, "Failed to create VirtIO Socket device: {e}")
+            }
+            Self::MissingVirtIOSocketDevice => write!(f, "Missing VirtIO Socket device."),
+            Self::VirtIODriverOperationFailed(e) => {
+                write!(f, "Failed VirtIO driver operation: {e}")
+            }
+            Self::ReceivingDataFailed(e) => write!(f, "Failed to receive data: {e}"),
         }
     }
 }
@@ -84,5 +97,11 @@ impl From<PciError> for Error {
 impl From<MemoryTrackerError> for Error {
     fn from(e: MemoryTrackerError) -> Self {
         Self::MemoryOperationFailed(e)
+    }
+}
+
+impl From<virtio_drivers::Error> for Error {
+    fn from(e: virtio_drivers::Error) -> Self {
+        Self::VirtIODriverOperationFailed(e)
     }
 }

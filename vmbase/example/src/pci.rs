@@ -78,7 +78,7 @@ fn check_virtio_block_device(transport: PciTransport, index: usize) {
             assert_eq!(blk.capacity(), EXPECTED_SECTOR_COUNT as u64);
             let mut data = [0; SECTOR_SIZE_BYTES * EXPECTED_SECTOR_COUNT];
             for i in 0..EXPECTED_SECTOR_COUNT {
-                blk.read_block(i, &mut data[i * SECTOR_SIZE_BYTES..(i + 1) * SECTOR_SIZE_BYTES])
+                blk.read_blocks(i, &mut data[i * SECTOR_SIZE_BYTES..(i + 1) * SECTOR_SIZE_BYTES])
                     .expect("Failed to read block device.");
             }
             for (i, chunk) in data.chunks(size_of::<u32>()).enumerate() {
@@ -89,7 +89,7 @@ fn check_virtio_block_device(transport: PciTransport, index: usize) {
         1 => {
             assert_eq!(blk.capacity(), 0);
             let mut data = [0; SECTOR_SIZE_BYTES];
-            assert_eq!(blk.read_block(0, &mut data), Err(Error::IoError));
+            assert_eq!(blk.read_blocks(0, &mut data), Err(Error::IoError));
         }
         _ => panic!("Unexpected VirtIO block device index {}.", index),
     }
@@ -120,11 +120,21 @@ pub fn get_bar_region(pci_info: &PciInfo) -> MemoryRegion {
 
 struct HalImpl;
 
+/// SAFETY: See the 'Implementation Safety' comments on methods below for how they fulfill the
+/// safety requirements of the unsafe `Hal` trait.
 unsafe impl Hal for HalImpl {
+    /// # Implementation Safety
+    ///
+    /// `dma_alloc` ensures the returned DMA buffer is not aliased with any other allocation or
+    /// reference in the program until it is deallocated by `dma_dealloc` by allocating a unique
+    /// block of memory using `alloc_zeroed`, which is guaranteed to allocate valid, unique and
+    /// zeroed memory. We request an alignment of at least `PAGE_SIZE` from `alloc_zeroed`.
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
         debug!("dma_alloc: pages={}", pages);
-        let layout = Layout::from_size_align(pages * PAGE_SIZE, PAGE_SIZE).unwrap();
-        // Safe because the layout has a non-zero size.
+        let layout =
+            Layout::from_size_align(pages.checked_mul(PAGE_SIZE).unwrap(), PAGE_SIZE).unwrap();
+        assert_ne!(layout.size(), 0);
+        // SAFETY: We just checked that the layout has a non-zero size.
         let vaddr = unsafe { alloc_zeroed(layout) };
         let vaddr =
             if let Some(vaddr) = NonNull::new(vaddr) { vaddr } else { handle_alloc_error(layout) };
@@ -135,14 +145,19 @@ unsafe impl Hal for HalImpl {
     unsafe fn dma_dealloc(paddr: PhysAddr, vaddr: NonNull<u8>, pages: usize) -> i32 {
         debug!("dma_dealloc: paddr={:#x}, pages={}", paddr, pages);
         let layout = Layout::from_size_align(pages * PAGE_SIZE, PAGE_SIZE).unwrap();
-        // Safe because the memory was allocated by `dma_alloc` above using the same allocator, and
-        // the layout is the same as was used then.
+        // SAFETY: The memory was allocated by `dma_alloc` above using the same allocator, and the
+        // layout is the same as was used then.
         unsafe {
             dealloc(vaddr.as_ptr(), layout);
         }
         0
     }
 
+    /// # Implementation Safety
+    ///
+    /// The returned pointer must be valid because the `paddr` describes a valid MMIO region, and we
+    /// previously mapped the entire PCI MMIO range. It can't alias any other allocations because
+    /// the PCI MMIO range doesn't overlap with any other memory ranges.
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, _size: usize) -> NonNull<u8> {
         NonNull::new(paddr as _).unwrap()
     }

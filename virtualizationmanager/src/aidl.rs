@@ -20,7 +20,7 @@ use crate::atom::{
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmContext, VmInstance, VmState};
 use crate::debug_config::DebugConfig;
-use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images};
+use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
 use crate::selinux::{getfilecon, SeContext};
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::{
@@ -28,6 +28,7 @@ use android_system_virtualizationcommon::aidl::android::system::virtualizationco
     ErrorCode::ErrorCode,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    AssignableDevice::AssignableDevice,
     CpuTopology::CpuTopology,
     DiskImage::DiskImage,
     IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
@@ -61,9 +62,10 @@ use nix::unistd::pipe;
 use rpcbinder::RpcServer;
 use rustutils::system_properties;
 use semver::VersionReq;
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::ffi::CStr;
-use std::fs::{read_dir, remove_file, File, OpenOptions};
+use std::fs::{canonicalize, read_dir, remove_file, File, OpenOptions};
 use std::io::{BufRead, BufReader, Error, ErrorKind, Write};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
@@ -270,6 +272,12 @@ impl IVirtualizationService for VirtualizationService {
         // Delegate to the global service, including checking the debug permission.
         GLOBAL_SERVICE.debugListVms()
     }
+
+    /// Get a list of assignable device types.
+    fn getAssignableDevices(&self) -> binder::Result<Vec<AssignableDevice>> {
+        // Delegate to the global service, including checking the permission.
+        GLOBAL_SERVICE.getAssignableDevices()
+    }
 }
 
 impl VirtualizationService {
@@ -330,7 +338,8 @@ impl VirtualizationService {
                 // - controlling CPUs;
                 // - specifying a config file in the APK; (this one is not part of CustomConfig)
                 // - gdbPort is set, meaning that crosvm will start a gdb server;
-                // - using anything other than the default kernel.
+                // - using anything other than the default kernel;
+                // - specifying devices to be assigned.
                 config.customConfig.is_some() || matches!(config.payload, Payload::ConfigPath(_))
             }
         };
@@ -449,6 +458,27 @@ impl VirtualizationService {
             }
         };
 
+        let devices_dtbo = if !config.devices.is_empty() {
+            let mut set = HashSet::new();
+            for device in config.devices.iter() {
+                let path = canonicalize(device).map_err(|e| {
+                    Status::new_exception_str(
+                        ExceptionCode::ILLEGAL_ARGUMENT,
+                        Some(format!("can't canonicalize {device}: {e:?}")),
+                    )
+                })?;
+                if !set.insert(path) {
+                    return Err(Status::new_exception_str(
+                        ExceptionCode::ILLEGAL_ARGUMENT,
+                        Some(format!("duplicated device {device}")),
+                    ));
+                }
+            }
+            Some(clone_file(&GLOBAL_SERVICE.bindDevicesToVfioDriver(&config.devices)?)?)
+        } else {
+            None
+        };
+
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -472,6 +502,8 @@ impl VirtualizationService {
             platform_version: parse_platform_version_req(&config.platformVersion)?,
             detect_hangup: is_app_config,
             gdb_port,
+            vfio_devices: config.devices.iter().map(PathBuf::from).collect(),
+            devices_dtbo,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -579,6 +611,15 @@ fn assemble_disk_image(
     Ok(DiskFile { image, writable: disk.writable })
 }
 
+fn append_kernel_param(param: &str, vm_config: &mut VirtualMachineRawConfig) {
+    if let Some(ref mut params) = vm_config.params {
+        params.push(' ');
+        params.push_str(param)
+    } else {
+        vm_config.params = Some(param.to_owned())
+    }
+}
+
 fn load_app_config(
     config: &VirtualMachineAppConfig,
     debug_config: &DebugConfig,
@@ -620,6 +661,13 @@ fn load_app_config(
         }
         vm_config.taskProfiles = custom_config.taskProfiles.clone();
         vm_config.gdbPort = custom_config.gdbPort;
+
+        if let Some(file) = custom_config.vendorImage.as_ref() {
+            add_microdroid_vendor_image(clone_file(file)?, &mut vm_config);
+            append_kernel_param("androidboot.microdroid.mount_vendor=1", &mut vm_config)
+        }
+
+        vm_config.devices = custom_config.devices.clone();
     }
 
     if config.memoryMib > 0 {
@@ -1086,8 +1134,9 @@ fn clone_or_prepare_logger_fd(
         Status::new_service_specific_error_str(-1, Some(format!("Failed to create pipe: {:?}", e)))
     })?;
 
-    // SAFETY: We are the sole owners of these fds as they were just created.
+    // SAFETY: We are the sole owner of this FD as we just created it, and it is valid and open.
     let mut reader = BufReader::new(unsafe { File::from_raw_fd(raw_read_fd) });
+    // SAFETY: We are the sole owner of this FD as we just created it, and it is valid and open.
     let write_fd = unsafe { File::from_raw_fd(raw_write_fd) };
 
     std::thread::spawn(move || loop {
@@ -1221,7 +1270,7 @@ impl IVirtualMachineService for VirtualMachineService {
             return Err(Status::new_service_specific_error_str(
                 -1,
                 Some(format!("cannot find a VM with CID {}", cid)),
-            ))
+            ));
         };
         let instance_img_path = vm.temporary_directory.join("rkpvm_instance.img");
         let instance_img = OpenOptions::new()
@@ -1348,5 +1397,20 @@ mod tests {
         let modified_new = idsig.metadata()?.modified()?;
         assert!(modified_orig == modified_new, "idsig file was updated unnecessarily");
         Ok(())
+    }
+
+    #[test]
+    fn test_append_kernel_param_first_param() {
+        let mut vm_config = VirtualMachineRawConfig { ..Default::default() };
+        append_kernel_param("foo=1", &mut vm_config);
+        assert_eq!(vm_config.params, Some("foo=1".to_owned()))
+    }
+
+    #[test]
+    fn test_append_kernel_param() {
+        let mut vm_config =
+            VirtualMachineRawConfig { params: Some("foo=5".to_owned()), ..Default::default() };
+        append_kernel_param("bar=42", &mut vm_config);
+        assert_eq!(vm_config.params, Some("foo=5 bar=42".to_owned()))
     }
 }

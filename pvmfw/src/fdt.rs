@@ -209,7 +209,7 @@ struct PciInfo {
 impl PciInfo {
     const IRQ_MASK_CELLS: usize = 4;
     const IRQ_MAP_CELLS: usize = 10;
-    const MAX_IRQS: usize = 8;
+    const MAX_IRQS: usize = 10;
 }
 
 type PciAddrRange = AddressRange<(u32, u64), u64, u64>;
@@ -248,14 +248,22 @@ fn read_pci_info_from(fdt: &Fdt) -> libfdt::Result<PciInfo> {
     let range1 = ranges.next().ok_or(FdtError::NotFound)?;
 
     let irq_masks = node.getprop_cells(cstr!("interrupt-map-mask"))?.ok_or(FdtError::NotFound)?;
-    let irq_masks = CellChunkIterator::<{ PciInfo::IRQ_MASK_CELLS }>::new(irq_masks);
-    let irq_masks: ArrayVec<[PciIrqMask; PciInfo::MAX_IRQS]> =
-        irq_masks.take(PciInfo::MAX_IRQS).collect();
+    let mut chunks = CellChunkIterator::<{ PciInfo::IRQ_MASK_CELLS }>::new(irq_masks);
+    let irq_masks = (&mut chunks).take(PciInfo::MAX_IRQS).collect();
+
+    if chunks.next().is_some() {
+        warn!("Input DT has more than {} PCI entries!", PciInfo::MAX_IRQS);
+        return Err(FdtError::NoSpace);
+    }
 
     let irq_maps = node.getprop_cells(cstr!("interrupt-map"))?.ok_or(FdtError::NotFound)?;
-    let irq_maps = CellChunkIterator::<{ PciInfo::IRQ_MAP_CELLS }>::new(irq_maps);
-    let irq_maps: ArrayVec<[PciIrqMap; PciInfo::MAX_IRQS]> =
-        irq_maps.take(PciInfo::MAX_IRQS).collect();
+    let mut chunks = CellChunkIterator::<{ PciInfo::IRQ_MAP_CELLS }>::new(irq_maps);
+    let irq_maps = (&mut chunks).take(PciInfo::MAX_IRQS).collect();
+
+    if chunks.next().is_some() {
+        warn!("Input DT has more than {} PCI entries!", PciInfo::MAX_IRQS);
+        return Err(FdtError::NoSpace);
+    }
 
     Ok(PciInfo { ranges: [range0, range1], irq_masks, irq_maps })
 }
@@ -559,7 +567,7 @@ fn patch_timer(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
         *v = v.to_be();
     }
 
-    // SAFETY - array size is the same
+    // SAFETY: array size is the same
     let value = unsafe {
         core::mem::transmute::<
             [u32; NUM_INTERRUPTS * CELLS_PER_INTERRUPT],
@@ -801,7 +809,7 @@ fn apply_debug_policy(
         }
     };
 
-    // SAFETY - on failure, the corrupted DT is restored using the backup.
+    // SAFETY: on failure, the corrupted DT is restored using the backup.
     if let Err(e) = unsafe { fdt.apply_overlay(overlay) } {
         warn!("Failed to apply debug policy: {e}. Recovering...");
         fdt.copy_from_slice(backup_fdt.as_slice())?;
@@ -813,7 +821,7 @@ fn apply_debug_policy(
     }
 }
 
-fn read_common_debug_policy(fdt: &Fdt, debug_feature_name: &CStr) -> libfdt::Result<bool> {
+fn has_common_debug_policy(fdt: &Fdt, debug_feature_name: &CStr) -> libfdt::Result<bool> {
     if let Some(node) = fdt.node(cstr!("/avf/guest/common"))? {
         if let Some(value) = node.getprop_u32(debug_feature_name)? {
             return Ok(value == 1);
@@ -823,8 +831,8 @@ fn read_common_debug_policy(fdt: &Fdt, debug_feature_name: &CStr) -> libfdt::Res
 }
 
 fn filter_out_dangerous_bootargs(fdt: &mut Fdt, bootargs: &CStr) -> libfdt::Result<()> {
-    let has_crashkernel = read_common_debug_policy(fdt, cstr!("ramdump"))?;
-    let has_console = read_common_debug_policy(fdt, cstr!("log"))?;
+    let has_crashkernel = has_common_debug_policy(fdt, cstr!("ramdump"))?;
+    let has_console = has_common_debug_policy(fdt, cstr!("log"))?;
 
     let accepted: &[(&str, Box<dyn Fn(Option<&str>) -> bool>)] = &[
         ("panic", Box::new(|v| if let Some(v) = v { v == "=-1" } else { false })),

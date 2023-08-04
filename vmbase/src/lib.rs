@@ -21,14 +21,15 @@
 extern crate alloc;
 
 pub mod arch;
-mod bionic;
+pub mod bionic;
 pub mod console;
 mod entry;
+pub mod exceptions;
 pub mod fdt;
 pub mod heap;
 mod hvc;
 pub mod layout;
-mod linker;
+pub mod linker;
 pub mod logger;
 pub mod memory;
 pub mod power;
