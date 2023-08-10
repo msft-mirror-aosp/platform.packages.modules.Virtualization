@@ -18,10 +18,11 @@ use crate::dice::derive_sealing_key;
 use android_system_virtualization_payload::aidl::android::system::virtualization::payload::IVmPayloadService::{
     BnVmPayloadService, IVmPayloadService, VM_PAYLOAD_SERVICE_SOCKET_NAME};
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
-use anyhow::Result;
-use binder::{Interface, BinderFeatures, ExceptionCode, Status, Strong};
+use anyhow::{anyhow, Context, Result};
+use avflog::LogResult;
+use binder::{Interface, BinderFeatures, ExceptionCode, Strong, IntoBinderResult};
 use diced_open_dice::{DiceArtifacts, OwnedDiceArtifacts};
-use log::{error, info};
+use log::info;
 use rpcbinder::RpcServer;
 use std::os::unix::io::OwnedFd;
 
@@ -39,7 +40,8 @@ impl IVmPayloadService for VmPayloadService {
 
     fn getVmInstanceSecret(&self, identifier: &[u8], size: i32) -> binder::Result<Vec<u8>> {
         if !(0..=32).contains(&size) {
-            return Err(Status::new_exception(ExceptionCode::ILLEGAL_ARGUMENT, None));
+            return Err(anyhow!("size {size} not in range (0..=32)"))
+                .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT);
         }
         // Use a fixed salt to scope the derivation to this API. It was randomly generated.
         let salt = [
@@ -48,10 +50,10 @@ impl IVmPayloadService for VmPayloadService {
             0xB7, 0xA8, 0x43, 0x92,
         ];
         let mut secret = vec![0; size.try_into().unwrap()];
-        derive_sealing_key(&self.dice, &salt, identifier, &mut secret).map_err(|e| {
-            error!("Failed to derive VM instance secret: {:?}", e);
-            Status::new_service_specific_error(-1, None)
-        })?;
+        derive_sealing_key(&self.dice, &salt, identifier, &mut secret)
+            .context("Failed to derive VM instance secret")
+            .with_log()
+            .or_service_specific_exception(-1)?;
         Ok(secret)
     }
 
@@ -60,7 +62,7 @@ impl IVmPayloadService for VmPayloadService {
         if let Some(bcc) = self.dice.bcc() {
             Ok(bcc.to_vec())
         } else {
-            Err(Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some("bcc is none")))
+            Err(anyhow!("bcc is none")).or_binder_exception(ExceptionCode::ILLEGAL_STATE)
         }
     }
 
@@ -91,8 +93,9 @@ impl VmPayloadService {
         if self.allow_restricted_apis {
             Ok(())
         } else {
-            error!("Use of restricted APIs is not allowed");
-            Err(Status::new_exception_str(ExceptionCode::SECURITY, Some("Use of restricted APIs")))
+            Err(anyhow!("Use of restricted APIs is not allowed"))
+                .with_log()
+                .or_binder_exception(ExceptionCode::SECURITY)
         }
     }
 }

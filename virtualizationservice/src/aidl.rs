@@ -33,7 +33,8 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
 };
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::VM_TOMBSTONES_SERVICE_PORT;
 use anyhow::{anyhow, ensure, Context, Result};
-use binder::{self, wait_for_interface, BinderFeatures, ExceptionCode, Interface, LazyServiceGuard, Status, Strong};
+use avflog::LogResult;
+use binder::{self, wait_for_interface, BinderFeatures, ExceptionCode, Interface, LazyServiceGuard, Status, Strong, IntoBinderResult};
 use libc::VMADDR_CID_HOST;
 use log::{error, info, warn};
 use rustutils::system_properties;
@@ -42,7 +43,7 @@ use std::fs::{create_dir, remove_dir_all, set_permissions, Permissions};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::raw::{pid_t, uid_t};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use tombstoned_client::{DebuggerdDumpType, TombstonedConnection};
 use vsock::{VsockListener, VsockStream};
@@ -102,15 +103,10 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
 
         match ret {
             0 => Ok(()),
-            -1 => Err(Status::new_exception_str(
-                ExceptionCode::ILLEGAL_STATE,
-                Some(std::io::Error::last_os_error().to_string()),
-            )),
-            n => Err(Status::new_exception_str(
-                ExceptionCode::ILLEGAL_STATE,
-                Some(format!("Unexpected return value from prlimit(): {n}")),
-            )),
+            -1 => Err(std::io::Error::last_os_error().into()),
+            n => Err(anyhow!("Unexpected return value from prlimit(): {n}")),
         }
+        .or_binder_exception(ExceptionCode::ILLEGAL_STATE)
     }
 
     fn allocateGlobalVmContext(
@@ -122,9 +118,9 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         let requester_uid = get_calling_uid();
         let requester_debug_pid = requester_debug_pid as pid_t;
         let state = &mut *self.state.lock().unwrap();
-        state.allocate_vm_context(requester_uid, requester_debug_pid).map_err(|e| {
-            Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
-        })
+        state
+            .allocate_vm_context(requester_uid, requester_debug_pid)
+            .or_binder_exception(ExceptionCode::ILLEGAL_STATE)
     }
 
     fn atomVmBooted(&self, atom: &AtomVmBooted) -> Result<(), Status> {
@@ -167,28 +163,36 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
     ) -> binder::Result<Vec<u8>> {
         check_manage_access()?;
         info!("Received csr. Getting certificate...");
-        request_certificate(csr, instance_img_fd).map_err(|e| {
-            error!("Failed to get certificate. Error: {e:?}");
-            Status::new_exception_str(ExceptionCode::SERVICE_SPECIFIC, Some(e.to_string()))
-        })
+        request_certificate(csr, instance_img_fd)
+            .context("Failed to get certificate")
+            .with_log()
+            .or_service_specific_exception(-1)
     }
 
     fn getAssignableDevices(&self) -> binder::Result<Vec<AssignableDevice>> {
         check_use_custom_virtual_machine()?;
 
         // TODO(b/291191362): read VM DTBO to find assignable devices.
-        Ok(vec![AssignableDevice {
-            kind: "eh".to_owned(),
-            node: "/sys/bus/platform/devices/16d00000.eh".to_owned(),
-        }])
+        let mut devices = Vec::new();
+        let eh_path = "/sys/bus/platform/devices/16d00000.eh";
+        if Path::new(eh_path).exists() {
+            devices.push(AssignableDevice { kind: "eh".to_owned(), node: eh_path.to_owned() });
+        }
+        Ok(devices)
     }
 
-    fn bindDevicesToVfioDriver(&self, devices: &[String]) -> binder::Result<ParcelFileDescriptor> {
+    fn bindDevicesToVfioDriver(
+        &self,
+        devices: &[String],
+        dtbo: &ParcelFileDescriptor,
+    ) -> binder::Result<()> {
         check_use_custom_virtual_machine()?;
 
         let vfio_service: Strong<dyn IVfioHandler> =
             wait_for_interface(<BpVfioHandler as IVfioHandler>::get_descriptor())?;
-        vfio_service.bindDevicesToVfioDriver(devices)
+
+        vfio_service.bindDevicesToVfioDriver(devices, dtbo)?;
+        Ok(())
     }
 }
 
@@ -397,10 +401,8 @@ fn check_permission(perm: &str) -> binder::Result<()> {
     if perm_svc.checkPermission(perm, calling_pid, calling_uid as i32)? {
         Ok(())
     } else {
-        Err(Status::new_exception_str(
-            ExceptionCode::SECURITY,
-            Some(format!("does not have the {} permission", perm)),
-        ))
+        Err(anyhow!("does not have the {} permission", perm))
+            .or_binder_exception(ExceptionCode::SECURITY)
     }
 }
 
