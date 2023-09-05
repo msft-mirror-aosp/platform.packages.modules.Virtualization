@@ -14,19 +14,20 @@
 
 //! Functions to scan the PCI bus for VirtIO devices.
 
-use super::hal::HalImpl;
 use crate::memory::{MemoryTracker, MemoryTrackerError};
 use alloc::boxed::Box;
 use core::fmt;
+use core::marker::PhantomData;
 use fdtpci::PciInfo;
 use log::debug;
 use once_cell::race::OnceBox;
 use virtio_drivers::{
-    device::blk,
+    device::{blk, socket},
     transport::pci::{
         bus::{BusDeviceIterator, PciRoot},
         virtio_device_type, PciTransport,
     },
+    Hal,
 };
 
 pub(super) static PCI_INFO: OnceBox<PciInfo> = OnceBox::new();
@@ -63,7 +64,7 @@ impl fmt::Display for PciError {
 /// 3. Creates and returns a `PciRoot`.
 ///
 /// This must only be called once; it will panic if it is called a second time.
-pub fn initialise(pci_info: PciInfo, memory: &mut MemoryTracker) -> Result<PciRoot, PciError> {
+pub fn initialize(pci_info: PciInfo, memory: &mut MemoryTracker) -> Result<PciRoot, PciError> {
     PCI_INFO.set(Box::new(pci_info.clone())).map_err(|_| PciError::DuplicateInitialization)?;
 
     memory.map_mmio_range(pci_info.cam_range.clone()).map_err(PciError::CamMapFailed)?;
@@ -76,23 +77,29 @@ pub fn initialise(pci_info: PciInfo, memory: &mut MemoryTracker) -> Result<PciRo
 }
 
 /// Virtio Block device.
-pub type VirtIOBlk = blk::VirtIOBlk<HalImpl, PciTransport>;
+pub type VirtIOBlk<T> = blk::VirtIOBlk<T, PciTransport>;
+
+/// Virtio Socket device.
+///
+/// Spec: https://docs.oasis-open.org/virtio/virtio/v1.2/csd01/virtio-v1.2-csd01.html 5.10
+pub type VirtIOSocket<T> = socket::VirtIOSocket<T, PciTransport>;
 
 /// An iterator that iterates over the PCI transport for each device.
-pub struct PciTransportIterator<'a> {
+pub struct PciTransportIterator<'a, T: Hal> {
     pci_root: &'a mut PciRoot,
     bus: BusDeviceIterator,
+    _hal: PhantomData<T>,
 }
 
-impl<'a> PciTransportIterator<'a> {
+impl<'a, T: Hal> PciTransportIterator<'a, T> {
     /// Creates a new iterator.
     pub fn new(pci_root: &'a mut PciRoot) -> Self {
         let bus = pci_root.enumerate_bus(0);
-        Self { pci_root, bus }
+        Self { pci_root, bus, _hal: PhantomData }
     }
 }
 
-impl<'a> Iterator for PciTransportIterator<'a> {
+impl<'a, T: Hal> Iterator for PciTransportIterator<'a, T> {
     type Item = PciTransport;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -109,7 +116,7 @@ impl<'a> Iterator for PciTransportIterator<'a> {
             };
             debug!("  VirtIO {:?}", virtio_type);
 
-            return PciTransport::new::<HalImpl>(self.pci_root, device_function).ok();
+            return PciTransport::new::<T>(self.pci_root, device_function).ok();
         }
     }
 }
