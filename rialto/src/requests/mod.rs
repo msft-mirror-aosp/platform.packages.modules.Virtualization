@@ -15,5 +15,6 @@
 //! This module contains functions for the request processing.
 
 mod api;
+mod rkp;
 
 pub use api::process_request;
