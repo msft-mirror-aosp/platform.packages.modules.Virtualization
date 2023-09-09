@@ -20,8 +20,9 @@ mod ioutil;
 mod payload;
 mod swap;
 mod vm_payload_service;
+mod vm_secret;
 
-use crate::dice::{DiceDriver, derive_sealing_key, format_payload_config_descriptor};
+use crate::dice::{DiceDriver, format_payload_config_descriptor};
 use crate::instance::{ApexData, ApkData, InstanceDisk, MicrodroidData, RootHash};
 use crate::vm_payload_service::register_vm_payload_service;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::ErrorCode::ErrorCode;
@@ -63,6 +64,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::str;
 use std::time::{Duration, SystemTime};
+use vm_secret::VmSecret;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAIN_APK_PATH: &str = "/dev/block/by-name/microdroid-apk";
@@ -88,7 +90,6 @@ const DEBUGGABLE_PROP: &str = "ro.boot.microdroid.debuggable";
 const FAILURE_SERIAL_DEVICE: &str = "/dev/ttyS1";
 
 const ENCRYPTEDSTORE_BACKING_DEVICE: &str = "/dev/block/by-name/encryptedstore";
-const ENCRYPTEDSTORE_KEY_IDENTIFIER: &str = "encryptedstore_key";
 const ENCRYPTEDSTORE_KEYSIZE: usize = 32;
 
 #[derive(thiserror::Error, Debug)]
@@ -416,11 +417,12 @@ fn try_run_payload(
     // To minimize the exposure to untrusted data, derive dice profile as soon as possible.
     info!("DICE derivation for payload");
     let dice_artifacts = dice_derivation(dice, &verified_data, &payload_metadata)?;
+    let vm_secret = VmSecret::new(dice_artifacts).context("Failed to create VM secrets")?;
 
     // Run encryptedstore binary to prepare the storage
     let encryptedstore_child = if Path::new(ENCRYPTEDSTORE_BACKING_DEVICE).exists() {
         info!("Preparing encryptedstore ...");
-        Some(prepare_encryptedstore(&dice_artifacts).context("encryptedstore run")?)
+        Some(prepare_encryptedstore(&vm_secret).context("encryptedstore run")?)
     } else {
         None
     };
@@ -477,7 +479,7 @@ fn try_run_payload(
     register_vm_payload_service(
         allow_restricted_apis,
         service.clone(),
-        dice_artifacts,
+        vm_secret,
         vm_payload_service_fd,
     )?;
 
@@ -917,18 +919,9 @@ fn to_hex_string(buf: &[u8]) -> String {
     buf.iter().map(|b| format!("{:02X}", b)).collect()
 }
 
-fn prepare_encryptedstore(dice_artifacts: &OwnedDiceArtifacts) -> Result<Child> {
-    // Use a fixed salt to scope the derivation to this API.
-    // Generated using hexdump -vn32 -e'14/1 "0x%02X, " 1 "\n"' /dev/urandom
-    // TODO(b/241541860) : Move this (& other salts) to a salt container, i.e. a global enum
-    let salt = [
-        0xFC, 0x1D, 0x35, 0x7B, 0x96, 0xF3, 0xEF, 0x17, 0x78, 0x7D, 0x70, 0xED, 0xEA, 0xFE, 0x1D,
-        0x6F, 0xB3, 0xF9, 0x40, 0xCE, 0xDD, 0x99, 0x40, 0xAA, 0xA7, 0x0E, 0x92, 0x73, 0x90, 0x86,
-        0x4A, 0x75,
-    ];
+fn prepare_encryptedstore(vm_secret: &VmSecret) -> Result<Child> {
     let mut key = ZVec::new(ENCRYPTEDSTORE_KEYSIZE)?;
-    derive_sealing_key(dice_artifacts, &salt, ENCRYPTEDSTORE_KEY_IDENTIFIER.as_bytes(), &mut key)?;
-
+    vm_secret.derive_encryptedstore_key(&mut key)?;
     let mut cmd = Command::new(ENCRYPTEDSTORE_BIN);
     cmd.arg("--blkdevice")
         .arg(ENCRYPTEDSTORE_BACKING_DEVICE)

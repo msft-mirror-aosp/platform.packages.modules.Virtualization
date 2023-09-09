@@ -36,6 +36,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualizationService::IVirtualizationService,
     IVirtualizationService::FEATURE_PAYLOAD_NON_ROOT,
     IVirtualizationService::FEATURE_VENDOR_MODULES,
+    IVirtualizationService::FEATURE_DICE_CHANGES,
     MemoryTrimLevel::MemoryTrimLevel,
     Partition::Partition,
     PartitionType::PartitionType,
@@ -274,10 +275,11 @@ impl IVirtualizationService for VirtualizationService {
         // This approach is quite cumbersome, but will do the work for the short term.
         // TODO(b/298012279): make this scalable.
         match feature {
+            FEATURE_DICE_CHANGES => Ok(cfg!(dice_changes)),
             FEATURE_PAYLOAD_NON_ROOT => Ok(cfg!(payload_not_root)),
             FEATURE_VENDOR_MODULES => Ok(cfg!(vendor_modules)),
             _ => {
-                warn!("unknown feature {}", feature);
+                warn!("unknown feature {feature}");
                 Ok(false)
             }
         }
@@ -456,7 +458,7 @@ impl VirtualizationService {
             }
         };
 
-        let devices_dtbo = if !config.devices.is_empty() {
+        if !config.devices.is_empty() {
             let mut set = HashSet::new();
             for device in config.devices.iter() {
                 let path = canonicalize(device)
@@ -467,30 +469,8 @@ impl VirtualizationService {
                         .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT);
                 }
             }
-            let dtbo_path = temporary_directory.join("dtbo");
-            // open a writable file descriptor for vfio_handler
-            let dtbo = File::create(&dtbo_path).map_err(|e| {
-                error!("Failed to create VM DTBO file {dtbo_path:?}: {e:?}");
-                Status::new_service_specific_error_str(
-                    -1,
-                    Some(format!("Failed to create VM DTBO file {dtbo_path:?}: {e:?}")),
-                )
-            })?;
-            GLOBAL_SERVICE
-                .bindDevicesToVfioDriver(&config.devices, &ParcelFileDescriptor::new(dtbo))?;
-
-            // open (again) a readable file descriptor for crosvm
-            let dtbo = File::open(&dtbo_path).map_err(|e| {
-                error!("Failed to open VM DTBO file {dtbo_path:?}: {e:?}");
-                Status::new_service_specific_error_str(
-                    -1,
-                    Some(format!("Failed to open VM DTBO file {dtbo_path:?}: {e:?}")),
-                )
-            })?;
-            Some(dtbo)
-        } else {
-            None
-        };
+            GLOBAL_SERVICE.bindDevicesToVfioDriver(&config.devices)?;
+        }
 
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
@@ -516,7 +496,6 @@ impl VirtualizationService {
             detect_hangup: is_app_config,
             gdb_port,
             vfio_devices: config.devices.iter().map(PathBuf::from).collect(),
-            devices_dtbo,
         };
         let instance = Arc::new(
             VmInstance::new(
