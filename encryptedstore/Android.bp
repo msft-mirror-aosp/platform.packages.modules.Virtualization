@@ -4,6 +4,7 @@ package {
 
 rust_defaults {
     name: "encryptedstore.defaults",
+    defaults: ["avf_build_flags_rust"],
     srcs: ["src/main.rs"],
     edition: "2021",
     prefer_rlib: true,
@@ -14,6 +15,7 @@ rust_defaults {
         "libclap",
         "libhex",
         "liblog_rust",
+        "libmicrodroid_uids",
         "libnix",
         "libdm_rust",
     ],

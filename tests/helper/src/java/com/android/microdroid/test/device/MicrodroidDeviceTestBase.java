@@ -20,6 +20,8 @@ import static android.content.pm.PackageManager.FEATURE_VIRTUALIZATION_FRAMEWORK
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
 
+import static org.junit.Assume.assumeTrue;
+
 import android.app.Instrumentation;
 import android.app.UiAutomation;
 import android.content.Context;
@@ -451,6 +453,7 @@ public abstract class MicrodroidDeviceTestBase {
         public String mApkContentsPath;
         public String mEncryptedStoragePath;
         public String[] mEffectiveCapabilities;
+        public int mUid;
         public String mFileContent;
         public byte[] mBcc;
         public long[] mTimings;
@@ -543,5 +546,13 @@ public abstract class MicrodroidDeviceTestBase {
     @FunctionalInterface
     protected interface RunTestsAgainstTestService {
         void runTests(ITestService testService, TestResults testResults) throws Exception;
+    }
+
+    protected void assumeFeatureEnabled(String featureName) throws Exception {
+        assumeTrue(featureName + " not enabled", isFeatureEnabled(featureName));
+    }
+
+    protected boolean isFeatureEnabled(String featureName) throws Exception {
+        return getVirtualMachineManager().isFeatureEnabled(featureName);
     }
 }

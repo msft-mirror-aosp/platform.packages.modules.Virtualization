@@ -12,6 +12,9 @@
       "name": "MicrodroidTestApp"
     },
     {
+      "name": "CustomPvmfwHostTestCases"
+    },
+    {
       "name": "art_standalone_dexpreopt_tests"
     },
     {
@@ -25,6 +28,9 @@
     },
     {
       "name": "initrd_bootconfig.test"
+    },
+    {
+      "name": "libdice_policy.test"
     }
   ],
   "avf-postsubmit": [

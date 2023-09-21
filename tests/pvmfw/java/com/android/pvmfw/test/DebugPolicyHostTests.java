@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.android.microdroid.test;
+package com.android.pvmfw.test;
 
 import static com.android.tradefed.device.TestDevice.MicrodroidBuilder;
 
@@ -22,7 +22,6 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import static org.junit.Assume.assumeTrue;
-import static org.junit.Assume.assumeFalse;
 import static org.junit.Assert.assertThrows;
 
 import androidx.annotation.NonNull;
@@ -30,7 +29,7 @@ import androidx.annotation.Nullable;
 
 import com.android.microdroid.test.host.CommandRunner;
 import com.android.microdroid.test.host.MicrodroidHostTestCaseBase;
-import com.android.microdroid.test.host.Pvmfw;
+import com.android.pvmfw.test.host.Pvmfw;
 import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.device.DeviceRuntimeException;
 import com.android.tradefed.device.ITestDevice;
@@ -113,9 +112,6 @@ public class DebugPolicyHostTests extends MicrodroidHostTestCaseBase {
         assumeTrue(
                 "Skip if protected VMs are not supported",
                 mAndroidDevice.supportsMicrodroid(/* protectedVm= */ true));
-        assumeFalse("Test requires setprop for using custom pvmfw and adb root", isUserBuild());
-
-        assumeTrue("Skip if adb root fails", mAndroidDevice.enableAdbRoot());
 
         // tradefed copies the test artfacts under /tmp when running tests,
         // so we should *find* the artifacts with the file name.
@@ -130,8 +126,8 @@ public class DebugPolicyHostTests extends MicrodroidHostTestCaseBase {
         // or tryLaunchProtectedNonDebuggableVm().
         mCustomPvmfwBinFileOnHost =
                 FileUtil.createTempFile(CUSTOM_PVMFW_FILE_PREFIX, CUSTOM_PVMFW_FILE_SUFFIX);
-        mAndroidDevice.setProperty(CUSTOM_PVMFW_IMG_PATH_PROP, CUSTOM_PVMFW_IMG_PATH);
-        mAndroidDevice.setProperty(CUSTOM_DEBUG_POLICY_PATH_PROP, CUSTOM_DEBUG_POLICY_PATH);
+        setPropertyOrThrow(mAndroidDevice, CUSTOM_PVMFW_IMG_PATH_PROP, CUSTOM_PVMFW_IMG_PATH);
+        setPropertyOrThrow(mAndroidDevice, CUSTOM_DEBUG_POLICY_PATH_PROP, CUSTOM_DEBUG_POLICY_PATH);
 
         // Prepare for launching microdroid
         mAndroidDevice.installPackage(findTestFile(PACKAGE_FILE_NAME), /* reinstall */ false);
@@ -151,13 +147,11 @@ public class DebugPolicyHostTests extends MicrodroidHostTestCaseBase {
         mAndroidDevice.uninstallPackage(PACKAGE_NAME);
 
         // Cleanup for custom debug policies
-        mAndroidDevice.setProperty(CUSTOM_DEBUG_POLICY_PATH_PROP, "");
-        mAndroidDevice.setProperty(CUSTOM_PVMFW_IMG_PATH_PROP, "");
+        setPropertyOrThrow(mAndroidDevice, CUSTOM_DEBUG_POLICY_PATH_PROP, "");
+        setPropertyOrThrow(mAndroidDevice, CUSTOM_PVMFW_IMG_PATH_PROP, "");
         FileUtil.deleteFile(mCustomPvmfwBinFileOnHost);
 
         cleanUpVirtualizationTestSetup(mAndroidDevice);
-
-        mAndroidDevice.disableAdbRoot();
     }
 
     @Test
@@ -196,6 +190,43 @@ public class DebugPolicyHostTests extends MicrodroidHostTestCaseBase {
         prepareCustomDebugPolicy("avf_debug_policy_without_adb.dtbo");
 
         launchProtectedVmAndWaitForBootCompleted(MICRODROID_DEBUG_FULL);
+    }
+
+    @Test
+    public void testRamdumpInDebugPolicy_withDebugLevelNone_hasRamdumpArgs() throws Exception {
+        prepareCustomDebugPolicy("avf_debug_policy_with_ramdump.dtbo");
+        mMicrodroidDevice = launchProtectedVmAndWaitForBootCompleted(MICRODROID_DEBUG_NONE);
+
+        assertThat(readMicrodroidFileAsString(MICRODROID_CMDLINE_PATH)).contains("crashkernel=");
+        assertThat(readMicrodroidFileAsString(MICRODROID_DT_BOOTARGS_PATH))
+                .contains("crashkernel=");
+        assertThat(readMicrodroidFileAsHexString(MICRODROID_DT_RAMDUMP_PATH))
+                .isEqualTo(HEX_STRING_ONE);
+    }
+
+    @Test
+    public void testNoRamdumpInDebugPolicy_withDebugLevelNone_noRamdumpArgs() throws Exception {
+        prepareCustomDebugPolicy("avf_debug_policy_without_ramdump.dtbo");
+        mMicrodroidDevice = launchProtectedVmAndWaitForBootCompleted(MICRODROID_DEBUG_NONE);
+
+        assertThat(readMicrodroidFileAsString(MICRODROID_CMDLINE_PATH))
+                .doesNotContain("crashkernel=");
+        assertThat(readMicrodroidFileAsString(MICRODROID_DT_BOOTARGS_PATH))
+                .doesNotContain("crashkernel=");
+        assertThat(readMicrodroidFileAsHexString(MICRODROID_DT_RAMDUMP_PATH))
+                .isEqualTo(HEX_STRING_ZERO);
+    }
+
+    @Test
+    public void testNoRamdumpInDebugPolicy_withDebugLevelFull_hasRamdumpArgs() throws Exception {
+        prepareCustomDebugPolicy("avf_debug_policy_without_ramdump.dtbo");
+        mMicrodroidDevice = launchProtectedVmAndWaitForBootCompleted(MICRODROID_DEBUG_FULL);
+
+        assertThat(readMicrodroidFileAsString(MICRODROID_CMDLINE_PATH)).contains("crashkernel=");
+        assertThat(readMicrodroidFileAsString(MICRODROID_DT_BOOTARGS_PATH))
+                .contains("crashkernel=");
+        assertThat(readMicrodroidFileAsHexString(MICRODROID_DT_RAMDUMP_PATH))
+                .isEqualTo(HEX_STRING_ZERO);
     }
 
     private boolean isDebugPolicyEnabled(@NonNull String dtPropertyPath)

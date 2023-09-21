@@ -16,14 +16,19 @@
 
 use aarch64_paging::MapError;
 use core::{fmt, result};
+use diced_open_dice::DiceError;
 use fdtpci::PciError;
 use hyp::Error as HypervisorError;
 use libfdt::FdtError;
+use service_vm_comm::RequestProcessingError;
 use vmbase::{memory::MemoryTrackerError, virtio::pci};
 
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Clone, Debug)]
+type CiboriumSerError = ciborium::ser::Error<virtio_drivers::Error>;
+type CiboriumDeError = ciborium::de::Error<virtio_drivers::Error>;
+
+#[derive(Debug)]
 pub enum Error {
     /// Hypervisor error.
     Hypervisor(HypervisorError),
@@ -43,8 +48,14 @@ pub enum Error {
     MissingVirtIOSocketDevice,
     /// Failed VirtIO driver operation.
     VirtIODriverOperationFailed(virtio_drivers::Error),
-    /// Failed to receive data.
-    ReceivingDataFailed(virtio_drivers::Error),
+    /// Failed to serialize.
+    SerializationFailed(CiboriumSerError),
+    /// Failed to deserialize.
+    DeserializationFailed(CiboriumDeError),
+    /// Failed DICE operation.
+    DiceOperationFailed(DiceError),
+    /// Failed to process request.
+    RequestProcessingFailed(RequestProcessingError),
 }
 
 impl fmt::Display for Error {
@@ -65,7 +76,10 @@ impl fmt::Display for Error {
             Self::VirtIODriverOperationFailed(e) => {
                 write!(f, "Failed VirtIO driver operation: {e}")
             }
-            Self::ReceivingDataFailed(e) => write!(f, "Failed to receive data: {e}"),
+            Self::SerializationFailed(e) => write!(f, "Failed to serialize: {e}"),
+            Self::DeserializationFailed(e) => write!(f, "Failed to deserialize: {e}"),
+            Self::DiceOperationFailed(e) => write!(f, "Failed DICE operation: {e}"),
+            Self::RequestProcessingFailed(e) => write!(f, "Failed to process request: {e}"),
         }
     }
 }
@@ -103,5 +117,29 @@ impl From<MemoryTrackerError> for Error {
 impl From<virtio_drivers::Error> for Error {
     fn from(e: virtio_drivers::Error) -> Self {
         Self::VirtIODriverOperationFailed(e)
+    }
+}
+
+impl From<CiboriumSerError> for Error {
+    fn from(e: CiboriumSerError) -> Self {
+        Self::SerializationFailed(e)
+    }
+}
+
+impl From<CiboriumDeError> for Error {
+    fn from(e: CiboriumDeError) -> Self {
+        Self::DeserializationFailed(e)
+    }
+}
+
+impl From<DiceError> for Error {
+    fn from(e: DiceError) -> Self {
+        Self::DiceOperationFailed(e)
+    }
+}
+
+impl From<RequestProcessingError> for Error {
+    fn from(e: RequestProcessingError) -> Self {
+        Self::RequestProcessingFailed(e)
     }
 }

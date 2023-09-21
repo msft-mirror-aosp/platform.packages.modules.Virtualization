@@ -20,19 +20,24 @@
 mod communication;
 mod error;
 mod exceptions;
+mod fdt;
+mod requests;
 
 extern crate alloc;
 
-use crate::communication::DataChannel;
+use crate::communication::VsockStream;
 use crate::error::{Error, Result};
+use crate::fdt::read_dice_range_from;
+use ciborium_io::Write;
 use core::num::NonZeroUsize;
 use core::slice;
 use fdtpci::PciInfo;
 use hyp::{get_mem_sharer, get_mmio_guard};
 use libfdt::FdtError;
 use log::{debug, error, info};
+use service_vm_comm::{ServiceVmRequest, VmType};
 use virtio_drivers::{
-    device::socket::VsockAddr,
+    device::socket::{VsockAddr, VMADDR_CID_HOST},
     transport::{pci::bus::PciRoot, DeviceType, Transport},
     Hal,
 };
@@ -50,17 +55,16 @@ use vmbase::{
 };
 
 fn host_addr() -> VsockAddr {
-    const PROTECTED_VM_PORT: u32 = 5679;
-    const NON_PROTECTED_VM_PORT: u32 = 5680;
-    const VMADDR_CID_HOST: u64 = 2;
-
-    let port = if is_protected_vm() { PROTECTED_VM_PORT } else { NON_PROTECTED_VM_PORT };
-    VsockAddr { cid: VMADDR_CID_HOST, port }
+    VsockAddr { cid: VMADDR_CID_HOST, port: vm_type().port() }
 }
 
-fn is_protected_vm() -> bool {
+fn vm_type() -> VmType {
     // Use MMIO support to determine whether the VM is protected.
-    get_mmio_guard().is_some()
+    if get_mmio_guard().is_some() {
+        VmType::ProtectedVm
+    } else {
+        VmType::NonProtectedVm
+    }
 }
 
 fn new_page_table() -> Result<PageTable> {
@@ -128,6 +132,17 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
             e
         })?;
     }
+    let _bcc_handover = match vm_type() {
+        VmType::ProtectedVm => {
+            let dice_range = read_dice_range_from(fdt)?;
+            info!("DICE range: {dice_range:#x?}");
+            // TODO(b/287233786): Read the bcc_handover from the given range.
+            Some(dice_range)
+        }
+        // Currently, no DICE data is retrieved for non-protected VMs, as these VMs are solely
+        // intended for debugging purposes.
+        VmType::NonProtectedVm => None,
+    };
 
     let pci_info = PciInfo::from_fdt(fdt)?;
     debug!("PCI: {pci_info:#x?}");
@@ -137,10 +152,14 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
     let socket_device = find_socket_device::<HalImpl>(&mut pci_root)?;
     debug!("Found socket device: guest cid = {:?}", socket_device.guest_cid());
 
-    let mut data_channel = DataChannel::from(socket_device);
-    data_channel.connect(host_addr())?;
-    data_channel.handle_incoming_request()?;
-    data_channel.force_close()?;
+    let mut vsock_stream = VsockStream::new(socket_device, host_addr())?;
+    // TODO(b/287233786): Pass the bcc_handover to process_request.
+    while let ServiceVmRequest::Process(req) = vsock_stream.read_request()? {
+        let response = requests::process_request(req)?;
+        vsock_stream.write_response(&response)?;
+        vsock_stream.flush()?;
+    }
+    vsock_stream.shutdown()?;
 
     Ok(())
 }

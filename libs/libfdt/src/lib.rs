@@ -16,8 +16,6 @@
 //! to a bare-metal environment.
 
 #![no_std]
-#![deny(unsafe_op_in_unsafe_fn)]
-#![deny(clippy::undocumented_unsafe_blocks)]
 
 mod iterators;
 
@@ -343,7 +341,8 @@ impl<'a> FdtNode<'a> {
         self.fdt
     }
 
-    fn next_compatible(self, compatible: &CStr) -> Result<Option<Self>> {
+    /// Returns the compatible node of the given name that is next after this node.
+    pub fn next_compatible(self, compatible: &CStr) -> Result<Option<Self>> {
         // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
         let ret = unsafe {
             libfdt_bindgen::fdt_node_offset_by_compatible(
@@ -354,6 +353,11 @@ impl<'a> FdtNode<'a> {
         };
 
         Ok(fdt_err_or_option(ret)?.map(|offset| Self { fdt: self.fdt, offset }))
+    }
+
+    /// Returns the first range of `reg` in this node.
+    pub fn first_reg(&self) -> Result<Reg<u64>> {
+        self.reg()?.ok_or(FdtError::NotFound)?.next().ok_or(FdtError::NotFound)
     }
 
     fn address_cells(&self) -> Result<AddrCells> {
@@ -528,7 +532,7 @@ impl<'a> FdtNodeMut<'a> {
         Ok(FdtNode { fdt: &*self.fdt, offset: fdt_err(ret)? })
     }
 
-    /// Return the compatible node of the given name that is next to this node
+    /// Returns the compatible node of the given name that is next after this node
     pub fn next_compatible(self, compatible: &CStr) -> Result<Option<Self>> {
         // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
         let ret = unsafe {

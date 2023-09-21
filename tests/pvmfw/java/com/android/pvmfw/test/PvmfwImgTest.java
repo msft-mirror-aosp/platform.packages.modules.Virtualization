@@ -14,21 +14,20 @@
  * limitations under the License.
  */
 
-package com.android.microdroid.test;
+package com.android.pvmfw.test;
 
 import static com.android.tradefed.device.TestDevice.MicrodroidBuilder;
 
 import static com.google.common.truth.Truth.assertThat;
 
 import static org.junit.Assume.assumeTrue;
-import static org.junit.Assume.assumeFalse;
 import static org.junit.Assert.assertThrows;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.android.microdroid.test.host.MicrodroidHostTestCaseBase;
-import com.android.microdroid.test.host.Pvmfw;
+import com.android.pvmfw.test.host.Pvmfw;
 import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.device.DeviceRuntimeException;
 import com.android.tradefed.device.ITestDevice;
@@ -42,6 +41,8 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.io.File;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 
 /** Tests pvmfw.img and pvmfw */
@@ -77,9 +78,6 @@ public class PvmfwImgTest extends MicrodroidHostTestCaseBase {
         assumeTrue(
                 "Skip if protected VMs are not supported",
                 mAndroidDevice.supportsMicrodroid(/* protectedVm= */ true));
-        assumeFalse("Test requires setprop for using custom pvmfw and adb root", isUserBuild());
-
-        assumeTrue("Skip if adb root fails", mAndroidDevice.enableAdbRoot());
 
         // tradefed copies the test artfacts under /tmp when running tests,
         // so we should *find* the artifacts with the file name.
@@ -93,7 +91,7 @@ public class PvmfwImgTest extends MicrodroidHostTestCaseBase {
         // when launching with launchProtectedVmAndWaitForBootCompleted().
         mCustomPvmfwBinFileOnHost =
                 FileUtil.createTempFile(CUSTOM_PVMFW_FILE_PREFIX, CUSTOM_PVMFW_FILE_SUFFIX);
-        mAndroidDevice.setProperty(CUSTOM_PVMFW_IMG_PATH_PROP, CUSTOM_PVMFW_IMG_PATH);
+        setPropertyOrThrow(mAndroidDevice, CUSTOM_PVMFW_IMG_PATH_PROP, CUSTOM_PVMFW_IMG_PATH);
 
         // Prepare for launching microdroid
         mAndroidDevice.installPackage(findTestFile(PACKAGE_FILE_NAME), /* reinstall */ false);
@@ -113,12 +111,10 @@ public class PvmfwImgTest extends MicrodroidHostTestCaseBase {
         mAndroidDevice.uninstallPackage(PACKAGE_NAME);
 
         // Cleanup for custom pvmfw.img
-        mAndroidDevice.setProperty(CUSTOM_PVMFW_IMG_PATH_PROP, "");
+        setPropertyOrThrow(mAndroidDevice, CUSTOM_PVMFW_IMG_PATH_PROP, "");
         FileUtil.deleteFile(mCustomPvmfwBinFileOnHost);
 
         cleanUpVirtualizationTestSetup(mAndroidDevice);
-
-        mAndroidDevice.disableAdbRoot();
     }
 
     @Test
@@ -141,15 +137,34 @@ public class PvmfwImgTest extends MicrodroidHostTestCaseBase {
 
     @Test
     public void testInvalidConfigVersion_doesNotBoot() throws Exception {
-        // Disclaimer: Update versions when it becomes valid
-        Pvmfw pvmfw =
-                new Pvmfw.Builder(mPvmfwBinFileOnHost, mBccFileOnHost).setVersion(1, 100).build();
-        pvmfw.serialize(mCustomPvmfwBinFileOnHost);
+        // Disclaimer: Update versions when they become valid
+        List<int[]> invalid_versions =
+                Arrays.asList(
+                        new int[] {0, 0},
+                        new int[] {0, 1},
+                        new int[] {0, 0xFFFF},
+                        new int[] {2, 0},
+                        new int[] {2, 1},
+                        new int[] {2, 0xFFFF},
+                        new int[] {0xFFFF, 0},
+                        new int[] {0xFFFF, 1},
+                        new int[] {0xFFFF, 0xFFFF});
 
-        assertThrows(
-                "pvmfw shouldn't boot with invalid version",
-                DeviceRuntimeException.class,
-                () -> launchProtectedVmAndWaitForBootCompleted(BOOT_FAILURE_WAIT_TIME_MS));
+        Pvmfw.Builder builder = new Pvmfw.Builder(mPvmfwBinFileOnHost, mBccFileOnHost);
+
+        for (int[] pair : invalid_versions) {
+            int major = pair[0];
+            int minor = pair[1];
+            String version = "v" + major + "." + minor;
+
+            Pvmfw pvmfw = builder.setVersion(major, minor).build();
+            pvmfw.serialize(mCustomPvmfwBinFileOnHost);
+
+            assertThrows(
+                    "pvmfw shouldn't boot with invalid version " + version,
+                    DeviceRuntimeException.class,
+                    () -> launchProtectedVmAndWaitForBootCompleted(BOOT_FAILURE_WAIT_TIME_MS));
+        }
     }
 
     private ITestDevice launchProtectedVmAndWaitForBootCompleted(long adbTimeoutMs)
