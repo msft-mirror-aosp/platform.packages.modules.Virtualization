@@ -12,18 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! This library contains the communication protocol used between the host
-//! and the service VM.
+//! High-level FDT functions.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+use core::ops::Range;
+use libfdt::{Fdt, FdtError};
+use vmbase::cstr;
 
-extern crate alloc;
-
-mod message;
-mod vsock;
-
-pub use message::{
-    EcdsaP256KeyPair, GenerateCertificateRequestParams, Request, RequestProcessingError, Response,
-    ServiceVmRequest,
-};
-pub use vsock::VmType;
+/// Reads the DICE data range from the given `fdt`.
+pub fn read_dice_range_from(fdt: &Fdt) -> libfdt::Result<Range<usize>> {
+    let node = fdt.node(cstr!("/reserved-memory"))?.ok_or(FdtError::NotFound)?;
+    let node = node.next_compatible(cstr!("google,open-dice"))?.ok_or(FdtError::NotFound)?;
+    node.first_reg()?.try_into()
+}
