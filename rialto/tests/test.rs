@@ -22,12 +22,14 @@ use android_system_virtualizationservice::{
     binder::{ParcelFileDescriptor, ProcessState},
 };
 use anyhow::{bail, Context, Result};
+use ciborium::value::Value;
 use log::info;
 use service_vm_comm::{
     EcdsaP256KeyPair, GenerateCertificateRequestParams, Request, Response, VmType,
 };
 use service_vm_manager::ServiceVm;
 use std::fs::File;
+use std::io;
 use std::panic;
 use std::path::PathBuf;
 use vmclient::VmInstance;
@@ -49,8 +51,8 @@ fn check_processing_requests(vm_type: VmType) -> Result<()> {
     let mut vm = start_service_vm(vm_type)?;
 
     check_processing_reverse_request(&mut vm)?;
-    check_processing_generating_key_pair_request(&mut vm)?;
-    check_processing_generating_certificate_request(&mut vm)?;
+    let maced_public_key = check_processing_generating_key_pair_request(&mut vm)?;
+    check_processing_generating_certificate_request(&mut vm, maced_public_key)?;
     Ok(())
 }
 
@@ -68,29 +70,55 @@ fn check_processing_reverse_request(vm: &mut ServiceVm) -> Result<()> {
     Ok(())
 }
 
-fn check_processing_generating_key_pair_request(vm: &mut ServiceVm) -> Result<()> {
+fn check_processing_generating_key_pair_request(vm: &mut ServiceVm) -> Result<Vec<u8>> {
     let request = Request::GenerateEcdsaP256KeyPair;
 
     let response = vm.process_request(request)?;
     info!("Received response: {response:?}.");
 
     match response {
-        Response::GenerateEcdsaP256KeyPair(EcdsaP256KeyPair { .. }) => Ok(()),
-        _ => bail!("Incorrect response type"),
+        Response::GenerateEcdsaP256KeyPair(EcdsaP256KeyPair { maced_public_key, .. }) => {
+            assert_array_has_nonzero(&maced_public_key[..]);
+            Ok(maced_public_key)
+        }
+        _ => bail!("Incorrect response type: {response:?}"),
     }
 }
 
-fn check_processing_generating_certificate_request(vm: &mut ServiceVm) -> Result<()> {
-    let params = GenerateCertificateRequestParams { keys_to_sign: vec![], challenge: vec![] };
+fn assert_array_has_nonzero(v: &[u8]) {
+    assert!(v.iter().any(|&x| x != 0))
+}
+
+fn check_processing_generating_certificate_request(
+    vm: &mut ServiceVm,
+    maced_public_key: Vec<u8>,
+) -> Result<()> {
+    let params = GenerateCertificateRequestParams {
+        keys_to_sign: vec![maced_public_key],
+        challenge: vec![],
+    };
     let request = Request::GenerateCertificateRequest(params);
 
     let response = vm.process_request(request)?;
     info!("Received response: {response:?}.");
 
     match response {
-        Response::GenerateCertificateRequest(_) => Ok(()),
-        _ => bail!("Incorrect response type"),
+        Response::GenerateCertificateRequest(csr) => check_csr(csr),
+        _ => bail!("Incorrect response type: {response:?}"),
     }
+}
+
+/// TODO(b/300625792): Check the CSR with libhwtrust once the CSR is complete.
+fn check_csr(csr: Vec<u8>) -> Result<()> {
+    let mut reader = io::Cursor::new(csr);
+    let csr: Value = ciborium::from_reader(&mut reader)?;
+    match csr {
+        Value::Array(arr) => {
+            assert_eq!(4, arr.len());
+        }
+        _ => bail!("Incorrect CSR format: {csr:?}"),
+    }
+    Ok(())
 }
 
 fn start_service_vm(vm_type: VmType) -> Result<ServiceVm> {

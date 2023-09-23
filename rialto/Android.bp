@@ -9,9 +9,12 @@ rust_ffi_static {
     defaults: ["vmbase_ffi_defaults"],
     rustlibs: [
         "libaarch64_paging",
+        "libbssl_ffi_nostd",
         "libciborium_io_nostd",
         "libciborium_nostd",
+        "libcoset_nostd",
         "libdiced_open_dice_nostd",
+        "libdiced_sample_inputs_nostd",
         "libhyp",
         "libfdtpci",
         "liblibfdt",
@@ -20,6 +23,10 @@ rust_ffi_static {
         "libtinyvec_nostd",
         "libvirtio_drivers",
         "libvmbase",
+        "libzeroize_nostd",
+    ],
+    static_libs: [
+        "libcrypto_baremetal",
     ],
 }
 
@@ -104,6 +111,7 @@ rust_test {
         "android.system.virtualizationservice-rust",
         "libandroid_logger",
         "libanyhow",
+        "libciborium",
         "liblibc",
         "liblog_rust",
         "libservice_vm_comm",
