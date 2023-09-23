@@ -15,7 +15,6 @@
 //! This module contains the requests and responses definitions exchanged
 //! between the host and the service VM.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use log::error;
@@ -71,27 +70,57 @@ pub enum Response {
     Err(RequestProcessingError),
 }
 
+/// BoringSSL API names.
+#[allow(missing_docs)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoringSSLApiName {
+    BN_new,
+    BN_bn2bin_padded,
+    CBB_flush,
+    CBB_len,
+    EC_KEY_check_key,
+    EC_KEY_generate_key,
+    EC_KEY_get0_group,
+    EC_KEY_get0_public_key,
+    EC_KEY_marshal_private_key,
+    EC_KEY_new_by_curve_name,
+    EC_POINT_get_affine_coordinates,
+    EVP_sha256,
+    HMAC,
+}
+
 /// Errors related to request processing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestProcessingError {
     /// Failed to invoke a BoringSSL API.
-    BoringSSLCallFailed(String),
+    BoringSSLCallFailed(BoringSSLApiName),
 
     /// An error happened during the interaction with coset.
     CosetError,
 
     /// Any key to sign lacks a valid MAC. Maps to `STATUS_INVALID_MAC`.
     InvalidMac,
+
+    /// No payload found in a key to sign.
+    KeyToSignHasEmptyPayload,
+
+    /// An error happened when serializing to/from a `Value`.
+    CborValueError,
 }
 
 impl fmt::Display for RequestProcessingError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::BoringSSLCallFailed(api_name) => {
-                write!(f, "Failed to invoke a BoringSSL API: {api_name}")
+                write!(f, "Failed to invoke a BoringSSL API: {api_name:?}")
             }
             Self::CosetError => write!(f, "Encountered an error with coset"),
             Self::InvalidMac => write!(f, "A key to sign lacks a valid MAC."),
+            Self::KeyToSignHasEmptyPayload => write!(f, "No payload found in a key to sign."),
+            Self::CborValueError => {
+                write!(f, "An error happened when serializing to/from a CBOR Value.")
+            }
         }
     }
 }
@@ -100,6 +129,13 @@ impl From<coset::CoseError> for RequestProcessingError {
     fn from(e: coset::CoseError) -> Self {
         error!("Coset error: {e}");
         Self::CosetError
+    }
+}
+
+impl From<ciborium::value::Error> for RequestProcessingError {
+    fn from(e: ciborium::value::Error) -> Self {
+        error!("CborValueError: {e}");
+        Self::CborValueError
     }
 }
 
