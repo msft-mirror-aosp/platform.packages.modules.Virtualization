@@ -70,34 +70,17 @@ pub enum Response {
     Err(RequestProcessingError),
 }
 
-/// BoringSSL API names.
-#[allow(missing_docs)]
-#[allow(non_camel_case_types)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BoringSSLApiName {
-    BN_new,
-    BN_bn2bin_padded,
-    CBB_flush,
-    CBB_len,
-    EC_KEY_check_key,
-    EC_KEY_generate_key,
-    EC_KEY_get0_group,
-    EC_KEY_get0_public_key,
-    EC_KEY_marshal_private_key,
-    EC_KEY_new_by_curve_name,
-    EC_POINT_get_affine_coordinates,
-    EVP_sha256,
-    HMAC,
-}
-
 /// Errors related to request processing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestProcessingError {
-    /// Failed to invoke a BoringSSL API.
-    BoringSSLCallFailed(BoringSSLApiName),
+    /// An error happened during the interaction with BoringSSL.
+    BoringSslError(bssl_avf_error::Error),
 
     /// An error happened during the interaction with coset.
     CosetError,
+
+    /// An unexpected internal error occurred.
+    InternalError,
 
     /// Any key to sign lacks a valid MAC. Maps to `STATUS_INVALID_MAC`.
     InvalidMac,
@@ -107,21 +90,32 @@ pub enum RequestProcessingError {
 
     /// An error happened when serializing to/from a `Value`.
     CborValueError,
+
+    /// The DICE chain of the service VM is missing.
+    MissingDiceChain,
 }
 
 impl fmt::Display for RequestProcessingError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::BoringSSLCallFailed(api_name) => {
-                write!(f, "Failed to invoke a BoringSSL API: {api_name:?}")
+            Self::BoringSslError(e) => {
+                write!(f, "An error happened during the interaction with BoringSSL: {e}")
             }
             Self::CosetError => write!(f, "Encountered an error with coset"),
+            Self::InternalError => write!(f, "An unexpected internal error occurred"),
             Self::InvalidMac => write!(f, "A key to sign lacks a valid MAC."),
             Self::KeyToSignHasEmptyPayload => write!(f, "No payload found in a key to sign."),
             Self::CborValueError => {
                 write!(f, "An error happened when serializing to/from a CBOR Value.")
             }
+            Self::MissingDiceChain => write!(f, "The DICE chain of the service VM is missing"),
         }
+    }
+}
+
+impl From<bssl_avf_error::Error> for RequestProcessingError {
+    fn from(e: bssl_avf_error::Error) -> Self {
+        Self::BoringSslError(e)
     }
 }
 
