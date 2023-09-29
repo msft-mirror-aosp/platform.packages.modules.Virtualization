@@ -27,6 +27,9 @@ pub type Result<T> = result::Result<T, Error>;
 pub enum Error {
     /// Failed to invoke a BoringSSL API.
     CallFailed(ApiName),
+
+    /// An unexpected internal error occurred.
+    InternalError,
 }
 
 impl fmt::Display for Error {
@@ -35,6 +38,7 @@ impl fmt::Display for Error {
             Self::CallFailed(api_name) => {
                 write!(f, "Failed to invoke the BoringSSL API: {api_name:?}")
             }
+            Self::InternalError => write!(f, "An unexpected internal error occurred"),
         }
     }
 }
@@ -55,6 +59,5 @@ pub enum ApiName {
     EC_KEY_marshal_private_key,
     EC_KEY_new_by_curve_name,
     EC_POINT_get_affine_coordinates,
-    EVP_sha256,
     HMAC,
 }
