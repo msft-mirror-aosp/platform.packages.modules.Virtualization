@@ -23,6 +23,9 @@ use alloc::vec::Vec;
 use avb_bindgen::{AvbPartitionData, AvbVBMetaData};
 use core::ffi::c_char;
 
+// We use this for the rollback_index field if AvbSlotVerifyDataWrap has empty rollback_indexes
+const DEFAULT_ROLLBACK_INDEX: u64 = 0;
+
 /// Verified data returned when the payload verification succeeds.
 #[derive(Debug, PartialEq, Eq)]
 pub struct VerifiedBootData<'a> {
@@ -36,6 +39,15 @@ pub struct VerifiedBootData<'a> {
     pub public_key: &'a [u8],
     /// VM capabilities.
     pub capabilities: Vec<Capability>,
+    /// Rollback index of kernel.
+    pub rollback_index: u64,
+}
+
+impl VerifiedBootData<'_> {
+    /// Returns whether the kernel have the given capability
+    pub fn has_capability(&self, cap: Capability) -> bool {
+        self.capabilities.contains(&cap)
+    }
 }
 
 /// This enum corresponds to the `DebugLevel` in `VirtualMachineConfig`.
@@ -48,15 +60,18 @@ pub enum DebugLevel {
 }
 
 /// VM Capability.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Capability {
     /// Remote attestation.
     RemoteAttest,
+    /// Secretkeeper protected secrets.
+    SecretkeeperProtection,
 }
 
 impl Capability {
     const KEY: &[u8] = b"com.android.virt.cap";
     const REMOTE_ATTEST: &[u8] = b"remote_attest";
+    const SECRETKEEPER_PROTECTION: &[u8] = b"secretkeeper_protection";
     const SEPARATOR: u8 = b'|';
 
     fn get_capabilities(property_value: &[u8]) -> Result<Vec<Self>, PvmfwVerifyError> {
@@ -65,6 +80,7 @@ impl Capability {
         for v in property_value.split(|b| *b == Self::SEPARATOR) {
             let cap = match v {
                 Self::REMOTE_ATTEST => Self::RemoteAttest,
+                Self::SECRETKEEPER_PROTECTION => Self::SecretkeeperProtection,
                 _ => return Err(PvmfwVerifyError::UnknownVbmetaProperty),
             };
             if res.contains(&cap) {
@@ -153,6 +169,10 @@ pub fn verify_payload<'a>(
     let kernel_verify_result = ops.verify_partition(PartitionName::Kernel.as_cstr())?;
 
     let vbmeta_images = kernel_verify_result.vbmeta_images()?;
+    // TODO(b/302093437): Use explicit rollback_index_location instead of default
+    // location (first element).
+    let rollback_index =
+        *kernel_verify_result.rollback_indexes().first().unwrap_or(&DEFAULT_ROLLBACK_INDEX);
     verify_only_one_vbmeta_exists(vbmeta_images)?;
     let vbmeta_image = vbmeta_images[0];
     verify_vbmeta_is_from_kernel_partition(&vbmeta_image)?;
@@ -171,6 +191,7 @@ pub fn verify_payload<'a>(
             initrd_digest: None,
             public_key: trusted_public_key,
             capabilities,
+            rollback_index,
         });
     }
 
@@ -196,5 +217,6 @@ pub fn verify_payload<'a>(
         initrd_digest: Some(*initrd_descriptor.digest),
         public_key: trusted_public_key,
         capabilities,
+        rollback_index,
     })
 }
