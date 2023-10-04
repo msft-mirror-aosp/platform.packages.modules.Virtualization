@@ -15,12 +15,17 @@
  */
 package android.system.virtualizationservice;
 
+import android.system.virtualizationservice.AssignableDevice;
 import android.system.virtualizationservice.IVirtualMachine;
 import android.system.virtualizationservice.PartitionType;
 import android.system.virtualizationservice.VirtualMachineConfig;
 import android.system.virtualizationservice.VirtualMachineDebugInfo;
 
 interface IVirtualizationService {
+    const String FEATURE_DICE_CHANGES = "com.android.kvm.DICE_CHANGES";
+    const String FEATURE_MULTI_TENANT = "com.android.kvm.MULTI_TENANT";
+    const String FEATURE_VENDOR_MODULES = "com.android.kvm.VENDOR_MODULES";
+
     /**
      * Create the VM with the given config file, and return a handle to it ready to start it. If
      * `consoleOutFd` is provided then console output from the VM will be sent to it. If
@@ -55,4 +60,12 @@ interface IVirtualizationService {
      * and as such is only permitted from the shell user.
      */
     VirtualMachineDebugInfo[] debugListVms();
+
+    /**
+     * Get a list of assignable device types.
+     */
+    AssignableDevice[] getAssignableDevices();
+
+    /** Returns whether given feature is enabled. */
+    boolean isFeatureEnabled(in String feature);
 }

@@ -14,8 +14,6 @@
 
 //! Low-level allocation and tracking of main memory.
 
-#![deny(unsafe_op_in_unsafe_fn)]
-
 use crate::helpers::PVMFW_PAGE_SIZE;
 use aarch64_paging::paging::VirtualAddress;
 use aarch64_paging::MapError;
@@ -30,7 +28,7 @@ use vmbase::{
 
 /// Returns memory range reserved for the appended payload.
 pub fn appended_payload_range() -> Range<VirtualAddress> {
-    let start = align_up(layout::binary_end(), SIZE_4KB).unwrap();
+    let start = align_up(layout::binary_end().0, SIZE_4KB).unwrap();
     // pvmfw is contained in a 2MiB region so the payload can't be larger than the 2MiB alignment.
     let end = align_up(start, SIZE_2MB).unwrap();
     VirtualAddress(start)..VirtualAddress(end)

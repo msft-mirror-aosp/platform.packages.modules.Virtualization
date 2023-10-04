@@ -16,8 +16,6 @@
 //! to a bare-metal environment.
 
 #![no_std]
-#![deny(unsafe_op_in_unsafe_fn)]
-#![deny(clippy::undocumented_unsafe_blocks)]
 
 mod iterators;
 
@@ -253,6 +251,18 @@ impl<'a> FdtNode<'a> {
         }
     }
 
+    /// Returns the node name.
+    pub fn name(&self) -> Result<&'a CStr> {
+        let mut len: c_int = 0;
+        // SAFETY: Accesses are constrained to the DT totalsize (validated by ctor). On success, the
+        // function returns valid null terminating string and otherwise returned values are dropped.
+        let name = unsafe { libfdt_bindgen::fdt_get_name(self.fdt.as_ptr(), self.offset, &mut len) }
+            as *const c_void;
+        let len = usize::try_from(fdt_err(len)?).unwrap();
+        let name = self.fdt.get_from_ptr(name, len + 1)?;
+        CStr::from_bytes_with_nul(name).map_err(|_| FdtError::Internal)
+    }
+
     /// Retrieve the value of a given <string> property.
     pub fn getprop_str(&self, name: &CStr) -> Result<Option<&CStr>> {
         let value = if let Some(bytes) = self.getprop(name)? {
@@ -295,11 +305,7 @@ impl<'a> FdtNode<'a> {
     /// Retrieve the value of a given property.
     pub fn getprop(&self, name: &CStr) -> Result<Option<&'a [u8]>> {
         if let Some((prop, len)) = Self::getprop_internal(self.fdt, self.offset, name)? {
-            let offset = (prop as usize)
-                .checked_sub(self.fdt.as_ptr() as usize)
-                .ok_or(FdtError::Internal)?;
-
-            Ok(Some(self.fdt.buffer.get(offset..(offset + len)).ok_or(FdtError::Internal)?))
+            Ok(Some(self.fdt.get_from_ptr(prop, len)?))
         } else {
             Ok(None) // property was not found
         }
@@ -329,7 +335,7 @@ impl<'a> FdtNode<'a> {
         let Some(len) = fdt_err_or_option(len)? else {
             return Ok(None); // Property was not found.
         };
-        let len = usize::try_from(len).map_err(|_| FdtError::Internal)?;
+        let len = usize::try_from(len).unwrap();
 
         if prop.is_null() {
             // We expected an error code in len but still received a valid value?!
@@ -343,7 +349,8 @@ impl<'a> FdtNode<'a> {
         self.fdt
     }
 
-    fn next_compatible(self, compatible: &CStr) -> Result<Option<Self>> {
+    /// Returns the compatible node of the given name that is next after this node.
+    pub fn next_compatible(self, compatible: &CStr) -> Result<Option<Self>> {
         // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
         let ret = unsafe {
             libfdt_bindgen::fdt_node_offset_by_compatible(
@@ -354,6 +361,11 @@ impl<'a> FdtNode<'a> {
         };
 
         Ok(fdt_err_or_option(ret)?.map(|offset| Self { fdt: self.fdt, offset }))
+    }
+
+    /// Returns the first range of `reg` in this node.
+    pub fn first_reg(&self) -> Result<Reg<u64>> {
+        self.reg()?.ok_or(FdtError::NotFound)?.next().ok_or(FdtError::NotFound)
     }
 
     fn address_cells(&self) -> Result<AddrCells> {
@@ -528,7 +540,7 @@ impl<'a> FdtNodeMut<'a> {
         Ok(FdtNode { fdt: &*self.fdt, offset: fdt_err(ret)? })
     }
 
-    /// Return the compatible node of the given name that is next to this node
+    /// Returns the compatible node of the given name that is next after this node
     pub fn next_compatible(self, compatible: &CStr) -> Result<Option<Self>> {
         // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
         let ret = unsafe {
@@ -798,14 +810,19 @@ impl Fdt {
     }
 
     fn check_full(&self) -> Result<()> {
-        let len = self.buffer.len();
         // SAFETY: Only performs read accesses within the limits of the slice. If successful, this
         // call guarantees to other unsafe calls that the header contains a valid totalsize (w.r.t.
         // 'len' i.e. the self.fdt slice) that those C functions can use to perform bounds
         // checking. The library doesn't maintain an internal state (such as pointers) between
         // calls as it expects the client code to keep track of the objects (DT, nodes, ...).
-        let ret = unsafe { libfdt_bindgen::fdt_check_full(self.as_ptr(), len) };
+        let ret = unsafe { libfdt_bindgen::fdt_check_full(self.as_ptr(), self.capacity()) };
         fdt_err_expect_zero(ret)
+    }
+
+    fn get_from_ptr(&self, ptr: *const c_void, len: usize) -> Result<&[u8]> {
+        let ptr = ptr as usize;
+        let offset = ptr.checked_sub(self.as_ptr() as usize).ok_or(FdtError::Internal)?;
+        self.buffer.get(offset..(offset + len)).ok_or(FdtError::Internal)
     }
 
     /// Return a shared pointer to the device tree.

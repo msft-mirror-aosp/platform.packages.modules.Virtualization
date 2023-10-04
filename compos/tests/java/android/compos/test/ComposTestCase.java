@@ -23,6 +23,8 @@ import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
+import static org.junit.Assume.assumeFalse;
+
 import android.platform.test.annotations.RootPermissionTest;
 
 import com.android.microdroid.test.host.CommandRunner;
@@ -81,6 +83,8 @@ public final class ComposTestCase extends MicrodroidHostTestCaseBase {
     @Before
     public void setUp() throws Exception {
         assumeDeviceIsCapable(getDevice());
+        // Test takes too long to run on Cuttlefish (b/292824951).
+        assumeFalse("Skipping test on Cuttlefish", isCuttlefish());
 
         String value = getDevice().getProperty(SYSTEM_SERVER_COMPILER_FILTER_PROP_NAME);
         if (value == null) {
@@ -112,13 +116,13 @@ public final class ComposTestCase extends MicrodroidHostTestCaseBase {
 
     @Test
     public void testOdrefreshSpeed() throws Exception {
-        getDevice().setProperty(SYSTEM_SERVER_COMPILER_FILTER_PROP_NAME, "speed");
+        setPropertyOrThrow(getDevice(), SYSTEM_SERVER_COMPILER_FILTER_PROP_NAME, "speed");
         testOdrefresh();
     }
 
     @Test
     public void testOdrefreshSpeedProfile() throws Exception {
-        getDevice().setProperty(SYSTEM_SERVER_COMPILER_FILTER_PROP_NAME, "speed-profile");
+        setPropertyOrThrow(getDevice(), SYSTEM_SERVER_COMPILER_FILTER_PROP_NAME, "speed-profile");
         testOdrefresh();
     }
 
@@ -188,7 +192,7 @@ public final class ComposTestCase extends MicrodroidHostTestCaseBase {
                         .runTimedCmd(
                                 10000,
                                 validator.getAbsolutePath(),
-                                "verify-dice-chain",
+                                "dice-chain",
                                 bcc_file.getAbsolutePath());
         assertWithMessage("hwtrust failed").about(command_results()).that(result).isSuccess();
     }

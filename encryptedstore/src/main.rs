@@ -21,24 +21,32 @@
 use anyhow::{ensure, Context, Result};
 use clap::arg;
 use dm::{crypt::CipherType, util};
-use log::info;
+use log::{error, info};
 use std::ffi::CString;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::{Error, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MK2FS_BIN: &str = "/system/bin/mke2fs";
 const UNFORMATTED_STORAGE_MAGIC: &str = "UNFORMATTED-STORAGE";
 
-fn main() -> Result<()> {
+fn main() {
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag("encryptedstore")
             .with_min_level(log::Level::Info),
     );
+
+    if let Err(e) = try_main() {
+        error!("{:?}", e);
+        std::process::exit(1)
+    }
+}
+
+fn try_main() -> Result<()> {
     info!("Starting encryptedstore binary");
 
     let matches = clap_command().get_matches();
@@ -47,10 +55,12 @@ fn main() -> Result<()> {
     let key = matches.get_one::<String>("key").unwrap();
     let mountpoint = Path::new(matches.get_one::<String>("mountpoint").unwrap());
     // Note this error context is used in MicrodroidTests.
-    encryptedstore_init(blkdevice, key, mountpoint).context(format!(
-        "Unable to initialize encryptedstore on {:?} & mount at {:?}",
-        blkdevice, mountpoint
-    ))?;
+    encryptedstore_init(blkdevice, key, mountpoint).with_context(|| {
+        format!(
+            "Unable to initialize encryptedstore on {:?} & mount at {:?}",
+            blkdevice, mountpoint
+        )
+    })?;
     Ok(())
 }
 
@@ -65,7 +75,7 @@ fn clap_command() -> clap::Command {
 fn encryptedstore_init(blkdevice: &Path, key: &str, mountpoint: &Path) -> Result<()> {
     ensure!(
         std::fs::metadata(blkdevice)
-            .context(format!("Failed to get metadata of {:?}", blkdevice))?
+            .with_context(|| format!("Failed to get metadata of {:?}", blkdevice))?
             .file_type()
             .is_block_device(),
         "The path:{:?} is not of a block device",
@@ -82,8 +92,21 @@ fn encryptedstore_init(blkdevice: &Path, key: &str, mountpoint: &Path) -> Result
         info!("Freshly formatting the crypt device");
         format_ext4(&crypt_device)?;
     }
-    mount(&crypt_device, mountpoint).context(format!("Unable to mount {:?}", crypt_device))?;
+    mount(&crypt_device, mountpoint)
+        .with_context(|| format!("Unable to mount {:?}", crypt_device))?;
+    if cfg!(multi_tenant) && needs_formatting {
+        set_root_dir_permissions(mountpoint)?;
+    }
     Ok(())
+}
+
+fn set_root_dir_permissions(mountpoint: &Path) -> Result<()> {
+    // mke2fs hardwires the root dir permissions as 0o755 which doesn't match what we want.
+    // We want to allow full access by both root and the payload group, and no access by anything
+    // else. And we want the sticky bit set, so different payload UIDs can create sub-directories
+    // that other payloads can't delete.
+    let permissions = PermissionsExt::from_mode(0o770 | libc::S_ISVTX);
+    std::fs::set_permissions(mountpoint, permissions).context("Failed to chmod root directory")
 }
 
 fn enable_crypt(data_device: &Path, key: &str, name: &str) -> Result<PathBuf> {
@@ -124,6 +147,11 @@ fn needs_formatting(data_device: &Path) -> Result<bool> {
 }
 
 fn format_ext4(device: &Path) -> Result<()> {
+    let root_dir_uid_gid = format!(
+        "root_owner={}:{}",
+        microdroid_uids::ROOT_UID,
+        microdroid_uids::MICRODROID_PAYLOAD_GID
+    );
     let mkfs_options = [
         "-j", // Create appropriate sized journal
         /* metadata_csum: enabled for filesystem integrity
@@ -131,20 +159,22 @@ fn format_ext4(device: &Path) -> Result<()> {
          * 64bit: larger fields afforded by this feature enable full-strength checksumming.
          */
         "-O metadata_csum, extents, 64bit",
-        "-b 4096", // block size in the filesystem
+        "-b 4096", // block size in the filesystem,
+        "-E",
+        &root_dir_uid_gid,
     ];
     let mut cmd = Command::new(MK2FS_BIN);
     let status = cmd
         .args(mkfs_options)
         .arg(device)
         .status()
-        .context(format!("failed to execute {}", MK2FS_BIN))?;
+        .with_context(|| format!("failed to execute {}", MK2FS_BIN))?;
     ensure!(status.success(), "mkfs failed with {:?}", status);
     Ok(())
 }
 
 fn mount(source: &Path, mountpoint: &Path) -> Result<()> {
-    create_dir_all(mountpoint).context(format!("Failed to create {:?}", &mountpoint))?;
+    create_dir_all(mountpoint).with_context(|| format!("Failed to create {:?}", &mountpoint))?;
     let mount_options = CString::new(
         "fscontext=u:object_r:encryptedstore_fs:s0,context=u:object_r:encryptedstore_file:s0",
     )
@@ -153,6 +183,9 @@ fn mount(source: &Path, mountpoint: &Path) -> Result<()> {
     let mountpoint = CString::new(mountpoint.as_os_str().as_bytes())?;
     let fstype = CString::new("ext4").unwrap();
 
+    // SAFETY: The source, target and filesystemtype are valid C strings. For ext4, data is expected
+    // to be a C string as well, which it is. None of these pointers are retained after mount
+    // returns.
     let ret = unsafe {
         libc::mount(
             source.as_ptr(),

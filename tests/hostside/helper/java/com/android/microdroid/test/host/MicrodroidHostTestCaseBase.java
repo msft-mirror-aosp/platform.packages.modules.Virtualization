@@ -89,6 +89,10 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         return DeviceProperties.create(getDevice()::getProperty).isCuttlefish();
     }
 
+    protected boolean isHwasan() {
+        return DeviceProperties.create(getDevice()::getProperty).isHwasan();
+    }
+
     protected String getMetricPrefix() {
         return MetricsProcessor.getMetricPrefix(
                 DeviceProperties.create(getDevice()::getProperty).getMetricsTag());
@@ -106,6 +110,13 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
     public static void archiveLogThenDelete(TestLogData logs, ITestDevice device, String remotePath,
             String localName) throws DeviceNotAvailableException {
         LogArchiver.archiveLogThenDelete(logs, device, remotePath, localName);
+    }
+
+    public static void setPropertyOrThrow(ITestDevice device, String propertyName, String value)
+            throws DeviceNotAvailableException {
+        if (!device.setProperty(propertyName, value)) {
+            throw new RuntimeException("Failed to set sysprop " + propertyName + " to " + value);
+        }
     }
 
     // Run an arbitrary command in the host side and returns the result.

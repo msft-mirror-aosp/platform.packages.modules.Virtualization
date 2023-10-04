@@ -38,6 +38,7 @@ import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineException;
 import android.system.Os;
+import android.system.virtualmachine.VirtualMachineManager;
 import android.util.Log;
 
 import com.android.microdroid.test.common.MetricsProcessor;
@@ -78,6 +79,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     private static final String TAG = "MicrodroidBenchmarks";
     private static final String METRIC_NAME_PREFIX = getMetricPrefix() + "microdroid/";
     private static final int IO_TEST_TRIAL_COUNT = 5;
+    private static final int TEST_TRIAL_COUNT = 5;
     private static final long ONE_MEBI = 1024 * 1024;
 
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
@@ -251,6 +253,26 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                         "test_vm_boot_time_debug",
                         (builder) ->
                                 builder.setDebugLevel(DEBUG_LEVEL_FULL).setVmOutputCaptured(true));
+        reportMetrics(stats.get(BootTimeMetric.TOTAL), "boot_time", "ms");
+        reportMetrics(stats.get(BootTimeMetric.VM_START), "vm_starting_time", "ms");
+        reportMetrics(stats.get(BootTimeMetric.BOOTLOADER), "bootloader_time", "ms");
+        reportMetrics(stats.get(BootTimeMetric.KERNEL), "kernel_boot_time", "ms");
+        reportMetrics(stats.get(BootTimeMetric.USERSPACE), "userspace_boot_time", "ms");
+    }
+
+    @Test
+    public void testMicrodroidDebugBootTime_withVendorPartition() throws Exception {
+        assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
+
+        File vendorDiskImage =
+                new File("/data/local/tmp/microdroid-bench/microdroid_vendor_image.img");
+        BootTimeStats stats =
+                runBootTimeTest(
+                        "test_vm_boot_time_debug_with_vendor_partition",
+                        (builder) ->
+                                builder.setDebugLevel(DEBUG_LEVEL_FULL)
+                                        .setVmOutputCaptured(true)
+                                        .setVendorDiskImage(vendorDiskImage));
         reportMetrics(stats.get(BootTimeMetric.TOTAL), "boot_time", "ms");
         reportMetrics(stats.get(BootTimeMetric.VM_START), "vm_starting_time", "ms");
         reportMetrics(stats.get(BootTimeMetric.BOOTLOADER), "bootloader_time", "ms");
@@ -766,5 +788,36 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
             }
         }
         reportMetrics(requestLatencies, "latency/vsock", "us");
+    }
+
+    @Test
+    public void testVmKillTime() throws Exception {
+        VirtualMachineConfig config =
+                newVmConfigBuilder()
+                        .setPayloadConfigPath("assets/vm_config_io.json")
+                        .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .build();
+        List<Double> vmKillTime = new ArrayList<>(TEST_TRIAL_COUNT);
+
+        for (int i = 0; i < TEST_TRIAL_COUNT; ++i) {
+            VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_kill_time" + i, config);
+            VmEventListener listener =
+                    new VmEventListener() {
+                        @Override
+                        public void onPayloadReady(VirtualMachine vm) {
+                            long start = System.nanoTime();
+                            try {
+                                vm.stop();
+                            } catch (Exception e) {
+                                Log.e(TAG, "Error in vm.stop():" + e);
+                                throw new RuntimeException(e);
+                            }
+                            vmKillTime.add((double) (System.nanoTime() - start) / NANO_TO_MICRO);
+                            super.onPayloadReady(vm);
+                        }
+                    };
+            listener.runToFinish(TAG, vm);
+        }
+        reportMetrics(vmKillTime, "vm_kill_time", "microsecond");
     }
 }

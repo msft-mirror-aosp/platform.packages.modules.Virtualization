@@ -19,6 +19,7 @@ use crate::atom::{forward_vm_booted_atom, forward_vm_creation_atom, forward_vm_e
 use crate::rkpvm::request_certificate;
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationservice::{
+    aidl::android::system::virtualizationservice::AssignableDevice::AssignableDevice,
     aidl::android::system::virtualizationservice::VirtualMachineDebugInfo::VirtualMachineDebugInfo,
     binder::ParcelFileDescriptor,
 };
@@ -27,20 +28,24 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
     AtomVmCreationRequested::AtomVmCreationRequested,
     AtomVmExited::AtomVmExited,
     IGlobalVmContext::{BnGlobalVmContext, IGlobalVmContext},
+    IVirtualizationServiceInternal::BoundDevice::BoundDevice,
     IVirtualizationServiceInternal::IVirtualizationServiceInternal,
+    IVfioHandler::{BpVfioHandler, IVfioHandler},
 };
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::VM_TOMBSTONES_SERVICE_PORT;
 use anyhow::{anyhow, ensure, Context, Result};
-use binder::{self, BinderFeatures, ExceptionCode, Interface, LazyServiceGuard, Status, Strong};
+use avflog::LogResult;
+use binder::{self, wait_for_interface, BinderFeatures, ExceptionCode, Interface, LazyServiceGuard, Status, Strong, IntoBinderResult};
 use libc::VMADDR_CID_HOST;
 use log::{error, info, warn};
 use rustutils::system_properties;
-use std::collections::HashMap;
-use std::fs::{create_dir, remove_dir_all, set_permissions, Permissions};
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, create_dir, remove_dir_all, set_permissions, File, Permissions};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::raw::{pid_t, uid_t};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use tombstoned_client::{DebuggerdDumpType, TombstonedConnection};
 use vsock::{VsockListener, VsockStream};
@@ -95,20 +100,15 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         let pid = get_calling_pid();
         let lim = libc::rlimit { rlim_cur: libc::RLIM_INFINITY, rlim_max: libc::RLIM_INFINITY };
 
-        // SAFETY - borrowing the new limit struct only
+        // SAFETY: borrowing the new limit struct only
         let ret = unsafe { libc::prlimit(pid, libc::RLIMIT_MEMLOCK, &lim, std::ptr::null_mut()) };
 
         match ret {
             0 => Ok(()),
-            -1 => Err(Status::new_exception_str(
-                ExceptionCode::ILLEGAL_STATE,
-                Some(std::io::Error::last_os_error().to_string()),
-            )),
-            n => Err(Status::new_exception_str(
-                ExceptionCode::ILLEGAL_STATE,
-                Some(format!("Unexpected return value from prlimit(): {n}")),
-            )),
+            -1 => Err(std::io::Error::last_os_error().into()),
+            n => Err(anyhow!("Unexpected return value from prlimit(): {n}")),
         }
+        .or_binder_exception(ExceptionCode::ILLEGAL_STATE)
     }
 
     fn allocateGlobalVmContext(
@@ -120,9 +120,9 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         let requester_uid = get_calling_uid();
         let requester_debug_pid = requester_debug_pid as pid_t;
         let state = &mut *self.state.lock().unwrap();
-        state.allocate_vm_context(requester_uid, requester_debug_pid).map_err(|e| {
-            Status::new_exception_str(ExceptionCode::ILLEGAL_STATE, Some(e.to_string()))
-        })
+        state
+            .allocate_vm_context(requester_uid, requester_debug_pid)
+            .or_binder_exception(ExceptionCode::ILLEGAL_STATE)
     }
 
     fn atomVmBooted(&self, atom: &AtomVmBooted) -> Result<(), Status> {
@@ -158,18 +158,116 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         Ok(cids)
     }
 
-    fn requestCertificate(
-        &self,
-        csr: &[u8],
-        instance_img_fd: &ParcelFileDescriptor,
-    ) -> binder::Result<Vec<u8>> {
+    fn requestCertificate(&self, csr: &[u8]) -> binder::Result<Vec<u8>> {
         check_manage_access()?;
         info!("Received csr. Getting certificate...");
-        request_certificate(csr, instance_img_fd).map_err(|e| {
-            error!("Failed to get certificate. Error: {e:?}");
-            Status::new_exception_str(ExceptionCode::SERVICE_SPECIFIC, Some(e.to_string()))
-        })
+        if cfg!(remote_attestation) {
+            request_certificate(csr)
+                .context("Failed to get certificate")
+                .with_log()
+                .or_service_specific_exception(-1)
+        } else {
+            Err(Status::new_exception_str(
+                ExceptionCode::UNSUPPORTED_OPERATION,
+                Some(
+                    "requestCertificate is not supported with the remote_attestation feature disabled",
+                ),
+            ))
+            .with_log()
+        }
     }
+
+    fn getAssignableDevices(&self) -> binder::Result<Vec<AssignableDevice>> {
+        check_use_custom_virtual_machine()?;
+
+        Ok(get_assignable_devices()?
+            .device
+            .into_iter()
+            .map(|x| AssignableDevice { node: x.sysfs_path, kind: x.kind })
+            .collect::<Vec<_>>())
+    }
+
+    fn bindDevicesToVfioDriver(&self, devices: &[String]) -> binder::Result<Vec<BoundDevice>> {
+        check_use_custom_virtual_machine()?;
+
+        let vfio_service: Strong<dyn IVfioHandler> =
+            wait_for_interface(<BpVfioHandler as IVfioHandler>::get_descriptor())?;
+
+        vfio_service.bindDevicesToVfioDriver(devices)?;
+
+        let dtbo_path = Path::new(TEMPORARY_DIRECTORY).join("common").join("dtbo");
+        if !dtbo_path.exists() {
+            // open a writable file descriptor for vfio_handler
+            let dtbo = File::create(&dtbo_path)
+                .context("Failed to create VM DTBO file")
+                .or_service_specific_exception(-1)?;
+            vfio_service.writeVmDtbo(&ParcelFileDescriptor::new(dtbo))?;
+        }
+
+        Ok(get_assignable_devices()?
+            .device
+            .into_iter()
+            .filter_map(|x| {
+                if devices.contains(&x.sysfs_path) {
+                    Some(BoundDevice { sysfsPath: x.sysfs_path, dtboNode: x.dtbo_node })
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>())
+    }
+}
+
+// KEEP IN SYNC WITH assignable_devices.xsd
+#[derive(Debug, Deserialize)]
+struct Device {
+    kind: String,
+    dtbo_node: String,
+    sysfs_path: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Devices {
+    device: Vec<Device>,
+}
+
+fn get_assignable_devices() -> binder::Result<Devices> {
+    let xml_path = Path::new("/vendor/etc/avf/assignable_devices.xml");
+    if !xml_path.exists() {
+        return Ok(Devices { ..Default::default() });
+    }
+
+    let xml = fs::read(xml_path)
+        .context("Failed to read assignable_devices.xml")
+        .with_log()
+        .or_service_specific_exception(-1)?;
+
+    let xml = String::from_utf8(xml)
+        .context("assignable_devices.xml is not a valid UTF-8 file")
+        .with_log()
+        .or_service_specific_exception(-1)?;
+
+    let mut devices: Devices = serde_xml_rs::from_str(&xml)
+        .context("can't parse assignable_devices.xml")
+        .with_log()
+        .or_service_specific_exception(-1)?;
+
+    let mut device_set = HashSet::new();
+    devices.device.retain(move |device| {
+        if device_set.contains(&device.sysfs_path) {
+            warn!("duplicated assignable device {device:?}; ignoring...");
+            return false;
+        }
+
+        if !Path::new(&device.sysfs_path).exists() {
+            warn!("assignable device {device:?} doesn't exist; ignoring...");
+            return false;
+        }
+
+        device_set.insert(device.sysfs_path.clone());
+        true
+    });
+    Ok(devices)
 }
 
 #[derive(Debug, Default)]
@@ -377,10 +475,8 @@ fn check_permission(perm: &str) -> binder::Result<()> {
     if perm_svc.checkPermission(perm, calling_pid, calling_uid as i32)? {
         Ok(())
     } else {
-        Err(Status::new_exception_str(
-            ExceptionCode::SECURITY,
-            Some(format!("does not have the {} permission", perm)),
-        ))
+        Err(anyhow!("does not have the {} permission", perm))
+            .or_binder_exception(ExceptionCode::SECURITY)
     }
 }
 
@@ -392,4 +488,9 @@ fn check_debug_access() -> binder::Result<()> {
 /// Check whether the caller of the current Binder method is allowed to manage VMs
 fn check_manage_access() -> binder::Result<()> {
     check_permission("android.permission.MANAGE_VIRTUAL_MACHINE")
+}
+
+/// Check whether the caller of the current Binder method is allowed to use custom VMs
+fn check_use_custom_virtual_machine() -> binder::Result<()> {
+    check_permission("android.permission.USE_CUSTOM_VIRTUAL_MACHINE")
 }

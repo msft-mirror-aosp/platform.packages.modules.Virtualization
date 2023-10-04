@@ -32,16 +32,6 @@ use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::slice;
 
-/// Derives a sealing key from the DICE sealing CDI.
-pub fn derive_sealing_key(
-    dice_artifacts: &dyn DiceArtifacts,
-    salt: &[u8],
-    info: &[u8],
-    key: &mut [u8],
-) -> Result<()> {
-    Ok(hkdf(key, Md::sha256(), dice_artifacts.cdi_seal(), salt, info)?)
-}
-
 /// Artifacts that are mapped into the process address space from the driver.
 pub enum DiceDriver<'a> {
     Real {
@@ -78,7 +68,7 @@ impl DiceDriver<'_> {
         let mmap_size =
             file.read_u64::<NativeEndian>()
                 .map_err(|error| Error::new(error).context("Reading driver"))? as usize;
-        // It's safe to map the driver as the service will only create a single
+        // SAFETY: It's safe to map the driver as the service will only create a single
         // mapping per process.
         let mmap_addr = unsafe {
             let fd = file.as_raw_fd();
@@ -87,10 +77,10 @@ impl DiceDriver<'_> {
         if mmap_addr == MAP_FAILED {
             bail!("Failed to mmap {:?}", driver_path);
         }
-        // The slice is created for the region of memory that was just
+        let mmap_buf =
+        // SAFETY: The slice is created for the region of memory that was just
         // successfully mapped into the process address space so it will be
         // accessible and not referenced from anywhere else.
-        let mmap_buf =
             unsafe { slice::from_raw_parts((mmap_addr as *const u8).as_ref().unwrap(), mmap_size) };
         let bcc_handover =
             bcc_handover_parse(mmap_buf).map_err(|_| anyhow!("Failed to parse Bcc Handover"))?;
@@ -109,7 +99,7 @@ impl DiceDriver<'_> {
         // input key material is already cryptographically strong.
         let mut key = ZVec::new(key_length)?;
         let salt = &[];
-        derive_sealing_key(self.dice_artifacts(), salt, identifier, &mut key)?;
+        hkdf(&mut key, Md::sha256(), self.dice_artifacts().cdi_seal(), salt, identifier)?;
         Ok(key)
     }
 
@@ -149,9 +139,9 @@ impl DiceDriver<'_> {
 impl Drop for DiceDriver<'_> {
     fn drop(&mut self) {
         if let &mut Self::Real { mmap_addr, mmap_size, .. } = self {
-            // All references to the mapped region have the same lifetime as self. Since self is
-            // being dropped, so are all the references to the mapped region meaning its safe to
-            // unmap.
+            // SAFETY: All references to the mapped region have the same lifetime as self. Since
+            // self is being dropped, so are all the references to the mapped region meaning it's
+            // safe to unmap.
             let ret = unsafe { munmap(mmap_addr, mmap_size) };
             if ret != 0 {
                 log::warn!("Failed to munmap ({})", ret);
@@ -164,11 +154,11 @@ impl Drop for DiceDriver<'_> {
 /// https://cs.android.com/android/platform/superproject/+/master:hardware/interfaces/security/rkp/aidl/android/hardware/security/keymint/ProtectedData.aidl
 /// {
 ///   -70002: "Microdroid payload",
-///   ? -71000: tstr // payload_config_path
+///   ? -71000: tstr ; payload_config_path
 ///   ? -71001: PayloadConfig
 /// }
 /// PayloadConfig = {
-///   1: tstr // payload_binary_name
+///   1: tstr ; payload_binary_name
 /// }
 pub fn format_payload_config_descriptor(payload: &PayloadMetadata) -> Result<Vec<u8>> {
     const MICRODROID_PAYLOAD_COMPONENT_NAME: &str = "Microdroid payload";

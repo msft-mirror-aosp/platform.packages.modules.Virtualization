@@ -103,7 +103,7 @@ impl Partitions {
 
     fn new(mut device: VirtIOBlk) -> Result<Self> {
         let mut blk = [0; Self::LBA_SIZE];
-        device.read_block(Header::LBA, &mut blk).map_err(Error::FailedRead)?;
+        device.read_blocks(Header::LBA, &mut blk).map_err(Error::FailedRead)?;
         let header = Header::read_from_prefix(blk.as_slice()).unwrap();
         if !header.is_valid() {
             return Err(Error::InvalidHeader);
@@ -130,7 +130,7 @@ impl Partitions {
         for i in Header::ENTRIES_LBA..Header::ENTRIES_LBA.checked_add(num_blocks).unwrap() {
             self.read_block(i, &mut blk)?;
             let entries = blk.as_ptr().cast::<Entry>();
-            // SAFETY - blk is assumed to be properly aligned for Entry and its size is assert-ed
+            // SAFETY: blk is assumed to be properly aligned for Entry and its size is assert-ed
             // above. All potential values of the slice will produce valid Entry values.
             let entries = unsafe { slice::from_raw_parts(entries, min(rem, entries_per_blk)) };
             for entry in entries {
@@ -145,11 +145,11 @@ impl Partitions {
     }
 
     fn read_block(&mut self, index: usize, blk: &mut [u8]) -> Result<()> {
-        self.device.read_block(index, blk).map_err(Error::FailedRead)
+        self.device.read_blocks(index, blk).map_err(Error::FailedRead)
     }
 
     fn write_block(&mut self, index: usize, blk: &[u8]) -> Result<()> {
-        self.device.write_block(index, blk).map_err(Error::FailedWrite)
+        self.device.write_blocks(index, blk).map_err(Error::FailedWrite)
     }
 }
 

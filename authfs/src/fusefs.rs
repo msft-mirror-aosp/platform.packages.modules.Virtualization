@@ -386,7 +386,8 @@ fn check_access_mode(flags: u32, mode: libc::c_int) -> io::Result<()> {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(all(target_arch = "aarch64", target_pointer_width = "64"))] {
+    if #[cfg(all(any(target_arch = "aarch64", target_arch = "riscv64"),
+                 target_pointer_width = "64"))] {
         fn blk_size() -> libc::c_int { CHUNK_SIZE as libc::c_int }
     } else {
         fn blk_size() -> libc::c_long { CHUNK_SIZE as libc::c_long }
@@ -992,8 +993,8 @@ impl FileSystem for AuthFs {
     fn statfs(&self, _ctx: Context, _inode: Self::Inode) -> io::Result<libc::statvfs64> {
         let remote_stat = self.remote_fs_stats_reader.statfs()?;
 
-        // Safe because we are zero-initializing a struct with only POD fields. Not all fields
-        // matter to FUSE. See also:
+        // SAFETY: We are zero-initializing a struct with only POD fields. Not all fields matter to
+        // FUSE. See also:
         // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/fuse/inode.c?h=v5.15#n460
         let mut st: libc::statvfs64 = unsafe { zeroed() };
 

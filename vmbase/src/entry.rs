@@ -14,14 +14,52 @@
 
 //! Rust entry point.
 
-use crate::{console, heap, power::shutdown};
+use crate::{
+    bionic, console, heap, logger,
+    power::{reboot, shutdown},
+    rand,
+};
+use core::mem::size_of;
+use hyp::{self, get_mmio_guard};
+
+fn try_console_init() -> Result<(), hyp::Error> {
+    console::init();
+
+    if let Some(mmio_guard) = get_mmio_guard() {
+        mmio_guard.enroll()?;
+        mmio_guard.validate_granule()?;
+        mmio_guard.map(console::BASE_ADDRESS)?;
+    }
+
+    Ok(())
+}
 
 /// This is the entry point to the Rust code, called from the binary entry point in `entry.S`.
 #[no_mangle]
 extern "C" fn rust_entry(x0: u64, x1: u64, x2: u64, x3: u64) -> ! {
     // SAFETY: Only called once, from here, and inaccessible to client code.
     unsafe { heap::init() };
-    console::init();
+
+    if try_console_init().is_err() {
+        // Don't panic (or log) here to avoid accessing the console.
+        reboot()
+    }
+
+    logger::init().expect("Failed to initialize the logger");
+    // We initialize the logger to Off (like the log crate) and clients should log::set_max_level.
+
+    const SIZE_OF_STACK_GUARD: usize = size_of::<u64>();
+    let mut stack_guard = [0u8; SIZE_OF_STACK_GUARD];
+    // We keep a null byte at the top of the stack guard to act as a string terminator.
+    let random_guard = &mut stack_guard[..(SIZE_OF_STACK_GUARD - 1)];
+
+    rand::init().expect("Failed to initialize a source of entropy");
+    rand::fill_with_entropy(random_guard).expect("Failed to get stack canary entropy");
+    bionic::__get_tls().stack_guard = u64::from_ne_bytes(stack_guard);
+
+    // Note: If rust_entry ever returned (which it shouldn't by being -> !), the compiler-injected
+    // stack guard comparison would detect a mismatch and call __stack_chk_fail.
+
     // SAFETY: `main` is provided by the application using the `main!` macro, and we make sure it
     // has the right type.
     unsafe {
@@ -37,16 +75,21 @@ extern "Rust" {
 
 /// Marks the main function of the binary.
 ///
+/// Once main is entered, it can assume that:
+/// - The panic_handler has been configured and panic!() and friends are available;
+/// - The global_allocator has been configured and heap memory is available;
+/// - The logger has been configured and the log::{info, warn, error, ...} macros are available.
+///
 /// Example:
 ///
 /// ```rust
-/// use vmbase::{logger, main};
+/// use vmbase::main;
 /// use log::{info, LevelFilter};
 ///
 /// main!(my_main);
 ///
 /// fn my_main() {
-///     logger::init(LevelFilter::Info).unwrap();
+///     log::set_max_level(LevelFilter::Info);
 ///     info!("Hello world");
 /// }
 /// ```

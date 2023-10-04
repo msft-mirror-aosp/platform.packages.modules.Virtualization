@@ -15,6 +15,7 @@
  */
 package android.system.virtualizationservice_internal;
 
+import android.system.virtualizationservice.AssignableDevice;
 import android.system.virtualizationservice.VirtualMachineDebugInfo;
 import android.system.virtualizationservice_internal.AtomVmBooted;
 import android.system.virtualizationservice_internal.AtomVmCreationRequested;
@@ -22,6 +23,10 @@ import android.system.virtualizationservice_internal.AtomVmExited;
 import android.system.virtualizationservice_internal.IGlobalVmContext;
 
 interface IVirtualizationServiceInternal {
+    parcelable BoundDevice {
+        String sysfsPath;
+        String dtboNode;
+    }
     /**
      * Removes the memlock rlimit of the calling process.
      *
@@ -54,9 +59,20 @@ interface IVirtualizationServiceInternal {
      * Requests a certificate using the provided certificate signing request (CSR).
      *
      * @param csr the certificate signing request.
-     * @param instanceImgFd The file descriptor of the instance image. The file should be open for
-     *         both reading and writing.
      * @return the X.509 encoded certificate.
      */
-    byte[] requestCertificate(in byte[] csr, in ParcelFileDescriptor instanceImgFd);
+    byte[] requestCertificate(in byte[] csr);
+
+    /**
+     * Get a list of assignable devices.
+     */
+    AssignableDevice[] getAssignableDevices();
+
+    /**
+     * Bind given devices to vfio driver.
+     *
+     * @param devices paths of sysfs nodes of devices to assign.
+     * @return a list of pairs (sysfs path, DTBO node label) for devices.
+     */
+    BoundDevice[] bindDevicesToVfioDriver(in String[] devices);
 }

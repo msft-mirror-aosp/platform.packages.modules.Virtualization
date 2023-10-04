@@ -16,80 +16,39 @@
 //! The RKP VM will be recognized and attested by the RKP server periodically and
 //! serves as a trusted platform to attest a client VM.
 
-use android_system_virtualizationservice::{
-    aidl::android::system::virtualizationservice::{
-        CpuTopology::CpuTopology, DiskImage::DiskImage, Partition::Partition,
-        PartitionType::PartitionType, VirtualMachineConfig::VirtualMachineConfig,
-        VirtualMachineRawConfig::VirtualMachineRawConfig,
-    },
-    binder::{ParcelFileDescriptor, ProcessState},
-};
-use anyhow::{anyhow, Context, Result};
-use log::info;
-use std::fs::File;
-use std::time::Duration;
-use vmclient::VmInstance;
+use android_hardware_security_rkp::aidl::android::hardware::security::keymint::MacedPublicKey::MacedPublicKey;
+use anyhow::{bail, Context, Result};
+use service_vm_comm::{GenerateCertificateRequestParams, Request, Response};
+use service_vm_manager::ServiceVm;
 
-const RIALTO_PATH: &str = "/apex/com.android.virt/etc/rialto.bin";
+pub(crate) fn request_certificate(csr: &[u8]) -> Result<Vec<u8>> {
+    let mut vm = ServiceVm::start()?;
 
-pub(crate) fn request_certificate(
-    csr: &[u8],
-    instance_img_fd: &ParcelFileDescriptor,
-) -> Result<Vec<u8>> {
-    // We need to start the thread pool for Binder to work properly, especially link_to_death.
-    ProcessState::start_thread_pool();
+    // TODO(b/271275206): Send the correct request type with client VM's
+    // information to be attested.
+    let request = Request::Reverse(csr.to_vec());
+    match vm.process_request(request).context("Failed to process request")? {
+        Response::Reverse(cert) => Ok(cert),
+        _ => bail!("Incorrect response type"),
+    }
+}
 
-    let virtmgr = vmclient::VirtualizationService::new().context("Failed to spawn virtmgr")?;
-    let service = virtmgr.connect().context("virtmgr failed to connect")?;
-    info!("service_vm: Connected to VirtualizationService");
-    // TODO(b/272226230): Either turn rialto into the service VM or use an empty payload here.
-    // If using an empty payload, the service code will be part of pvmfw.
-    let rialto = File::open(RIALTO_PATH).context("Failed to open Rialto kernel binary")?;
+pub(crate) fn generate_ecdsa_p256_key_pair() -> Result<Response> {
+    let mut vm = ServiceVm::start()?;
+    let request = Request::GenerateEcdsaP256KeyPair;
+    vm.process_request(request).context("Failed to process request")
+}
 
-    // TODO(b/272226230): Initialize the partition from virtualization manager.
-    const INSTANCE_IMG_SIZE_BYTES: i64 = 1 << 20; // 1MB
-    service
-        .initializeWritablePartition(
-            instance_img_fd,
-            INSTANCE_IMG_SIZE_BYTES,
-            PartitionType::ANDROID_VM_INSTANCE,
-        )
-        .context("Failed to initialize instange.img")?;
-    let instance_img =
-        instance_img_fd.as_ref().try_clone().context("Failed to clone instance.img")?;
-    let instance_img = ParcelFileDescriptor::new(instance_img);
-    let writable_partitions = vec![Partition {
-        label: "vm-instance".to_owned(),
-        image: Some(instance_img),
-        writable: true,
-    }];
-    info!("service_vm: Finished initializing instance.img...");
+pub(crate) fn generate_certificate_request(
+    keys_to_sign: &[MacedPublicKey],
+    challenge: &[u8],
+) -> Result<Response> {
+    let params = GenerateCertificateRequestParams {
+        keys_to_sign: keys_to_sign.iter().map(|v| v.macedKey.to_vec()).collect(),
+        challenge: challenge.to_vec(),
+    };
+    let request = Request::GenerateCertificateRequest(params);
 
-    let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
-        name: String::from("Service VM"),
-        kernel: None,
-        initrd: None,
-        params: None,
-        bootloader: Some(ParcelFileDescriptor::new(rialto)),
-        disks: vec![DiskImage { image: None, partitions: writable_partitions, writable: true }],
-        protectedVm: true,
-        memoryMib: 300,
-        cpuTopology: CpuTopology::ONE_CPU,
-        platformVersion: "~1.0".to_string(),
-        taskProfiles: vec![],
-        gdbPort: 0, // No gdb
-    });
-    let vm = VmInstance::create(service.as_ref(), &config, None, None, None, None)
-        .context("Failed to create service VM")?;
-
-    info!("service_vm: Starting Service VM...");
-    vm.start().context("Failed to start service VM")?;
-
-    // TODO(b/274441673): The host can send the CSR to the RKP VM for attestation.
-    // Wait for VM to finish.
-    vm.wait_for_death_with_timeout(Duration::from_secs(10))
-        .ok_or_else(|| anyhow!("Timed out waiting for VM exit"))?;
-
-    info!("service_vm: Finished getting the certificate");
-    Ok([b"Return: ", csr].concat())
+    let mut vm = ServiceVm::start()?;
+    vm.process_request(request).context("Failed to process request")
 }

@@ -5,6 +5,7 @@ package {
 rust_binary {
     name: "virtualizationservice",
     crate_name: "virtualizationservice",
+    defaults: ["avf_build_flags_rust"],
     edition: "2021",
     srcs: ["src/main.rs"],
     // Only build on targets which crosvm builds on.
@@ -20,6 +21,7 @@ rust_binary {
     },
     prefer_rlib: true,
     rustlibs: [
+        "android.hardware.security.rkp-V3-rust",
         "android.system.virtualizationcommon-rust",
         "android.system.virtualizationservice-rust",
         "android.system.virtualizationservice_internal-rust",
@@ -27,15 +29,27 @@ rust_binary {
         "android.os.permissions_aidl-rust",
         "libandroid_logger",
         "libanyhow",
+        "libavflog",
         "libbinder_rs",
-        "libvmclient",
         "liblibc",
         "liblog_rust",
         "libnix",
         "librustutils",
+        "libvmclient",
         "libstatslog_virtualization_rust",
         "libtombstoned_client_rust",
         "libvsock",
+        "libserde",
+        "libserde_xml_rs",
+        "libservice_vm_comm",
+        "libservice_vm_manager",
     ],
     apex_available: ["com.android.virt"],
+}
+
+xsd_config {
+    name: "assignable_devices",
+    srcs: ["assignable_devices.xsd"],
+    api_dir: "schema",
+    package_name: "android.system.virtualizationservice",
 }

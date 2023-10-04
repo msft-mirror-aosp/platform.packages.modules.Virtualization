@@ -35,8 +35,8 @@ use android_system_virtualizationservice::{
         VirtualMachineState::VirtualMachineState,
     },
     binder::{
-        wait_for_interface, BinderFeatures, DeathRecipient, FromIBinder, IBinder, Interface,
-        ParcelFileDescriptor, Result as BinderResult, StatusCode, Strong,
+        BinderFeatures, DeathRecipient, FromIBinder, IBinder, Interface, ParcelFileDescriptor,
+        Result as BinderResult, StatusCode, Strong,
     },
 };
 use command_fds::CommandFdExt;
@@ -53,9 +53,6 @@ use std::{
     time::Duration,
 };
 
-const VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER: &str =
-    "android.system.virtualizationservice";
-
 const VIRTMGR_PATH: &str = "/apex/com.android.virt/bin/virtmgr";
 const VIRTMGR_THREADS: usize = 2;
 
@@ -67,7 +64,7 @@ fn posix_pipe() -> Result<(OwnedFd, OwnedFd), io::Error> {
     // file descriptors (expected by SharedChild).
     let (raw1, raw2) = pipe2(OFlag::O_CLOEXEC)?;
 
-    // SAFETY - Taking ownership of brand new FDs.
+    // SAFETY: Taking ownership of brand new FDs.
     unsafe { Ok((OwnedFd::from_raw_fd(raw1), OwnedFd::from_raw_fd(raw2))) }
 }
 
@@ -80,7 +77,7 @@ fn posix_socketpair() -> Result<(OwnedFd, OwnedFd), io::Error> {
     let (raw1, raw2) =
         socketpair(AddressFamily::Unix, SockType::Stream, None, SockFlag::SOCK_CLOEXEC)?;
 
-    // SAFETY - Taking ownership of brand new FDs.
+    // SAFETY: Taking ownership of brand new FDs.
     unsafe { Ok((OwnedFd::from_raw_fd(raw1), OwnedFd::from_raw_fd(raw2))) }
 }
 
@@ -126,11 +123,6 @@ impl VirtualizationService {
             .setup_unix_domain_bootstrap_client(self.client_fd.as_fd())
             .map_err(|_| io::Error::from(io::ErrorKind::ConnectionRefused))
     }
-}
-
-/// Connects to the VirtualizationService AIDL service.
-pub fn connect() -> Result<Strong<dyn IVirtualizationService>, StatusCode> {
-    wait_for_interface(VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER)
 }
 
 /// A virtual machine which has been started by the VirtualizationService.

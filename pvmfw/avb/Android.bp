@@ -5,12 +5,12 @@ package {
 rust_library_rlib {
     name: "libpvmfw_avb_nostd",
     crate_name: "pvmfw_avb",
+    defaults: ["avf_build_flags_rust"],
     srcs: ["src/lib.rs"],
     prefer_rlib: true,
-    // Require unsafe blocks for inside unsafe functions.
-    flags: ["-Dunsafe_op_in_unsafe_fn"],
     rustlibs: [
         "libavb_bindgen_nostd",
+        "libavb_rs_nostd",
         "libtinyvec_nostd",
     ],
     whole_static_libs: [
@@ -25,6 +25,7 @@ rust_library_rlib {
 rust_test {
     name: "libpvmfw_avb.integration_test",
     crate_name: "pvmfw_avb_test",
+    defaults: ["avf_build_flags_rust"],
     srcs: ["tests/*.rs"],
     test_suites: ["general-tests"],
     data: [
@@ -41,12 +42,15 @@ rust_test {
         ":test_image_with_unknown_vm_type_prop",
         ":test_image_with_multiple_props",
         ":test_image_with_duplicated_capability",
+        ":test_image_with_rollback_index_5",
+        ":test_image_with_multiple_capabilities",
         ":unsigned_test_image",
     ],
     prefer_rlib: true,
     rustlibs: [
         "libanyhow",
         "libavb_bindgen",
+        "libavb_rs_nostd",
         "libhex",
         "libpvmfw_avb_nostd",
         "libopenssl",
@@ -191,4 +195,27 @@ avb_add_hash_footer {
     partition_name: "boot",
     private_key: ":pvmfw_sign_key",
     salt: "1111",
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_rollback_index_5",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "1211",
+    rollback_index: 5,
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_multiple_capabilities",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "2134",
+    props: [
+        {
+            name: "com.android.virt.cap",
+            value: "remote_attest|secretkeeper_protection",
+        },
+    ],
 }

@@ -5,10 +5,10 @@ package {
 rust_library_rlib {
     name: "libhyp",
     crate_name: "hyp",
+    defaults: ["avf_build_flags_rust"],
     srcs: ["src/lib.rs"],
     prefer_rlib: true,
     rustlibs: [
-        "libbitflags",
         "libonce_cell_nostd",
         "libsmccc",
         "libuuid_nostd",
