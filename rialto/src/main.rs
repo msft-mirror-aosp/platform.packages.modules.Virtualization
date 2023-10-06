@@ -21,7 +21,6 @@ mod communication;
 mod error;
 mod exceptions;
 mod fdt;
-mod requests;
 
 extern crate alloc;
 
@@ -39,6 +38,7 @@ use hyp::{get_mem_sharer, get_mmio_guard};
 use libfdt::FdtError;
 use log::{debug, error, info};
 use service_vm_comm::{ServiceVmRequest, VmType};
+use service_vm_requests::process_request;
 use virtio_drivers::{
     device::socket::{VsockAddr, VMADDR_CID_HOST},
     transport::{pci::bus::PciRoot, DeviceType, Transport},
@@ -178,7 +178,7 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
 
     let mut vsock_stream = VsockStream::new(socket_device, host_addr())?;
     while let ServiceVmRequest::Process(req) = vsock_stream.read_request()? {
-        let response = requests::process_request(req, bcc_handover.as_ref())?;
+        let response = process_request(req, bcc_handover.as_ref());
         vsock_stream.write_response(&response)?;
         vsock_stream.flush()?;
     }
