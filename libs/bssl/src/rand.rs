@@ -12,28 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Safe wrappers around the BoringSSL API.
+//! Wrappers of the randon number generations functions in BoringSSL rand.h.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+use crate::util::check_int_result;
+use bssl_avf_error::{ApiName, Result};
+use bssl_ffi::RAND_bytes;
 
-extern crate alloc;
-
-mod aead;
-mod cbb;
-mod digest;
-mod ec_key;
-mod err;
-mod hkdf;
-mod hmac;
-mod rand;
-mod util;
-
-pub use bssl_avf_error::{ApiName, CipherError, Error, ReasonCode, Result};
-
-pub use aead::{Aead, AeadContext, AES_GCM_NONCE_LENGTH};
-pub use cbb::CbbFixed;
-pub use digest::Digester;
-pub use ec_key::{EcKey, ZVec};
-pub use hkdf::hkdf;
-pub use hmac::hmac_sha256;
-pub use rand::rand_bytes;
+/// Fills the given `dest` with random data.
+pub fn rand_bytes(dest: &mut [u8]) -> Result<()> {
+    // SAFETY: This function only writes to the given buffer within its bounds.
+    let ret = unsafe { RAND_bytes(dest.as_mut_ptr(), dest.len()) };
+    check_int_result(ret, ApiName::RAND_bytes)
+}

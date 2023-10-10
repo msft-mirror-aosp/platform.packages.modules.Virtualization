@@ -12,9 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! This module contains functions for the request processing.
+//! This library contains functions for the request processing.
+
+#![no_std]
+
+extern crate alloc;
 
 mod api;
+mod cbor;
+mod keyblob;
 mod pub_key;
 mod rkp;
 

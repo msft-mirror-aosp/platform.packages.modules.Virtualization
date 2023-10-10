@@ -13,9 +13,9 @@ android_test {
         "androidx.test.runner",
         "androidx.test.ext.junit",
         "compatibility-common-util-devicesidelib",
-        "truth-prebuilt",
+        "truth",
     ],
     sdk_version: "test_current",
     compile_multilib: "both",
-    min_sdk_version: "UpsideDownCake",
+    min_sdk_version: "34",
 }
