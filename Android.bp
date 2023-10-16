@@ -27,3 +27,46 @@ license {
     ],
     // large-scale-change unable to identify any license_text files
 }
+
+soong_config_module_type {
+    name: "avf_flag_aware_rust_defaults",
+    module_type: "rust_defaults",
+    config_namespace: "ANDROID",
+    bool_variables: [
+        "release_avf_enable_dice_changes",
+        "release_avf_enable_llpvm_changes",
+        "release_avf_enable_multi_tenant_microdroid_vm",
+        "release_avf_enable_remote_attestation",
+        "release_avf_enable_vendor_modules",
+    ],
+    properties: [
+        "cfgs",
+    ],
+}
+
+avf_flag_aware_rust_defaults {
+    name: "avf_build_flags_rust",
+    soong_config_variables: {
+        release_avf_enable_dice_changes: {
+            cfgs: ["dice_changes"],
+        },
+        release_avf_enable_llpvm_changes: {
+            cfgs: ["llpvm_changes"],
+        },
+        release_avf_enable_multi_tenant_microdroid_vm: {
+            cfgs: ["multi_tenant"],
+        },
+        release_avf_enable_remote_attestation: {
+            cfgs: ["remote_attestation"],
+        },
+        release_avf_enable_vendor_modules: {
+            cfgs: ["vendor_modules"],
+        },
+    },
+}
+
+genrule_defaults {
+    name: "dts_to_dtb",
+    tools: ["dtc"],
+    cmd: "$(location dtc) -I dts -O dtb $(in) -o $(out)",
+}

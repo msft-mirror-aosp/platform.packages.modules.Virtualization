@@ -15,15 +15,15 @@
 //! Microdroid Manager
 
 mod dice;
+mod dice_driver;
 mod instance;
 mod ioutil;
 mod payload;
 mod swap;
+mod verify;
 mod vm_payload_service;
+mod vm_secret;
 
-use crate::dice::{DiceDriver, derive_sealing_key, format_payload_config_descriptor};
-use crate::instance::{ApexData, ApkData, InstanceDisk, MicrodroidData, RootHash};
-use crate::vm_payload_service::register_vm_payload_service;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::ErrorCode::ErrorCode;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
 use android_system_virtualization_payload::aidl::android::system::virtualization::payload::IVmPayloadService::{
@@ -31,53 +31,46 @@ use android_system_virtualization_payload::aidl::android::system::virtualization
     VM_PAYLOAD_SERVICE_SOCKET_NAME,
     ENCRYPTEDSTORE_MOUNTPOINT,
 };
+
+use crate::dice::dice_derivation;
+use crate::dice_driver::DiceDriver;
+use crate::instance::{ApexData, InstanceDisk, MicrodroidData};
+use crate::verify::verify_payload;
+use crate::vm_payload_service::register_vm_payload_service;
 use anyhow::{anyhow, bail, ensure, Context, Error, Result};
-use apkverify::{get_public_key_der, verify, V4Signature};
 use binder::Strong;
-use diced_open_dice::OwnedDiceArtifacts;
-use glob::glob;
-use itertools::sorted;
+use keystore2_crypto::ZVec;
 use libc::VMADDR_CID_HOST;
 use log::{error, info};
-use keystore2_crypto::ZVec;
-use microdroid_metadata::{write_metadata, Metadata, PayloadMetadata};
+use microdroid_metadata::{write_metadata, PayloadMetadata};
 use microdroid_payload_config::{OsConfig, Task, TaskType, VmPayloadConfig};
 use nix::sys::signal::Signal;
-use openssl::sha::Sha512;
-use payload::{get_apex_data_from_payload, load_metadata, to_metadata};
-use rand::Fill;
+use payload::{load_metadata, to_metadata};
 use rpcbinder::RpcSession;
 use rustutils::sockets::android_get_control_socket;
 use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
 use std::borrow::Cow::{Borrowed, Owned};
-use std::convert::TryInto;
 use std::env;
 use std::ffi::CString;
-use std::fs::{self, create_dir, OpenOptions, File};
+use std::fs::{self, create_dir, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
-use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::str;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+use vm_secret::VmSecret;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAIN_APK_PATH: &str = "/dev/block/by-name/microdroid-apk";
-const MAIN_APK_IDSIG_PATH: &str = "/dev/block/by-name/microdroid-apk-idsig";
-const MAIN_APK_DEVICE_NAME: &str = "microdroid-apk";
-const EXTRA_APK_PATH_PATTERN: &str = "/dev/block/by-name/extra-apk-*";
-const EXTRA_IDSIG_PATH_PATTERN: &str = "/dev/block/by-name/extra-idsig-*";
-const DM_MOUNTED_APK_PATH: &str = "/dev/block/mapper/microdroid-apk";
 const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
 const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
 const AVF_DEBUG_POLICY_RAMDUMP: &str = "/sys/firmware/devicetree/base/avf/guest/common/ramdump";
 const DEBUG_MICRODROID_NO_VERIFIED_BOOT: &str =
     "/sys/firmware/devicetree/base/virtualization/guest/debug-microdroid,no-verified-boot";
 
-const APKDMVERITY_BIN: &str = "/system/bin/apkdmverity";
 const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
 const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
 
@@ -88,7 +81,6 @@ const DEBUGGABLE_PROP: &str = "ro.boot.microdroid.debuggable";
 const FAILURE_SERIAL_DEVICE: &str = "/dev/ttyS1";
 
 const ENCRYPTEDSTORE_BACKING_DEVICE: &str = "/dev/block/by-name/encryptedstore";
-const ENCRYPTEDSTORE_KEY_IDENTIFIER: &str = "encryptedstore_key";
 const ENCRYPTEDSTORE_KEYSIZE: usize = 32;
 
 #[derive(thiserror::Error, Debug)]
@@ -143,18 +135,9 @@ fn write_death_reason_to_serial(err: &Error) -> Result<()> {
         Owned(format!("MICRODROID_UNKNOWN_RUNTIME_ERROR|{:?}", err))
     };
 
-    let death_reason_bytes = death_reason.as_bytes();
-    let mut sent_total = 0;
-    while sent_total < death_reason_bytes.len() {
+    for chunk in death_reason.as_bytes().chunks(16) {
         // TODO(b/220071963): Sometimes, sending more than 16 bytes at once makes MM hang.
-        let begin = sent_total;
-        let end = std::cmp::min(begin.saturating_add(16), death_reason_bytes.len());
-        OpenOptions::new()
-            .read(false)
-            .write(true)
-            .open(FAILURE_SERIAL_DEVICE)?
-            .write_all(&death_reason_bytes[begin..end])?;
-        sent_total = end;
+        OpenOptions::new().read(false).write(true).open(FAILURE_SERIAL_DEVICE)?.write_all(chunk)?;
     }
 
     Ok(())
@@ -171,7 +154,7 @@ fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
 
 fn main() -> Result<()> {
     // If debuggable, print full backtrace to console log with stdio_to_kmsg
-    if system_properties::read_bool(DEBUGGABLE_PROP, true)? {
+    if is_debuggable()? {
         env::set_var("RUST_BACKTRACE", "full");
     }
 
@@ -286,36 +269,6 @@ fn post_payload_work() -> Result<()> {
     }
     Ok(())
 }
-fn dice_derivation(
-    dice: DiceDriver,
-    verified_data: &MicrodroidData,
-    payload_metadata: &PayloadMetadata,
-) -> Result<OwnedDiceArtifacts> {
-    // Calculate compound digests of code and authorities
-    let mut code_hash_ctx = Sha512::new();
-    let mut authority_hash_ctx = Sha512::new();
-    code_hash_ctx.update(verified_data.apk_data.root_hash.as_ref());
-    authority_hash_ctx.update(verified_data.apk_data.pubkey.as_ref());
-    for extra_apk in &verified_data.extra_apks_data {
-        code_hash_ctx.update(extra_apk.root_hash.as_ref());
-        authority_hash_ctx.update(extra_apk.pubkey.as_ref());
-    }
-    for apex in &verified_data.apex_data {
-        code_hash_ctx.update(apex.root_digest.as_ref());
-        authority_hash_ctx.update(apex.public_key.as_ref());
-    }
-    let code_hash = code_hash_ctx.finish();
-    let authority_hash = authority_hash_ctx.finish();
-
-    let config_descriptor = format_payload_config_descriptor(payload_metadata)?;
-
-    // Check debuggability, conservatively assuming it is debuggable
-    let debuggable = system_properties::read_bool(DEBUGGABLE_PROP, true)?;
-
-    // Send the details to diced
-    let hidden = verified_data.salt.clone().try_into().unwrap();
-    dice.derive(code_hash, &config_descriptor, authority_hash, debuggable, hidden)
-}
 
 fn is_strict_boot() -> bool {
     Path::new(AVF_STRICT_BOOT).exists()
@@ -329,10 +282,14 @@ fn is_verified_boot() -> bool {
     !Path::new(DEBUG_MICRODROID_NO_VERIFIED_BOOT).exists()
 }
 
+fn is_debuggable() -> Result<bool> {
+    Ok(system_properties::read_bool(DEBUGGABLE_PROP, true)?)
+}
+
 fn should_export_tombstones(config: &VmPayloadConfig) -> bool {
     match config.export_tombstones {
         Some(b) => b,
-        None => system_properties::read_bool(DEBUGGABLE_PROP, true).unwrap_or(false),
+        None => is_debuggable().unwrap_or(false),
     }
 }
 
@@ -341,7 +298,9 @@ fn get_debug_policy_bool(path: &'static str) -> Result<Option<bool>> {
     let mut file = match File::open(path) {
         Ok(dp) => dp,
         Err(e) => {
-            info!("{e:?}. Assumes <0>");
+            info!(
+                "Assumes that debug policy is disabled because failed to read debug policy ({e:?})"
+            );
             return Ok(Some(false));
         }
     };
@@ -414,11 +373,12 @@ fn try_run_payload(
     // To minimize the exposure to untrusted data, derive dice profile as soon as possible.
     info!("DICE derivation for payload");
     let dice_artifacts = dice_derivation(dice, &verified_data, &payload_metadata)?;
+    let vm_secret = VmSecret::new(dice_artifacts).context("Failed to create VM secrets")?;
 
     // Run encryptedstore binary to prepare the storage
     let encryptedstore_child = if Path::new(ENCRYPTEDSTORE_BACKING_DEVICE).exists() {
         info!("Preparing encryptedstore ...");
-        Some(prepare_encryptedstore(&dice_artifacts).context("encryptedstore run")?)
+        Some(prepare_encryptedstore(&vm_secret).context("encryptedstore run")?)
     } else {
         None
     };
@@ -429,7 +389,7 @@ fn try_run_payload(
     zipfuse.mount(
         MountForExec::Allowed,
         "fscontext=u:object_r:zipfusefs:s0,context=u:object_r:system_file:s0",
-        Path::new("/dev/block/mapper/microdroid-apk"),
+        Path::new(verify::DM_MOUNTED_APK_PATH),
         Path::new(VM_APK_CONTENTS_PATH),
         "microdroid_manager.apk.mounted".to_owned(),
     )?;
@@ -475,7 +435,7 @@ fn try_run_payload(
     register_vm_payload_service(
         allow_restricted_apis,
         service.clone(),
-        dice_artifacts,
+        vm_secret,
         vm_payload_service_fd,
     )?;
 
@@ -495,28 +455,6 @@ fn try_run_payload(
     exec_task(task, service).context("Failed to run payload")
 }
 
-struct ApkDmverityArgument<'a> {
-    apk: &'a str,
-    idsig: &'a str,
-    name: &'a str,
-    saved_root_hash: Option<&'a RootHash>,
-}
-
-fn run_apkdmverity(args: &[ApkDmverityArgument]) -> Result<Child> {
-    let mut cmd = Command::new(APKDMVERITY_BIN);
-
-    for argument in args {
-        cmd.arg("--apk").arg(argument.apk).arg(argument.idsig).arg(argument.name);
-        if let Some(root_hash) = argument.saved_root_hash {
-            cmd.arg(&to_hex_string(root_hash));
-        } else {
-            cmd.arg("none");
-        }
-    }
-
-    cmd.spawn().context("Spawn apkdmverity")
-}
-
 enum MountForExec {
     Allowed,
     Disallowed,
@@ -528,8 +466,6 @@ struct Zipfuse {
 }
 
 impl Zipfuse {
-    const MICRODROID_PAYLOAD_UID: u32 = 0; // TODO(b/264861173) should be non-root
-    const MICRODROID_PAYLOAD_GID: u32 = 0; // TODO(b/264861173) should be non-root
     fn mount(
         &mut self,
         noexec: MountForExec,
@@ -542,9 +478,13 @@ impl Zipfuse {
         if let MountForExec::Disallowed = noexec {
             cmd.arg("--noexec");
         }
+        // Let root own the files in APK, so we can access them, but set the group to
+        // allow all payloads to have access too.
+        let (uid, gid) = (microdroid_uids::ROOT_UID, microdroid_uids::MICRODROID_PAYLOAD_GID);
+
         cmd.args(["-p", &ready_prop, "-o", option]);
-        cmd.args(["-u", &Self::MICRODROID_PAYLOAD_UID.to_string()]);
-        cmd.args(["-g", &Self::MICRODROID_PAYLOAD_GID.to_string()]);
+        cmd.args(["-u", &uid.to_string()]);
+        cmd.args(["-g", &gid.to_string()]);
         cmd.arg(zip_path).arg(mount_dir);
         self.ready_properties.push(ready_prop);
         cmd.spawn().with_context(|| format!("Failed to run zipfuse for {mount_dir:?}"))
@@ -585,156 +525,17 @@ fn write_apex_payload_data(
     Ok(())
 }
 
-// Verify payload before executing it. For APK payload, Full verification (which is slow) is done
-// when the root_hash values from the idsig file and the instance disk are different. This function
-// returns the verified root hash (for APK payload) and pubkeys (for APEX payloads) that can be
-// saved to the instance disk.
-fn verify_payload(
-    metadata: &Metadata,
-    saved_data: Option<&MicrodroidData>,
-) -> Result<MicrodroidData> {
-    let start_time = SystemTime::now();
-
-    // Verify main APK
-    let root_hash_from_idsig = get_apk_root_hash_from_idsig(MAIN_APK_IDSIG_PATH)?;
-    let root_hash_trustful =
-        saved_data.map(|d| d.apk_data.root_hash_eq(root_hash_from_idsig.as_ref())).unwrap_or(false);
-
-    // If root_hash can be trusted, pass it to apkdmverity so that it uses the passed root_hash
-    // instead of the value read from the idsig file.
-    let main_apk_argument = {
-        ApkDmverityArgument {
-            apk: MAIN_APK_PATH,
-            idsig: MAIN_APK_IDSIG_PATH,
-            name: MAIN_APK_DEVICE_NAME,
-            saved_root_hash: if root_hash_trustful {
-                Some(root_hash_from_idsig.as_ref())
-            } else {
-                None
-            },
-        }
-    };
-    let mut apkdmverity_arguments = vec![main_apk_argument];
-
-    // Verify extra APKs
-    // For now, we can't read the payload config, so glob APKs and idsigs.
-    // Later, we'll see if it matches with the payload config.
-
-    // sort globbed paths to match apks (extra-apk-{idx}) and idsigs (extra-idsig-{idx})
-    // e.g. "extra-apk-0" corresponds to "extra-idsig-0"
-    let extra_apks =
-        sorted(glob(EXTRA_APK_PATH_PATTERN)?.collect::<Result<Vec<_>, _>>()?).collect::<Vec<_>>();
-    let extra_idsigs =
-        sorted(glob(EXTRA_IDSIG_PATH_PATTERN)?.collect::<Result<Vec<_>, _>>()?).collect::<Vec<_>>();
-    ensure!(
-        extra_apks.len() == extra_idsigs.len(),
-        "Extra apks/idsigs mismatch: {} apks but {} idsigs",
-        extra_apks.len(),
-        extra_idsigs.len()
-    );
-
-    let extra_root_hashes_from_idsig: Vec<_> = extra_idsigs
-        .iter()
-        .map(|idsig| {
-            get_apk_root_hash_from_idsig(idsig).expect("Can't find root hash from extra idsig")
-        })
-        .collect();
-
-    let extra_root_hashes_trustful: Vec<_> = if let Some(data) = saved_data {
-        extra_root_hashes_from_idsig
-            .iter()
-            .enumerate()
-            .map(|(i, root_hash)| data.extra_apk_root_hash_eq(i, root_hash))
-            .collect()
-    } else {
-        vec![false; extra_root_hashes_from_idsig.len()]
-    };
-    let extra_apk_names: Vec<_> =
-        (0..extra_apks.len()).map(|i| format!("extra-apk-{}", i)).collect();
-
-    for (i, extra_apk) in extra_apks.iter().enumerate() {
-        apkdmverity_arguments.push({
-            ApkDmverityArgument {
-                apk: extra_apk.to_str().unwrap(),
-                idsig: extra_idsigs[i].to_str().unwrap(),
-                name: &extra_apk_names[i],
-                saved_root_hash: if extra_root_hashes_trustful[i] {
-                    Some(&extra_root_hashes_from_idsig[i])
-                } else {
-                    None
-                },
-            }
-        });
-    }
-
-    // Start apkdmverity and wait for the dm-verify block
-    let mut apkdmverity_child = run_apkdmverity(&apkdmverity_arguments)?;
-
-    // While waiting for apkdmverity to mount APK, gathers public keys and root digests from
-    // APEX payload.
-    let apex_data_from_payload = get_apex_data_from_payload(metadata)?;
-
-    // Writing /apex/vm-payload-metadata is to verify that the payload isn't changed.
-    // Skip writing it if the debug policy ignoring identity is on
-    if is_verified_boot() {
-        write_apex_payload_data(saved_data, &apex_data_from_payload)?;
-    }
-
-    // Start apexd to activate APEXes
-    system_properties::write("ctl.start", "apexd-vm")?;
-
-    // TODO(inseob): add timeout
-    apkdmverity_child.wait()?;
-
-    // Do the full verification if the root_hash is un-trustful. This requires the full scanning of
-    // the APK file and therefore can be very slow if the APK is large. Note that this step is
-    // taken only when the root_hash is un-trustful which can be either when this is the first boot
-    // of the VM or APK was updated in the host.
-    // TODO(jooyung): consider multithreading to make this faster
-    let main_apk_pubkey = get_public_key_from_apk(DM_MOUNTED_APK_PATH, root_hash_trustful)?;
-    let extra_apks_data = extra_root_hashes_from_idsig
-        .into_iter()
-        .enumerate()
-        .map(|(i, extra_root_hash)| {
-            let mount_path = format!("/dev/block/mapper/{}", &extra_apk_names[i]);
-            let apk_pubkey = get_public_key_from_apk(&mount_path, extra_root_hashes_trustful[i])?;
-            Ok(ApkData { root_hash: extra_root_hash, pubkey: apk_pubkey })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    info!("payload verification successful. took {:#?}", start_time.elapsed().unwrap());
-
-    // Use the salt from a verified instance, or generate a salt for a new instance.
-    let salt = if let Some(saved_data) = saved_data {
-        saved_data.salt.clone()
-    } else if is_strict_boot() {
-        // No need to add more entropy as a previous stage must have used a new, random salt.
-        vec![0u8; 64]
-    } else {
-        let mut salt = vec![0u8; 64];
-        salt.as_mut_slice().try_fill(&mut rand::thread_rng())?;
-        salt
-    };
-
-    // At this point, we can ensure that the root_hash from the idsig file is trusted, either by
-    // fully verifying the APK or by comparing it with the saved root_hash.
-    Ok(MicrodroidData {
-        salt,
-        apk_data: ApkData { root_hash: root_hash_from_idsig, pubkey: main_apk_pubkey },
-        extra_apks_data,
-        apex_data: apex_data_from_payload,
-    })
-}
-
 fn mount_extra_apks(config: &VmPayloadConfig, zipfuse: &mut Zipfuse) -> Result<()> {
     // For now, only the number of apks is important, as the mount point and dm-verity name is fixed
     for i in 0..config.extra_apks.len() {
         let mount_dir = format!("/mnt/extra-apk/{i}");
         create_dir(Path::new(&mount_dir)).context("Failed to create mount dir for extra apks")?;
 
-        // don't wait, just detach
+        let mount_for_exec =
+            if cfg!(multi_tenant) { MountForExec::Allowed } else { MountForExec::Disallowed };
+        // These run asynchronously in parallel - we wait later for them to complete.
         zipfuse.mount(
-            MountForExec::Disallowed,
+            mount_for_exec,
             "fscontext=u:object_r:zipfusefs:s0,context=u:object_r:extra_apk_file:s0",
             Path::new(&format!("/dev/block/mapper/extra-apk-{i}")),
             Path::new(&mount_dir),
@@ -769,28 +570,6 @@ fn wait_for_property_true(property_name: &str) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn get_apk_root_hash_from_idsig<P: AsRef<Path>>(idsig_path: P) -> Result<Box<RootHash>> {
-    Ok(V4Signature::from_idsig_path(idsig_path)?.hashing_info.raw_root_hash)
-}
-
-fn get_public_key_from_apk(apk: &str, root_hash_trustful: bool) -> Result<Box<[u8]>> {
-    let current_sdk = get_current_sdk()?;
-    if !root_hash_trustful {
-        verify(apk, current_sdk).context(MicrodroidError::PayloadVerificationFailed(format!(
-            "failed to verify {}",
-            apk
-        )))
-    } else {
-        get_public_key_der(apk, current_sdk)
-    }
-}
-
-fn get_current_sdk() -> Result<u32> {
-    let current_sdk = system_properties::read("ro.build.version.sdk")?;
-    let current_sdk = current_sdk.ok_or_else(|| anyhow!("SDK version missing"))?;
-    current_sdk.parse().context("Malformed SDK version")
 }
 
 fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
@@ -832,7 +611,7 @@ fn load_crashkernel_if_supported() -> Result<()> {
         return Ok(());
     }
 
-    let debuggable = system_properties::read_bool(DEBUGGABLE_PROP, true)?;
+    let debuggable = is_debuggable()?;
     let ramdump = get_debug_policy_bool(AVF_DEBUG_POLICY_RAMDUMP)?.unwrap_or_default();
     let requested = debuggable | ramdump;
 
@@ -850,10 +629,15 @@ fn load_crashkernel_if_supported() -> Result<()> {
 fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Result<i32> {
     info!("executing main task {:?}...", task);
     let mut command = match task.type_ {
-        TaskType::Executable => Command::new(&task.command),
+        TaskType::Executable => {
+            // TODO(b/297501338): Figure out how to handle non-root for system payloads.
+            Command::new(&task.command)
+        }
         TaskType::MicrodroidLauncher => {
             let mut command = Command::new("/system/bin/microdroid_launcher");
             command.arg(find_library_path(&task.command)?);
+            command.uid(microdroid_uids::MICRODROID_PAYLOAD_UID);
+            command.gid(microdroid_uids::MICRODROID_PAYLOAD_GID);
             command
         }
     };
@@ -904,22 +688,9 @@ fn find_library_path(name: &str) -> Result<String> {
     Ok(path)
 }
 
-fn to_hex_string(buf: &[u8]) -> String {
-    buf.iter().map(|b| format!("{:02X}", b)).collect()
-}
-
-fn prepare_encryptedstore(dice_artifacts: &OwnedDiceArtifacts) -> Result<Child> {
-    // Use a fixed salt to scope the derivation to this API.
-    // Generated using hexdump -vn32 -e'14/1 "0x%02X, " 1 "\n"' /dev/urandom
-    // TODO(b/241541860) : Move this (& other salts) to a salt container, i.e. a global enum
-    let salt = [
-        0xFC, 0x1D, 0x35, 0x7B, 0x96, 0xF3, 0xEF, 0x17, 0x78, 0x7D, 0x70, 0xED, 0xEA, 0xFE, 0x1D,
-        0x6F, 0xB3, 0xF9, 0x40, 0xCE, 0xDD, 0x99, 0x40, 0xAA, 0xA7, 0x0E, 0x92, 0x73, 0x90, 0x86,
-        0x4A, 0x75,
-    ];
+fn prepare_encryptedstore(vm_secret: &VmSecret) -> Result<Child> {
     let mut key = ZVec::new(ENCRYPTEDSTORE_KEYSIZE)?;
-    derive_sealing_key(dice_artifacts, &salt, ENCRYPTEDSTORE_KEY_IDENTIFIER.as_bytes(), &mut key)?;
-
+    vm_secret.derive_encryptedstore_key(&mut key)?;
     let mut cmd = Command::new(ENCRYPTEDSTORE_BIN);
     cmd.arg("--blkdevice")
         .arg(ENCRYPTEDSTORE_BACKING_DEVICE)

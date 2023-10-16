@@ -5,6 +5,7 @@ package {
 rust_defaults {
     name: "microdroid_manager_defaults",
     crate_name: "microdroid_manager",
+    defaults: ["avf_build_flags_rust"],
     srcs: ["src/main.rs"],
     edition: "2021",
     prefer_rlib: true,
@@ -15,6 +16,7 @@ rust_defaults {
         "android.system.virtualization.payload-rust",
         "libandroid_logger",
         "libanyhow",
+        "libapkmanifest",
         "libavflog",
         "libapexutil_rust",
         "libapkverify",
@@ -32,6 +34,7 @@ rust_defaults {
         "liblog_rust",
         "libmicrodroid_metadata",
         "libmicrodroid_payload_config",
+        "libmicrodroid_uids",
         "libnix",
         "libonce_cell",
         "libopenssl",

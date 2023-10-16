@@ -7,13 +7,12 @@ rust_ffi_static {
     crate_name: "pvmfw",
     defaults: ["vmbase_ffi_defaults"],
     srcs: ["src/main.rs"],
-    // Require unsafe blocks for inside unsafe functions.
-    flags: ["-Dunsafe_op_in_unsafe_fn"],
     features: [
         "legacy",
     ],
     rustlibs: [
         "libaarch64_paging",
+        "libbssl_avf_nostd",
         "libbssl_ffi_nostd",
         "libciborium_nostd",
         "libciborium_io_nostd",
@@ -50,6 +49,7 @@ rust_test {
     host_supported: true,
     // For now, only bootargs.rs is written to be conditionally compiled with std.
     srcs: ["src/bootargs.rs"],
+    defaults: ["avf_build_flags_rust"],
     test_suites: ["general-tests"],
     test_options: {
         unit_test: true,

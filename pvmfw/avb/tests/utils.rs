@@ -22,7 +22,9 @@ use avb_bindgen::{
     AvbVBMetaImageHeader,
 };
 use openssl::sha;
-use pvmfw_avb::{verify_payload, AvbSlotVerifyError, DebugLevel, Digest, VerifiedBootData};
+use pvmfw_avb::{
+    verify_payload, Capability, DebugLevel, Digest, PvmfwVerifyError, VerifiedBootData,
+};
 use std::{
     fs,
     mem::{size_of, transmute, MaybeUninit},
@@ -39,7 +41,7 @@ pub fn assert_payload_verification_with_initrd_fails(
     kernel: &[u8],
     initrd: &[u8],
     trusted_public_key: &[u8],
-    expected_error: AvbSlotVerifyError,
+    expected_error: PvmfwVerifyError,
 ) -> Result<()> {
     assert_payload_verification_fails(kernel, Some(initrd), trusted_public_key, expected_error)
 }
@@ -48,7 +50,7 @@ pub fn assert_payload_verification_fails(
     kernel: &[u8],
     initrd: Option<&[u8]>,
     trusted_public_key: &[u8],
-    expected_error: AvbSlotVerifyError,
+    expected_error: PvmfwVerifyError,
 ) -> Result<()> {
     assert_eq!(expected_error, verify_payload(kernel, initrd, trusted_public_key).unwrap_err());
     Ok(())
@@ -110,13 +112,16 @@ pub fn assert_latest_payload_verification_passes(
     let footer = extract_avb_footer(&kernel)?;
     let kernel_digest =
         hash(&[&hash(&[b"bootloader"]), &kernel[..usize::try_from(footer.original_image_size)?]]);
+    let capabilities =
+        if cfg!(llpvm_changes) { vec![Capability::SecretkeeperProtection] } else { vec![] };
     let initrd_digest = Some(hash(&[&hash(&[initrd_salt]), initrd]));
     let expected_boot_data = VerifiedBootData {
         debug_level: expected_debug_level,
         kernel_digest,
         initrd_digest,
         public_key: &public_key,
-        capabilities: vec![],
+        capabilities,
+        rollback_index: if cfg!(llpvm_changes) { 1 } else { 0 },
     };
     assert_eq!(expected_boot_data, verified_boot_data);
 

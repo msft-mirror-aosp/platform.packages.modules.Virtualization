@@ -20,19 +20,27 @@
 mod communication;
 mod error;
 mod exceptions;
+mod fdt;
 
 extern crate alloc;
 
-use crate::communication::DataChannel;
+use crate::communication::VsockStream;
 use crate::error::{Error, Result};
+use crate::fdt::read_dice_range_from;
+use alloc::boxed::Box;
+use bssl_ffi::CRYPTO_library_init;
+use ciborium_io::Write;
 use core::num::NonZeroUsize;
 use core::slice;
+use diced_open_dice::{bcc_handover_parse, DiceArtifacts};
 use fdtpci::PciInfo;
 use hyp::{get_mem_sharer, get_mmio_guard};
 use libfdt::FdtError;
 use log::{debug, error, info};
+use service_vm_comm::{ServiceVmRequest, VmType};
+use service_vm_requests::process_request;
 use virtio_drivers::{
-    device::socket::VsockAddr,
+    device::socket::{VsockAddr, VMADDR_CID_HOST},
     transport::{pci::bus::PciRoot, DeviceType, Transport},
     Hal,
 };
@@ -50,17 +58,16 @@ use vmbase::{
 };
 
 fn host_addr() -> VsockAddr {
-    const PROTECTED_VM_PORT: u32 = 5679;
-    const NON_PROTECTED_VM_PORT: u32 = 5680;
-    const VMADDR_CID_HOST: u64 = 2;
-
-    let port = if is_protected_vm() { PROTECTED_VM_PORT } else { NON_PROTECTED_VM_PORT };
-    VsockAddr { cid: VMADDR_CID_HOST, port }
+    VsockAddr { cid: VMADDR_CID_HOST, port: vm_type().port() }
 }
 
-fn is_protected_vm() -> bool {
+fn vm_type() -> VmType {
     // Use MMIO support to determine whether the VM is protected.
-    get_mmio_guard().is_some()
+    if get_mmio_guard().is_some() {
+        VmType::ProtectedVm
+    } else {
+        VmType::NonProtectedVm
+    }
 }
 
 fn new_page_table() -> Result<PageTable> {
@@ -129,6 +136,38 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
         })?;
     }
 
+    // Initializes the crypto library before any crypto operations and after the heap is
+    // initialized.
+    // SAFETY: It is safe to call this function multiple times and concurrently.
+    unsafe {
+        CRYPTO_library_init();
+    }
+    let bcc_handover: Box<dyn DiceArtifacts> = match vm_type() {
+        VmType::ProtectedVm => {
+            let dice_range = read_dice_range_from(fdt)?;
+            info!("DICE range: {dice_range:#x?}");
+            // SAFETY: This region was written by pvmfw in its writable_data region. The region
+            // has no overlap with the main memory region and is safe to be mapped as read-only
+            // data.
+            let res = unsafe {
+                MEMORY.lock().as_mut().unwrap().alloc_range_outside_main_memory(&dice_range)
+            };
+            res.map_err(|e| {
+                error!("Failed to use DICE range from DT: {dice_range:#x?}");
+                e
+            })?;
+            let dice_start = dice_range.start as *const u8;
+            // SAFETY: There's no memory overlap and the region is mapped as read-only data.
+            let bcc_handover = unsafe { slice::from_raw_parts(dice_start, dice_range.len()) };
+            Box::new(bcc_handover_parse(bcc_handover)?)
+        }
+        // Currently, a sample DICE data is used for non-protected VMs, as these VMs only run
+        // in tests at the moment.
+        // If we intend to run non-protected rialto in production, we should retrieve real
+        // DICE chain data instead.
+        VmType::NonProtectedVm => Box::new(diced_sample_inputs::make_sample_bcc_and_cdis()?),
+    };
+
     let pci_info = PciInfo::from_fdt(fdt)?;
     debug!("PCI: {pci_info:#x?}");
     let mut pci_root = pci::initialize(pci_info, MEMORY.lock().as_mut().unwrap())
@@ -137,10 +176,13 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
     let socket_device = find_socket_device::<HalImpl>(&mut pci_root)?;
     debug!("Found socket device: guest cid = {:?}", socket_device.guest_cid());
 
-    let mut data_channel = DataChannel::from(socket_device);
-    data_channel.connect(host_addr())?;
-    data_channel.handle_incoming_request()?;
-    data_channel.force_close()?;
+    let mut vsock_stream = VsockStream::new(socket_device, host_addr())?;
+    while let ServiceVmRequest::Process(req) = vsock_stream.read_request()? {
+        let response = process_request(req, bcc_handover.as_ref());
+        vsock_stream.write_response(&response)?;
+        vsock_stream.flush()?;
+    }
+    vsock_stream.shutdown()?;
 
     Ok(())
 }

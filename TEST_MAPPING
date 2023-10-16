@@ -12,6 +12,9 @@
       "name": "MicrodroidTestApp"
     },
     {
+      "name": "CustomPvmfwHostTestCases"
+    },
+    {
       "name": "art_standalone_dexpreopt_tests"
     },
     {
@@ -25,6 +28,12 @@
     },
     {
       "name": "initrd_bootconfig.test"
+    },
+    {
+      "name": "libdice_policy.test"
+    },
+    {
+      "name": "libapkzip.test"
     }
   ],
   "avf-postsubmit": [
@@ -66,10 +75,16 @@
       "path": "packages/modules/Virtualization/libs/avb"
     },
     {
+      "path": "packages/modules/Virtualization/libs/bssl"
+    },
+    {
       "path": "packages/modules/Virtualization/libs/capabilities"
     },
     {
       "path": "packages/modules/Virtualization/libs/devicemapper"
+    },
+    {
+      "path": "packages/modules/Virtualization/libs/dice"
     },
     {
       "path": "packages/modules/Virtualization/libs/libfdt"
@@ -88,6 +103,9 @@
     },
     {
       "path": "packages/modules/Virtualization/rialto"
+    },
+    {
+      "path": "packages/modules/Virtualization/service_vm/requests"
     },
     {
       "path": "packages/modules/Virtualization/vm"

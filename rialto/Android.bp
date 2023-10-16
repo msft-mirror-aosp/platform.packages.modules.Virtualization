@@ -9,10 +9,19 @@ rust_ffi_static {
     defaults: ["vmbase_ffi_defaults"],
     rustlibs: [
         "libaarch64_paging",
+        "libbssl_avf_nostd",
+        "libbssl_ffi_nostd",
+        "libciborium_io_nostd",
+        "libciborium_nostd",
+        "libdiced_open_dice_nostd",
+        "libdiced_sample_inputs_nostd",
         "libhyp",
         "libfdtpci",
         "liblibfdt",
         "liblog_rust_nostd",
+        "libservice_vm_comm_nostd",
+        "libservice_vm_requests_nostd",
+        "libtinyvec_nostd",
         "libvirtio_drivers",
         "libvmbase",
     ],
@@ -76,6 +85,7 @@ avb_add_hash_footer {
 }
 
 prebuilt_etc {
+    // rialto_bin is a prebuilt target wrapping the signed bare-metal service VM.
     name: "rialto_bin",
     filename: "rialto.bin",
     target: {
@@ -90,6 +100,7 @@ prebuilt_etc {
 rust_test {
     name: "rialto_test",
     crate_name: "rialto_test",
+    defaults: ["avf_build_flags_rust"],
     srcs: ["tests/test.rs"],
     prefer_rlib: true,
     edition: "2021",
@@ -97,14 +108,14 @@ rust_test {
         "android.system.virtualizationservice-rust",
         "libandroid_logger",
         "libanyhow",
+        "libciborium",
         "liblibc",
         "liblog_rust",
-        "libnix",
+        "libservice_vm_comm",
+        "libservice_vm_manager",
         "libvmclient",
-        "libvsock",
     ],
     data: [
-        ":rialto_bin",
         ":rialto_unsigned",
     ],
     test_suites: ["general-tests"],
