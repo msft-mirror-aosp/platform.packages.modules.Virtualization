@@ -31,6 +31,9 @@
     },
     {
       "name": "libdice_policy.test"
+    },
+    {
+      "name": "libapkzip.test"
     }
   ],
   "avf-postsubmit": [
@@ -79,6 +82,9 @@
     },
     {
       "path": "packages/modules/Virtualization/libs/devicemapper"
+    },
+    {
+      "path": "packages/modules/Virtualization/libs/dice"
     },
     {
       "path": "packages/modules/Virtualization/libs/libfdt"
