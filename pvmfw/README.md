@@ -42,7 +42,7 @@ pvmfw currently only supports AArch64.
 
 [AVF]: https://source.android.com/docs/core/virtualization
 [why-avf]: https://source.android.com/docs/core/virtualization/whyavf
-[BCC]: https://pigweed.googlesource.com/open-dice/+/master/src/android/README.md
+[BCC]: https://pigweed.googlesource.com/open-dice/+/refs/heads/main/docs/android.md
 [pKVM]: https://source.android.com/docs/core/virtualization/architecture#hypervisor
 [open-dice]: https://pigweed.googlesource.com/open-dice/+/refs/heads/main/docs/specification.md
 
@@ -191,7 +191,7 @@ In version 1.1, new blob is added.
   pvmfw will provision assigned devices with the VM DTBO.
 
 [header]: src/config.rs
-[DTBO]: https://android.googlesource.com/platform/external/dtc/+/refs/heads/master/Documentation/dt-object-internal.txt
+[DTBO]: https://android.googlesource.com/platform/external/dtc/+/refs/heads/main/Documentation/dt-object-internal.txt
 [debug_policy]: ../docs/debug/README.md#debug-policy
 
 #### Virtual Platform Boot Certificate Chain Handover
@@ -416,20 +416,34 @@ the signing described above is recommended to be done through an
 `avb_add_hash_footer` Soong module (see [how we sign the Microdroid
 kernel][soong-udroid]).
 
-[soong-udroid]: https://cs.android.com/android/platform/superproject/+/master:packages/modules/Virtualization/microdroid/Android.bp;l=427;drc=ca0049be4d84897b8c9956924cfae506773103eb
+[soong-udroid]: https://cs.android.com/android/platform/superproject/main/+/main:packages/modules/Virtualization/microdroid/Android.bp;l=425;drc=b94a5cf516307c4279f6c16a63803527a8affc6d
 
 ## Development
 
 For faster iteration, you can build pvmfw, adb-push it to the device, and use
 it directly for a new pVM, without having to flash it to the physical
-partition. To do that, set the system property `hypervisor.pvmfw.path` to point
-to the pvmfw image you pushed as shown below:
+partition. To do that, the binary image composition performed by ABL described
+above must be replicated to produce a single file containing the pvmfw binary
+and its configuration data.
+
+As a quick prototyping solution, a valid BCC (such as the [bcc.dat] test file)
+can be appended to the `pvmfw.bin` image with `pvmfw-tool`.
 
 ```shell
-m pvmfw_img
-adb push out/target/product/generic_arm64/system/etc/pvmfw.img /data/local/tmp/pvmfw.img
+m pvmfw-tool pvmfw_bin
+PVMFW_BIN=${ANDROID_PRODUCT_OUT}/system/etc/pvmfw.bin
+BCC_DAT=${ANDROID_BUILD_TOP}/packages/modules/Virtualization/tests/pvmfw/assets/bcc.dat
+
+pvmfw-tool custom_pvmfw ${PVMFW_BIN} ${BCC_DAT}
+```
+
+The result can then be pushed to the device. Pointing the system property
+`hypervisor.pvmfw.path` to it will cause AVF to use that image as pvmfw:
+
+```shell
+adb push custom_pvmfw /data/local/tmp/pvmfw
 adb root
-adb shell setprop hypervisor.pvmfw.path /data/local/tmp/pvmfw.img
+adb shell setprop hypervisor.pvmfw.path /data/local/tmp/pvmfw
 ```
 
 Then run a protected VM, for example:
@@ -439,3 +453,5 @@ adb shell /apex/com.android.virt/bin/vm run-microdroid --protected
 ```
 
 Note: `adb root` is required to set the system property.
+
+[bcc.dat]: https://cs.android.com/android/platform/superproject/main/+/main:packages/modules/Virtualization/tests/pvmfw/assets/bcc.dat
