@@ -16,7 +16,7 @@
 
 use crate::{get_calling_pid, get_calling_uid};
 use crate::atom::{forward_vm_booted_atom, forward_vm_creation_atom, forward_vm_exited_atom};
-use crate::rkpvm::request_certificate;
+use crate::rkpvm::request_attestation;
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::AssignableDevice::AssignableDevice,
@@ -158,19 +158,20 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         Ok(cids)
     }
 
-    fn requestCertificate(&self, csr: &[u8]) -> binder::Result<Vec<u8>> {
+    fn requestAttestation(&self, csr: &[u8]) -> binder::Result<Vec<u8>> {
         check_manage_access()?;
-        info!("Received csr. Getting certificate...");
+        info!("Received csr. Requestting attestation...");
         if cfg!(remote_attestation) {
-            request_certificate(csr)
-                .context("Failed to get certificate")
+            request_attestation(csr)
+                .context("Failed to request attestation")
                 .with_log()
                 .or_service_specific_exception(-1)
         } else {
             Err(Status::new_exception_str(
                 ExceptionCode::UNSUPPORTED_OPERATION,
                 Some(
-                    "requestCertificate is not supported with the remote_attestation feature disabled",
+                    "requestAttestation is not supported with the remote_attestation feature \
+                     disabled",
                 ),
             ))
             .with_log()
@@ -209,7 +210,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             .into_iter()
             .filter_map(|x| {
                 if devices.contains(&x.sysfs_path) {
-                    Some(BoundDevice { sysfsPath: x.sysfs_path, dtboNode: x.dtbo_node })
+                    Some(BoundDevice { sysfsPath: x.sysfs_path, dtboLabel: x.dtbo_label })
                 } else {
                     None
                 }
@@ -222,7 +223,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
 #[derive(Debug, Deserialize)]
 struct Device {
     kind: String,
-    dtbo_node: String,
+    dtbo_label: String,
     sysfs_path: String,
 }
 

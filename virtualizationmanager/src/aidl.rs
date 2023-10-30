@@ -474,7 +474,7 @@ impl VirtualizationService {
                 .into_iter()
                 .map(|x| VfioDevice {
                     sysfs_path: PathBuf::from(&x.sysfsPath),
-                    dtbo_node: x.dtboNode,
+                    dtbo_label: x.dtboLabel,
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -1245,8 +1245,8 @@ impl IVirtualMachineService for VirtualMachineService {
         }
     }
 
-    fn requestCertificate(&self, csr: &[u8]) -> binder::Result<Vec<u8>> {
-        GLOBAL_SERVICE.requestCertificate(csr)
+    fn requestAttestation(&self, csr: &[u8]) -> binder::Result<Vec<u8>> {
+        GLOBAL_SERVICE.requestAttestation(csr)
     }
 }
 
