@@ -499,18 +499,30 @@ impl<'a> FdtNode<'a> {
     }
 }
 
+impl<'a> PartialEq for FdtNode<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.fdt.as_ptr() == other.fdt.as_ptr() && self.offset == other.offset
+    }
+}
+
 /// Phandle of a FDT node
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Phandle(u32);
 
 impl Phandle {
+    /// Minimum valid value for device tree phandles.
+    pub const MIN: Self = Self(1);
+    /// Maximum valid value for device tree phandles.
+    pub const MAX: Self = Self(libfdt_bindgen::FDT_MAX_PHANDLE);
+
     /// Creates a new Phandle
-    pub fn new(value: u32) -> Result<Self> {
-        if value == 0 || value > libfdt_bindgen::FDT_MAX_PHANDLE {
-            return Err(FdtError::BadPhandle);
+    pub const fn new(value: u32) -> Option<Self> {
+        if Self::MIN.0 <= value && value <= Self::MAX.0 {
+            Some(Self(value))
+        } else {
+            None
         }
-        Ok(Self(value))
     }
 }
 
@@ -520,7 +532,16 @@ impl From<Phandle> for u32 {
     }
 }
 
+impl TryFrom<u32> for Phandle {
+    type Error = FdtError;
+
+    fn try_from(value: u32) -> Result<Self> {
+        Self::new(value).ok_or(FdtError::BadPhandle)
+    }
+}
+
 /// Mutable FDT node.
+#[derive(Debug)]
 pub struct FdtNodeMut<'a> {
     fdt: &'a mut Fdt,
     offset: c_int,
@@ -964,7 +985,7 @@ impl Fdt {
         let ret = unsafe { libfdt_bindgen::fdt_find_max_phandle(self.as_ptr(), &mut phandle) };
 
         fdt_err_expect_zero(ret)?;
-        Phandle::new(phandle)
+        phandle.try_into()
     }
 
     /// Returns a node with the phandle
