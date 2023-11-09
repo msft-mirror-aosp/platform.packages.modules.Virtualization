@@ -3,13 +3,10 @@
 {
   "avf-presubmit" : [
     {
-      "name" : "libpvmfw_avb.integration_test"
+      "name" : "libservice_vm_comm.test"
     },
     {
-      "name" : "libpvmfw.bootargs.test"
-    },
-    {
-      "name" : "libpvmfw.device_assignment.test"
+      "name" : "libservice_vm_comm_nostd.test"
     }
   ]
 }
