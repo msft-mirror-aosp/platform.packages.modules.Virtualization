@@ -48,7 +48,7 @@ pub(super) fn generate_ecdsa_p256_key_pair(
 
     let maced_public_key = build_maced_public_key(ec_key.cose_public_key()?, hmac_key.as_ref())?;
     let key_blob =
-        EncryptedKeyBlob::new(ec_key.private_key()?.as_slice(), dice_artifacts.cdi_seal())?;
+        EncryptedKeyBlob::new(ec_key.ec_private_key()?.as_slice(), dice_artifacts.cdi_seal())?;
 
     let key_pair =
         EcdsaP256KeyPair { maced_public_key, key_blob: cbor_util::serialize(&key_blob)? };
@@ -75,13 +75,10 @@ pub(super) fn generate_certificate_request(
         public_keys.push(public_key.to_cbor_value()?);
     }
     // Builds `CsrPayload`.
-    // TODO(b/299256925): The device information is currently empty as we do not
-    // have sufficient details to include.
-    let device_info = Value::Map(Vec::new());
     let csr_payload = cbor!([
         Value::Integer(CSR_PAYLOAD_SCHEMA_V3.into()),
         Value::Text(String::from(CERTIFICATE_TYPE)),
-        device_info,
+        // TODO(b/299256925): Add device info in CBOR format here.
         Value::Array(public_keys),
     ])?;
     let csr_payload = cbor_util::serialize(&csr_payload)?;
