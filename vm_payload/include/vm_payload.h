@@ -19,7 +19,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdnoreturn.h>
 #include <sys/cdefs.h>
 
 #include "vm_main.h"
@@ -43,11 +42,14 @@ typedef enum attestation_status_t : int32_t {
     /** The remote attestation completes successfully. */
     ATTESTATION_OK = 0,
 
-    /** The remote attestation has failed due to an unspecified cause. */
-    ATTESTATION_UNKNOWN_ERROR = -10000,
-
     /** The challenge size is not between 0 and 64. */
     ATTESTATION_ERROR_INVALID_CHALLENGE = -10001,
+
+    /** Failed to attest the VM. Please retry at a later time. */
+    ATTESTATION_ERROR_ATTESTATION_FAILED = -10002,
+
+    /** Remote attestation is not supported in the current environment. */
+    ATTESTATION_ERROR_UNSUPPORTED = -10003,
 } attestation_status_t;
 
 /**
@@ -78,9 +80,9 @@ void AVmPayload_notifyPayloadReady(void);
  * callback will be called at most once.
  * \param param parameter to be passed to the `on_ready` callback.
  */
-noreturn void AVmPayload_runVsockRpcServer(AIBinder* _Nonnull service, uint32_t port,
-                                           void (*_Nullable on_ready)(void* _Nullable param),
-                                           void* _Nullable param);
+__attribute__((noreturn)) void AVmPayload_runVsockRpcServer(
+        AIBinder* _Nonnull service, uint32_t port,
+        void (*_Nullable on_ready)(void* _Nullable param), void* _Nullable param);
 
 /**
  * Returns all or part of a 32-byte secret that is bound to this unique VM
