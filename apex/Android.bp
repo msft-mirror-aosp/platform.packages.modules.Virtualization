@@ -67,7 +67,21 @@ apex_defaults {
     ],
 }
 
-apex_defaults {
+soong_config_module_type {
+    name: "avf_flag_aware_apex_defaults",
+    module_type: "apex_defaults",
+    config_namespace: "ANDROID",
+    bool_variables: [
+        "release_avf_enable_device_assignment",
+        "release_avf_enable_vendor_modules",
+    ],
+    properties: [
+        "arch",
+        "prebuilts",
+    ],
+}
+
+avf_flag_aware_apex_defaults {
     name: "com.android.virt_avf_enabled",
 
     defaults: ["com.android.virt_common"],
@@ -79,7 +93,6 @@ apex_defaults {
         arm64: {
             binaries: [
                 "crosvm",
-                "vfio_handler",
                 "virtmgr",
                 "virtualizationservice",
             ],
@@ -88,7 +101,6 @@ apex_defaults {
         x86_64: {
             binaries: [
                 "crosvm",
-                "vfio_handler",
                 "virtmgr",
                 "virtualizationservice",
             ],
@@ -115,6 +127,28 @@ apex_defaults {
     apps: [
         "EmptyPayloadApp",
     ],
+    soong_config_variables: {
+        release_avf_enable_device_assignment: {
+            prebuilts: [
+                "com.android.virt.vfio_handler.rc",
+            ],
+            arch: {
+                arm64: {
+                    binaries: ["vfio_handler"],
+                },
+                x86_64: {
+                    binaries: ["vfio_handler"],
+                },
+            },
+        },
+        release_avf_enable_vendor_modules: {
+            prebuilts: [
+                "microdroid_gki_initrd_debuggable",
+                "microdroid_gki_initrd_normal",
+                "microdroid_gki_kernel",
+            ],
+        },
+    },
 }
 
 apex_defaults {
@@ -138,6 +172,13 @@ prebuilt_etc {
     name: "com.android.virt.init.rc",
     src: "virtualizationservice.rc",
     filename: "init.rc",
+    installable: false,
+}
+
+prebuilt_etc {
+    name: "com.android.virt.vfio_handler.rc",
+    src: "vfio_handler.rc",
+    filename: "vfio_handler.rc",
     installable: false,
 }
 
