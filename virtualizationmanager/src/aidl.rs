@@ -101,6 +101,8 @@ const ANDROID_VM_INSTANCE_VERSION: u16 = 1;
 
 const MICRODROID_OS_NAME: &str = "microdroid";
 
+const MICRODROID_GKI_OS_NAME: &str = "microdroid_gki";
+
 const UNFORMATTED_STORAGE_MAGIC: &str = "UNFORMATTED-STORAGE";
 
 /// Roughly estimated sufficient size for storing vendor public key into DTBO.
@@ -694,6 +696,16 @@ fn append_kernel_param(param: &str, vm_config: &mut VirtualMachineRawConfig) {
     }
 }
 
+fn is_valid_os(os_name: &str) -> bool {
+    if os_name == MICRODROID_OS_NAME {
+        return true;
+    }
+    if cfg!(vendor_modules) && os_name == MICRODROID_GKI_OS_NAME {
+        return true;
+    }
+    false
+}
+
 fn load_app_config(
     config: &VirtualMachineAppConfig,
     debug_config: &DebugConfig,
@@ -717,9 +729,9 @@ fn load_app_config(
         Payload::PayloadConfig(payload_config) => create_vm_payload_config(payload_config)?,
     };
 
-    // For now, the only supported OS is Microdroid
+    // For now, the only supported OS is Microdroid and Microdroid GKI
     let os_name = vm_payload_config.os.name.as_str();
-    if os_name != MICRODROID_OS_NAME {
+    if !is_valid_os(os_name) {
         bail!("Unknown OS \"{}\"", os_name);
     }
 
@@ -753,7 +765,7 @@ fn load_app_config(
     vm_config.cpuTopology = config.cpuTopology;
 
     // Microdroid takes additional init ramdisk & (optionally) storage image
-    add_microdroid_system_images(config, instance_file, storage_image, &mut vm_config)?;
+    add_microdroid_system_images(config, instance_file, storage_image, os_name, &mut vm_config)?;
 
     // Include Microdroid payload disk (contains apks, idsigs) in vm config
     add_microdroid_payload_images(
@@ -788,8 +800,9 @@ fn create_vm_payload_config(
     }
 
     let task = Task { type_: TaskType::MicrodroidLauncher, command: payload_binary_name.clone() };
+    let name = payload_config.osName.clone();
     Ok(VmPayloadConfig {
-        os: OsConfig { name: MICRODROID_OS_NAME.to_owned() },
+        os: OsConfig { name },
         task: Some(task),
         apexes: vec![],
         extra_apks: vec![],
@@ -871,7 +884,7 @@ fn is_safe_raw_partition(label: &str) -> bool {
 /// Check that a file SELinux label is acceptable.
 ///
 /// We only want to allow code in a VM to be sourced from places that apps, and the
-/// system, do not have write access to.
+/// system or vendor, do not have write access to.
 ///
 /// Note that sepolicy must also grant read access for these types to both virtualization
 /// service and crosvm.
@@ -885,6 +898,7 @@ fn check_label_is_allowed(context: &SeContext) -> Result<()> {
         | "staging_data_file" // updated/staged APEX images
         | "system_file" // immutable dm-verity protected partition
         | "virtualizationservice_data_file" // files created by VS / VirtMgr
+        | "vendor_microdroid_file" // immutable dm-verity protected partition (/vendor/etc/avf/microdroid/.*)
          => Ok(()),
         _ => bail!("Label {} is not allowed", context),
     }
@@ -1346,7 +1360,7 @@ impl IVirtualMachineService for VirtualMachineService {
     }
 
     fn requestAttestation(&self, csr: &[u8]) -> binder::Result<Vec<Certificate>> {
-        GLOBAL_SERVICE.requestAttestation(csr)
+        GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32)
     }
 }
 
