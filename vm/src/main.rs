@@ -97,32 +97,23 @@ pub struct MicrodroidConfig {
     #[arg(long)]
     storage_size: Option<u64>,
 
-    /// Path to custom kernel image to use when booting Microdroid.
-    #[cfg(vendor_modules)]
-    #[arg(long)]
-    kernel: Option<PathBuf>,
-
     /// Path to disk image containing vendor-specific modules.
     #[cfg(vendor_modules)]
     #[arg(long)]
     vendor: Option<PathBuf>,
 
     /// SysFS nodes of devices to assign to VM
+    #[cfg(device_assignment)]
     #[arg(long)]
     devices: Vec<PathBuf>,
+
+    /// If set, use GKI instead of microdroid kernel
+    #[cfg(vendor_modules)]
+    #[arg(long)]
+    gki: bool,
 }
 
 impl MicrodroidConfig {
-    #[cfg(vendor_modules)]
-    fn kernel(&self) -> &Option<PathBuf> {
-        &self.kernel
-    }
-
-    #[cfg(not(vendor_modules))]
-    fn kernel(&self) -> Option<PathBuf> {
-        None
-    }
-
     #[cfg(vendor_modules)]
     fn vendor(&self) -> &Option<PathBuf> {
         &self.vendor
@@ -131,6 +122,26 @@ impl MicrodroidConfig {
     #[cfg(not(vendor_modules))]
     fn vendor(&self) -> Option<PathBuf> {
         None
+    }
+
+    #[cfg(vendor_modules)]
+    fn gki(&self) -> bool {
+        self.gki
+    }
+
+    #[cfg(not(vendor_modules))]
+    fn gki(&self) -> bool {
+        false
+    }
+
+    #[cfg(device_assignment)]
+    fn devices(&self) -> &Vec<PathBuf> {
+        &self.devices
+    }
+
+    #[cfg(not(device_assignment))]
+    fn devices(&self) -> Vec<PathBuf> {
+        Vec::new()
     }
 }
 
