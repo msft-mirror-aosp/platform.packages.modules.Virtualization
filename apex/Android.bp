@@ -58,9 +58,32 @@ apex_defaults {
         "libvirtualizationservice_jni",
         "libvirtualmachine_jni",
     ],
+    // TODO(b/295593640) Unfortunately these are added to the apex even though they are unused.
+    // Once the build system is fixed, remove this.
+    unwanted_transitive_deps: [
+        "libdrm",
+        "libsso",
+        "libutils",
+    ],
 }
 
-apex_defaults {
+soong_config_module_type {
+    name: "avf_flag_aware_apex_defaults",
+    module_type: "apex_defaults",
+    config_namespace: "ANDROID",
+    bool_variables: [
+        "release_avf_enable_device_assignment",
+        "release_avf_enable_remote_attestation",
+        "release_avf_enable_vendor_modules",
+    ],
+    properties: [
+        "arch",
+        "prebuilts",
+        "vintf_fragments",
+    ],
+}
+
+avf_flag_aware_apex_defaults {
     name: "com.android.virt_avf_enabled",
 
     defaults: ["com.android.virt_common"],
@@ -72,7 +95,6 @@ apex_defaults {
         arm64: {
             binaries: [
                 "crosvm",
-                "vfio_handler",
                 "virtmgr",
                 "virtualizationservice",
             ],
@@ -81,7 +103,6 @@ apex_defaults {
         x86_64: {
             binaries: [
                 "crosvm",
-                "vfio_handler",
                 "virtmgr",
                 "virtualizationservice",
             ],
@@ -93,7 +114,6 @@ apex_defaults {
         "vm",
     ],
     prebuilts: [
-        "com.android.virt.init.rc",
         "features_com.android.virt.xml",
         "microdroid_initrd_debuggable",
         "microdroid_initrd_normal",
@@ -103,11 +123,42 @@ apex_defaults {
     ],
     host_required: [
         "vm_shell",
-        "prepare_device_vfio",
     ],
     apps: [
         "EmptyPayloadApp",
     ],
+    soong_config_variables: {
+        release_avf_enable_device_assignment: {
+            prebuilts: [
+                "com.android.virt.vfio_handler.rc",
+            ],
+            arch: {
+                arm64: {
+                    binaries: ["vfio_handler"],
+                },
+                x86_64: {
+                    binaries: ["vfio_handler"],
+                },
+            },
+        },
+        release_avf_enable_vendor_modules: {
+            prebuilts: [
+                "microdroid_gki_initrd_debuggable",
+                "microdroid_gki_initrd_normal",
+                "microdroid_gki_kernel",
+                "microdroid_gki.json",
+            ],
+        },
+        release_avf_enable_remote_attestation: {
+            prebuilts: ["com.android.virt.init_attestation_enabled.rc"],
+            vintf_fragments: [
+                "virtualizationservice.xml",
+            ],
+            conditions_default: {
+                prebuilts: ["com.android.virt.init.rc"],
+            },
+        },
+    },
 }
 
 apex_defaults {
@@ -130,14 +181,22 @@ android_app_certificate {
 prebuilt_etc {
     name: "com.android.virt.init.rc",
     src: "virtualizationservice.rc",
-    filename: "init.rc",
+    filename: "virtualizationservice.rc",
     installable: false,
 }
 
-sh_binary_host {
-    name: "prepare_device_vfio",
-    src: "prepare_device_vfio.sh",
-    filename: "prepare_device_vfio.sh",
+prebuilt_etc {
+    name: "com.android.virt.init_attestation_enabled.rc",
+    src: "virtualizationservice_attestation_enabled.rc",
+    filename: "virtualizationservice.rc",
+    installable: false,
+}
+
+prebuilt_etc {
+    name: "com.android.virt.vfio_handler.rc",
+    src: "vfio_handler.rc",
+    filename: "vfio_handler.rc",
+    installable: false,
 }
 
 // Virt apex needs a custom signer for its payload

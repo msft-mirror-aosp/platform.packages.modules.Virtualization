@@ -15,6 +15,7 @@
  */
 package android.system.virtualizationservice_internal;
 
+import android.system.virtualizationcommon.Certificate;
 import android.system.virtualizationservice.AssignableDevice;
 import android.system.virtualizationservice.VirtualMachineDebugInfo;
 import android.system.virtualizationservice_internal.AtomVmBooted;
@@ -59,10 +60,14 @@ interface IVirtualizationServiceInternal {
      * Requests a certificate chain for the provided certificate signing request (CSR).
      *
      * @param csr The certificate signing request.
+     * @param requesterUid The UID of the app that requests remote attestation. The client VM to be
+     *                     attested is owned by this app.
+     *                     The uniqueness of the UID ensures that no two VMs owned by different apps
+     *                     are able to correlate keys.
      * @return A sequence of DER-encoded X.509 certificates that make up the attestation
      *         key's certificate chain. The attestation key is provided in the CSR.
      */
-    byte[] requestAttestation(in byte[] csr);
+    Certificate[] requestAttestation(in byte[] csr, int requesterUid);
 
     /**
      * Get a list of assignable devices.
@@ -76,4 +81,7 @@ interface IVirtualizationServiceInternal {
      * @return a list of pairs (sysfs path, DTBO node label) for devices.
      */
     BoundDevice[] bindDevicesToVfioDriver(in String[] devices);
+
+    /** Returns a read-only file descriptor of the VM DTBO file. */
+    ParcelFileDescriptor getDtboFile();
 }

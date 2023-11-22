@@ -1293,7 +1293,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
         assertThat(payloadStarted.getNow(false)).isTrue();
         assertThat(exitCodeFuture.getNow(0)).isNotEqualTo(0);
-        assertThat(listener.getLogOutput()).contains(reason);
+        assertThat(listener.getConsoleOutput() + listener.getLogOutput()).contains(reason);
     }
 
     @Test
@@ -1698,7 +1698,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .command(
                                 "logcat",
                                 "-e",
-                                "virtualizationmanager::aidl: Log.*executing main task",
+                                "virtualizationmanager::aidl: (Console|Log).*executing main task",
                                 "-t",
                                 time)
                         .start();
@@ -2019,11 +2019,10 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         | OsConstants.S_IROTH
                         | OsConstants.S_IWOTH
                         | OsConstants.S_IXOTH;
-        int expectedPermissions =
-                OsConstants.S_IRUSR
-                        | OsConstants.S_IXUSR
-                        | OsConstants.S_IRGRP
-                        | OsConstants.S_IXGRP;
+        int expectedPermissions = OsConstants.S_IRUSR | OsConstants.S_IXUSR;
+        if (isFeatureEnabled(VirtualMachineManager.FEATURE_MULTI_TENANT)) {
+            expectedPermissions |= OsConstants.S_IRGRP | OsConstants.S_IXGRP;
+        }
         assertThat(testResults.mFileMode & allPermissionsMask).isEqualTo(expectedPermissions);
     }
 
@@ -2158,6 +2157,28 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(testResults.mException).isNull();
         int expectedFlags = MS_NOATIME | MS_RDONLY;
         assertThat(testResults.mMountFlags & expectedFlags).isEqualTo(expectedFlags);
+    }
+
+    @Test
+    public void creationFailsWithUnsignedVendorPartition() throws Exception {
+        assumeSupportedDevice();
+        assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
+
+        grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+
+        File unsignedVendorDiskImage =
+                new File(
+                        "/data/local/tmp/cts/microdroid/test_microdroid_vendor_image_unsigned.img");
+        VirtualMachineConfig config =
+                newVmConfigBuilder()
+                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                        .setVendorDiskImage(unsignedVendorDiskImage)
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_boot_with_unsigned_vendor", config);
+        assertThrowsVmExceptionContaining(
+                () -> vm.run(), "Failed to get vbmeta from microdroid-vendor.img");
     }
 
     @Test

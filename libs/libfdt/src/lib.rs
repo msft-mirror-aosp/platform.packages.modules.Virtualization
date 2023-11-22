@@ -31,6 +31,7 @@ use core::mem;
 use core::ops::Range;
 use core::ptr;
 use core::result;
+use cstr::cstr;
 use zerocopy::AsBytes as _;
 
 /// Error type corresponding to libfdt error codes.
@@ -297,12 +298,12 @@ impl<'a> FdtNode<'a> {
 
     /// Returns the standard (deprecated) device_type <string> property.
     pub fn device_type(&self) -> Result<Option<&CStr>> {
-        self.getprop_str(CStr::from_bytes_with_nul(b"device_type\0").unwrap())
+        self.getprop_str(cstr!("device_type"))
     }
 
     /// Returns the standard reg <prop-encoded-array> property.
     pub fn reg(&self) -> Result<Option<RegIterator<'a>>> {
-        let reg = CStr::from_bytes_with_nul(b"reg\0").unwrap();
+        let reg = cstr!("reg");
 
         if let Some(cells) = self.getprop_cells(reg)? {
             let parent = self.parent()?;
@@ -318,7 +319,7 @@ impl<'a> FdtNode<'a> {
 
     /// Returns the standard ranges property.
     pub fn ranges<A, P, S>(&self) -> Result<Option<RangesIterator<'a, A, P, S>>> {
-        let ranges = CStr::from_bytes_with_nul(b"ranges\0").unwrap();
+        let ranges = cstr!("ranges");
         if let Some(cells) = self.getprop_cells(ranges)? {
             let parent = self.parent()?;
             let addr_cells = self.address_cells()?;
@@ -497,20 +498,44 @@ impl<'a> FdtNode<'a> {
 
         fdt_err_or_option(ret)?.map(|offset| FdtProperty::new(self.fdt, offset)).transpose()
     }
+
+    /// Returns the phandle
+    pub fn get_phandle(&self) -> Result<Option<Phandle>> {
+        // This rewrites the fdt_get_phandle() because it doesn't return error code.
+        if let Some(prop) = self.getprop_u32(cstr!("phandle"))? {
+            Ok(Some(prop.try_into()?))
+        } else if let Some(prop) = self.getprop_u32(cstr!("linux,phandle"))? {
+            Ok(Some(prop.try_into()?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl<'a> PartialEq for FdtNode<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.fdt.as_ptr() == other.fdt.as_ptr() && self.offset == other.offset
+    }
 }
 
 /// Phandle of a FDT node
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Phandle(u32);
 
 impl Phandle {
+    /// Minimum valid value for device tree phandles.
+    pub const MIN: Self = Self(1);
+    /// Maximum valid value for device tree phandles.
+    pub const MAX: Self = Self(libfdt_bindgen::FDT_MAX_PHANDLE);
+
     /// Creates a new Phandle
-    pub fn new(value: u32) -> Result<Self> {
-        if value == 0 || value > libfdt_bindgen::FDT_MAX_PHANDLE {
-            return Err(FdtError::BadPhandle);
+    pub const fn new(value: u32) -> Option<Self> {
+        if Self::MIN.0 <= value && value <= Self::MAX.0 {
+            Some(Self(value))
+        } else {
+            None
         }
-        Ok(Self(value))
     }
 }
 
@@ -520,7 +545,16 @@ impl From<Phandle> for u32 {
     }
 }
 
+impl TryFrom<u32> for Phandle {
+    type Error = FdtError;
+
+    fn try_from(value: u32) -> Result<Self> {
+        Self::new(value).ok_or(FdtError::BadPhandle)
+    }
+}
+
 /// Mutable FDT node.
+#[derive(Debug)]
 pub struct FdtNodeMut<'a> {
     fdt: &'a mut Fdt,
     offset: c_int,
@@ -666,6 +700,11 @@ impl<'a> FdtNodeMut<'a> {
     /// Returns reference to the containing device tree.
     pub fn fdt(&mut self) -> &mut Fdt {
         self.fdt
+    }
+
+    /// Returns immutable FdtNode of this node.
+    pub fn as_node(&self) -> FdtNode {
+        FdtNode { fdt: self.fdt, offset: self.offset }
     }
 
     /// Adds a new subnode to the given node and return it as a FdtNodeMut on success.
@@ -917,8 +956,8 @@ impl Fdt {
     ///
     /// NOTE: This does not support individual "/memory@XXXX" banks.
     pub fn memory(&self) -> Result<MemRegIterator> {
-        let memory_node_name = CStr::from_bytes_with_nul(b"/memory\0").unwrap();
-        let memory_device_type = CStr::from_bytes_with_nul(b"memory\0").unwrap();
+        let memory_node_name = cstr!("/memory");
+        let memory_device_type = cstr!("memory");
 
         let node = self.node(memory_node_name)?.ok_or(FdtError::NotFound)?;
         if node.device_type()? != Some(memory_device_type) {
@@ -934,17 +973,27 @@ impl Fdt {
 
     /// Returns the standard /chosen node.
     pub fn chosen(&self) -> Result<Option<FdtNode>> {
-        self.node(CStr::from_bytes_with_nul(b"/chosen\0").unwrap())
+        self.node(cstr!("/chosen"))
     }
 
     /// Returns the standard /chosen node as mutable.
     pub fn chosen_mut(&mut self) -> Result<Option<FdtNodeMut>> {
-        self.node_mut(CStr::from_bytes_with_nul(b"/chosen\0").unwrap())
+        self.node_mut(cstr!("/chosen"))
     }
 
     /// Returns the root node of the tree.
     pub fn root(&self) -> Result<FdtNode> {
-        self.node(CStr::from_bytes_with_nul(b"/\0").unwrap())?.ok_or(FdtError::Internal)
+        self.node(cstr!("/"))?.ok_or(FdtError::Internal)
+    }
+
+    /// Returns the standard /__symbols__ node.
+    pub fn symbols(&self) -> Result<Option<FdtNode>> {
+        self.node(cstr!("/__symbols__"))
+    }
+
+    /// Returns the standard /__symbols__ node as mutable
+    pub fn symbols_mut(&mut self) -> Result<Option<FdtNodeMut>> {
+        self.node_mut(cstr!("/__symbols__"))
     }
 
     /// Returns a tree node by its full path.
@@ -964,19 +1013,30 @@ impl Fdt {
         let ret = unsafe { libfdt_bindgen::fdt_find_max_phandle(self.as_ptr(), &mut phandle) };
 
         fdt_err_expect_zero(ret)?;
-        Phandle::new(phandle)
+        phandle.try_into()
     }
 
     /// Returns a node with the phandle
     pub fn node_with_phandle(&self, phandle: Phandle) -> Result<Option<FdtNode>> {
-        // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
+        let offset = self.node_offset_with_phandle(phandle)?;
+        Ok(offset.map(|offset| FdtNode { fdt: self, offset }))
+    }
+
+    /// Returns a mutable node with the phandle
+    pub fn node_mut_with_phandle(&mut self, phandle: Phandle) -> Result<Option<FdtNodeMut>> {
+        let offset = self.node_offset_with_phandle(phandle)?;
+        Ok(offset.map(|offset| FdtNodeMut { fdt: self, offset }))
+    }
+
+    fn node_offset_with_phandle(&self, phandle: Phandle) -> Result<Option<c_int>> {
+        // SAFETY: Accesses are constrained to the DT totalsize.
         let ret = unsafe { libfdt_bindgen::fdt_node_offset_by_phandle(self.as_ptr(), phandle.0) };
-        Ok(fdt_err_or_option(ret)?.map(|offset| FdtNode { fdt: self, offset }))
+        fdt_err_or_option(ret)
     }
 
     /// Returns the mutable root node of the tree.
     pub fn root_mut(&mut self) -> Result<FdtNodeMut> {
-        self.node_mut(CStr::from_bytes_with_nul(b"/\0").unwrap())?.ok_or(FdtError::Internal)
+        self.node_mut(cstr!("/"))?.ok_or(FdtError::Internal)
     }
 
     /// Returns a mutable tree node by its full path.

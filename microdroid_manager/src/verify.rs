@@ -12,18 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::instance::{ApkData, MicrodroidData, RootHash};
-use crate::payload::get_apex_data_from_payload;
-use crate::{is_strict_boot, is_verified_boot, write_apex_payload_data, MicrodroidError};
+use crate::instance::{ApexData, ApkData, MicrodroidData, RootHash};
+use crate::payload::{get_apex_data_from_payload, to_metadata};
+use crate::{is_strict_boot, is_verified_boot, MicrodroidError};
 use anyhow::{anyhow, ensure, Context, Result};
 use apkmanifest::get_manifest_info;
 use apkverify::{get_public_key_der, verify, V4Signature};
 use glob::glob;
 use itertools::sorted;
 use log::{info, warn};
-use microdroid_metadata::Metadata;
+use microdroid_metadata::{write_metadata, Metadata};
 use rand::Fill;
 use rustutils::system_properties;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::str;
@@ -134,8 +135,10 @@ pub fn verify_payload(
         write_apex_payload_data(saved_data, &apex_data_from_payload)?;
     }
 
-    // Start apexd to activate APEXes
-    system_properties::write("ctl.start", "apexd-vm")?;
+    if cfg!(not(dice_changes)) {
+        // Start apexd to activate APEXes
+        system_properties::write("ctl.start", "apexd-vm")?;
+    }
 
     // TODO(inseob): add timeout
     apkdmverity_child.wait()?;
@@ -145,18 +148,25 @@ pub fn verify_payload(
     // taken only when the root_hash is un-trustful which can be either when this is the first boot
     // of the VM or APK was updated in the host.
     // TODO(jooyung): consider multithreading to make this faster
-    let main_apk_pubkey = get_public_key_from_apk(DM_MOUNTED_APK_PATH, root_hash_trustful)?;
+
+    let main_apk_data =
+        get_data_from_apk(DM_MOUNTED_APK_PATH, root_hash_from_idsig, root_hash_trustful)?;
+
     let extra_apks_data = extra_root_hashes_from_idsig
         .into_iter()
         .enumerate()
         .map(|(i, extra_root_hash)| {
             let mount_path = format!("/dev/block/mapper/{}", &extra_apk_names[i]);
-            let apk_pubkey = get_public_key_from_apk(&mount_path, extra_root_hashes_trustful[i])?;
-            Ok(ApkData { root_hash: extra_root_hash, pubkey: apk_pubkey })
+            get_data_from_apk(&mount_path, extra_root_hash, extra_root_hashes_trustful[i])
         })
         .collect::<Result<Vec<_>>>()?;
 
     info!("payload verification successful. took {:#?}", start_time.elapsed().unwrap());
+
+    // At this point, we can ensure that the root hashes from the idsig files are trusted, either
+    // because we have fully verified the APK signature (and apkdmverity checks all the data we
+    // verified is consistent with the root hash) or because we have the saved APK data which will
+    // be checked as identical to the data we have verified.
 
     // Use the salt from a verified instance, or generate a salt for a new instance.
     let salt = if let Some(saved_data) = saved_data {
@@ -170,14 +180,57 @@ pub fn verify_payload(
         salt
     };
 
-    // At this point, we can ensure that the root_hash from the idsig file is trusted, either by
-    // fully verifying the APK or by comparing it with the saved root_hash.
     Ok(MicrodroidData {
         salt,
-        apk_data: ApkData { root_hash: root_hash_from_idsig, pubkey: main_apk_pubkey },
+        apk_data: main_apk_data,
         extra_apks_data,
         apex_data: apex_data_from_payload,
     })
+}
+
+fn get_data_from_apk(
+    apk_path: &str,
+    root_hash: Box<RootHash>,
+    root_hash_trustful: bool,
+) -> Result<ApkData> {
+    let pubkey = get_public_key_from_apk(apk_path, root_hash_trustful)?;
+    // Read package name etc from the APK manifest. In the unlikely event that they aren't present
+    // we use the default values. We simply put these values in the DICE node for the payload, and
+    // users of that can decide how to handle blank information - there's no reason for us
+    // to fail starting a VM even with such a weird APK.
+    let manifest_info = get_manifest_info(apk_path)
+        .map_err(|e| warn!("Failed to read manifest info from APK: {e:?}"))
+        .unwrap_or_default();
+
+    Ok(ApkData {
+        root_hash,
+        pubkey,
+        package_name: manifest_info.package,
+        version_code: manifest_info.version_code,
+    })
+}
+
+fn write_apex_payload_data(
+    saved_data: Option<&MicrodroidData>,
+    apex_data_from_payload: &[ApexData],
+) -> Result<()> {
+    if let Some(saved_apex_data) = saved_data.map(|d| &d.apex_data) {
+        // We don't support APEX updates. (assuming that update will change root digest)
+        ensure!(
+            saved_apex_data == apex_data_from_payload,
+            MicrodroidError::PayloadChanged(String::from("APEXes have changed."))
+        );
+        let apex_metadata = to_metadata(apex_data_from_payload);
+        // Pass metadata(with public keys and root digests) to apexd so that it uses the passed
+        // metadata instead of the default one (/dev/block/by-name/payload-metadata)
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open("/apex/vm-payload-metadata")
+            .context("Failed to open /apex/vm-payload-metadata")
+            .and_then(|f| write_metadata(&apex_metadata, f))?;
+    }
+    Ok(())
 }
 
 fn get_apk_root_hash_from_idsig<P: AsRef<Path>>(idsig_path: P) -> Result<Box<RootHash>> {
@@ -187,24 +240,14 @@ fn get_apk_root_hash_from_idsig<P: AsRef<Path>>(idsig_path: P) -> Result<Box<Roo
 fn get_public_key_from_apk(apk: &str, root_hash_trustful: bool) -> Result<Box<[u8]>> {
     let current_sdk = get_current_sdk()?;
 
-    let public_key_der = if !root_hash_trustful {
+    if !root_hash_trustful {
         verify(apk, current_sdk).context(MicrodroidError::PayloadVerificationFailed(format!(
             "failed to verify {}",
             apk
-        )))?
+        )))
     } else {
-        get_public_key_der(apk, current_sdk)?
-    };
-
-    match get_manifest_info(apk) {
-        Ok(manifest_info) => {
-            // TODO (b/299591171): Do something with this info
-            info!("Manifest info is {manifest_info:?}")
-        }
-        Err(e) => warn!("Failed to read manifest info from APK: {e:?}"),
-    };
-
-    Ok(public_key_der)
+        get_public_key_der(apk, current_sdk)
+    }
 }
 
 fn get_current_sdk() -> Result<u32> {

@@ -15,16 +15,19 @@
 //! Implementation of the AIDL interface `IVmPayloadService`.
 
 use android_system_virtualization_payload::aidl::android::system::virtualization::payload::IVmPayloadService::{
-    BnVmPayloadService, IVmPayloadService, VM_PAYLOAD_SERVICE_SOCKET_NAME};
+    BnVmPayloadService, IVmPayloadService, VM_PAYLOAD_SERVICE_SOCKET_NAME, AttestationResult::AttestationResult,
+    STATUS_FAILED_TO_PREPARE_CSR_AND_KEY
+};
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
 use anyhow::{anyhow, Context, Result};
 use avflog::LogResult;
-use binder::{Interface, BinderFeatures, ExceptionCode, Strong, IntoBinderResult};
+use binder::{Interface, BinderFeatures, ExceptionCode, Strong, IntoBinderResult, Status};
+use client_vm_csr::{generate_attestation_key_and_csr, ClientVmAttestationData};
 use diced_open_dice::DiceArtifacts;
 use log::info;
 use rpcbinder::RpcServer;
+use crate::vm_secret::VmSecret;
 use std::os::unix::io::OwnedFd;
-use crate::vm_secret::{VmSecret};
 
 /// Implementation of `IVmPayloadService`.
 struct VmPayloadService {
@@ -66,9 +69,31 @@ impl IVmPayloadService for VmPayloadService {
         Ok(self.secret.dice().cdi_attest().to_vec())
     }
 
-    fn requestAttestation(&self, challenge: &[u8]) -> binder::Result<Vec<u8>> {
+    fn requestAttestation(&self, challenge: &[u8]) -> binder::Result<AttestationResult> {
         self.check_restricted_apis_allowed()?;
-        self.virtual_machine_service.requestAttestation(challenge)
+        let ClientVmAttestationData { private_key, csr } =
+            generate_attestation_key_and_csr(challenge, self.secret.dice())
+                .map_err(|e| {
+                    Status::new_service_specific_error_str(
+                        STATUS_FAILED_TO_PREPARE_CSR_AND_KEY,
+                        Some(format!("Failed to prepare the CSR and key pair: {e:?}")),
+                    )
+                })
+                .with_log()?;
+        let csr = csr
+            .into_cbor_vec()
+            .map_err(|e| {
+                Status::new_service_specific_error_str(
+                    STATUS_FAILED_TO_PREPARE_CSR_AND_KEY,
+                    Some(format!("Failed to serialize CSR into CBOR: {e:?}")),
+                )
+            })
+            .with_log()?;
+        let cert_chain = self.virtual_machine_service.requestAttestation(&csr)?;
+        Ok(AttestationResult {
+            privateKey: private_key.as_slice().to_vec(),
+            certificateChain: cert_chain,
+        })
     }
 }
 

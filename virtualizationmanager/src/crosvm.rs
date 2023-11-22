@@ -116,6 +116,8 @@ pub struct CrosvmConfig {
     pub detect_hangup: bool,
     pub gdb_port: Option<NonZeroU16>,
     pub vfio_devices: Vec<VfioDevice>,
+    pub dtbo: Option<File>,
+    pub dtbo_vendor: Option<File>,
 }
 
 /// A disk image to pass to crosvm for a VM.
@@ -716,17 +718,29 @@ fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Erro
     }
 
     if let Some(p) = path.to_str() {
-        Ok(format!("--vfio={p},iommu=viommu,dt-symbol={0}", device.dtbo_label))
+        Ok(format!("--vfio={p},iommu=pkvm-iommu,dt-symbol={0}", device.dtbo_label))
     } else {
         bail!("invalid path {path:?}");
     }
 }
 
-fn append_platform_devices(command: &mut Command, config: &CrosvmConfig) -> Result<(), Error> {
+fn append_platform_devices(
+    command: &mut Command,
+    preserved_fds: &mut Vec<RawFd>,
+    config: &CrosvmConfig,
+) -> Result<(), Error> {
+    if config.vfio_devices.is_empty() {
+        return Ok(());
+    }
+
+    let Some(dtbo) = &config.dtbo else {
+        bail!("VFIO devices assigned but no DTBO available");
+    };
+    command.arg(format!("--device-tree-overlay={},filter", add_preserved_fd(preserved_fds, dtbo)));
+
     for device in &config.vfio_devices {
         command.arg(vfio_argument_for_platform_device(device)?);
     }
-    // TODO(b/291192693): add dtbo to command line when assigned device is not empty.
     Ok(())
 }
 
@@ -886,7 +900,9 @@ fn run_vm(
         .arg("--socket")
         .arg(add_preserved_fd(&mut preserved_fds, &control_server_socket.as_raw_descriptor()));
 
-    append_platform_devices(&mut command, &config)?;
+    // TODO(b/285855436): Pass dtbo_vendor after --device-tree-overlay crosvm option is supported.
+
+    append_platform_devices(&mut command, &mut preserved_fds, &config)?;
 
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);
