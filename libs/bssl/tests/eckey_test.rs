@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bssl_avf::{sha256, ApiName, EcKey, EcdsaError, Error, EvpPKey, Result};
+use bssl_avf::{sha256, ApiName, EcKey, EcdsaError, Error, PKey, Result};
 use coset::CborSerializable;
 use spki::{
     der::{AnyRef, Decode},
@@ -43,7 +43,7 @@ fn ec_private_key_serialization() -> Result<()> {
 fn subject_public_key_info_serialization() -> Result<()> {
     let mut ec_key = EcKey::new_p256()?;
     ec_key.generate_key()?;
-    let pkey: EvpPKey = ec_key.try_into()?;
+    let pkey: PKey = ec_key.try_into()?;
     let subject_public_key_info = pkey.subject_public_key_info()?;
 
     let subject_public_key_info = SubjectPublicKeyInfo::from_der(&subject_public_key_info).unwrap();
@@ -57,8 +57,18 @@ fn subject_public_key_info_serialization() -> Result<()> {
 }
 
 #[test]
-fn cose_public_key_serialization() -> Result<()> {
+fn p256_cose_public_key_serialization() -> Result<()> {
     let mut ec_key = EcKey::new_p256()?;
+    check_cose_public_key_serialization(&mut ec_key)
+}
+
+#[test]
+fn p384_cose_public_key_serialization() -> Result<()> {
+    let mut ec_key = EcKey::new_p384()?;
+    check_cose_public_key_serialization(&mut ec_key)
+}
+
+fn check_cose_public_key_serialization(ec_key: &mut EcKey) -> Result<()> {
     ec_key.generate_key()?;
     let cose_key = ec_key.cose_public_key()?;
     let cose_key_data = cose_key.clone().to_vec().unwrap();
