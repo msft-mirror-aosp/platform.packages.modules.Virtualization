@@ -26,15 +26,13 @@ use bssl_avf::{sha256, EcKey, PKey};
 use ciborium::value::Value;
 use client_vm_csr::generate_attestation_key_and_csr;
 use coset::{CborSerializable, CoseMac0, CoseSign};
-use cstr::cstr;
-use diced_open_dice::{
-    retry_bcc_format_config_descriptor, retry_bcc_main_flow, Config, DiceArtifacts,
-    DiceConfigValues, DiceMode, InputValues, OwnedDiceArtifacts, HASH_SIZE, HIDDEN_SIZE,
-};
 use log::info;
 use service_vm_comm::{
     ClientVmAttestationParams, Csr, CsrPayload, EcdsaP256KeyPair, GenerateCertificateRequestParams,
     Request, RequestProcessingError, Response, VmType,
+};
+use service_vm_fake_chain::client_vm::{
+    fake_client_vm_dice_artifacts, fake_sub_components, SubComponent,
 };
 use service_vm_manager::ServiceVm;
 use std::fs;
@@ -45,7 +43,7 @@ use std::path::PathBuf;
 use vmclient::VmInstance;
 use x509_parser::{
     certificate::X509Certificate,
-    der_parser::{der::parse_der, oid, oid::Oid},
+    der_parser::{ber::BerObject, der::parse_der, oid, oid::Oid},
     prelude::FromDer,
     x509::{AlgorithmIdentifier, SubjectPublicKeyInfo, X509Version},
 };
@@ -53,19 +51,6 @@ use x509_parser::{
 const UNSIGNED_RIALTO_PATH: &str = "/data/local/tmp/rialto_test/arm64/rialto_unsigned.bin";
 const INSTANCE_IMG_PATH: &str = "/data/local/tmp/rialto_test/arm64/instance.img";
 const TEST_CERT_CHAIN_PATH: &str = "testdata/rkp_cert_chain.der";
-/// The following data are generated randomly with urandom.
-const CODE_HASH_MICRODROID: [u8; HASH_SIZE] = [
-    0x08, 0x78, 0xc2, 0x5b, 0xe7, 0xea, 0x3d, 0x62, 0x70, 0x22, 0xd9, 0x1c, 0x4f, 0x3c, 0x2e, 0x2f,
-    0x0f, 0x97, 0xa4, 0x6f, 0x6d, 0xd5, 0xe6, 0x4a, 0x6d, 0xbe, 0x34, 0x2e, 0x56, 0x04, 0xaf, 0xef,
-    0x74, 0x3f, 0xec, 0xb8, 0x44, 0x11, 0xf4, 0x2f, 0x05, 0xb2, 0x06, 0xa3, 0x0e, 0x75, 0xb7, 0x40,
-    0x9a, 0x4c, 0x58, 0xab, 0x96, 0xe7, 0x07, 0x97, 0x07, 0x86, 0x5c, 0xa1, 0x42, 0x12, 0xf0, 0x34,
-];
-const AUTHORITY_HASH_MICRODROID: [u8; HASH_SIZE] = [
-    0xc7, 0x97, 0x5b, 0xa9, 0x9e, 0xbf, 0x0b, 0xeb, 0xe7, 0x7f, 0x69, 0x8f, 0x8e, 0xcf, 0x04, 0x7d,
-    0x2c, 0x0f, 0x4d, 0xbe, 0xcb, 0xf5, 0xf1, 0x4c, 0x1d, 0x1c, 0xb7, 0x44, 0xdf, 0xf8, 0x40, 0x90,
-    0x09, 0x65, 0xab, 0x01, 0x34, 0x3e, 0xc2, 0xc4, 0xf7, 0xa2, 0x3a, 0x5c, 0x4e, 0x76, 0x4f, 0x42,
-    0xa8, 0x6c, 0xc9, 0xf1, 0x7b, 0x12, 0x80, 0xa4, 0xef, 0xa2, 0x4d, 0x72, 0xa1, 0x21, 0xe2, 0x47,
-];
 
 #[test]
 fn process_requests_in_protected_vm() -> Result<()> {
@@ -148,8 +133,7 @@ fn check_attestation_request(
         0x7d, 0x86, 0x58, 0x79, 0x3a, 0x09, 0xdf, 0x1c, 0xa5, 0x80, 0x80, 0x15, 0x2b, 0x13, 0x17,
         0x5c,
     ];
-    let dice_artifacts = diced_sample_inputs::make_sample_bcc_and_cdis()?;
-    let dice_artifacts = extend_dice_artifacts_with_microdroid_payload(&dice_artifacts)?;
+    let dice_artifacts = fake_client_vm_dice_artifacts()?;
     let attestation_data = generate_attestation_key_and_csr(&CHALLENGE, &dice_artifacts)?;
     let cert_chain = fs::read(TEST_CERT_CHAIN_PATH)?;
     let (remaining, cert) = X509Certificate::from_der(&cert_chain)?;
@@ -193,30 +177,23 @@ fn check_attestation_request(
     }
 }
 
-fn extend_dice_artifacts_with_microdroid_payload(
-    dice_artifacts: &dyn DiceArtifacts,
-) -> Result<OwnedDiceArtifacts> {
-    let config_values = DiceConfigValues {
-        component_name: Some(cstr!("Microdroid payload")),
-        component_version: Some(1),
-        resettable: true,
-        ..Default::default()
-    };
-    let config_descriptor = retry_bcc_format_config_descriptor(&config_values)?;
-    let input_values = InputValues::new(
-        CODE_HASH_MICRODROID,
-        Config::Descriptor(config_descriptor.as_slice()),
-        AUTHORITY_HASH_MICRODROID,
-        DiceMode::kDiceModeDebug,
-        [0u8; HIDDEN_SIZE], // hidden
-    );
-    retry_bcc_main_flow(
-        dice_artifacts.cdi_attest(),
-        dice_artifacts.cdi_seal(),
-        dice_artifacts.bcc().unwrap(),
-        &input_values,
-    )
-    .context("Failed to run BCC main flow for Microdroid")
+fn check_vm_components(vm_components: &[BerObject]) -> Result<()> {
+    let expected_components = fake_sub_components();
+    assert_eq!(expected_components.len(), vm_components.len());
+    for i in 0..expected_components.len() {
+        check_vm_component(&vm_components[i], &expected_components[i])?;
+    }
+    Ok(())
+}
+
+fn check_vm_component(vm_component: &BerObject, expected_component: &SubComponent) -> Result<()> {
+    let vm_component = vm_component.as_sequence()?;
+    assert_eq!(4, vm_component.len());
+    assert_eq!(expected_component.name, vm_component[0].as_str()?);
+    assert_eq!(expected_component.version, vm_component[1].as_u64()?);
+    assert_eq!(expected_component.code_hash, vm_component[2].as_slice()?);
+    assert_eq!(expected_component.authority_hash, vm_component[3].as_slice()?);
+    Ok(())
 }
 
 fn check_certificate_for_client_vm(
@@ -262,13 +239,15 @@ fn check_certificate_for_client_vm(
     let (remaining, extension) = parse_der(extension.value)?;
     assert!(remaining.is_empty());
     let attestation_ext = extension.as_sequence()?;
-    assert_eq!(2, attestation_ext.len());
+    assert_eq!(3, attestation_ext.len());
     assert_eq!(csr_payload.challenge, attestation_ext[0].as_slice()?);
     let is_vm_secure = attestation_ext[1].as_bool()?;
     assert!(
         !is_vm_secure,
         "The VM shouldn't be secure as the last payload added in the test is in Debug mode"
     );
+    let vm_components = attestation_ext[2].as_sequence()?;
+    check_vm_components(vm_components)?;
 
     // Checks other fields on the certificate
     assert_eq!(X509Version::V3, cert.version());
