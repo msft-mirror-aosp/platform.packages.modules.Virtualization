@@ -14,8 +14,9 @@
 
 //! This module contains functions related to DICE.
 
+use alloc::string::String;
 use alloc::vec::Vec;
-use ciborium::value::Value;
+use ciborium::value::{Integer, Value};
 use core::cell::OnceCell;
 use core::result;
 use coset::{
@@ -23,7 +24,9 @@ use coset::{
 };
 use diced_open_dice::{DiceMode, HASH_SIZE};
 use log::error;
-use service_vm_comm::{cbor_value_type, try_as_bytes, RequestProcessingError};
+use service_vm_comm::{
+    cbor_value_type, to_unexpected_item_error, value_to_bytes, RequestProcessingError,
+};
 
 type Result<T> = result::Result<T, RequestProcessingError>;
 
@@ -32,6 +35,17 @@ const CONFIG_DESC: i64 = -4670548;
 const AUTHORITY_HASH: i64 = -4670549;
 const MODE: i64 = -4670551;
 const SUBJECT_PUBLIC_KEY: i64 = -4670552;
+
+const CONFIG_DESC_COMPONENT_NAME: i64 = -70002;
+const CONFIG_DESC_SUB_COMPONENTS: i64 = -71002;
+
+const SUB_COMPONENT_NAME: i64 = 1;
+const SUB_COMPONENT_VERSION: i64 = 2;
+const SUB_COMPONENT_CODE_HASH: i64 = 3;
+const SUB_COMPONENT_AUTHORITY_HASH: i64 = 4;
+
+const MICRODROID_KERNEL_COMPONENT_NAME: &str = "vm_entry";
+const MICRODROID_PAYLOAD_COMPONENT_NAME: &str = "Microdroid payload";
 
 /// Represents a partially decoded `DiceCertChain` from the client VM.
 /// The whole chain is defined as following:
@@ -83,7 +97,43 @@ impl ClientVmDiceChain {
             payloads.len() >= 3,
             "The client VM DICE chain must contain at least three DiceChainEntryPayloads"
         );
-        Ok(Self { payloads })
+        let chain = Self { payloads };
+        chain.validate_microdroid_components_names()?;
+        Ok(chain)
+    }
+
+    fn validate_microdroid_components_names(&self) -> Result<()> {
+        let microdroid_kernel_name = &self.microdroid_kernel().config_descriptor.component_name;
+        if MICRODROID_KERNEL_COMPONENT_NAME != microdroid_kernel_name {
+            error!(
+                "The second to last entry in the client VM DICE chain must describe the \
+                    Microdroid kernel. Got {}",
+                microdroid_kernel_name
+            );
+            return Err(RequestProcessingError::InvalidDiceChain);
+        }
+        let microdroid_payload_name = &self.microdroid_payload().config_descriptor.component_name;
+        if MICRODROID_PAYLOAD_COMPONENT_NAME != microdroid_payload_name {
+            error!(
+                "The last entry in the client VM DICE chain must describe the Microdroid \
+                    payload. Got {}",
+                microdroid_payload_name
+            );
+            return Err(RequestProcessingError::InvalidDiceChain);
+        }
+        Ok(())
+    }
+
+    fn microdroid_kernel(&self) -> &DiceChainEntryPayload {
+        &self.payloads[self.payloads.len() - 2]
+    }
+
+    fn microdroid_payload(&self) -> &DiceChainEntryPayload {
+        &self.payloads[self.payloads.len() - 1]
+    }
+
+    pub(crate) fn microdroid_payload_components(&self) -> Option<&Vec<SubComponent>> {
+        self.microdroid_payload().config_descriptor.sub_components.as_ref()
     }
 
     /// Returns true if all payloads in the DICE chain are in normal mode.
@@ -101,9 +151,9 @@ pub(crate) fn validate_client_vm_dice_chain_prefix_match(
     service_vm_dice_chain: &[u8],
 ) -> Result<Vec<Value>> {
     let client_vm_dice_chain =
-        try_as_value_array(Value::from_slice(client_vm_dice_chain)?, "client_vm_dice_chain")?;
+        value_to_array(Value::from_slice(client_vm_dice_chain)?, "client_vm_dice_chain")?;
     let service_vm_dice_chain =
-        try_as_value_array(Value::from_slice(service_vm_dice_chain)?, "service_vm_dice_chain")?;
+        value_to_array(Value::from_slice(service_vm_dice_chain)?, "service_vm_dice_chain")?;
     if service_vm_dice_chain.len() < 3 {
         // The service VM's DICE chain must contain the root key and at least two other entries
         // that describe:
@@ -161,9 +211,7 @@ pub(crate) struct DiceChainEntryPayload {
     code_hash: [u8; HASH_SIZE],
     #[allow(dead_code)]
     authority_hash: [u8; HASH_SIZE],
-    /// TODO(b/313815907): Parse the config descriptor and read Apk/Apexes info in it.
-    #[allow(dead_code)]
-    config_descriptor: Vec<u8>,
+    config_descriptor: ConfigDescriptor,
 }
 
 impl DiceChainEntryPayload {
@@ -180,10 +228,7 @@ impl DiceChainEntryPayload {
             error!("No payload found in the DICE chain entry");
             RequestProcessingError::InvalidDiceChain
         })?;
-        let payload = Value::from_slice(&payload)?;
-        let Value::Map(entries) = payload else {
-            return Err(CoseError::UnexpectedItem(cbor_value_type(&payload), "map").into());
-        };
+        let entries = value_to_map(Value::from_slice(&payload)?, "DiceChainEntryPayload")?;
         build_payload(entries)
     }
 }
@@ -191,41 +236,191 @@ impl DiceChainEntryPayload {
 fn build_payload(entries: Vec<(Value, Value)>) -> Result<DiceChainEntryPayload> {
     let mut builder = PayloadBuilder::default();
     for (key, value) in entries.into_iter() {
-        let Some(Ok(key)) = key.as_integer().map(i64::try_from) else {
-            error!("Invalid key found in the DICE chain entry: {:?}", key);
-            return Err(RequestProcessingError::InvalidDiceChain);
-        };
+        let key: i64 = value_to_num(key, "DiceChainEntryPayload key")?;
         match key {
             SUBJECT_PUBLIC_KEY => {
-                let subject_public_key = try_as_bytes(value, "subject_public_key")?;
+                let subject_public_key = value_to_bytes(value, "subject_public_key")?;
                 let subject_public_key = CoseKey::from_slice(&subject_public_key)?.try_into()?;
                 builder.subject_public_key(subject_public_key)?;
             }
             MODE => builder.mode(to_mode(value)?)?,
-            CODE_HASH => builder.code_hash(try_as_byte_array(value, "code_hash")?)?,
-            AUTHORITY_HASH => {
-                builder.authority_hash(try_as_byte_array(value, "authority_hash")?)?
+            CODE_HASH => {
+                let code_hash = value_to_byte_array(value, "DiceChainEntryPayload code_hash")?;
+                builder.code_hash(code_hash)?;
             }
-            CONFIG_DESC => builder.config_descriptor(try_as_bytes(value, "config_descriptor")?)?,
+            AUTHORITY_HASH => {
+                let authority_hash =
+                    value_to_byte_array(value, "DiceChainEntryPayload authority_hash")?;
+                builder.authority_hash(authority_hash)?;
+            }
+            CONFIG_DESC => {
+                let config_descriptor = value_to_bytes(value, "config_descriptor")?;
+                let config_descriptor = ConfigDescriptor::from_slice(&config_descriptor)?;
+                builder.config_descriptor(config_descriptor)?;
+            }
             _ => {}
         }
     }
     builder.build()
 }
 
-fn try_as_value_array(v: Value, context: &str) -> coset::Result<Vec<Value>> {
-    if let Value::Array(data) = v {
-        Ok(data)
-    } else {
-        let v_type = cbor_value_type(&v);
-        error!("The provided value type '{v_type}' is not of type 'bytes': {context}");
-        Err(CoseError::UnexpectedItem(v_type, "array"))
+/// Represents a partially decoded `ConfigurationDescriptor`.
+///
+/// The whole `ConfigurationDescriptor` is defined in:
+///
+/// hardware/interfaces/security/rkp/aidl/android/hardware/security/keymint/
+/// generateCertificateRequestV2.cddl
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigDescriptor {
+    component_name: String,
+    sub_components: Option<Vec<SubComponent>>,
+}
+
+impl ConfigDescriptor {
+    fn from_slice(data: &[u8]) -> Result<Self> {
+        let value = Value::from_slice(data)?;
+        let entries = value_to_map(value, "ConfigDescriptor")?;
+        let mut builder = ConfigDescriptorBuilder::default();
+        for (key, value) in entries.into_iter() {
+            let key: i64 = value_to_num(key, "ConfigDescriptor key")?;
+            match key {
+                CONFIG_DESC_COMPONENT_NAME => {
+                    let name = value_to_text(value, "ConfigDescriptor component_name")?;
+                    builder.component_name(name)?;
+                }
+                CONFIG_DESC_SUB_COMPONENTS => {
+                    let sub_components = value_to_array(value, "ConfigDescriptor sub_components")?;
+                    let sub_components = sub_components
+                        .into_iter()
+                        .map(SubComponent::try_from)
+                        .collect::<Result<Vec<_>>>()?;
+                    builder.sub_components(sub_components)?
+                }
+                _ => {}
+            }
+        }
+        builder.build()
     }
 }
 
-fn try_as_byte_array<const N: usize>(v: Value, context: &str) -> Result<[u8; N]> {
-    let data = try_as_bytes(v, context)?;
-    data.try_into().map_err(|e| {
+#[derive(Debug, Clone, Default)]
+struct ConfigDescriptorBuilder {
+    component_name: OnceCell<String>,
+    sub_components: OnceCell<Vec<SubComponent>>,
+}
+
+impl ConfigDescriptorBuilder {
+    fn component_name(&mut self, component_name: String) -> Result<()> {
+        set_once(&self.component_name, component_name, "ConfigDescriptor component_name")
+    }
+
+    fn sub_components(&mut self, sub_components: Vec<SubComponent>) -> Result<()> {
+        set_once(&self.sub_components, sub_components, "ConfigDescriptor sub_components")
+    }
+
+    fn build(mut self) -> Result<ConfigDescriptor> {
+        let component_name =
+            take_value(&mut self.component_name, "ConfigDescriptor component_name")?;
+        let sub_components = self.sub_components.take();
+        Ok(ConfigDescriptor { component_name, sub_components })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SubComponent {
+    pub(crate) name: String,
+    pub(crate) version: u64,
+    pub(crate) code_hash: Vec<u8>,
+    pub(crate) authority_hash: Vec<u8>,
+}
+
+impl TryFrom<Value> for SubComponent {
+    type Error = RequestProcessingError;
+
+    fn try_from(value: Value) -> Result<Self> {
+        let entries = value_to_map(value, "SubComponent")?;
+        let mut builder = SubComponentBuilder::default();
+        for (key, value) in entries.into_iter() {
+            let key: i64 = value_to_num(key, "SubComponent key")?;
+            match key {
+                SUB_COMPONENT_NAME => {
+                    builder.name(value_to_text(value, "SubComponent component_name")?)?
+                }
+                SUB_COMPONENT_VERSION => {
+                    builder.version(value_to_num(value, "SubComponent version")?)?
+                }
+                SUB_COMPONENT_CODE_HASH => {
+                    builder.code_hash(value_to_bytes(value, "SubComponent code_hash")?)?
+                }
+                SUB_COMPONENT_AUTHORITY_HASH => {
+                    builder.authority_hash(value_to_bytes(value, "SubComponent authority_hash")?)?
+                }
+                k => {
+                    error!("Unknown key in SubComponent: {}", k);
+                    return Err(RequestProcessingError::InvalidDiceChain);
+                }
+            }
+        }
+        builder.build()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SubComponentBuilder {
+    name: OnceCell<String>,
+    version: OnceCell<u64>,
+    code_hash: OnceCell<Vec<u8>>,
+    authority_hash: OnceCell<Vec<u8>>,
+}
+
+impl SubComponentBuilder {
+    fn name(&mut self, name: String) -> Result<()> {
+        set_once(&self.name, name, "SubComponent name")
+    }
+
+    fn version(&mut self, version: u64) -> Result<()> {
+        set_once(&self.version, version, "SubComponent version")
+    }
+
+    fn code_hash(&mut self, code_hash: Vec<u8>) -> Result<()> {
+        set_once(&self.code_hash, code_hash, "SubComponent code_hash")
+    }
+
+    fn authority_hash(&mut self, authority_hash: Vec<u8>) -> Result<()> {
+        set_once(&self.authority_hash, authority_hash, "SubComponent authority_hash")
+    }
+
+    fn build(mut self) -> Result<SubComponent> {
+        let name = take_value(&mut self.name, "SubComponent name")?;
+        let version = take_value(&mut self.version, "SubComponent version")?;
+        let code_hash = take_value(&mut self.code_hash, "SubComponent code_hash")?;
+        let authority_hash = take_value(&mut self.authority_hash, "SubComponent authority_hash")?;
+        Ok(SubComponent { name, version, code_hash, authority_hash })
+    }
+}
+
+fn value_to_array(v: Value, context: &'static str) -> coset::Result<Vec<Value>> {
+    v.into_array().map_err(|e| to_unexpected_item_error(&e, "array", context))
+}
+
+fn value_to_text(v: Value, context: &'static str) -> coset::Result<String> {
+    v.into_text().map_err(|e| to_unexpected_item_error(&e, "tstr", context))
+}
+
+fn value_to_map(v: Value, context: &'static str) -> coset::Result<Vec<(Value, Value)>> {
+    v.into_map().map_err(|e| to_unexpected_item_error(&e, "map", context))
+}
+
+fn value_to_num<T: TryFrom<Integer>>(v: Value, context: &'static str) -> Result<T> {
+    let num = v.into_integer().map_err(|e| to_unexpected_item_error(&e, "int", context))?;
+    num.try_into().map_err(|_| {
+        error!("The provided value '{num:?}' is not a valid number: {context}");
+        RequestProcessingError::InvalidDiceChain
+    })
+}
+
+fn value_to_byte_array<const N: usize>(v: Value, context: &'static str) -> Result<[u8; N]> {
+    value_to_bytes(v, context)?.try_into().map_err(|e| {
         error!("The provided value '{context}' is not an array of length {N}: {e:?}");
         RequestProcessingError::InternalError
     })
@@ -264,7 +459,7 @@ struct PayloadBuilder {
     mode: OnceCell<DiceMode>,
     code_hash: OnceCell<[u8; HASH_SIZE]>,
     authority_hash: OnceCell<[u8; HASH_SIZE]>,
-    config_descriptor: OnceCell<Vec<u8>>,
+    config_descriptor: OnceCell<ConfigDescriptor>,
 }
 
 fn set_once<T>(field: &OnceCell<T>, value: T, field_name: &str) -> Result<()> {
@@ -298,7 +493,7 @@ impl PayloadBuilder {
         set_once(&self.authority_hash, authority_hash, "authority_hash")
     }
 
-    fn config_descriptor(&mut self, config_descriptor: Vec<u8>) -> Result<()> {
+    fn config_descriptor(&mut self, config_descriptor: ConfigDescriptor) -> Result<()> {
         set_once(&self.config_descriptor, config_descriptor, "config_descriptor")
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 The Android Open Source Project
+ * Copyright (C) 2023 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,17 +14,14 @@
  * limitations under the License.
  */
 
-//! Verifies APK/APEX signing with v2/v3 scheme
+//! Provides functions to build a test chain for non-protected rialto and tests.
 
-mod algorithms;
-mod bytes_ext;
-mod hashtree;
-mod sigutil;
-#[allow(dead_code)]
-pub mod testing;
-mod v3;
-mod v4;
+#![cfg_attr(not(feature = "std"), no_std)]
 
-pub use algorithms::{HashAlgorithm, SignatureAlgorithmID};
-pub use v3::{extract_signed_data, verify, SignedData};
-pub use v4::{get_apk_digest, V4Signature};
+extern crate alloc;
+
+// `client_vm` builds DICE artifacts related to Microdroid, which is not relevant
+// to the nostd build used in rialto.
+#[cfg(feature = "std")]
+pub mod client_vm;
+pub mod service_vm;
