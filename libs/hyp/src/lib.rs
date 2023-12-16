@@ -20,7 +20,10 @@ mod error;
 mod hypervisor;
 mod util;
 
+pub use crate::hypervisor::DeviceAssigningHypervisor;
 pub use error::{Error, Result};
-pub use hypervisor::{get_mem_sharer, get_mmio_guard, KvmError, MMIO_GUARD_GRANULE_SIZE};
+pub use hypervisor::{
+    get_device_assigner, get_mem_sharer, get_mmio_guard, KvmError, MMIO_GUARD_GRANULE_SIZE,
+};
 
 use hypervisor::GeniezoneError;

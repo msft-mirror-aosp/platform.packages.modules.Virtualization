@@ -24,7 +24,9 @@ mod kvm;
 use crate::error::{Error, Result};
 use alloc::boxed::Box;
 use common::Hypervisor;
-pub use common::{MemSharingHypervisor, MmioGuardedHypervisor, MMIO_GUARD_GRANULE_SIZE};
+pub use common::{
+    DeviceAssigningHypervisor, MemSharingHypervisor, MmioGuardedHypervisor, MMIO_GUARD_GRANULE_SIZE,
+};
 pub use geniezone::GeniezoneError;
 use geniezone::GeniezoneHypervisor;
 use gunyah::GunyahHypervisor;
@@ -121,4 +123,9 @@ pub fn get_mmio_guard() -> Option<&'static dyn MmioGuardedHypervisor> {
 /// Gets the dynamic memory sharing hypervisor singleton, if any.
 pub fn get_mem_sharer() -> Option<&'static dyn MemSharingHypervisor> {
     get_hypervisor().as_mem_sharer()
+}
+
+/// Gets the device assigning hypervisor singleton, if any.
+pub fn get_device_assigner() -> Option<&'static dyn DeviceAssigningHypervisor> {
+    get_hypervisor().as_device_assigner()
 }

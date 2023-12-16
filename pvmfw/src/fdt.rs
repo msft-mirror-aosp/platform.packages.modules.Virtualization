@@ -15,8 +15,7 @@
 //! High-level FDT functions.
 
 use crate::bootargs::BootArgsIterator;
-use crate::device_assignment::DeviceAssignmentInfo;
-use crate::device_assignment::VmDtbo;
+use crate::device_assignment::{DeviceAssignmentInfo, VmDtbo};
 use crate::helpers::GUEST_PAGE_SIZE;
 use crate::Box;
 use crate::RebootReason;
@@ -198,6 +197,22 @@ fn patch_num_cpus(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
     while let Some(current) = next {
         next = current.delete_and_next_compatible(cpu)?;
     }
+    Ok(())
+}
+
+fn read_vendor_public_key_from(fdt: &Fdt) -> libfdt::Result<Option<Vec<u8>>> {
+    if let Some(avf_node) = fdt.node(cstr!("/avf"))? {
+        if let Some(vendor_public_key) = avf_node.getprop(cstr!("vendor_public_key"))? {
+            return Ok(Some(vendor_public_key.to_vec()));
+        }
+    }
+    Ok(None)
+}
+
+fn patch_vendor_public_key(fdt: &mut Fdt, vendor_public_key: &[u8]) -> libfdt::Result<()> {
+    let mut root_node = fdt.root_mut()?;
+    let mut avf_node = root_node.add_subnode(cstr!("/avf"))?;
+    avf_node.setprop(cstr!("vendor_public_key"), vendor_public_key)?;
     Ok(())
 }
 
@@ -593,6 +608,7 @@ pub struct DeviceTreeInfo {
     serial_info: SerialInfo,
     pub swiotlb_info: SwiotlbInfo,
     device_assignment: Option<DeviceAssignmentInfo>,
+    vendor_public_key: Option<Vec<u8>>,
 }
 
 impl DeviceTreeInfo {
@@ -627,6 +643,11 @@ pub fn sanitize_device_tree(
         RebootReason::InvalidFdt
     })?;
 
+    fdt.unpack().map_err(|e| {
+        error!("Failed to unpack DT for patching: {e}");
+        RebootReason::InvalidFdt
+    })?;
+
     if let Some(device_assignment_info) = &info.device_assignment {
         let vm_dtbo = vm_dtbo.unwrap();
         device_assignment_info.filter(vm_dtbo).map_err(|e| {
@@ -645,6 +666,11 @@ pub fn sanitize_device_tree(
     }
 
     patch_device_tree(fdt, &info)?;
+
+    fdt.pack().map_err(|e| {
+        error!("Failed to unpack DT after patching: {e}");
+        RebootReason::InvalidFdt
+    })?;
 
     Ok(info)
 }
@@ -694,12 +720,33 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
     validate_swiotlb_info(&swiotlb_info, &memory_range)?;
 
     let device_assignment = match vm_dtbo {
-        Some(vm_dtbo) => DeviceAssignmentInfo::parse(fdt, vm_dtbo).map_err(|e| {
-            error!("Failed to parse device assignment from DT and VM DTBO: {e}");
-            RebootReason::InvalidFdt
-        })?,
+        Some(vm_dtbo) => {
+            if let Some(hypervisor) = hyp::get_device_assigner() {
+                DeviceAssignmentInfo::parse(fdt, vm_dtbo, hypervisor).map_err(|e| {
+                    error!("Failed to parse device assignment from DT and VM DTBO: {e}");
+                    RebootReason::InvalidFdt
+                })?
+            } else {
+                warn!(
+                    "Device assignment is ignored because device assigning hypervisor is missing"
+                );
+                None
+            }
+        }
         None => None,
     };
+
+    // TODO(b/285854379) : A temporary solution lives. This is for enabling
+    // microdroid vendor partition for non-protected VM as well. When passing
+    // DT path containing vendor_public_key via fstab, init stage will check
+    // if vendor_public_key exists in the init stage, regardless the protection.
+    // Adding this temporary solution will prevent fatal in init stage for
+    // protected VM. However, this data is not trustable without validating
+    // with vendor public key value comes from ABL.
+    let vendor_public_key = read_vendor_public_key_from(fdt).map_err(|e| {
+        error!("Failed to read vendor_public_key from DT: {e}");
+        RebootReason::InvalidFdt
+    })?;
 
     Ok(DeviceTreeInfo {
         kernel_range,
@@ -711,15 +758,11 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
         serial_info,
         swiotlb_info,
         device_assignment,
+        vendor_public_key,
     })
 }
 
 fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootReason> {
-    fdt.unpack().map_err(|e| {
-        error!("Failed to unpack DT for patching: {e}");
-        RebootReason::InvalidFdt
-    })?;
-
     if let Some(initrd_range) = &info.initrd_range {
         patch_initrd_range(fdt, initrd_range).map_err(|e| {
             error!("Failed to patch initrd range to DT: {e}");
@@ -768,11 +811,12 @@ fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootR
             RebootReason::InvalidFdt
         })?;
     }
-
-    fdt.pack().map_err(|e| {
-        error!("Failed to pack DT after patching: {e}");
-        RebootReason::InvalidFdt
-    })?;
+    if let Some(vendor_public_key) = &info.vendor_public_key {
+        patch_vendor_public_key(fdt, vendor_public_key).map_err(|e| {
+            error!("Failed to patch vendor_public_key to DT: {e}");
+            RebootReason::InvalidFdt
+        })?;
+    }
 
     Ok(())
 }

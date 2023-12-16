@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::dice_driver::DiceDriver;
-use crate::instance::ApkData;
+use crate::instance::{ApexData, ApkData};
 use crate::{is_debuggable, MicrodroidData};
 use anyhow::{bail, Context, Result};
 use ciborium::{cbor, Value};
@@ -26,24 +26,23 @@ use std::iter::once;
 /// Perform an open DICE derivation for the payload.
 pub fn dice_derivation(
     dice: DiceDriver,
-    verified_data: &MicrodroidData,
+    instance_data: &MicrodroidData,
     payload_metadata: &PayloadMetadata,
 ) -> Result<OwnedDiceArtifacts> {
-    let subcomponents = build_subcomponent_list(verified_data);
-
-    let config_descriptor = format_payload_config_descriptor(payload_metadata, &subcomponents)
+    let subcomponents = build_subcomponent_list(instance_data);
+    let config_descriptor = format_payload_config_descriptor(payload_metadata, subcomponents)
         .context("Building config descriptor")?;
 
     // Calculate compound digests of code and authorities
     let mut code_hash_ctx = Sha512::new();
     let mut authority_hash_ctx = Sha512::new();
-    code_hash_ctx.update(verified_data.apk_data.root_hash.as_ref());
-    authority_hash_ctx.update(verified_data.apk_data.pubkey.as_ref());
-    for extra_apk in &verified_data.extra_apks_data {
+    code_hash_ctx.update(instance_data.apk_data.root_hash.as_ref());
+    authority_hash_ctx.update(instance_data.apk_data.cert_hash.as_ref());
+    for extra_apk in &instance_data.extra_apks_data {
         code_hash_ctx.update(extra_apk.root_hash.as_ref());
-        authority_hash_ctx.update(extra_apk.pubkey.as_ref());
+        authority_hash_ctx.update(extra_apk.cert_hash.as_ref());
     }
-    for apex in &verified_data.apex_data {
+    for apex in &instance_data.apex_data {
         code_hash_ctx.update(apex.root_digest.as_ref());
         authority_hash_ctx.update(apex.public_key.as_ref());
     }
@@ -54,55 +53,65 @@ pub fn dice_derivation(
     let debuggable = is_debuggable()?;
 
     // Send the details to diced
-    let hidden = verified_data.salt.clone().try_into().unwrap();
+    let hidden = instance_data.salt.clone().try_into().unwrap();
     dice.derive(code_hash, &config_descriptor, authority_hash, debuggable, hidden)
 }
 
-struct Subcomponent<'a> {
+struct Subcomponent {
     name: String,
     version: u64,
-    code_hash: &'a [u8],
-    authority_hash: Box<[u8]>,
+    code_hash: Vec<u8>,
+    authority_hash: Vec<u8>,
 }
 
-impl<'a> Subcomponent<'a> {
-    fn to_value(&self) -> Result<Value> {
+impl Subcomponent {
+    fn into_value(self) -> Result<Value> {
         Ok(cbor!({
            1 => self.name,
            2 => self.version,
-           3 => self.code_hash,
-           4 => self.authority_hash
+           3 => Value::Bytes(self.code_hash),
+           4 => Value::Bytes(self.authority_hash),
         })?)
     }
 
-    fn for_apk(apk: &'a ApkData) -> Self {
+    fn for_apk(apk: &ApkData) -> Self {
         Self {
             name: format!("apk:{}", apk.package_name),
             version: apk.version_code,
-            code_hash: &apk.root_hash,
-            authority_hash:
-                // TODO(b/305925597): Hash the certificate not the pubkey
-                Box::new(sha512(&apk.pubkey)),
+            code_hash: apk.root_hash.clone(),
+            authority_hash: apk.cert_hash.clone(),
+        }
+    }
+
+    fn for_apex(apex: &ApexData) -> Self {
+        // Note that this is only reachable if the dice_changes flag is on, in which case
+        // the manifest data will always be present.
+        Self {
+            name: format!("apex:{}", apex.manifest_name.as_ref().unwrap()),
+            version: apex.manifest_version.unwrap() as u64,
+            code_hash: apex.root_digest.clone(),
+            authority_hash: sha512(&apex.public_key).to_vec(),
         }
     }
 }
 
-fn build_subcomponent_list(verified_data: &MicrodroidData) -> Vec<Subcomponent> {
+fn build_subcomponent_list(instance_data: &MicrodroidData) -> Vec<Subcomponent> {
     if !cfg!(dice_changes) {
         return vec![];
     }
 
-    once(&verified_data.apk_data)
-        .chain(&verified_data.extra_apks_data)
-        .map(Subcomponent::for_apk)
-        .collect()
+    let apks = once(&instance_data.apk_data)
+        .chain(&instance_data.extra_apks_data)
+        .map(Subcomponent::for_apk);
+    let apexes = instance_data.apex_data.iter().map(Subcomponent::for_apex);
+    apks.chain(apexes).collect()
 }
 
-// Returns a configuration descriptor of the given payload. See vm_config.cddl for a definition
+// Returns a configuration descriptor of the given payload. See vm_config.cddl for the definition
 // of the format.
 fn format_payload_config_descriptor(
     payload: &PayloadMetadata,
-    subcomponents: &[Subcomponent],
+    subcomponents: Vec<Subcomponent>,
 ) -> Result<Vec<u8>> {
     let mut map = Vec::new();
     map.push((cbor!(-70002)?, cbor!("Microdroid payload")?));
@@ -118,7 +127,7 @@ fn format_payload_config_descriptor(
 
     if !subcomponents.is_empty() {
         let values =
-            subcomponents.iter().map(Subcomponent::to_value).collect::<Result<Vec<_>>>()?;
+            subcomponents.into_iter().map(Subcomponent::into_value).collect::<Result<Vec<_>>>()?;
         map.push((cbor!(-71002)?, cbor!(values)?));
     }
 
@@ -130,7 +139,7 @@ mod tests {
     use super::*;
     use microdroid_metadata::PayloadConfig;
 
-    const NO_SUBCOMPONENTS: [Subcomponent; 0] = [];
+    const NO_SUBCOMPONENTS: Vec<Subcomponent> = Vec::new();
 
     fn assert_eq_bytes(expected: &[u8], actual: &[u8]) {
         assert_eq!(
@@ -146,7 +155,7 @@ mod tests {
     fn payload_metadata_with_path_formats_correctly() -> Result<()> {
         let payload_metadata = PayloadMetadata::ConfigPath("/config_path".to_string());
         let config_descriptor =
-            format_payload_config_descriptor(&payload_metadata, &NO_SUBCOMPONENTS)?;
+            format_payload_config_descriptor(&payload_metadata, NO_SUBCOMPONENTS)?;
         static EXPECTED_CONFIG_DESCRIPTOR: &[u8] = &[
             0xa2, 0x3a, 0x00, 0x01, 0x11, 0x71, 0x72, 0x4d, 0x69, 0x63, 0x72, 0x6f, 0x64, 0x72,
             0x6f, 0x69, 0x64, 0x20, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x3a, 0x00, 0x01,
@@ -165,7 +174,7 @@ mod tests {
         };
         let payload_metadata = PayloadMetadata::Config(payload_config);
         let config_descriptor =
-            format_payload_config_descriptor(&payload_metadata, &NO_SUBCOMPONENTS)?;
+            format_payload_config_descriptor(&payload_metadata, NO_SUBCOMPONENTS)?;
         static EXPECTED_CONFIG_DESCRIPTOR: &[u8] = &[
             0xa2, 0x3a, 0x00, 0x01, 0x11, 0x71, 0x72, 0x4d, 0x69, 0x63, 0x72, 0x6f, 0x64, 0x72,
             0x6f, 0x69, 0x64, 0x20, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x3a, 0x00, 0x01,
@@ -179,31 +188,30 @@ mod tests {
     #[test]
     fn payload_metadata_with_subcomponents_formats_correctly() -> Result<()> {
         let payload_metadata = PayloadMetadata::ConfigPath("/config_path".to_string());
-        let subcomponents = [
+        let subcomponents = vec![
             Subcomponent {
                 name: "apk1".to_string(),
                 version: 1,
-                code_hash: &[42u8],
-                authority_hash: Box::new([17u8]),
+                code_hash: vec![42, 43],
+                authority_hash: vec![17],
             },
             Subcomponent {
                 name: "apk2".to_string(),
                 version: 0x1000_0000_0001,
-                code_hash: &[43u8],
-                authority_hash: Box::new([19u8]),
+                code_hash: vec![43],
+                authority_hash: vec![19, 20],
             },
         ];
-        let config_descriptor =
-            format_payload_config_descriptor(&payload_metadata, &subcomponents)?;
+        let config_descriptor = format_payload_config_descriptor(&payload_metadata, subcomponents)?;
         // Verified using cbor.me.
         static EXPECTED_CONFIG_DESCRIPTOR: &[u8] = &[
             0xa3, 0x3a, 0x00, 0x01, 0x11, 0x71, 0x72, 0x4d, 0x69, 0x63, 0x72, 0x6f, 0x64, 0x72,
             0x6f, 0x69, 0x64, 0x20, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x3a, 0x00, 0x01,
             0x15, 0x57, 0x6c, 0x2f, 0x63, 0x6f, 0x6e, 0x66, 0x69, 0x67, 0x5f, 0x70, 0x61, 0x74,
             0x68, 0x3a, 0x00, 0x01, 0x15, 0x59, 0x82, 0xa4, 0x01, 0x64, 0x61, 0x70, 0x6b, 0x31,
-            0x02, 0x01, 0x03, 0x81, 0x18, 0x2a, 0x04, 0x81, 0x11, 0xa4, 0x01, 0x64, 0x61, 0x70,
-            0x6b, 0x32, 0x02, 0x1b, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x81,
-            0x18, 0x2b, 0x04, 0x81, 0x13,
+            0x02, 0x01, 0x03, 0x42, 0x2a, 0x2b, 0x04, 0x41, 0x11, 0xa4, 0x01, 0x64, 0x61, 0x70,
+            0x6b, 0x32, 0x02, 0x1b, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x41,
+            0x2b, 0x04, 0x42, 0x13, 0x14,
         ];
         assert_eq_bytes(EXPECTED_CONFIG_DESCRIPTOR, &config_descriptor);
         Ok(())
