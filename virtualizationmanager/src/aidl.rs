@@ -52,6 +52,14 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::{
         BnVirtualMachineService, IVirtualMachineService,
 };
+use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::ISecretkeeper::{BnSecretkeeper, ISecretkeeper};
+use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::SecretId::SecretId;
+use android_hardware_security_authgraph::aidl::android::hardware::security::authgraph::{
+    Arc::Arc as AuthgraphArc, IAuthGraphKeyExchange::IAuthGraphKeyExchange,
+    IAuthGraphKeyExchange::BnAuthGraphKeyExchange, Identity::Identity, KeInitResult::KeInitResult,
+    Key::Key, PubKey::PubKey, SessionIdSignature::SessionIdSignature, SessionInfo::SessionInfo,
+    SessionInitiationInfo::SessionInitiationInfo,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use apkverify::{HashAlgorithm, V4Signature};
 use avflog::LogResult;
@@ -102,9 +110,13 @@ const ANDROID_VM_INSTANCE_VERSION: u16 = 1;
 
 const MICRODROID_OS_NAME: &str = "microdroid";
 
+// TODO(b/291213394): Use 'default' instance for secretkeeper instead of 'nonsecure'
+const SECRETKEEPER_IDENTIFIER: &str =
+    "android.hardware.security.secretkeeper.ISecretkeeper/nonsecure";
+
 const UNFORMATTED_STORAGE_MAGIC: &str = "UNFORMATTED-STORAGE";
 
-/// Roughly estimated sufficient size for storing vendor public key into DTBO.
+/// Rough size for storing root digest of vendor hash descriptor into DTBO.
 const EMPTY_VENDOR_DT_OVERLAY_BUF_SIZE: usize = 10000;
 
 /// crosvm requires all partitions to be a multiple of 4KiB.
@@ -369,13 +381,17 @@ impl VirtualizationService {
             check_gdb_allowed(config)?;
         }
 
-        let vendor_public_key = extract_vendor_public_key(config)
-            .context("Failed to extract vendor public key")
-            .or_service_specific_exception(-1)?;
-        let dtbo_vendor = if let Some(vendor_public_key) = vendor_public_key {
+        let vendor_hashtree_descriptor_root_digest =
+            extract_vendor_hashtree_descriptor_root_digest(config)
+                .context("Failed to extract root digest of vendor")
+                .or_service_specific_exception(-1)?;
+        let dtbo_vendor = if let Some(vendor_hashtree_descriptor_root_digest) =
+            vendor_hashtree_descriptor_root_digest
+        {
+            let root_digest_hex = hex::encode(vendor_hashtree_descriptor_root_digest);
             let dtbo_for_vendor_image = temporary_directory.join("dtbo_vendor");
-            create_dtbo_for_vendor_image(&vendor_public_key, &dtbo_for_vendor_image)
-                .context("Failed to write vendor_public_key")
+            create_dtbo_for_vendor_image(root_digest_hex.as_bytes(), &dtbo_for_vendor_image)
+                .context("Failed to write root digest of vendor")
                 .or_service_specific_exception(-1)?;
             let file = File::open(dtbo_for_vendor_image)
                 .context("Failed to open dtbo_vendor")
@@ -559,7 +575,9 @@ impl VirtualizationService {
     }
 }
 
-fn extract_vendor_public_key(config: &VirtualMachineConfig) -> Result<Option<Vec<u8>>> {
+fn extract_vendor_hashtree_descriptor_root_digest(
+    config: &VirtualMachineConfig,
+) -> Result<Option<Vec<u8>>> {
     let VirtualMachineConfig::AppConfig(config) = config else {
         return Ok(None);
     };
@@ -574,15 +592,19 @@ fn extract_vendor_public_key(config: &VirtualMachineConfig) -> Result<Option<Vec
     let size = file.metadata().context("Failed to get metadata from microdroid-vendor.img")?.len();
     let vbmeta = VbMetaImage::verify_reader_region(&file, 0, size)
         .context("Failed to get vbmeta from microdroid-vendor.img")?;
-    let vendor_public_key = vbmeta
-        .public_key()
-        .ok_or(anyhow!("No public key is extracted from microdroid-vendor.img"))?
-        .to_vec();
 
-    Ok(Some(vendor_public_key))
+    for descriptor in vbmeta.descriptors()?.iter() {
+        if let vbmeta::Descriptor::Hashtree(_) = descriptor {
+            return Ok(Some(descriptor.to_hashtree()?.root_digest().to_vec()));
+        }
+    }
+    Err(anyhow!("No root digest is extracted from microdroid-vendor.img"))
 }
 
-fn create_dtbo_for_vendor_image(vendor_public_key: &[u8], dtbo: &PathBuf) -> Result<()> {
+fn create_dtbo_for_vendor_image(
+    vendor_hashtree_descriptor_root_digest: &[u8],
+    dtbo: &PathBuf,
+) -> Result<()> {
     if dtbo.exists() {
         return Err(anyhow!("DTBO file already exists"));
     }
@@ -610,10 +632,16 @@ fn create_dtbo_for_vendor_image(vendor_public_key: &[u8], dtbo: &PathBuf) -> Res
     let mut avf_node = overlay_node
         .add_subnode(avf_node_name.as_c_str())
         .map_err(|e| anyhow!("Failed to create avf node: {:?}", e))?;
-    let vendor_public_key_name = CString::new("vendor_public_key")?;
+    let vendor_hashtree_descriptor_root_digest_name =
+        CString::new("vendor_hashtree_descriptor_root_digest")?;
     avf_node
-        .setprop(vendor_public_key_name.as_c_str(), vendor_public_key)
-        .map_err(|e| anyhow!("Failed to set avf/vendor_public_key: {:?}", e))?;
+        .setprop(
+            vendor_hashtree_descriptor_root_digest_name.as_c_str(),
+            vendor_hashtree_descriptor_root_digest,
+        )
+        .map_err(|e| {
+            anyhow!("Failed to set avf/vendor_hashtree_descriptor_root_digest: {:?}", e)
+        })?;
 
     fdt.pack().map_err(|e| anyhow!("Failed to pack fdt: {:?}", e))?;
     let mut file = File::create(dtbo)?;
@@ -1370,6 +1398,20 @@ impl IVirtualMachineService for VirtualMachineService {
         }
     }
 
+    fn getSecretkeeper(&self) -> binder::Result<Option<Strong<dyn ISecretkeeper>>> {
+        let sk = match binder::get_interface(SECRETKEEPER_IDENTIFIER) {
+            Ok(sk) => {
+                Some(BnSecretkeeper::new_binder(SecretkeeperProxy(sk), BinderFeatures::default()))
+            }
+            Err(StatusCode::NAME_NOT_FOUND) => None,
+            Err(e) => {
+                error!("unexpected error while fetching connection to Secretkeeper {:?}", e);
+                return Err(e.into());
+            }
+        };
+        Ok(sk)
+    }
+
     fn requestAttestation(&self, csr: &[u8]) -> binder::Result<Vec<Certificate>> {
         GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32)
     }
@@ -1502,13 +1544,14 @@ mod tests {
 
     #[test]
     fn test_create_dtbo_for_vendor_image() -> Result<()> {
-        let vendor_public_key = String::from("foo");
-        let vendor_public_key = vendor_public_key.as_bytes();
+        let vendor_hashtree_descriptor_root_digest = String::from("foo");
+        let vendor_hashtree_descriptor_root_digest =
+            vendor_hashtree_descriptor_root_digest.as_bytes();
 
         let tmp_dir = tempfile::TempDir::new()?;
         let dtbo_path = tmp_dir.path().to_path_buf().join("bar");
 
-        create_dtbo_for_vendor_image(vendor_public_key, &dtbo_path)?;
+        create_dtbo_for_vendor_image(vendor_hashtree_descriptor_root_digest, &dtbo_path)?;
 
         let data = std::fs::read(dtbo_path)?;
         let fdt = Fdt::from_slice(&data).unwrap();
@@ -1529,9 +1572,11 @@ mod tests {
         let Some(avf_node) = avf_node else {
             bail!("avf_node shouldn't be None.");
         };
-        let vendor_public_key_name = CString::new("vendor_public_key")?;
-        let key_from_dtbo = avf_node.getprop(vendor_public_key_name.as_c_str()).unwrap();
-        assert_eq!(key_from_dtbo, Some(vendor_public_key));
+        let vendor_hashtree_descriptor_root_digest_name =
+            CString::new("vendor_hashtree_descriptor_root_digest")?;
+        let digest_from_dtbo =
+            avf_node.getprop(vendor_hashtree_descriptor_root_digest_name.as_c_str()).unwrap();
+        assert_eq!(digest_from_dtbo, Some(vendor_hashtree_descriptor_root_digest));
 
         tmp_dir.close()?;
         Ok(())
@@ -1539,18 +1584,84 @@ mod tests {
 
     #[test]
     fn test_create_dtbo_for_vendor_image_throws_error_if_already_exists() -> Result<()> {
-        let vendor_public_key = String::from("foo");
-        let vendor_public_key = vendor_public_key.as_bytes();
+        let vendor_hashtree_descriptor_root_digest = String::from("foo");
+        let vendor_hashtree_descriptor_root_digest =
+            vendor_hashtree_descriptor_root_digest.as_bytes();
 
         let tmp_dir = tempfile::TempDir::new()?;
         let dtbo_path = tmp_dir.path().to_path_buf().join("bar");
 
-        create_dtbo_for_vendor_image(vendor_public_key, &dtbo_path)?;
+        create_dtbo_for_vendor_image(vendor_hashtree_descriptor_root_digest, &dtbo_path)?;
 
-        let ret_second_trial = create_dtbo_for_vendor_image(vendor_public_key, &dtbo_path);
+        let ret_second_trial =
+            create_dtbo_for_vendor_image(vendor_hashtree_descriptor_root_digest, &dtbo_path);
         assert!(ret_second_trial.is_err(), "should fail");
 
         tmp_dir.close()?;
         Ok(())
+    }
+}
+
+struct SecretkeeperProxy(Strong<dyn ISecretkeeper>);
+
+impl Interface for SecretkeeperProxy {}
+
+impl ISecretkeeper for SecretkeeperProxy {
+    fn processSecretManagementRequest(&self, req: &[u8]) -> binder::Result<Vec<u8>> {
+        // Pass the request to the channel, and read the response.
+        self.0.processSecretManagementRequest(req)
+    }
+
+    fn getAuthGraphKe(&self) -> binder::Result<Strong<dyn IAuthGraphKeyExchange>> {
+        let ag = AuthGraphKeyExchangeProxy(self.0.getAuthGraphKe()?);
+        Ok(BnAuthGraphKeyExchange::new_binder(ag, BinderFeatures::default()))
+    }
+
+    fn deleteIds(&self, ids: &[SecretId]) -> binder::Result<()> {
+        self.0.deleteIds(ids)
+    }
+
+    fn deleteAll(&self) -> binder::Result<()> {
+        self.0.deleteAll()
+    }
+}
+
+struct AuthGraphKeyExchangeProxy(Strong<dyn IAuthGraphKeyExchange>);
+
+impl Interface for AuthGraphKeyExchangeProxy {}
+
+impl IAuthGraphKeyExchange for AuthGraphKeyExchangeProxy {
+    fn create(&self) -> binder::Result<SessionInitiationInfo> {
+        self.0.create()
+    }
+
+    fn init(
+        &self,
+        peer_pub_key: &PubKey,
+        peer_id: &Identity,
+        peer_nonce: &[u8],
+        peer_version: i32,
+    ) -> binder::Result<KeInitResult> {
+        self.0.init(peer_pub_key, peer_id, peer_nonce, peer_version)
+    }
+
+    fn finish(
+        &self,
+        peer_pub_key: &PubKey,
+        peer_id: &Identity,
+        peer_signature: &SessionIdSignature,
+        peer_nonce: &[u8],
+        peer_version: i32,
+        own_key: &Key,
+    ) -> binder::Result<SessionInfo> {
+        self.0.finish(peer_pub_key, peer_id, peer_signature, peer_nonce, peer_version, own_key)
+    }
+
+    fn authenticationComplete(
+        &self,
+        peer_signature: &SessionIdSignature,
+        shared_keys: &[AuthgraphArc; 2],
+    ) -> binder::Result<[AuthgraphArc; 2]> {
+        self.0.authenticationComplete(peer_signature, shared_keys)
     }
 }

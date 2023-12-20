@@ -15,9 +15,9 @@
 //! Low-level entry and exit points of pvmfw.
 
 use crate::config;
-use crate::crypto;
 use crate::fdt;
 use crate::memory;
+use bssl_ffi::CRYPTO_library_init;
 use core::arch::asm;
 use core::mem::{drop, size_of};
 use core::num::NonZeroUsize;
@@ -196,7 +196,12 @@ fn main_wrapper(
     // - only access non-pvmfw memory once (and while) it has been mapped
 
     log::set_max_level(LevelFilter::Info);
-    crypto::init();
+    // TODO(https://crbug.com/boringssl/35): Remove this init when BoringSSL can handle this
+    // internally.
+    // SAFETY: Configures the internal state of the library - may be called multiple times.
+    unsafe {
+        CRYPTO_library_init();
+    }
 
     let page_table = memory::init_page_table().map_err(|e| {
         error!("Failed to set up the dynamic page tables: {e}");
@@ -207,7 +212,7 @@ fn main_wrapper(
     // then remapped by `init_page_table()`.
     let appended_data = unsafe { get_appended_data_slice() };
 
-    let mut appended = AppendedPayload::new(appended_data).ok_or_else(|| {
+    let appended = AppendedPayload::new(appended_data).ok_or_else(|| {
         error!("No valid configuration found");
         RebootReason::InvalidConfig
     })?;
@@ -438,7 +443,7 @@ impl<'a> AppendedPayload<'a> {
         }
     }
 
-    fn get_entries(&mut self) -> config::Entries<'_> {
+    fn get_entries(self) -> config::Entries<'a> {
         match self {
             Self::Config(cfg) => cfg.get_entries(),
             Self::LegacyBcc(bcc) => config::Entries { bcc, ..Default::default() },
