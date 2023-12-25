@@ -10,7 +10,7 @@ rust_ffi_static {
     rustlibs: [
         "libaarch64_paging",
         "libbssl_avf_nostd",
-        "libbssl_ffi_nostd",
+        "libbssl_sys_nostd",
         "libciborium_io_nostd",
         "libciborium_nostd",
         "libcstr",
@@ -142,7 +142,7 @@ rust_test {
         "libservice_vm_fake_chain",
         "libservice_vm_manager",
         "libvmclient",
-        "libx509_parser",
+        "libx509_cert_nostd",
     ],
     data: [
         ":rialto_unsigned",
