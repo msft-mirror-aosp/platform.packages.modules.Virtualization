@@ -2145,7 +2145,11 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         // TODO(b/317567210): Boots fails with vendor partition in HWASAN enabled microdroid
         // after introducing verification based on DT and fstab in microdroid vendor partition.
         assumeFalse(
-                "boot with vendor partition is failing in HWASAN enabled Microdroid.", isHwasan());
+                "Boot with vendor partition is failing in HWASAN enabled Microdroid.", isHwasan());
+        assumeFalse(
+                "Skip test for protected VM, pvmfw config data doesn't contain any information of"
+                        + " test images, such as root digest.",
+                isProtectedVm());
         assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
