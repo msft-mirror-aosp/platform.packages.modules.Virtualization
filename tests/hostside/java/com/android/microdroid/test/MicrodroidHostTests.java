@@ -151,6 +151,12 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         if (!updateBootconfigs) {
             command.add("--do_not_update_bootconfigs");
         }
+        // In some cases we run a CTS binary that is built from a different branch that the /system
+        // image under test. In such cases we might end up in a situation when avb_version used in
+        // CTS binary and avb_version used to sign the com.android.virt APEX do not match.
+        // This is a weird configuration, but unfortunately it can happen, hence we pass here
+        // --do_not_validate_avb_version flag to make sure that CTS doesn't fail on it.
+        command.add("--do_not_validate_avb_version");
         keyOverrides.forEach(
                 (filename, keyFile) ->
                         command.add("--key_override " + filename + "=" + keyFile.getPath()));
@@ -433,7 +439,9 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         key, keyOverrides, /*isProtected=*/ false, /*updateBootconfigs=*/ true);
         assertThatEventually(
                 100000,
-                () -> getDevice().pullFileContents(CONSOLE_PATH),
+                () ->
+                        getDevice().pullFileContents(CONSOLE_PATH)
+                                + getDevice().pullFileContents(LOG_PATH),
                 containsString("boot completed, time to run payload"));
 
         vmInfo.mProcess.destroy();
