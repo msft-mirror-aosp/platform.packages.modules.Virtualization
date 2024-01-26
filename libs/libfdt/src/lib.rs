@@ -468,7 +468,7 @@ impl<'a> FdtNode<'a> {
     }
 
     /// Returns an iterator of subnodes
-    pub fn subnodes(&'a self) -> Result<SubnodeIterator<'a>> {
+    pub fn subnodes(&self) -> Result<SubnodeIterator<'a>> {
         SubnodeIterator::new(self)
     }
 
@@ -748,6 +748,14 @@ impl<'a> FdtNodeMut<'a> {
     /// Returns immutable FdtNode of this node.
     pub fn as_node(&self) -> FdtNode {
         FdtNode { fdt: self.fdt, offset: self.offset }
+    }
+
+    /// Adds new subnodes to the given node.
+    pub fn add_subnodes(&mut self, names: &[&CStr]) -> Result<()> {
+        for name in names {
+            self.add_subnode_offset(name.to_bytes())?;
+        }
+        Ok(())
     }
 
     /// Adds a new subnode to the given node and return it as a FdtNodeMut on success.

@@ -19,6 +19,7 @@
 use core::ffi::CStr;
 use cstr::cstr;
 use libfdt::{Fdt, FdtError, FdtNodeMut, Phandle};
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs;
 use std::ops::Range;
@@ -451,6 +452,22 @@ fn node_name_lifetime() {
 }
 
 #[test]
+fn node_mut_add_subnodes() {
+    let mut data = vec![0_u8; 1000];
+    let fdt = Fdt::create_empty_tree(&mut data).unwrap();
+
+    let mut root = fdt.root_mut().unwrap();
+    let names = [cstr!("a"), cstr!("b")];
+    root.add_subnodes(&names).unwrap();
+
+    let expected: HashSet<_> = names.into_iter().collect();
+    let subnodes = fdt.root().unwrap().subnodes().unwrap();
+    let names: HashSet<_> = subnodes.map(|node| node.name().unwrap()).collect();
+
+    assert_eq!(expected, names);
+}
+
+#[test]
 #[ignore] // Borrow checker test. Compilation success is sufficient.
 fn node_subnode_lifetime() {
     let data = fs::read(TEST_TREE_PHANDLE_PATH).unwrap();
@@ -467,6 +484,28 @@ fn node_subnode_lifetime() {
         // Make node_a to be dropped
     };
     assert_eq!(Ok(cstr!("node_a")), name);
+}
+
+#[test]
+#[ignore] // Borrow checker test. Compilation success is sufficient.
+fn node_subnodess_lifetime() {
+    let data = fs::read(TEST_TREE_PHANDLE_PATH).unwrap();
+    let fdt = Fdt::from_slice(&data).unwrap();
+
+    let first_subnode_name = {
+        let first_subnode = {
+            let mut subnodes_iter = {
+                let root = fdt.root().unwrap();
+                root.subnodes().unwrap()
+                // Make root to be dropped
+            };
+            subnodes_iter.next().unwrap()
+            // Make subnodess_iter to be dropped
+        };
+        first_subnode.name()
+        // Make first_subnode to be dropped
+    };
+    assert_eq!(Ok(cstr!("node_a")), first_subnode_name);
 }
 
 #[test]
