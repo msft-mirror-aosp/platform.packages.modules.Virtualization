@@ -43,7 +43,7 @@ use keystore2_crypto::ZVec;
 use libc::VMADDR_CID_HOST;
 use log::{error, info};
 use microdroid_metadata::PayloadMetadata;
-use microdroid_payload_config::{OsConfig, Task, TaskType, VmPayloadConfig};
+use microdroid_payload_config::{ApkConfig, OsConfig, Task, TaskType, VmPayloadConfig};
 use nix::sys::signal::Signal;
 use openssl::hkdf::hkdf;
 use openssl::md::Md;
@@ -68,11 +68,11 @@ use std::time::Duration;
 use vm_secret::VmSecret;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
-const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
-const AVF_DEBUG_POLICY_RAMDUMP: &str = "/sys/firmware/devicetree/base/avf/guest/common/ramdump";
+const AVF_STRICT_BOOT: &str = "/proc/device-tree/chosen/avf,strict-boot";
+const AVF_NEW_INSTANCE: &str = "/proc/device-tree/chosen/avf,new-instance";
+const AVF_DEBUG_POLICY_RAMDUMP: &str = "/proc/device-tree/avf/guest/common/ramdump";
 const DEBUG_MICRODROID_NO_VERIFIED_BOOT: &str =
-    "/sys/firmware/devicetree/base/virtualization/guest/debug-microdroid,no-verified-boot";
+    "/proc/device-tree/virtualization/guest/debug-microdroid,no-verified-boot";
 
 const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
 const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
@@ -580,11 +580,15 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
                 type_: TaskType::MicrodroidLauncher,
                 command: payload_config.payload_binary_name,
             };
+            // We don't care about the paths, only the number of extra APKs really matters.
+            let extra_apks = (0..payload_config.extra_apk_count)
+                .map(|i| ApkConfig { path: format!("extra-apk-{i}") })
+                .collect();
             Ok(VmPayloadConfig {
                 os: OsConfig { name: "microdroid".to_owned() },
                 task: Some(task),
                 apexes: vec![],
-                extra_apks: vec![],
+                extra_apks,
                 prefer_staged: false,
                 export_tombstones: None,
                 enable_authfs: false,
