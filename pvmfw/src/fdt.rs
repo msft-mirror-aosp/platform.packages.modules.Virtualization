@@ -15,11 +15,11 @@
 //! High-level FDT functions.
 
 use crate::bootargs::BootArgsIterator;
-use crate::device_assignment::DeviceAssignmentInfo;
-use crate::device_assignment::VmDtbo;
+use crate::device_assignment::{DeviceAssignmentInfo, VmDtbo};
 use crate::helpers::GUEST_PAGE_SIZE;
 use crate::Box;
 use crate::RebootReason;
+use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
 use alloc::vec::Vec;
 use core::cmp::max;
@@ -197,6 +197,49 @@ fn patch_num_cpus(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
     }
     while let Some(current) = next {
         next = current.delete_and_next_compatible(cpu)?;
+    }
+    Ok(())
+}
+
+/// Read candidate properties' names from DT which could be overlaid
+fn parse_vm_ref_dt(fdt: &Fdt) -> libfdt::Result<BTreeMap<CString, Vec<u8>>> {
+    let mut property_map = BTreeMap::new();
+    if let Some(avf_node) = fdt.node(cstr!("/avf"))? {
+        for property in avf_node.properties()? {
+            let name = property.name()?;
+            let value = property.value()?;
+            property_map.insert(
+                CString::new(name.to_bytes()).map_err(|_| FdtError::BadValue)?,
+                value.to_vec(),
+            );
+        }
+    }
+    Ok(property_map)
+}
+
+/// Overlay VM reference DT into VM DT based on the props_info. Property is overlaid in vm_dt only
+/// when it exists both in vm_ref_dt and props_info. If the values mismatch, it returns error.
+fn validate_vm_ref_dt(
+    vm_dt: &mut Fdt,
+    vm_ref_dt: &Fdt,
+    props_info: &BTreeMap<CString, Vec<u8>>,
+) -> libfdt::Result<()> {
+    let mut root_vm_dt = vm_dt.root_mut()?;
+    let mut avf_vm_dt = root_vm_dt.add_subnode(cstr!("avf"))?;
+    // TODO(b/318431677): Validate nodes beyond /avf.
+    let avf_node = vm_ref_dt.node(cstr!("/avf"))?.ok_or(FdtError::NotFound)?;
+    for (name, value) in props_info.iter() {
+        if let Some(ref_value) = avf_node.getprop(name)? {
+            if value != ref_value {
+                error!(
+                    "Property mismatches while applying overlay VM reference DT. \
+                    Name:{:?}, Value from host as hex:{:x?}, Value from VM reference DT as hex:{:x?}",
+                    name, value, ref_value
+                );
+                return Err(FdtError::BadValue);
+            }
+            avf_vm_dt.setprop(name, ref_value)?;
+        }
     }
     Ok(())
 }
@@ -593,6 +636,7 @@ pub struct DeviceTreeInfo {
     serial_info: SerialInfo,
     pub swiotlb_info: SwiotlbInfo,
     device_assignment: Option<DeviceAssignmentInfo>,
+    vm_ref_dt_props_info: BTreeMap<CString, Vec<u8>>,
 }
 
 impl DeviceTreeInfo {
@@ -606,6 +650,7 @@ impl DeviceTreeInfo {
 pub fn sanitize_device_tree(
     fdt: &mut [u8],
     vm_dtbo: Option<&mut [u8]>,
+    vm_ref_dt: Option<&[u8]>,
 ) -> Result<DeviceTreeInfo, RebootReason> {
     let fdt = Fdt::from_mut_slice(fdt).map_err(|e| {
         error!("Failed to load FDT: {e}");
@@ -627,6 +672,11 @@ pub fn sanitize_device_tree(
         RebootReason::InvalidFdt
     })?;
 
+    fdt.unpack().map_err(|e| {
+        error!("Failed to unpack DT for patching: {e}");
+        RebootReason::InvalidFdt
+    })?;
+
     if let Some(device_assignment_info) = &info.device_assignment {
         let vm_dtbo = vm_dtbo.unwrap();
         device_assignment_info.filter(vm_dtbo).map_err(|e| {
@@ -644,7 +694,26 @@ pub fn sanitize_device_tree(
         }
     }
 
+    if let Some(vm_ref_dt) = vm_ref_dt {
+        let vm_ref_dt = Fdt::from_slice(vm_ref_dt).map_err(|e| {
+            error!("Failed to load VM reference DT: {e}");
+            RebootReason::InvalidFdt
+        })?;
+
+        validate_vm_ref_dt(fdt, vm_ref_dt, &info.vm_ref_dt_props_info).map_err(|e| {
+            error!("Failed to apply VM reference DT: {e}");
+            RebootReason::InvalidFdt
+        })?;
+    }
+
     patch_device_tree(fdt, &info)?;
+
+    // TODO(b/317201360): Ensure no overlapping in <reg> among devices
+
+    fdt.pack().map_err(|e| {
+        error!("Failed to unpack DT after patching: {e}");
+        RebootReason::InvalidFdt
+    })?;
 
     Ok(info)
 }
@@ -694,12 +763,26 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
     validate_swiotlb_info(&swiotlb_info, &memory_range)?;
 
     let device_assignment = match vm_dtbo {
-        Some(vm_dtbo) => DeviceAssignmentInfo::parse(fdt, vm_dtbo).map_err(|e| {
-            error!("Failed to parse device assignment from DT and VM DTBO: {e}");
-            RebootReason::InvalidFdt
-        })?,
+        Some(vm_dtbo) => {
+            if let Some(hypervisor) = hyp::get_device_assigner() {
+                DeviceAssignmentInfo::parse(fdt, vm_dtbo, hypervisor).map_err(|e| {
+                    error!("Failed to parse device assignment from DT and VM DTBO: {e}");
+                    RebootReason::InvalidFdt
+                })?
+            } else {
+                warn!(
+                    "Device assignment is ignored because device assigning hypervisor is missing"
+                );
+                None
+            }
+        }
         None => None,
     };
+
+    let vm_ref_dt_props_info = parse_vm_ref_dt(fdt).map_err(|e| {
+        error!("Failed to read names of properties under /avf from DT: {e}");
+        RebootReason::InvalidFdt
+    })?;
 
     Ok(DeviceTreeInfo {
         kernel_range,
@@ -711,15 +794,11 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
         serial_info,
         swiotlb_info,
         device_assignment,
+        vm_ref_dt_props_info,
     })
 }
 
 fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootReason> {
-    fdt.unpack().map_err(|e| {
-        error!("Failed to unpack DT for patching: {e}");
-        RebootReason::InvalidFdt
-    })?;
-
     if let Some(initrd_range) = &info.initrd_range {
         patch_initrd_range(fdt, initrd_range).map_err(|e| {
             error!("Failed to patch initrd range to DT: {e}");
@@ -769,11 +848,6 @@ fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootR
         })?;
     }
 
-    fdt.pack().map_err(|e| {
-        error!("Failed to pack DT after patching: {e}");
-        RebootReason::InvalidFdt
-    })?;
-
     Ok(())
 }
 
@@ -783,7 +857,7 @@ pub fn modify_for_next_stage(
     bcc: &[u8],
     new_instance: bool,
     strict_boot: bool,
-    debug_policy: Option<&mut [u8]>,
+    debug_policy: Option<&[u8]>,
     debuggable: bool,
     kaslr_seed: u64,
 ) -> libfdt::Result<()> {

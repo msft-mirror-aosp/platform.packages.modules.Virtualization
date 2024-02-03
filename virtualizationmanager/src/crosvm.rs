@@ -47,6 +47,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     VirtualMachineAppConfig::DebugLevel::DebugLevel
 };
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
+use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IBoundDevice::IBoundDevice;
 use binder::Strong;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
 use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
@@ -117,7 +118,7 @@ pub struct CrosvmConfig {
     pub gdb_port: Option<NonZeroU16>,
     pub vfio_devices: Vec<VfioDevice>,
     pub dtbo: Option<File>,
-    pub dtbo_vendor: Option<File>,
+    pub reference_dt: Option<File>,
 }
 
 /// A disk image to pass to crosvm for a VM.
@@ -127,11 +128,7 @@ pub struct DiskFile {
     pub writable: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct VfioDevice {
-    pub sysfs_path: PathBuf,
-    pub dtbo_label: String,
-}
+type VfioDevice = Strong<dyn IBoundDevice>;
 
 /// The lifecycle state which the payload in the VM has reported itself to be in.
 ///
@@ -412,10 +409,7 @@ impl VmInstance {
             error!("Error removing temporary files from {:?}: {}", self.temporary_directory, e);
         });
 
-        // TODO(b/278008182): clean up assigned devices.
-        for device in vfio_devices.iter() {
-            info!("NOT RELEASING {device:?}");
-        }
+        drop(vfio_devices); // Cleanup devices.
     }
 
     /// Waits until payload is started, or timeout expires. When timeout occurs, kill
@@ -706,7 +700,7 @@ const VFIO_PLATFORM_DRIVER_PATH: &str = "/sys/bus/platform/drivers/vfio-platform
 
 fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Error> {
     // Check platform device exists
-    let path = device.sysfs_path.canonicalize()?;
+    let path = Path::new(&device.getSysfsPath()?).canonicalize()?;
     if !path.starts_with(SYSFS_PLATFORM_DEVICES_PATH) {
         bail!("{path:?} is not a platform device");
     }
@@ -718,7 +712,7 @@ fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Erro
     }
 
     if let Some(p) = path.to_str() {
-        Ok(format!("--vfio={p},iommu=pkvm-iommu,dt-symbol={0}", device.dtbo_label))
+        Ok(format!("--vfio={p},iommu=pkvm-iommu,dt-symbol={0}", device.getDtboLabel()?))
     } else {
         bail!("invalid path {path:?}");
     }
@@ -816,8 +810,10 @@ fn run_vm(
     }
 
     if config.host_cpu_topology {
-        // TODO(b/266664564): replace with --host-cpu-topology once available
-        if let Some(cpus) = get_num_cpus() {
+        if cfg!(virt_cpufreq) {
+            command.arg("--host-cpu-topology");
+            command.arg("--virt-cpufreq");
+        } else if let Some(cpus) = get_num_cpus() {
             command.arg("--cpus").arg(cpus.to_string());
         } else {
             bail!("Could not determine the number of CPUs in the system");
@@ -900,7 +896,11 @@ fn run_vm(
         .arg("--socket")
         .arg(add_preserved_fd(&mut preserved_fds, &control_server_socket.as_raw_descriptor()));
 
-    // TODO(b/285855436): Pass dtbo_vendor after --device-tree-overlay crosvm option is supported.
+    if let Some(reference_dt) = &config.reference_dt {
+        command
+            .arg("--device-tree-overlay")
+            .arg(add_preserved_fd(&mut preserved_fds, reference_dt));
+    }
 
     append_platform_devices(&mut command, &mut preserved_fds, &config)?;
 

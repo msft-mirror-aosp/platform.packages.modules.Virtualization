@@ -37,14 +37,18 @@ message Metadata {
 }
 
 message ApexPayload {
+  // Next id: 9
+
   // Required.
   string name = 1;
   string partition_name = 2;
 
   // Optional.
-  // When specified, apex payload should be verified with the public key and root digest.
+  // When specified, apex payload should be verified against these values.
   bytes public_key = 3;
   bytes root_digest = 4;
+  int64 manifest_version = 7;
+  string manifest_name = 8;
 
   // Required.
   // The timestamp in seconds when the APEX was last updated. This should match the value in
@@ -70,4 +74,8 @@ message PayloadConfig {
   // Required.
   // Name of the payload binary file inside the APK.
   string payload_binary_name = 1;
+
+  // Optional.
+  // The number of extra APKs that are present.
+  uint32 extra_apk_count = 2;
 }

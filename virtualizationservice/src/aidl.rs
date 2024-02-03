@@ -28,15 +28,17 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
     AtomVmBooted::AtomVmBooted,
     AtomVmCreationRequested::AtomVmCreationRequested,
     AtomVmExited::AtomVmExited,
+    IBoundDevice::IBoundDevice,
     IGlobalVmContext::{BnGlobalVmContext, IGlobalVmContext},
-    IVirtualizationServiceInternal::BoundDevice::BoundDevice,
     IVirtualizationServiceInternal::IVirtualizationServiceInternal,
     IVfioHandler::{BpVfioHandler, IVfioHandler},
+    IVfioHandler::VfioDev::VfioDev,
 };
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::VM_TOMBSTONES_SERVICE_PORT;
 use anyhow::{anyhow, ensure, Context, Result};
 use avflog::LogResult;
 use binder::{self, wait_for_interface, BinderFeatures, ExceptionCode, Interface, LazyServiceGuard, Status, Strong, IntoBinderResult};
+use lazy_static::lazy_static;
 use libc::VMADDR_CID_HOST;
 use log::{error, info, warn};
 use rkpd_client::get_rkpd_attestation_key;
@@ -52,6 +54,7 @@ use std::sync::{Arc, Mutex, Weak};
 use tombstoned_client::{DebuggerdDumpType, TombstonedConnection};
 use vsock::{VsockListener, VsockStream};
 use nix::unistd::{chown, Uid};
+use openssl::x509::X509;
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
 pub type Cid = u32;
@@ -69,6 +72,12 @@ const GUEST_CID_MAX: Cid = 65535;
 const SYSPROP_LAST_CID: &str = "virtualizationservice.state.last_cid";
 
 const CHUNK_RECV_MAX_LEN: usize = 1024;
+
+lazy_static! {
+    static ref VFIO_SERVICE: Strong<dyn IVfioHandler> =
+        wait_for_interface(<BpVfioHandler as IVfioHandler>::get_descriptor())
+            .expect("Could not connect to VfioHandler");
+}
 
 fn is_valid_guest_cid(cid: Cid) -> bool {
     (GUEST_CID_MIN..=GUEST_CID_MAX).contains(&cid)
@@ -166,35 +175,46 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         requester_uid: i32,
     ) -> binder::Result<Vec<Certificate>> {
         check_manage_access()?;
-        info!("Received csr. Requestting attestation...");
-        if cfg!(remote_attestation) {
-            let attestation_key = get_rkpd_attestation_key(
-                REMOTELY_PROVISIONED_COMPONENT_SERVICE_NAME,
-                requester_uid as u32,
-            )
-            .context("Failed to retrieve the remotely provisioned keys")
-            .with_log()
-            .or_service_specific_exception(-1)?;
-            let certificate = request_attestation(csr, &attestation_key.keyBlob)
-                .context("Failed to request attestation")
-                .with_log()
-                .or_service_specific_exception(-1)?;
-            // TODO(b/309780089): Parse the remotely provisioned certificate chain into
-            // individual certificates.
-            let mut certificate_chain =
-                vec![Certificate { encodedCertificate: attestation_key.encodedCertChain }];
-            certificate_chain.push(Certificate { encodedCertificate: certificate });
-            Ok(certificate_chain)
-        } else {
-            Err(Status::new_exception_str(
+        if !cfg!(remote_attestation) {
+            return Err(Status::new_exception_str(
                 ExceptionCode::UNSUPPORTED_OPERATION,
                 Some(
                     "requestAttestation is not supported with the remote_attestation feature \
                      disabled",
                 ),
             ))
-            .with_log()
+            .with_log();
         }
+        info!("Received csr. Requestting attestation...");
+        let attestation_key = get_rkpd_attestation_key(
+            REMOTELY_PROVISIONED_COMPONENT_SERVICE_NAME,
+            requester_uid as u32,
+        )
+        .context("Failed to retrieve the remotely provisioned keys")
+        .with_log()
+        .or_service_specific_exception(-1)?;
+        let mut certificate_chain = split_x509_certificate_chain(&attestation_key.encodedCertChain)
+            .context("Failed to split the remotely provisioned certificate chain")
+            .with_log()
+            .or_service_specific_exception(-1)?;
+        if certificate_chain.is_empty() {
+            return Err(Status::new_service_specific_error_str(
+                -1,
+                Some("The certificate chain should contain at least 1 certificate"),
+            ))
+            .with_log();
+        }
+        let certificate = request_attestation(
+            csr.to_vec(),
+            attestation_key.keyBlob,
+            certificate_chain[0].encodedCertificate.clone(),
+        )
+        .context("Failed to request attestation")
+        .with_log()
+        .or_service_specific_exception(-1)?;
+        certificate_chain.insert(0, Certificate { encodedCertificate: certificate });
+
+        Ok(certificate_chain)
     }
 
     fn getAssignableDevices(&self) -> binder::Result<Vec<AssignableDevice>> {
@@ -207,24 +227,26 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             .collect::<Vec<_>>())
     }
 
-    fn bindDevicesToVfioDriver(&self, devices: &[String]) -> binder::Result<Vec<BoundDevice>> {
+    fn bindDevicesToVfioDriver(
+        &self,
+        devices: &[String],
+    ) -> binder::Result<Vec<Strong<dyn IBoundDevice>>> {
         check_use_custom_virtual_machine()?;
 
-        let vfio_service: Strong<dyn IVfioHandler> =
-            wait_for_interface(<BpVfioHandler as IVfioHandler>::get_descriptor())?;
-        vfio_service.bindDevicesToVfioDriver(devices)?;
-
-        Ok(get_assignable_devices()?
+        let devices = get_assignable_devices()?
             .device
             .into_iter()
             .filter_map(|x| {
                 if devices.contains(&x.sysfs_path) {
-                    Some(BoundDevice { sysfsPath: x.sysfs_path, dtboLabel: x.dtbo_label })
+                    Some(VfioDev { sysfsPath: x.sysfs_path, dtboLabel: x.dtbo_label })
                 } else {
+                    warn!("device {} is not assignable", x.sysfs_path);
                     None
                 }
             })
-            .collect::<Vec<_>>())
+            .collect::<Vec<VfioDev>>();
+
+        VFIO_SERVICE.bindDevicesToVfioDriver(devices.as_slice())
     }
 
     fn getDtboFile(&self) -> binder::Result<ParcelFileDescriptor> {
@@ -286,6 +308,17 @@ fn get_assignable_devices() -> binder::Result<Devices> {
         true
     });
     Ok(devices)
+}
+
+fn split_x509_certificate_chain(mut cert_chain: &[u8]) -> Result<Vec<Certificate>> {
+    let mut out = Vec::new();
+    while !cert_chain.is_empty() {
+        let cert = X509::from_der(cert_chain)?;
+        let end = cert.to_der()?.len();
+        out.push(Certificate { encodedCertificate: cert_chain[..end].to_vec() });
+        cert_chain = &cert_chain[end..];
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Default)]
@@ -401,10 +434,7 @@ impl GlobalState {
 
             // Open a write-only file descriptor for vfio_handler.
             let write_fd = File::create(&path).context("Failed to create VM DTBO file")?;
-
-            let vfio_service: Strong<dyn IVfioHandler> =
-                wait_for_interface(<BpVfioHandler as IVfioHandler>::get_descriptor())?;
-            vfio_service.writeVmDtbo(&ParcelFileDescriptor::new(write_fd))?;
+            VFIO_SERVICE.writeVmDtbo(&ParcelFileDescriptor::new(write_fd))?;
 
             // Open read-only. This FD will be cached and returned to clients.
             let read_fd = File::open(&path).context("Failed to open VM DTBO file")?;
@@ -560,4 +590,25 @@ fn check_manage_access() -> binder::Result<()> {
 /// Check whether the caller of the current Binder method is allowed to use custom VMs
 fn check_use_custom_virtual_machine() -> binder::Result<()> {
     check_permission("android.permission.USE_CUSTOM_VIRTUAL_MACHINE")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    const TEST_RKP_CERT_CHAIN_PATH: &str = "testdata/rkp_cert_chain.der";
+
+    #[test]
+    fn splitting_x509_certificate_chain_succeeds() -> Result<()> {
+        let bytes = fs::read(TEST_RKP_CERT_CHAIN_PATH)?;
+        let cert_chain = split_x509_certificate_chain(&bytes)?;
+
+        assert_eq!(4, cert_chain.len());
+        for cert in cert_chain {
+            let x509_cert = X509::from_der(&cert.encodedCertificate)?;
+            assert_eq!(x509_cert.to_der()?.len(), cert.encodedCertificate.len());
+        }
+        Ok(())
+    }
 }

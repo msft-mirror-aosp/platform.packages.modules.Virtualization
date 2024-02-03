@@ -99,6 +99,9 @@ avf_flag_aware_apex_defaults {
                 "virtualizationservice",
             ],
             filesystems: microdroid_filesystem_images,
+            prebuilts: [
+                "rialto_bin",
+            ],
         },
         x86_64: {
             binaries: [
@@ -119,7 +122,6 @@ avf_flag_aware_apex_defaults {
         "microdroid_initrd_normal",
         "microdroid.json",
         "microdroid_kernel",
-        "rialto_bin",
     ],
     host_required: [
         "vm_shell",
@@ -143,10 +145,10 @@ avf_flag_aware_apex_defaults {
         },
         release_avf_enable_vendor_modules: {
             prebuilts: [
-                "microdroid_gki_initrd_debuggable",
-                "microdroid_gki_initrd_normal",
-                "microdroid_gki_kernel",
-                "microdroid_gki.json",
+                "microdroid_gki-android14-6.1_initrd_debuggable",
+                "microdroid_gki-android14-6.1_initrd_normal",
+                "microdroid_gki-android14-6.1_kernel",
+                "microdroid_gki-android14-6.1.json",
             ],
         },
         release_avf_enable_remote_attestation: {

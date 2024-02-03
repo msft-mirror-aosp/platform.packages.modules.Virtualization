@@ -45,7 +45,7 @@ impl DPPath {
         // unwrap() is safe for to_str() because node_path and prop_name were &str.
         PathBuf::from(
             [
-                "/sys/firmware/devicetree/base",
+                "/proc/device-tree",
                 self.node_path.to_str().unwrap(),
                 "/",
                 self.prop_name.to_str().unwrap(),
@@ -84,9 +84,9 @@ fn get_fdt_prop_bool(fdt: &Fdt, path: &DPPath) -> Result<bool> {
     let (node_path, prop_name) = (&path.node_path, &path.prop_name);
     let node = match fdt.node(node_path) {
         Ok(Some(node)) => node,
-        Err(error) if error != FdtError::NotFound => Err(error)
-            .map_err(Error::msg)
-            .with_context(|| format!("Failed to get node {node_path:?}"))?,
+        Err(error) if error != FdtError::NotFound => {
+            Err(Error::msg(error)).with_context(|| format!("Failed to get node {node_path:?}"))?
+        }
         _ => return Ok(false),
     };
 
@@ -94,9 +94,9 @@ fn get_fdt_prop_bool(fdt: &Fdt, path: &DPPath) -> Result<bool> {
         Ok(Some(0)) => Ok(false),
         Ok(Some(1)) => Ok(true),
         Ok(Some(_)) => Err(anyhow!("Invalid prop value {prop_name:?} in node {node_path:?}")),
-        Err(error) if error != FdtError::NotFound => Err(error)
-            .map_err(Error::msg)
-            .with_context(|| format!("Failed to get prop {prop_name:?}")),
+        Err(error) if error != FdtError::NotFound => {
+            Err(Error::msg(error)).with_context(|| format!("Failed to get prop {prop_name:?}"))
+        }
         _ => Ok(false),
     }
 }

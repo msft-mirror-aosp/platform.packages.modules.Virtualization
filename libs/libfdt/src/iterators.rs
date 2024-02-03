@@ -304,7 +304,7 @@ pub struct SubnodeIterator<'a> {
 }
 
 impl<'a> SubnodeIterator<'a> {
-    pub(crate) fn new(node: &'a FdtNode) -> Result<Self, FdtError> {
+    pub(crate) fn new(node: &FdtNode<'a>) -> Result<Self, FdtError> {
         let subnode = node.first_subnode()?;
 
         Ok(Self { subnode })
@@ -320,6 +320,29 @@ impl<'a> Iterator for SubnodeIterator<'a> {
         self.subnode = self.subnode.and_then(|node| node.next_subnode().ok()?);
 
         res
+    }
+}
+
+/// Iterator over descendants
+#[derive(Debug)]
+pub struct DescendantsIterator<'a> {
+    node: Option<(FdtNode<'a>, usize)>,
+}
+
+impl<'a> DescendantsIterator<'a> {
+    pub(crate) fn new(node: &FdtNode<'a>) -> Self {
+        Self { node: Some((*node, 0)) }
+    }
+}
+
+impl<'a> Iterator for DescendantsIterator<'a> {
+    type Item = (FdtNode<'a>, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (node, depth) = self.node?;
+        self.node = node.next_node(depth).ok().flatten().filter(|(_, depth)| *depth > 0);
+
+        self.node
     }
 }
 

@@ -27,12 +27,14 @@ rust_library_rlib {
     ],
     visibility: [
         "//packages/modules/Virtualization:__subpackages__",
+        "//system/authgraph/tests:__subpackages__",
     ],
 }
 
 rust_library {
     name: "libdiced_open_dice",
     defaults: ["libdiced_open_dice_defaults"],
+    host_supported: true,
     vendor_available: true,
     rustlibs: [
         "libopen_dice_android_bindgen",
@@ -53,7 +55,10 @@ rust_library {
         "libopen_dice_android",
     ],
     visibility: [
+        "//hardware/interfaces/security/secretkeeper/aidl/vts",
         "//packages/modules/Virtualization:__subpackages__",
+        "//system/authgraph/tests:__subpackages__",
+        "//system/secretkeeper/client:__subpackages__",
     ],
     apex_available: [
         "//apex_available:platform",

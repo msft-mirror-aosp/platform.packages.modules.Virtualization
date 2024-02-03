@@ -22,7 +22,6 @@ extern crate alloc;
 mod bcc;
 mod bootargs;
 mod config;
-mod crypto;
 mod device_assignment;
 mod dice;
 mod entry;
@@ -63,7 +62,7 @@ fn main(
     signed_kernel: &[u8],
     ramdisk: Option<&[u8]>,
     current_bcc_handover: &[u8],
-    mut debug_policy: Option<&mut [u8]>,
+    mut debug_policy: Option<&[u8]>,
 ) -> Result<Range<usize>, RebootReason> {
     info!("pVM firmware");
     debug!("FDT: {:?}", fdt.as_ptr());
@@ -115,6 +114,17 @@ fn main(
 
     if verified_boot_data.has_capability(Capability::RemoteAttest) {
         info!("Service VM capable of remote attestation detected");
+        if service_vm_version::VERSION != verified_boot_data.rollback_index {
+            // For RKP VM, we only boot if the version in the AVB footer of its kernel matches
+            // the one embedded in pvmfw at build time.
+            // This prevents the pvmfw from booting a roll backed RKP VM.
+            error!(
+                "Service VM version mismatch: expected {}, found {}",
+                service_vm_version::VERSION,
+                verified_boot_data.rollback_index
+            );
+            return Err(RebootReason::InvalidPayload);
+        }
     }
 
     if verified_boot_data.has_capability(Capability::SecretkeeperProtection) {

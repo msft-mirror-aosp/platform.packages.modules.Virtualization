@@ -17,9 +17,9 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use cbor_util::{cbor_value_type, value_to_bytes};
 use ciborium::Value;
 use coset::{self, CborSerializable, CoseError};
-use log::error;
 
 /// Represents a CSR sent from the client VM to the service VM for attestation.
 ///
@@ -55,8 +55,8 @@ impl Csr {
             return Err(CoseError::UnexpectedItem("array", "array with 2 items"));
         }
         Ok(Self {
-            signed_csr_payload: try_as_bytes(arr.remove(1), "signed_csr_payload")?,
-            dice_cert_chain: try_as_bytes(arr.remove(0), "dice_cert_chain")?,
+            signed_csr_payload: value_to_bytes(arr.remove(1), "signed_csr_payload")?,
+            dice_cert_chain: value_to_bytes(arr.remove(0), "dice_cert_chain")?,
         })
     }
 }
@@ -94,33 +94,8 @@ impl CsrPayload {
             return Err(CoseError::UnexpectedItem("array", "array with 2 items"));
         }
         Ok(Self {
-            challenge: try_as_bytes(arr.remove(1), "challenge")?,
-            public_key: try_as_bytes(arr.remove(0), "public_key")?,
+            challenge: value_to_bytes(arr.remove(1), "challenge")?,
+            public_key: value_to_bytes(arr.remove(0), "public_key")?,
         })
-    }
-}
-
-fn try_as_bytes(v: Value, context: &str) -> coset::Result<Vec<u8>> {
-    if let Value::Bytes(data) = v {
-        Ok(data)
-    } else {
-        let v_type = cbor_value_type(&v);
-        error!("The provided value type '{v_type}' is not of type 'bytes': {context}");
-        Err(CoseError::UnexpectedItem(v_type, "bytes"))
-    }
-}
-
-fn cbor_value_type(v: &Value) -> &'static str {
-    match v {
-        Value::Integer(_) => "int",
-        Value::Bytes(_) => "bstr",
-        Value::Float(_) => "float",
-        Value::Text(_) => "tstr",
-        Value::Bool(_) => "bool",
-        Value::Null => "nul",
-        Value::Tag(_, _) => "tag",
-        Value::Array(_) => "array",
-        Value::Map(_) => "map",
-        _ => "other",
     }
 }

@@ -43,13 +43,16 @@ use keystore2_crypto::ZVec;
 use libc::VMADDR_CID_HOST;
 use log::{error, info};
 use microdroid_metadata::PayloadMetadata;
-use microdroid_payload_config::{OsConfig, Task, TaskType, VmPayloadConfig};
+use microdroid_payload_config::{ApkConfig, OsConfig, Task, TaskType, VmPayloadConfig};
 use nix::sys::signal::Signal;
+use openssl::hkdf::hkdf;
+use openssl::md::Md;
 use payload::load_metadata;
 use rpcbinder::RpcSession;
 use rustutils::sockets::android_get_control_socket;
 use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
+use secretkeeper_comm::data_types::ID_SIZE;
 use std::borrow::Cow::{Borrowed, Owned};
 use std::env;
 use std::ffi::CString;
@@ -65,11 +68,11 @@ use std::time::Duration;
 use vm_secret::VmSecret;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-const AVF_STRICT_BOOT: &str = "/sys/firmware/devicetree/base/chosen/avf,strict-boot";
-const AVF_NEW_INSTANCE: &str = "/sys/firmware/devicetree/base/chosen/avf,new-instance";
-const AVF_DEBUG_POLICY_RAMDUMP: &str = "/sys/firmware/devicetree/base/avf/guest/common/ramdump";
+const AVF_STRICT_BOOT: &str = "/proc/device-tree/chosen/avf,strict-boot";
+const AVF_NEW_INSTANCE: &str = "/proc/device-tree/chosen/avf,new-instance";
+const AVF_DEBUG_POLICY_RAMDUMP: &str = "/proc/device-tree/avf/guest/common/ramdump";
 const DEBUG_MICRODROID_NO_VERIFIED_BOOT: &str =
-    "/sys/firmware/devicetree/base/virtualization/guest/debug-microdroid,no-verified-boot";
+    "/proc/device-tree/virtualization/guest/debug-microdroid,no-verified-boot";
 
 const ENCRYPTEDSTORE_BIN: &str = "/system/bin/encryptedstore";
 const ZIPFUSE_BIN: &str = "/system/bin/zipfuse";
@@ -105,7 +108,6 @@ fn translate_error(err: &Error) -> (ErrorCode, String) {
             MicrodroidError::PayloadInvalidConfig(msg) => {
                 (ErrorCode::PAYLOAD_INVALID_CONFIG, msg.to_string())
             }
-
             // Connection failure won't be reported to VS; return the default value
             MicrodroidError::FailedToConnectToVirtualizationService(msg) => {
                 (ErrorCode::UNKNOWN, msg.to_string())
@@ -169,7 +171,7 @@ fn try_main() -> Result<()> {
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag("microdroid_manager")
-            .with_min_level(log::Level::Info),
+            .with_max_level(log::LevelFilter::Info),
     );
     info!("started.");
 
@@ -246,20 +248,20 @@ fn try_run_payload(
     }
 
     // Verify the payload before using it.
-    let verified_data = verify_payload(&metadata, saved_data.as_ref())
+    let extracted_data = verify_payload(&metadata, saved_data.as_ref())
         .context("Payload verification failed")
         .map_err(|e| MicrodroidError::PayloadVerificationFailed(e.to_string()))?;
 
     // In case identity is ignored (by debug policy), we should reuse existing payload data, even
     // when the payload is changed. This is to keep the derived secret same as before.
-    let verified_data = if let Some(saved_data) = saved_data {
+    let instance_data = if let Some(saved_data) = saved_data {
         if !is_verified_boot() {
-            if saved_data != verified_data {
+            if saved_data != extracted_data {
                 info!("Detected an update of the payload, but continue (regarding debug policy)")
             }
         } else {
             ensure!(
-                saved_data == verified_data,
+                saved_data == extracted_data,
                 MicrodroidError::PayloadChanged(String::from(
                     "Detected an update of the payload which isn't supported yet."
                 ))
@@ -270,9 +272,9 @@ fn try_run_payload(
     } else {
         info!("Saving verified data.");
         instance
-            .write_microdroid_data(&verified_data, &dice)
+            .write_microdroid_data(&extracted_data, &dice)
             .context("Failed to write identity data")?;
-        verified_data
+        extracted_data
     };
 
     let payload_metadata = metadata.payload.ok_or_else(|| {
@@ -281,8 +283,20 @@ fn try_run_payload(
 
     // To minimize the exposure to untrusted data, derive dice profile as soon as possible.
     info!("DICE derivation for payload");
-    let dice_artifacts = dice_derivation(dice, &verified_data, &payload_metadata)?;
-    let vm_secret = VmSecret::new(dice_artifacts).context("Failed to create VM secrets")?;
+    let dice_artifacts = dice_derivation(dice, &instance_data, &payload_metadata)?;
+    // TODO(b/291213394): This will be the Id for non-pVM only, instance_data.salt is all 0
+    // for protected VM, implement a mechanism for pVM!
+    let mut vm_id = [0u8; ID_SIZE];
+    hkdf(
+        &mut vm_id,
+        Md::sha256(),
+        &instance_data.salt,
+        /* salt */ b"",
+        /* info */ b"VM_ID",
+    )
+    .context("hkdf failed")?;
+    let vm_secret =
+        VmSecret::new(vm_id, dice_artifacts, service).context("Failed to create VM secrets")?;
 
     if cfg!(dice_changes) {
         // Now that the DICE derivation is done, it's ok to allow payload code to run.
@@ -326,10 +340,10 @@ fn try_run_payload(
         .ok_or_else(|| MicrodroidError::PayloadInvalidConfig("No task in VM config".to_string()))?;
 
     ensure!(
-        config.extra_apks.len() == verified_data.extra_apks_data.len(),
+        config.extra_apks.len() == instance_data.extra_apks_data.len(),
         "config expects {} extra apks, but found {}",
         config.extra_apks.len(),
-        verified_data.extra_apks_data.len()
+        instance_data.extra_apks_data.len()
     );
     mount_extra_apks(&config, &mut zipfuse)?;
 
@@ -566,11 +580,15 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
                 type_: TaskType::MicrodroidLauncher,
                 command: payload_config.payload_binary_name,
             };
+            // We don't care about the paths, only the number of extra APKs really matters.
+            let extra_apks = (0..payload_config.extra_apk_count)
+                .map(|i| ApkConfig { path: format!("extra-apk-{i}") })
+                .collect();
             Ok(VmPayloadConfig {
                 os: OsConfig { name: "microdroid".to_owned() },
                 task: Some(task),
                 apexes: vec![],
-                extra_apks: vec![],
+                extra_apks,
                 prefer_staged: false,
                 export_tombstones: None,
                 enable_authfs: false,

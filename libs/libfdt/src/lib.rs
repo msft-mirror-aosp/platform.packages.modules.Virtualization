@@ -20,8 +20,8 @@
 mod iterators;
 
 pub use iterators::{
-    AddressRange, CellIterator, CompatibleIterator, MemRegIterator, PropertyIterator,
-    RangesIterator, Reg, RegIterator, SubnodeIterator,
+    AddressRange, CellIterator, CompatibleIterator, DescendantsIterator, MemRegIterator,
+    PropertyIterator, RangesIterator, Reg, RegIterator, SubnodeIterator,
 };
 
 use core::cmp::max;
@@ -468,7 +468,7 @@ impl<'a> FdtNode<'a> {
     }
 
     /// Returns an iterator of subnodes
-    pub fn subnodes(&'a self) -> Result<SubnodeIterator<'a>> {
+    pub fn subnodes(&self) -> Result<SubnodeIterator<'a>> {
         SubnodeIterator::new(self)
     }
 
@@ -484,6 +484,23 @@ impl<'a> FdtNode<'a> {
         let ret = unsafe { libfdt_bindgen::fdt_next_subnode(self.fdt.as_ptr(), self.offset) };
 
         Ok(fdt_err_or_option(ret)?.map(|offset| FdtNode { fdt: self.fdt, offset }))
+    }
+
+    /// Returns an iterator of descendants
+    pub fn descendants(&self) -> DescendantsIterator<'a> {
+        DescendantsIterator::new(self)
+    }
+
+    fn next_node(&self, depth: usize) -> Result<Option<(Self, usize)>> {
+        let mut next_depth: c_int = depth.try_into().unwrap();
+        // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
+        let ret = unsafe {
+            libfdt_bindgen::fdt_next_node(self.fdt.as_ptr(), self.offset, &mut next_depth)
+        };
+        let Ok(next_depth) = usize::try_from(next_depth) else {
+            return Ok(None);
+        };
+        Ok(fdt_err_or_option(ret)?.map(|offset| (FdtNode { fdt: self.fdt, offset }, next_depth)))
     }
 
     /// Returns an iterator of properties
@@ -509,6 +526,32 @@ impl<'a> FdtNode<'a> {
         } else {
             Ok(None)
         }
+    }
+
+    /// Returns the subnode of the given name. The name doesn't need to be nul-terminated.
+    pub fn subnode(&self, name: &CStr) -> Result<Option<Self>> {
+        let offset = self.subnode_offset(name.to_bytes())?;
+        Ok(offset.map(|offset| Self { fdt: self.fdt, offset }))
+    }
+
+    /// Returns the subnode of the given name bytes
+    pub fn subnode_with_name_bytes(&self, name: &[u8]) -> Result<Option<Self>> {
+        let offset = self.subnode_offset(name)?;
+        Ok(offset.map(|offset| Self { fdt: self.fdt, offset }))
+    }
+
+    fn subnode_offset(&self, name: &[u8]) -> Result<Option<c_int>> {
+        let namelen = name.len().try_into().unwrap();
+        // SAFETY: Accesses are constrained to the DT totalsize (validated by ctor).
+        let ret = unsafe {
+            libfdt_bindgen::fdt_subnode_offset_namelen(
+                self.fdt.as_ptr(),
+                self.offset,
+                name.as_ptr().cast::<_>(),
+                namelen,
+            )
+        };
+        fdt_err_or_option(ret)
     }
 }
 
@@ -707,6 +750,14 @@ impl<'a> FdtNodeMut<'a> {
         FdtNode { fdt: self.fdt, offset: self.offset }
     }
 
+    /// Adds new subnodes to the given node.
+    pub fn add_subnodes(&mut self, names: &[&CStr]) -> Result<()> {
+        for name in names {
+            self.add_subnode_offset(name.to_bytes())?;
+        }
+        Ok(())
+    }
+
     /// Adds a new subnode to the given node and return it as a FdtNodeMut on success.
     pub fn add_subnode(&'a mut self, name: &CStr) -> Result<Self> {
         let offset = self.add_subnode_offset(name.to_bytes())?;
@@ -734,24 +785,73 @@ impl<'a> FdtNodeMut<'a> {
         fdt_err(ret)
     }
 
-    /// Returns the subnode of the given name with len.
-    pub fn subnode_with_namelen(&'a mut self, name: &CStr, namelen: usize) -> Result<Option<Self>> {
-        let offset = self.subnode_offset(&name.to_bytes()[..namelen])?;
-        Ok(offset.map(|offset| Self { fdt: self.fdt, offset }))
+    /// Returns the first subnode of this
+    pub fn first_subnode(&'a mut self) -> Result<Option<Self>> {
+        // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
+        let ret = unsafe { libfdt_bindgen::fdt_first_subnode(self.fdt.as_ptr(), self.offset) };
+
+        Ok(fdt_err_or_option(ret)?.map(|offset| Self { fdt: self.fdt, offset }))
     }
 
-    fn subnode_offset(&self, name: &[u8]) -> Result<Option<c_int>> {
-        let namelen = name.len().try_into().unwrap();
-        // SAFETY: Accesses are constrained to the DT totalsize (validated by ctor).
+    /// Returns the next subnode that shares the same parent with this
+    pub fn next_subnode(self) -> Result<Option<Self>> {
+        // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
+        let ret = unsafe { libfdt_bindgen::fdt_next_subnode(self.fdt.as_ptr(), self.offset) };
+
+        Ok(fdt_err_or_option(ret)?.map(|offset| Self { fdt: self.fdt, offset }))
+    }
+
+    /// Deletes the current node and returns the next subnode
+    pub fn delete_and_next_subnode(mut self) -> Result<Option<Self>> {
+        // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
+        let ret = unsafe { libfdt_bindgen::fdt_next_subnode(self.fdt.as_ptr(), self.offset) };
+
+        let next_offset = fdt_err_or_option(ret)?;
+
+        if Some(self.offset) == next_offset {
+            return Err(FdtError::Internal);
+        }
+
+        // SAFETY: nop_self() only touches bytes of the self and its properties and subnodes, and
+        // doesn't alter any other blob in the tree. self.fdt and next_offset would remain valid.
+        unsafe { self.nop_self()? };
+
+        Ok(next_offset.map(|offset| Self { fdt: self.fdt, offset }))
+    }
+
+    fn next_node_offset(&self, depth: usize) -> Result<Option<(c_int, usize)>> {
+        let mut next_depth: c_int = depth.try_into().or(Err(FdtError::BadValue))?;
+        // SAFETY: Accesses (read-only) are constrained to the DT totalsize.
         let ret = unsafe {
-            libfdt_bindgen::fdt_subnode_offset_namelen(
-                self.fdt.as_ptr(),
-                self.offset,
-                name.as_ptr().cast::<_>(),
-                namelen,
-            )
+            libfdt_bindgen::fdt_next_node(self.fdt.as_ptr(), self.offset, &mut next_depth)
         };
-        fdt_err_or_option(ret)
+        let Ok(next_depth) = usize::try_from(next_depth) else {
+            return Ok(None);
+        };
+        Ok(fdt_err_or_option(ret)?.map(|offset| (offset, next_depth)))
+    }
+
+    /// Returns the next node
+    pub fn next_node(self, depth: usize) -> Result<Option<(Self, usize)>> {
+        Ok(self
+            .next_node_offset(depth)?
+            .map(|(offset, next_depth)| (FdtNodeMut { fdt: self.fdt, offset }, next_depth)))
+    }
+
+    /// Deletes this and returns the next node
+    pub fn delete_and_next_node(mut self, depth: usize) -> Result<Option<(Self, usize)>> {
+        // Skip all would-be-removed descendants.
+        let mut iter = self.next_node_offset(depth)?;
+        while let Some((descendant_offset, descendant_depth)) = iter {
+            if descendant_depth <= depth {
+                break;
+            }
+            let descendant = FdtNodeMut { fdt: self.fdt, offset: descendant_offset };
+            iter = descendant.next_node_offset(descendant_depth)?;
+        }
+        // SAFETY: This consumes self, so invalid node wouldn't be used any further
+        unsafe { self.nop_self()? };
+        Ok(iter.map(|(offset, next_depth)| (FdtNodeMut { fdt: self.fdt, offset }, next_depth)))
     }
 
     fn parent(&'a self) -> Result<FdtNode<'a>> {

@@ -66,6 +66,13 @@ pub struct ClientVmAttestationParams {
 
     /// The key blob retrieved from RKPD by virtualizationservice.
     pub remotely_provisioned_key_blob: Vec<u8>,
+
+    /// The leaf certificate of the certificate chain retrieved from RKPD by
+    /// virtualizationservice.
+    ///
+    /// This certificate is a DER-encoded X.509 certificate that includes the remotely
+    /// provisioned public key.
+    pub remotely_provisioned_cert: Vec<u8>,
 }
 
 /// Represents a response to a request sent to the service VM.
@@ -120,6 +127,12 @@ pub enum RequestProcessingError {
 
     /// The requested operation has not been implemented.
     OperationUnimplemented,
+
+    /// An error happened during the DER encoding/decoding.
+    DerError,
+
+    /// The DICE chain from the client VM is invalid.
+    InvalidDiceChain,
 }
 
 impl fmt::Display for RequestProcessingError {
@@ -142,6 +155,12 @@ impl fmt::Display for RequestProcessingError {
             Self::OperationUnimplemented => {
                 write!(f, "The requested operation has not been implemented")
             }
+            Self::DerError => {
+                write!(f, "An error happened during the DER encoding/decoding")
+            }
+            Self::InvalidDiceChain => {
+                write!(f, "The DICE chain from the client VM is invalid")
+            }
         }
     }
 }
@@ -163,6 +182,14 @@ impl From<ciborium::value::Error> for RequestProcessingError {
     fn from(e: ciborium::value::Error) -> Self {
         error!("CborValueError: {e}");
         Self::CborValueError
+    }
+}
+
+#[cfg(not(feature = "std"))]
+impl From<der::Error> for RequestProcessingError {
+    fn from(e: der::Error) -> Self {
+        error!("DER encoding/decoding error: {e}");
+        Self::DerError
     }
 }
 

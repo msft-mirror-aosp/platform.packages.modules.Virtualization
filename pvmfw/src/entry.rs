@@ -15,9 +15,9 @@
 //! Low-level entry and exit points of pvmfw.
 
 use crate::config;
-use crate::crypto;
 use crate::fdt;
 use crate::memory;
+use bssl_sys::CRYPTO_library_init;
 use core::arch::asm;
 use core::mem::{drop, size_of};
 use core::num::NonZeroUsize;
@@ -88,6 +88,7 @@ impl<'a> MemorySlices<'a> {
         kernel: usize,
         kernel_size: usize,
         vm_dtbo: Option<&mut [u8]>,
+        vm_ref_dt: Option<&[u8]>,
     ) -> Result<Self, RebootReason> {
         let fdt_size = NonZeroUsize::new(crosvm::FDT_MAX_SIZE).unwrap();
         // TODO - Only map the FDT as read-only, until we modify it right before jump_to_payload()
@@ -101,7 +102,7 @@ impl<'a> MemorySlices<'a> {
         // SAFETY: The tracker validated the range to be in main memory, mapped, and not overlap.
         let fdt = unsafe { slice::from_raw_parts_mut(range.start as *mut u8, range.len()) };
 
-        let info = fdt::sanitize_device_tree(fdt, vm_dtbo)?;
+        let info = fdt::sanitize_device_tree(fdt, vm_dtbo, vm_ref_dt)?;
         let fdt = libfdt::Fdt::from_mut_slice(fdt).map_err(|e| {
             error!("Failed to load sanitized FDT: {e}");
             RebootReason::InvalidFdt
@@ -196,7 +197,12 @@ fn main_wrapper(
     // - only access non-pvmfw memory once (and while) it has been mapped
 
     log::set_max_level(LevelFilter::Info);
-    crypto::init();
+    // TODO(https://crbug.com/boringssl/35): Remove this init when BoringSSL can handle this
+    // internally.
+    // SAFETY: Configures the internal state of the library - may be called multiple times.
+    unsafe {
+        CRYPTO_library_init();
+    }
 
     let page_table = memory::init_page_table().map_err(|e| {
         error!("Failed to set up the dynamic page tables: {e}");
@@ -207,12 +213,12 @@ fn main_wrapper(
     // then remapped by `init_page_table()`.
     let appended_data = unsafe { get_appended_data_slice() };
 
-    let mut appended = AppendedPayload::new(appended_data).ok_or_else(|| {
+    let appended = AppendedPayload::new(appended_data).ok_or_else(|| {
         error!("No valid configuration found");
         RebootReason::InvalidConfig
     })?;
 
-    let (bcc_slice, debug_policy, vm_dtbo) = appended.get_entries();
+    let config_entries = appended.get_entries();
 
     // Up to this point, we were using the built-in static (from .rodata) page tables.
     MEMORY.lock().replace(MemoryTracker::new(
@@ -222,13 +228,25 @@ fn main_wrapper(
         Some(memory::appended_payload_range()),
     ));
 
-    let slices = MemorySlices::new(fdt, payload, payload_size, vm_dtbo)?;
+    let slices = MemorySlices::new(
+        fdt,
+        payload,
+        payload_size,
+        config_entries.vm_dtbo,
+        config_entries.vm_ref_dt,
+    )?;
 
     // This wrapper allows main() to be blissfully ignorant of platform details.
-    let next_bcc = crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc_slice, debug_policy)?;
+    let next_bcc = crate::main(
+        slices.fdt,
+        slices.kernel,
+        slices.ramdisk,
+        config_entries.bcc,
+        config_entries.debug_policy,
+    )?;
 
     // Writable-dirty regions will be flushed when MemoryTracker is dropped.
-    bcc_slice.zeroize();
+    config_entries.bcc.zeroize();
 
     info!("Expecting a bug making MMIO_GUARD_UNMAP return NOT_SUPPORTED on success");
     MEMORY.lock().as_mut().unwrap().mmio_unmap_all().map_err(|e| {
@@ -432,10 +450,10 @@ impl<'a> AppendedPayload<'a> {
         }
     }
 
-    fn get_entries(&mut self) -> (&mut [u8], Option<&mut [u8]>, Option<&mut [u8]>) {
+    fn get_entries(self) -> config::Entries<'a> {
         match self {
-            Self::Config(ref mut cfg) => cfg.get_entries(),
-            Self::LegacyBcc(ref mut bcc) => (bcc, None, None),
+            Self::Config(cfg) => cfg.get_entries(),
+            Self::LegacyBcc(bcc) => config::Entries { bcc, ..Default::default() },
         }
     }
 }
