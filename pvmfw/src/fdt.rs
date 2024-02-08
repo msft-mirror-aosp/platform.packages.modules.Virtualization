@@ -47,6 +47,7 @@ use vmbase::layout::{crosvm::MEM_START, MAX_VIRT_ADDR};
 use vmbase::memory::SIZE_4KB;
 use vmbase::util::flatten;
 use vmbase::util::RangeExt as _;
+use zerocopy::AsBytes as _;
 
 /// An enumeration of errors that can occur during the FDT validation.
 #[derive(Clone, Debug)]
@@ -164,10 +165,11 @@ fn read_and_validate_memory_range(fdt: &Fdt) -> Result<Range<usize>, RebootReaso
 }
 
 fn patch_memory_range(fdt: &mut Fdt, memory_range: &Range<usize>) -> libfdt::Result<()> {
-    let size = memory_range.len() as u64;
+    let addr = u64::try_from(MEM_START).unwrap();
+    let size = u64::try_from(memory_range.len()).unwrap();
     fdt.node_mut(cstr!("/memory"))?
         .ok_or(FdtError::NotFound)?
-        .setprop_inplace(cstr!("reg"), flatten(&[MEM_START.to_be_bytes(), size.to_be_bytes()]))
+        .setprop_inplace(cstr!("reg"), [addr.to_be(), size.to_be()].as_bytes())
 }
 
 /// Read the number of CPUs from DT
@@ -486,11 +488,17 @@ impl SerialInfo {
 }
 
 fn read_serial_info_from(fdt: &Fdt) -> libfdt::Result<SerialInfo> {
-    let mut addrs: ArrayVec<[u64; SerialInfo::MAX_SERIALS]> = Default::default();
-    for node in fdt.compatible_nodes(cstr!("ns16550a"))?.take(SerialInfo::MAX_SERIALS) {
+    let mut addrs = ArrayVec::new();
+
+    let mut serial_nodes = fdt.compatible_nodes(cstr!("ns16550a"))?;
+    for node in serial_nodes.by_ref().take(addrs.capacity()) {
         let reg = node.first_reg()?;
         addrs.push(reg.addr);
     }
+    if serial_nodes.next().is_some() {
+        warn!("DT has more than {} UART nodes: discarding extra nodes.", addrs.capacity());
+    }
+
     Ok(SerialInfo { addrs })
 }
 
@@ -607,17 +615,11 @@ fn patch_timer(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
         *v = v.to_be();
     }
 
-    // SAFETY: array size is the same
-    let value = unsafe {
-        core::mem::transmute::<
-            [u32; NUM_INTERRUPTS * CELLS_PER_INTERRUPT],
-            [u8; NUM_INTERRUPTS * CELLS_PER_INTERRUPT * size_of::<u32>()],
-        >(value.into_inner())
-    };
+    let value = value.into_inner();
 
     let mut node =
         fdt.root_mut()?.next_compatible(cstr!("arm,armv8-timer"))?.ok_or(FdtError::NotFound)?;
-    node.setprop_inplace(cstr!("interrupts"), value.as_slice())
+    node.setprop_inplace(cstr!("interrupts"), value.as_bytes())
 }
 
 #[derive(Debug)]
