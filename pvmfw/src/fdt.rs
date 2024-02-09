@@ -35,12 +35,12 @@ use libfdt::AddressRange;
 use libfdt::CellIterator;
 use libfdt::Fdt;
 use libfdt::FdtError;
-use libfdt::FdtNode;
 use libfdt::FdtNodeMut;
 use log::debug;
 use log::error;
 use log::info;
 use log::warn;
+use static_assertions::const_assert;
 use tinyvec::ArrayVec;
 use vmbase::fdt::SwiotlbInfo;
 use vmbase::layout::{crosvm::MEM_START, MAX_VIRT_ADDR};
@@ -172,33 +172,40 @@ fn patch_memory_range(fdt: &mut Fdt, memory_range: &Range<usize>) -> libfdt::Res
         .setprop_inplace(cstr!("reg"), [addr.to_be(), size.to_be()].as_bytes())
 }
 
-/// Read the number of CPUs from DT
-fn read_num_cpus_from(fdt: &Fdt) -> libfdt::Result<usize> {
-    Ok(fdt.compatible_nodes(cstr!("arm,arm-v8"))?.count())
-}
+#[derive(Debug, Default)]
+struct CpuInfo {}
 
-/// Validate number of CPUs
-fn validate_num_cpus(num_cpus: usize) -> Result<(), FdtValidationError> {
-    if num_cpus == 0 || DeviceTreeInfo::gic_patched_size(num_cpus).is_none() {
-        Err(FdtValidationError::InvalidCpuCount(num_cpus))
-    } else {
-        Ok(())
+fn read_cpu_info_from(fdt: &Fdt) -> libfdt::Result<ArrayVec<[CpuInfo; DeviceTreeInfo::MAX_CPUS]>> {
+    let mut cpus = ArrayVec::new();
+
+    let mut cpu_nodes = fdt.compatible_nodes(cstr!("arm,arm-v8"))?;
+    for _cpu in cpu_nodes.by_ref().take(cpus.capacity()) {
+        let info = CpuInfo {};
+        cpus.push(info);
     }
+    if cpu_nodes.next().is_some() {
+        warn!("DT has more than {} CPU nodes: discarding extra nodes.", cpus.capacity());
+    }
+
+    Ok(cpus)
 }
 
-/// Patch DT by keeping `num_cpus` number of arm,arm-v8 compatible nodes, and pruning the rest.
-fn patch_num_cpus(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
-    let cpu = cstr!("arm,arm-v8");
-    let mut next = fdt.root_mut()?.next_compatible(cpu)?;
-    for _ in 0..num_cpus {
-        next = if let Some(current) = next {
-            current.next_compatible(cpu)?
-        } else {
-            return Err(FdtError::NoSpace);
-        };
+fn validate_cpu_info(cpus: &[CpuInfo]) -> Result<(), FdtValidationError> {
+    if cpus.is_empty() {
+        return Err(FdtValidationError::InvalidCpuCount(0));
+    }
+
+    Ok(())
+}
+
+fn patch_cpus(fdt: &mut Fdt, cpus: &[CpuInfo]) -> libfdt::Result<()> {
+    const COMPAT: &CStr = cstr!("arm,arm-v8");
+    let mut next = fdt.root_mut()?.next_compatible(COMPAT)?;
+    for _cpu in cpus {
+        next = next.ok_or(FdtError::NoSpace)?.next_compatible(COMPAT)?;
     }
     while let Some(current) = next {
-        next = current.delete_and_next_compatible(cpu)?;
+        next = current.delete_and_next_compatible(COMPAT)?;
     }
     Ok(())
 }
@@ -488,11 +495,17 @@ impl SerialInfo {
 }
 
 fn read_serial_info_from(fdt: &Fdt) -> libfdt::Result<SerialInfo> {
-    let mut addrs: ArrayVec<[u64; SerialInfo::MAX_SERIALS]> = Default::default();
-    for node in fdt.compatible_nodes(cstr!("ns16550a"))?.take(SerialInfo::MAX_SERIALS) {
+    let mut addrs = ArrayVec::new();
+
+    let mut serial_nodes = fdt.compatible_nodes(cstr!("ns16550a"))?;
+    for node in serial_nodes.by_ref().take(addrs.capacity()) {
         let reg = node.first_reg()?;
         addrs.push(reg.addr);
     }
+    if serial_nodes.next().is_some() {
+        warn!("DT has more than {} UART nodes: discarding extra nodes.", addrs.capacity());
+    }
+
     Ok(SerialInfo { addrs })
 }
 
@@ -501,11 +514,8 @@ fn patch_serial_info(fdt: &mut Fdt, serial_info: &SerialInfo) -> libfdt::Result<
     let name = cstr!("ns16550a");
     let mut next = fdt.root_mut()?.next_compatible(name);
     while let Some(current) = next? {
-        let reg = FdtNode::from_mut(&current)
-            .reg()?
-            .ok_or(FdtError::NotFound)?
-            .next()
-            .ok_or(FdtError::NotFound)?;
+        let reg =
+            current.as_node().reg()?.ok_or(FdtError::NotFound)?.next().ok_or(FdtError::NotFound)?;
         next = if !serial_info.addrs.contains(&reg.addr) {
             current.delete_and_next_compatible(name)
         } else {
@@ -576,7 +586,8 @@ fn patch_gic(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
     let mut range1 = ranges.next().ok_or(FdtError::NotFound)?;
 
     let addr = range0.addr;
-    // `validate_num_cpus()` checked that this wouldn't panic
+    // `read_cpu_info_from()` guarantees that we have at most MAX_CPUS.
+    const_assert!(DeviceTreeInfo::gic_patched_size(DeviceTreeInfo::MAX_CPUS).is_some());
     let size = u64::try_from(DeviceTreeInfo::gic_patched_size(num_cpus).unwrap()).unwrap();
 
     // range1 is just below range0
@@ -622,7 +633,7 @@ pub struct DeviceTreeInfo {
     pub initrd_range: Option<Range<usize>>,
     pub memory_range: Range<usize>,
     bootargs: Option<CString>,
-    num_cpus: usize,
+    cpus: ArrayVec<[CpuInfo; DeviceTreeInfo::MAX_CPUS]>,
     pci_info: PciInfo,
     serial_info: SerialInfo,
     pub swiotlb_info: SwiotlbInfo,
@@ -631,7 +642,9 @@ pub struct DeviceTreeInfo {
 }
 
 impl DeviceTreeInfo {
-    fn gic_patched_size(num_cpus: usize) -> Option<usize> {
+    const MAX_CPUS: usize = 16;
+
+    const fn gic_patched_size(num_cpus: usize) -> Option<usize> {
         const GIC_REDIST_SIZE_PER_CPU: usize = 32 * SIZE_4KB;
 
         GIC_REDIST_SIZE_PER_CPU.checked_mul(num_cpus)
@@ -658,7 +671,9 @@ pub fn sanitize_device_tree(
 
     let info = parse_device_tree(fdt, vm_dtbo.as_deref())?;
 
-    fdt.copy_from_slice(pvmfw_fdt_template::RAW).map_err(|e| {
+    // SAFETY: We trust that the template (hardcoded in our RO data) is a valid DT.
+    let fdt_template = unsafe { Fdt::unchecked_from_slice(pvmfw_fdt_template::RAW) };
+    fdt.clone_from(fdt_template).map_err(|e| {
         error!("Failed to instantiate FDT from the template DT: {e}");
         RebootReason::InvalidFdt
     })?;
@@ -727,12 +742,12 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
         RebootReason::InvalidFdt
     })?;
 
-    let num_cpus = read_num_cpus_from(fdt).map_err(|e| {
-        error!("Failed to read num cpus from DT: {e}");
+    let cpus = read_cpu_info_from(fdt).map_err(|e| {
+        error!("Failed to read CPU info from DT: {e}");
         RebootReason::InvalidFdt
     })?;
-    validate_num_cpus(num_cpus).map_err(|e| {
-        error!("Failed to validate num cpus from DT: {e}");
+    validate_cpu_info(&cpus).map_err(|e| {
+        error!("Failed to validate CPU info from DT: {e}");
         RebootReason::InvalidFdt
     })?;
 
@@ -780,7 +795,7 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
         initrd_range,
         memory_range,
         bootargs,
-        num_cpus,
+        cpus,
         pci_info,
         serial_info,
         swiotlb_info,
@@ -806,7 +821,7 @@ fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootR
             RebootReason::InvalidFdt
         })?;
     }
-    patch_num_cpus(fdt, info.num_cpus).map_err(|e| {
+    patch_cpus(fdt, &info.cpus).map_err(|e| {
         error!("Failed to patch cpus to DT: {e}");
         RebootReason::InvalidFdt
     })?;
@@ -822,11 +837,11 @@ fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootR
         error!("Failed to patch swiotlb info to DT: {e}");
         RebootReason::InvalidFdt
     })?;
-    patch_gic(fdt, info.num_cpus).map_err(|e| {
+    patch_gic(fdt, info.cpus.len()).map_err(|e| {
         error!("Failed to patch gic info to DT: {e}");
         RebootReason::InvalidFdt
     })?;
-    patch_timer(fdt, info.num_cpus).map_err(|e| {
+    patch_timer(fdt, info.cpus.len()).map_err(|e| {
         error!("Failed to patch timer info to DT: {e}");
         RebootReason::InvalidFdt
     })?;
@@ -932,7 +947,7 @@ fn apply_debug_policy(
     // SAFETY: on failure, the corrupted DT is restored using the backup.
     if let Err(e) = unsafe { fdt.apply_overlay(overlay) } {
         warn!("Failed to apply debug policy: {e}. Recovering...");
-        fdt.copy_from_slice(backup_fdt.as_slice())?;
+        fdt.clone_from(backup_fdt)?;
         // A successful restoration is considered success because an invalid debug policy
         // shouldn't DOS the pvmfw
         Ok(false)
