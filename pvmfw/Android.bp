@@ -1,5 +1,4 @@
 package {
-    default_team: "trendy_team_virtualization",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -295,6 +294,7 @@ genrule {
 // numbers defined in the ARM DT binding headers
 cc_object {
     name: "pvmfw_platform.dts.preprocessed",
+    defaults: ["avf_build_flags_cc"],
     header_libs: ["arm_dt_bindings_headers"],
     host_supported: true,
     srcs: [":pvmfw_platform.dts.renamed"],

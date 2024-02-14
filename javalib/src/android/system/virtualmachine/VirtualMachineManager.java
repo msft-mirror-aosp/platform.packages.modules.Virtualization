@@ -92,13 +92,19 @@ public class VirtualMachineManager {
     })
     public @interface Capability {}
 
-    /* The implementation supports creating protected VMs, whose memory is inaccessible to the
-     * host OS.
+    /**
+     * The implementation supports creating protected VMs, whose memory is inaccessible to the host
+     * OS.
+     *
+     * @see VirtualMachineConfig.Builder#setProtectedVm
      */
     public static final int CAPABILITY_PROTECTED_VM = 1;
 
-    /* The implementation supports creating non-protected VMs, whose memory is accessible to the
+    /**
+     * The implementation supports creating non-protected VMs, whose memory is accessible to the
      * host OS.
+     *
+     * @see VirtualMachineConfig.Builder#setProtectedVm
      */
     public static final int CAPABILITY_NON_PROTECTED_VM = 2;
 
@@ -110,7 +116,12 @@ public class VirtualMachineManager {
     @Retention(RetentionPolicy.SOURCE)
     @StringDef(
             prefix = "FEATURE_",
-            value = {FEATURE_DICE_CHANGES, FEATURE_MULTI_TENANT, FEATURE_VENDOR_MODULES})
+            value = {
+                FEATURE_DICE_CHANGES,
+                FEATURE_MULTI_TENANT,
+                FEATURE_REMOTE_ATTESTATION,
+                FEATURE_VENDOR_MODULES
+            })
     public @interface Features {}
 
     /**
@@ -120,6 +131,7 @@ public class VirtualMachineManager {
      */
     @TestApi
     public static final String FEATURE_DICE_CHANGES = IVirtualizationService.FEATURE_DICE_CHANGES;
+
     /**
      * Feature to run payload as non-root user.
      *
@@ -127,6 +139,15 @@ public class VirtualMachineManager {
      */
     @TestApi
     public static final String FEATURE_MULTI_TENANT = IVirtualizationService.FEATURE_MULTI_TENANT;
+
+    /**
+     * Feature to allow remote attestation in Microdroid.
+     *
+     * @hide
+     */
+    @TestApi
+    public static final String FEATURE_REMOTE_ATTESTATION =
+            IVirtualizationService.FEATURE_REMOTE_ATTESTATION;
 
     /**
      * Feature to allow vendor modules in Microdroid.
@@ -204,7 +225,7 @@ public class VirtualMachineManager {
      *
      * @see #getOrCreate
      * @throws VirtualMachineException if the virtual machine exists but could not be successfully
-     *     retrieved.
+     *     retrieved. This can be resolved by calling {@link #delete} on the VM.
      * @hide
      */
     @SystemApi

@@ -1,5 +1,4 @@
 package {
-    default_team: "trendy_team_virtualization",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -34,6 +33,7 @@ android_test {
 
 cc_library_shared {
     name: "MicrodroidBenchmarkNativeLib",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["src/native/*.cpp"],
     local_include_dirs: ["src/native/include"],
     static_libs: [

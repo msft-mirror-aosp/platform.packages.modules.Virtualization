@@ -38,6 +38,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualizationService::FEATURE_MULTI_TENANT,
     IVirtualizationService::FEATURE_VENDOR_MODULES,
     IVirtualizationService::FEATURE_DICE_CHANGES,
+    IVirtualizationService::FEATURE_REMOTE_ATTESTATION,
     MemoryTrimLevel::MemoryTrimLevel,
     Partition::Partition,
     PartitionType::PartitionType,
@@ -307,12 +308,17 @@ impl IVirtualizationService for VirtualizationService {
         match feature {
             FEATURE_DICE_CHANGES => Ok(cfg!(dice_changes)),
             FEATURE_MULTI_TENANT => Ok(cfg!(multi_tenant)),
+            FEATURE_REMOTE_ATTESTATION => Ok(cfg!(remote_attestation)),
             FEATURE_VENDOR_MODULES => Ok(cfg!(vendor_modules)),
             _ => {
                 warn!("unknown feature {feature}");
                 Ok(false)
             }
         }
+    }
+
+    fn enableTestAttestation(&self) -> binder::Result<()> {
+        GLOBAL_SERVICE.enableTestAttestation()
     }
 }
 
@@ -1391,8 +1397,8 @@ impl IVirtualMachineService for VirtualMachineService {
         Ok(sk.map(|s| BnSecretkeeper::new_binder(SecretkeeperProxy(s), BinderFeatures::default())))
     }
 
-    fn requestAttestation(&self, csr: &[u8]) -> binder::Result<Vec<Certificate>> {
-        GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32)
+    fn requestAttestation(&self, csr: &[u8], test_mode: bool) -> binder::Result<Vec<Certificate>> {
+        GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32, test_mode)
     }
 }
 
@@ -1407,6 +1413,70 @@ impl VirtualMachineService {
             VirtualMachineService { state, cid },
             BinderFeatures::default(),
         )
+    }
+}
+
+struct SecretkeeperProxy(Strong<dyn ISecretkeeper>);
+
+impl Interface for SecretkeeperProxy {}
+
+impl ISecretkeeper for SecretkeeperProxy {
+    fn processSecretManagementRequest(&self, req: &[u8]) -> binder::Result<Vec<u8>> {
+        // Pass the request to the channel, and read the response.
+        self.0.processSecretManagementRequest(req)
+    }
+
+    fn getAuthGraphKe(&self) -> binder::Result<Strong<dyn IAuthGraphKeyExchange>> {
+        let ag = AuthGraphKeyExchangeProxy(self.0.getAuthGraphKe()?);
+        Ok(BnAuthGraphKeyExchange::new_binder(ag, BinderFeatures::default()))
+    }
+
+    fn deleteIds(&self, ids: &[SecretId]) -> binder::Result<()> {
+        self.0.deleteIds(ids)
+    }
+
+    fn deleteAll(&self) -> binder::Result<()> {
+        self.0.deleteAll()
+    }
+}
+
+struct AuthGraphKeyExchangeProxy(Strong<dyn IAuthGraphKeyExchange>);
+
+impl Interface for AuthGraphKeyExchangeProxy {}
+
+impl IAuthGraphKeyExchange for AuthGraphKeyExchangeProxy {
+    fn create(&self) -> binder::Result<SessionInitiationInfo> {
+        self.0.create()
+    }
+
+    fn init(
+        &self,
+        peer_pub_key: &PubKey,
+        peer_id: &Identity,
+        peer_nonce: &[u8],
+        peer_version: i32,
+    ) -> binder::Result<KeInitResult> {
+        self.0.init(peer_pub_key, peer_id, peer_nonce, peer_version)
+    }
+
+    fn finish(
+        &self,
+        peer_pub_key: &PubKey,
+        peer_id: &Identity,
+        peer_signature: &SessionIdSignature,
+        peer_nonce: &[u8],
+        peer_version: i32,
+        own_key: &Key,
+    ) -> binder::Result<SessionInfo> {
+        self.0.finish(peer_pub_key, peer_id, peer_signature, peer_nonce, peer_version, own_key)
+    }
+
+    fn authenticationComplete(
+        &self,
+        peer_signature: &SessionIdSignature,
+        shared_keys: &[AuthgraphArc; 2],
+    ) -> binder::Result<[AuthgraphArc; 2]> {
+        self.0.authenticationComplete(peer_signature, shared_keys)
     }
 }
 
@@ -1624,69 +1694,5 @@ mod tests {
             bail!("Expected {:?} but was {:?}", os_names, result);
         }
         Ok(())
-    }
-}
-
-struct SecretkeeperProxy(Strong<dyn ISecretkeeper>);
-
-impl Interface for SecretkeeperProxy {}
-
-impl ISecretkeeper for SecretkeeperProxy {
-    fn processSecretManagementRequest(&self, req: &[u8]) -> binder::Result<Vec<u8>> {
-        // Pass the request to the channel, and read the response.
-        self.0.processSecretManagementRequest(req)
-    }
-
-    fn getAuthGraphKe(&self) -> binder::Result<Strong<dyn IAuthGraphKeyExchange>> {
-        let ag = AuthGraphKeyExchangeProxy(self.0.getAuthGraphKe()?);
-        Ok(BnAuthGraphKeyExchange::new_binder(ag, BinderFeatures::default()))
-    }
-
-    fn deleteIds(&self, ids: &[SecretId]) -> binder::Result<()> {
-        self.0.deleteIds(ids)
-    }
-
-    fn deleteAll(&self) -> binder::Result<()> {
-        self.0.deleteAll()
-    }
-}
-
-struct AuthGraphKeyExchangeProxy(Strong<dyn IAuthGraphKeyExchange>);
-
-impl Interface for AuthGraphKeyExchangeProxy {}
-
-impl IAuthGraphKeyExchange for AuthGraphKeyExchangeProxy {
-    fn create(&self) -> binder::Result<SessionInitiationInfo> {
-        self.0.create()
-    }
-
-    fn init(
-        &self,
-        peer_pub_key: &PubKey,
-        peer_id: &Identity,
-        peer_nonce: &[u8],
-        peer_version: i32,
-    ) -> binder::Result<KeInitResult> {
-        self.0.init(peer_pub_key, peer_id, peer_nonce, peer_version)
-    }
-
-    fn finish(
-        &self,
-        peer_pub_key: &PubKey,
-        peer_id: &Identity,
-        peer_signature: &SessionIdSignature,
-        peer_nonce: &[u8],
-        peer_version: i32,
-        own_key: &Key,
-    ) -> binder::Result<SessionInfo> {
-        self.0.finish(peer_pub_key, peer_id, peer_signature, peer_nonce, peer_version, own_key)
-    }
-
-    fn authenticationComplete(
-        &self,
-        peer_signature: &SessionIdSignature,
-        shared_keys: &[AuthgraphArc; 2],
-    ) -> binder::Result<[AuthgraphArc; 2]> {
-        self.0.authenticationComplete(peer_signature, shared_keys)
     }
 }

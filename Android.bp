@@ -14,6 +14,7 @@
 // limitations under the License.
 
 package {
+    default_team: "trendy_team_virtualization",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -58,6 +59,27 @@ avf_flag_aware_rust_defaults {
         },
         release_avf_enable_virt_cpufreq: {
             cfgs: ["virt_cpufreq"],
+        },
+    },
+}
+
+soong_config_module_type {
+    name: "avf_flag_aware_cc_defaults",
+    module_type: "cc_defaults",
+    config_namespace: "ANDROID",
+    bool_variables: [
+        "release_avf_enable_virt_cpufreq",
+    ],
+    properties: [
+        "cflags",
+    ],
+}
+
+avf_flag_aware_cc_defaults {
+    name: "avf_build_flags_cc",
+    soong_config_variables: {
+        release_avf_enable_virt_cpufreq: {
+            cflags: ["-DAVF_ENABLE_VIRT_CPUFREQ=1"],
         },
     },
 }
