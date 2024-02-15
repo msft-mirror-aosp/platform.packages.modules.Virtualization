@@ -14,16 +14,78 @@
 // limitations under the License.
 
 package {
-    default_applicable_licenses: ["packages_modules_Virtualization_license"],
+    default_team: "trendy_team_virtualization",
+    default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-// Added automatically by a large-scale-change
-// See: http://go/android-license-faq
-license {
-    name: "packages_modules_Virtualization_license",
-    visibility: [":__subpackages__"],
-    license_kinds: [
-        "legacy_unencumbered",
+soong_config_module_type {
+    name: "avf_flag_aware_rust_defaults",
+    module_type: "rust_defaults",
+    config_namespace: "ANDROID",
+    bool_variables: [
+        "release_avf_enable_device_assignment",
+        "release_avf_enable_dice_changes",
+        "release_avf_enable_llpvm_changes",
+        "release_avf_enable_multi_tenant_microdroid_vm",
+        "release_avf_enable_remote_attestation",
+        "release_avf_enable_vendor_modules",
+        "release_avf_enable_virt_cpufreq",
     ],
-    // large-scale-change unable to identify any license_text files
+    properties: [
+        "cfgs",
+    ],
+}
+
+avf_flag_aware_rust_defaults {
+    name: "avf_build_flags_rust",
+    soong_config_variables: {
+        release_avf_enable_device_assignment: {
+            cfgs: ["device_assignment"],
+        },
+        release_avf_enable_dice_changes: {
+            cfgs: ["dice_changes"],
+        },
+        release_avf_enable_llpvm_changes: {
+            cfgs: ["llpvm_changes"],
+        },
+        release_avf_enable_multi_tenant_microdroid_vm: {
+            cfgs: ["multi_tenant"],
+        },
+        release_avf_enable_remote_attestation: {
+            cfgs: ["remote_attestation"],
+        },
+        release_avf_enable_vendor_modules: {
+            cfgs: ["vendor_modules"],
+        },
+        release_avf_enable_virt_cpufreq: {
+            cfgs: ["virt_cpufreq"],
+        },
+    },
+}
+
+soong_config_module_type {
+    name: "avf_flag_aware_cc_defaults",
+    module_type: "cc_defaults",
+    config_namespace: "ANDROID",
+    bool_variables: [
+        "release_avf_enable_virt_cpufreq",
+    ],
+    properties: [
+        "cflags",
+    ],
+}
+
+avf_flag_aware_cc_defaults {
+    name: "avf_build_flags_cc",
+    soong_config_variables: {
+        release_avf_enable_virt_cpufreq: {
+            cflags: ["-DAVF_ENABLE_VIRT_CPUFREQ=1"],
+        },
+    },
+}
+
+genrule_defaults {
+    name: "dts_to_dtb",
+    tools: ["dtc"],
+    cmd: "FILES=($(in)) && $(location dtc) -I dts -O dtb $${FILES[-1]} -o $(out)",
 }

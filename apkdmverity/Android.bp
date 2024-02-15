@@ -5,6 +5,7 @@ package {
 rust_defaults {
     name: "apkdmverity.defaults",
     crate_name: "apkdmverity",
+    defaults: ["avf_build_flags_rust"],
     srcs: ["src/main.rs"],
     edition: "2021",
     prefer_rlib: true,
@@ -13,14 +14,15 @@ rust_defaults {
         "libapkverify",
         "libbitflags",
         "libclap",
-        "libdata_model",
         "libdm_rust",
+        "libhex",
         "libitertools",
         "liblibc",
         "libnix",
         "libnum_traits",
         "libscopeguard",
         "libuuid",
+        "libzerocopy",
     ],
     proc_macros: ["libnum_derive"],
     multilib: {
@@ -38,7 +40,10 @@ rust_binary {
 
 rust_test {
     name: "apkdmverity.test",
-    defaults: ["apkdmverity.defaults"],
+    defaults: [
+        "apkdmverity.defaults",
+        "rdroidtest.defaults",
+    ],
     test_suites: ["general-tests"],
     compile_multilib: "first",
     rustlibs: [

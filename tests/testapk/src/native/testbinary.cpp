@@ -248,6 +248,11 @@ Result<void> start_test_service() {
             return ScopedAStatus::ok();
         }
 
+        ScopedAStatus getUid(int* out) override {
+            *out = getuid();
+            return ScopedAStatus::ok();
+        }
+
         ScopedAStatus runEchoReverseServer() override {
             auto result = start_echo_reverse_server();
             if (result.ok()) {
@@ -313,18 +318,38 @@ Result<void> start_test_service() {
             return ScopedAStatus::ok();
         }
 
+        ScopedAStatus readLineFromConsole(std::string* out) {
+            FILE* f = fopen("/dev/console", "r");
+            if (f == nullptr) {
+                return ScopedAStatus::fromExceptionCodeWithMessage(EX_SERVICE_SPECIFIC,
+                                                                   "failed to open /dev/console");
+            }
+            char* line = nullptr;
+            size_t len = 0;
+            ssize_t nread = getline(&line, &len, f);
+
+            if (nread == -1) {
+                free(line);
+                return ScopedAStatus::fromExceptionCodeWithMessage(EX_SERVICE_SPECIFIC,
+                                                                   "failed to read /dev/console");
+            }
+            out->append(line, nread);
+            free(line);
+            return ScopedAStatus::ok();
+        }
+
         ScopedAStatus quit() override { exit(0); }
     };
     auto testService = ndk::SharedRefBase::make<TestService>();
 
     auto callback = []([[maybe_unused]] void* param) { AVmPayload_notifyPayloadReady(); };
-    AVmPayload_runVsockRpcServer(testService->asBinder().get(), testService->SERVICE_PORT, callback,
+    AVmPayload_runVsockRpcServer(testService->asBinder().get(), testService->PORT, callback,
                                  nullptr);
 
     return {};
 }
 
-Result<void> verify_apk() {
+Result<void> verify_build_manifest() {
     const char* path = "/mnt/extra-apk/0/assets/build_manifest.pb";
 
     std::string str;
@@ -339,6 +364,17 @@ Result<void> verify_apk() {
     return {};
 }
 
+Result<void> verify_vm_share() {
+    const char* path = "/mnt/extra-apk/0/assets/vmshareapp.txt";
+
+    std::string str;
+    if (!android::base::ReadFileToString(path, &str)) {
+        return ErrnoError() << "failed to read vmshareapp.txt";
+    }
+
+    return {};
+}
+
 } // Anonymous namespace
 
 extern "C" int AVmPayload_main() {
@@ -347,8 +383,10 @@ extern "C" int AVmPayload_main() {
     // Make sure we can call into other shared libraries.
     testlib_sub();
 
-    // Extra apks may be missing; this is not a fatal error
-    report_test("extra_apk", verify_apk());
+    // Report various things that aren't always fatal - these are checked in MicrodroidTests as
+    // appropriate.
+    report_test("extra_apk_build_manifest", verify_build_manifest());
+    report_test("extra_apk_vm_share", verify_vm_share());
 
     __system_property_set("debug.microdroid.app.run", "true");
 

@@ -24,8 +24,7 @@ mod sigutil;
 pub mod testing;
 mod v3;
 mod v4;
-mod ziputil;
 
 pub use algorithms::{HashAlgorithm, SignatureAlgorithmID};
-pub use v3::{get_public_key_der, verify};
+pub use v3::{extract_signed_data, verify, SignedData};
 pub use v4::{get_apk_digest, V4Signature};

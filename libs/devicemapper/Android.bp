@@ -5,6 +5,7 @@ package {
 rust_defaults {
     name: "libdm_rust.defaults",
     crate_name: "dm",
+    defaults: ["avf_build_flags_rust"],
     srcs: ["src/lib.rs"],
     edition: "2021",
     prefer_rlib: true,
@@ -12,10 +13,10 @@ rust_defaults {
         "libanyhow",
         "libbitflags",
         "liblibc",
-        "libdata_model",
         "libhex",
         "libnix",
         "libuuid",
+        "libzerocopy",
     ],
     multilib: {
         lib32: {
@@ -31,7 +32,10 @@ rust_library {
 
 rust_test {
     name: "libdm_rust.test",
-    defaults: ["libdm_rust.defaults"],
+    defaults: [
+        "libdm_rust.defaults",
+        "rdroidtest.defaults",
+    ],
     test_suites: ["general-tests"],
     rustlibs: [
         "librustutils",

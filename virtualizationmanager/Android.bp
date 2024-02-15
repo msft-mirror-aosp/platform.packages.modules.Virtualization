@@ -5,6 +5,11 @@ package {
 rust_defaults {
     name: "virtualizationmanager_defaults",
     crate_name: "virtualizationmanager",
+    defaults: [
+        "avf_build_flags_rust",
+        "secretkeeper_use_latest_hal_aidl_rust",
+        "authgraph_use_latest_hal_aidl_rust",
+    ],
     edition: "2021",
     // Only build on targets which crosvm builds on.
     enabled: false,
@@ -27,11 +32,14 @@ rust_defaults {
         "libandroid_logger",
         "libanyhow",
         "libapkverify",
+        "libavflog",
         "libbase_rust",
         "libbinder_rs",
         "libclap",
+        "libcstr",
         "libcommand_fds",
         "libdisk",
+        "libglob",
         "libhypervisor_props",
         "liblazy_static",
         "liblibc",
@@ -57,6 +65,7 @@ rust_defaults {
         "libzip",
         "libvsock",
         "liblibfdt",
+        "libfsfdt",
         // TODO(b/202115393) stabilize the interface
         "packagemanager_aidl-rust",
     ],
@@ -80,6 +89,8 @@ rust_test {
         "libtempfile",
     ],
     data: [
+        ":test_avf_debug_policy_with_ramdump",
+        ":test_avf_debug_policy_without_ramdump",
         ":test_avf_debug_policy_with_adb",
         ":test_avf_debug_policy_without_adb",
     ],

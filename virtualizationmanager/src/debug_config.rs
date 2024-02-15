@@ -42,10 +42,10 @@ impl DPPath {
     }
 
     fn to_path(&self) -> PathBuf {
-        // SAFETY -- unwrap() is safe for to_str() because node_path and prop_name were &str.
+        // unwrap() is safe for to_str() because node_path and prop_name were &str.
         PathBuf::from(
             [
-                "/sys/firmware/devicetree/base",
+                "/proc/device-tree",
                 self.node_path.to_str().unwrap(),
                 "/",
                 self.prop_name.to_str().unwrap(),
@@ -84,9 +84,9 @@ fn get_fdt_prop_bool(fdt: &Fdt, path: &DPPath) -> Result<bool> {
     let (node_path, prop_name) = (&path.node_path, &path.prop_name);
     let node = match fdt.node(node_path) {
         Ok(Some(node)) => node,
-        Err(error) if error != FdtError::NotFound => Err(error)
-            .map_err(Error::msg)
-            .with_context(|| format!("Failed to get node {node_path:?}"))?,
+        Err(error) if error != FdtError::NotFound => {
+            Err(Error::msg(error)).with_context(|| format!("Failed to get node {node_path:?}"))?
+        }
         _ => return Ok(false),
     };
 
@@ -94,9 +94,9 @@ fn get_fdt_prop_bool(fdt: &Fdt, path: &DPPath) -> Result<bool> {
         Ok(Some(0)) => Ok(false),
         Ok(Some(1)) => Ok(true),
         Ok(Some(_)) => Err(anyhow!("Invalid prop value {prop_name:?} in node {node_path:?}")),
-        Err(error) if error != FdtError::NotFound => Err(error)
-            .map_err(Error::msg)
-            .with_context(|| format!("Failed to get prop {prop_name:?}")),
+        Err(error) if error != FdtError::NotFound => {
+            Err(Error::msg(error)).with_context(|| format!("Failed to get prop {prop_name:?}"))
+        }
         _ => Ok(false),
     }
 }
@@ -129,7 +129,7 @@ impl OwnedFdt {
                 .map_err(Error::msg)
                 .with_context(|| "Malformed {overlay_file_path:?}")?;
 
-            // SAFETY - Return immediately if error happens. Damaged fdt_buf and fdt are discarded.
+            // SAFETY: Return immediately if error happens. Damaged fdt_buf and fdt are discarded.
             unsafe {
                 fdt.apply_overlay(overlay_fdt).map_err(Error::msg).with_context(|| {
                     "Failed to overlay {overlay_file_path:?} onto empty device tree"
@@ -141,7 +141,7 @@ impl OwnedFdt {
     }
 
     fn as_fdt(&self) -> &Fdt {
-        // SAFETY - Checked validity of buffer when instantiate.
+        // SAFETY: Checked validity of buffer when instantiate.
         unsafe { Fdt::unchecked_from_slice(&self.buffer) }
     }
 }
@@ -236,6 +236,38 @@ mod tests {
             return "user".eq(&value);
         }
         false // if we're in doubt, skip test.
+    }
+
+    #[test]
+    fn test_read_avf_debug_policy_with_ramdump() -> Result<()> {
+        let debug_config = DebugConfig::from_custom_debug_overlay_policy(
+            DebugLevel::FULL,
+            "avf_debug_policy_with_ramdump.dtbo".as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(DebugLevel::FULL, debug_config.debug_level);
+        assert!(!debug_config.debug_policy_log);
+        assert!(debug_config.debug_policy_ramdump);
+        assert!(debug_config.debug_policy_adb);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_avf_debug_policy_without_ramdump() -> Result<()> {
+        let debug_config = DebugConfig::from_custom_debug_overlay_policy(
+            DebugLevel::FULL,
+            "avf_debug_policy_without_ramdump.dtbo".as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(DebugLevel::FULL, debug_config.debug_level);
+        assert!(!debug_config.debug_policy_log);
+        assert!(!debug_config.debug_policy_ramdump);
+        assert!(debug_config.debug_policy_adb);
+
+        Ok(())
     }
 
     #[test]

@@ -7,28 +7,27 @@ rust_ffi_static {
     crate_name: "pvmfw",
     defaults: ["vmbase_ffi_defaults"],
     srcs: ["src/main.rs"],
-    edition: "2021",
-    // Require unsafe blocks for inside unsafe functions.
-    flags: ["-Dunsafe_op_in_unsafe_fn"],
     features: [
         "legacy",
     ],
     rustlibs: [
         "libaarch64_paging",
-        "libbssl_ffi_nostd",
-        "libbuddy_system_allocator",
+        "libbssl_avf_nostd",
+        "libbssl_sys_nostd",
         "libciborium_nostd",
         "libciborium_io_nostd",
+        "libcstr",
         "libdiced_open_dice_nostd",
         "libfdtpci",
         "libhyp",
         "liblibfdt",
         "liblog_rust_nostd",
         "libonce_cell_nostd",
-        "libpsci",
         "libpvmfw_avb_nostd",
         "libpvmfw_embedded_key",
         "libpvmfw_fdt_template",
+        "libservice_vm_version",
+        "libsmccc",
         "libstatic_assertions",
         "libtinyvec_nostd",
         "libuuid_nostd",
@@ -36,7 +35,6 @@ rust_ffi_static {
         "libvmbase",
         "libzerocopy_nostd",
         "libzeroize_nostd",
-        "libspin_nostd",
     ],
 }
 
@@ -47,18 +45,155 @@ genrule {
     cmd: "touch $(out)",
 }
 
+rust_defaults {
+    name: "libpvmfw.test.defaults",
+    defaults: ["avf_build_flags_rust"],
+    test_suites: ["general-tests"],
+    test_options: {
+        unit_test: true,
+    },
+    prefer_rlib: true,
+    rustlibs: [
+        "libcstr",
+    ],
+}
+
 rust_test {
     name: "libpvmfw.bootargs.test",
     host_supported: true,
     // For now, only bootargs.rs is written to be conditionally compiled with std.
     srcs: ["src/bootargs.rs"],
-    test_suites: ["general-tests"],
-    test_options: {
-        unit_test: true,
-    },
+    defaults: ["libpvmfw.test.defaults"],
     rustlibs: [
         "libzeroize",
     ],
+}
+
+rust_test {
+    name: "libpvmfw.device_assignment.test",
+    srcs: ["src/device_assignment.rs"],
+    defaults: ["libpvmfw.test.defaults"],
+    rustlibs: [
+        "libhyp",
+        "liblibfdt",
+        "liblog_rust",
+        "libpvmfw_fdt_template",
+    ],
+    data: [
+        ":test_pvmfw_devices_vm_dtbo",
+        ":test_pvmfw_devices_vm_dtbo_without_symbols",
+        ":test_pvmfw_devices_vm_dtbo_with_duplicated_iommus",
+        ":test_pvmfw_devices_with_rng",
+        ":test_pvmfw_devices_with_multiple_devices_iommus",
+        ":test_pvmfw_devices_with_iommu_sharing",
+        ":test_pvmfw_devices_with_iommu_id_conflict",
+        ":test_pvmfw_devices_without_device",
+        ":test_pvmfw_devices_without_iommus",
+        ":test_pvmfw_devices_with_duplicated_pviommus",
+        ":test_pvmfw_devices_with_multiple_reg_iommus",
+    ],
+    // To use libpvmfw_fdt_template for testing
+    enabled: false,
+    target: {
+        android_arm64: {
+            enabled: true,
+        },
+    },
+}
+
+rust_test {
+    name: "libpvmfw.dice.test",
+    srcs: ["src/dice.rs"],
+    defaults: ["libpvmfw.test.defaults"],
+    rustlibs: [
+        "libcbor_util",
+        "libciborium",
+        "libdiced_open_dice_nostd",
+        "libpvmfw_avb_nostd",
+    ],
+}
+
+genrule {
+    name: "test_pvmfw_devices_vm_dtbo",
+    defaults: ["dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_vm_dtbo.dts"],
+    out: ["test_pvmfw_devices_vm_dtbo.dtbo"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_vm_dtbo_without_symbols",
+    defaults: ["dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_vm_dtbo_without_symbols.dts"],
+    out: ["test_pvmfw_devices_vm_dtbo_without_symbols.dtbo"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_vm_dtbo_with_duplicated_iommus",
+    defaults: ["dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_vm_dtbo_with_duplicated_iommus.dts"],
+    out: ["test_pvmfw_devices_vm_dtbo_with_duplicated_iommus.dtbo"],
+}
+
+genrule_defaults {
+    name: "test_device_assignment_dts_to_dtb",
+    defaults: ["dts_to_dtb"],
+    srcs: ["testdata/test_crosvm_dt_base.dtsi"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_with_rng",
+    defaults: ["test_device_assignment_dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_with_rng.dts"],
+    out: ["test_pvmfw_devices_with_rng.dtb"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_without_iommus",
+    defaults: ["test_device_assignment_dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_without_iommus.dts"],
+    out: ["test_pvmfw_devices_without_iommus.dtb"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_without_device",
+    defaults: ["test_device_assignment_dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_without_device.dts"],
+    out: ["test_pvmfw_devices_without_device.dtb"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_with_multiple_devices_iommus",
+    defaults: ["test_device_assignment_dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_with_multiple_devices_iommus.dts"],
+    out: ["test_pvmfw_devices_with_multiple_devices_iommus.dtb"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_with_iommu_sharing",
+    defaults: ["test_device_assignment_dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_with_iommu_sharing.dts"],
+    out: ["test_pvmfw_devices_with_iommu_sharing.dtb"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_with_iommu_id_conflict",
+    defaults: ["test_device_assignment_dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_with_iommu_id_conflict.dts"],
+    out: ["test_pvmfw_devices_with_iommu_id_conflict.dtb"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_with_duplicated_pviommus",
+    defaults: ["test_device_assignment_dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_with_duplicated_pviommus.dts"],
+    out: ["test_pvmfw_devices_with_duplicated_pviommus.dtb"],
+}
+
+genrule {
+    name: "test_pvmfw_devices_with_multiple_reg_iommus",
+    defaults: ["test_device_assignment_dts_to_dtb"],
+    srcs: ["testdata/test_pvmfw_devices_with_multiple_reg_iommus.dts"],
+    out: ["test_pvmfw_devices_with_multiple_reg_iommus.dtb"],
 }
 
 cc_binary {
@@ -83,7 +218,6 @@ cc_binary {
     // partition image. This is just to package the unstripped file into the
     // symbols zip file for debugging purpose.
     installable: true,
-    native_coverage: false,
 }
 
 raw_binary {
@@ -135,11 +269,9 @@ genrule {
 
 rust_library_rlib {
     name: "libpvmfw_embedded_key",
-    defaults: ["vmbase_ffi_defaults"],
-    prefer_rlib: true,
+    defaults: ["vmbase_rlib_defaults"],
     srcs: [":pvmfw_embedded_key_rs"],
     crate_name: "pvmfw_embedded_key",
-    apex_available: ["com.android.virt"],
 }
 
 prebuilt_etc {
@@ -148,20 +280,40 @@ prebuilt_etc {
     installable: false,
 }
 
-// platform.dts is passed to clang for macro preprocessing, and then compiled to dtbo using dtc.
-// The raw content of the dtbo file is then written as a Rust byte array.
+// We need to rename *.dts into *.cpp as cc_object doesn't accept *.dts as an
+// input
 genrule {
-    name: "pvmfw_fdt_template_rs",
-    srcs: [
-        "platform.dts",
-        ":arm_dt_bindings_headers", // implicit dependency
+    name: "pvmfw_platform.dts.renamed",
+    srcs: ["platform.dts"],
+    out: ["out.cpp"],
+    cmd: "cp $(in) $(out)",
+    visibility: ["//visibility:private"],
+}
+
+// Then run the macro processor to replace symbols like GIC_SPI into actual
+// numbers defined in the ARM DT binding headers
+cc_object {
+    name: "pvmfw_platform.dts.preprocessed",
+    defaults: ["avf_build_flags_cc"],
+    header_libs: ["arm_dt_bindings_headers"],
+    host_supported: true,
+    srcs: [":pvmfw_platform.dts.renamed"],
+    cflags: [
+        "-E",
+        "-P",
+        "-xassembler-with-cpp", // allow C preprocessor directives
     ],
+    visibility: ["//visibility:private"],
+}
+
+// Compile the preprocessed dts into binary and create a rust library source
+// having the binary.
+cc_genrule {
+    name: "pvmfw_fdt_template_rs",
+    srcs: [":pvmfw_platform.dts.preprocessed"],
     out: ["lib.rs"],
     tools: ["dtc"],
-    cmd: "prebuilts/clang/host/linux-x86/clang-r487747c/bin/clang " + // UGLY!!!
-        "-E -P -x assembler-with-cpp -I external/arm-trusted-firmware/include " +
-        "-o $(genDir)/preprocessed.dts $(location platform.dts) && " +
-        "$(location dtc) -I dts -O dtb -o $(genDir)/compiled.dtbo $(genDir)/preprocessed.dts && " +
+    cmd: "$(location dtc) -@ -I dts -O dtb -o $(genDir)/compiled.dtbo $(in) && " +
         "(" +
         "    echo '#![no_std]';" +
         "    echo '#![allow(missing_docs)]';" +
@@ -169,12 +321,12 @@ genrule {
         "    xxd -i < $(genDir)/compiled.dtbo;" +
         "    echo '];';" +
         ") > $(out)",
+    visibility: ["//visibility:private"],
 }
 
 rust_library_rlib {
     name: "libpvmfw_fdt_template",
-    defaults: ["vmbase_ffi_defaults"],
-    prefer_rlib: true,
+    defaults: ["vmbase_rlib_defaults"],
     srcs: [":pvmfw_fdt_template_rs"],
     crate_name: "pvmfw_fdt_template",
 }

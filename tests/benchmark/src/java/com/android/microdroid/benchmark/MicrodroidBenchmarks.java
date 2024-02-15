@@ -24,6 +24,7 @@ import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_NON
 import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentation;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 
 import android.app.Instrumentation;
@@ -37,6 +38,7 @@ import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineException;
 import android.system.Os;
+import android.system.virtualmachine.VirtualMachineManager;
 import android.util.Log;
 
 import com.android.microdroid.test.common.MetricsProcessor;
@@ -64,6 +66,7 @@ import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -77,6 +80,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     private static final String TAG = "MicrodroidBenchmarks";
     private static final String METRIC_NAME_PREFIX = getMetricPrefix() + "microdroid/";
     private static final int IO_TEST_TRIAL_COUNT = 5;
+    private static final int TEST_TRIAL_COUNT = 5;
     private static final long ONE_MEBI = 1024 * 1024;
 
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
@@ -88,12 +92,23 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     private static final String MICRODROID_IMG_PREFIX = "microdroid_";
     private static final String MICRODROID_IMG_SUFFIX = ".img";
 
-    @Parameterized.Parameters(name = "protectedVm={0}")
-    public static Object[] protectedVmConfigs() {
-        return new Object[] {false, true};
+    @Parameterized.Parameters(name = "protectedVm={0},gki={1}")
+    public static Collection<Object[]> params() {
+        List<Object[]> ret = new ArrayList<>();
+        ret.add(new Object[] {true /* protectedVm */, null /* use microdroid kernel */});
+        ret.add(new Object[] {false /* protectedVm */, null /* use microdroid kernel */});
+        for (String gki : SUPPORTED_GKI_VERSIONS) {
+            ret.add(new Object[] {true /* protectedVm */, gki});
+            ret.add(new Object[] {false /* protectedVm */, gki});
+        }
+        return ret;
     }
 
-    @Parameterized.Parameter public boolean mProtectedVm;
+    @Parameterized.Parameter(0)
+    public boolean mProtectedVm;
+
+    @Parameterized.Parameter(1)
+    public String mGki;
 
     private final MetricsProcessor mMetricsProcessor = new MetricsProcessor(METRIC_NAME_PREFIX);
 
@@ -116,7 +131,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     public void setup() throws IOException {
         grantPermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
-        prepareTestSetup(mProtectedVm);
+        prepareTestSetup(mProtectedVm, mGki);
         setMaxPerformanceTaskProfile();
         mInstrumentation = getInstrumentation();
     }
@@ -131,8 +146,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     private boolean canBootMicrodroidWithMemory(int mem)
             throws VirtualMachineException, InterruptedException, IOException {
         VirtualMachineConfig normalConfig =
-                newVmConfigBuilder()
-                        .setPayloadBinaryName("MicrodroidIdleNativeLib.so")
+                newVmConfigBuilderWithPayloadBinary("MicrodroidIdleNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
                         .setMemoryBytes(mem * ONE_MEBI)
                         .build();
@@ -197,8 +211,10 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         }
     }
 
-    private BootTimeStats runBootTimeTest(
+    private void runBootTimeTest(
             String name,
+            String payloadConfig,
+            boolean fullDebug,
             Function<VirtualMachineConfig.Builder, VirtualMachineConfig.Builder> fnConfig)
             throws VirtualMachineException, InterruptedException, IOException {
         assume().withMessage("Skip on CF; too slow").that(isCuttlefish()).isFalse();
@@ -208,10 +224,12 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         BootTimeStats stats = new BootTimeStats(trialCount);
         for (int i = 0; i < trialCount; i++) {
             VirtualMachineConfig.Builder builder =
-                    newVmConfigBuilder()
-                            .setPayloadBinaryName("MicrodroidIdleNativeLib.so")
+                    newVmConfigBuilderWithPayloadBinary("MicrodroidIdleNativeLib.so")
                             .setMemoryBytes(256 * ONE_MEBI)
                             .setDebugLevel(DEBUG_LEVEL_NONE);
+            if (fullDebug) {
+                builder = builder.setDebugLevel(DEBUG_LEVEL_FULL).setVmOutputCaptured(true);
+            }
             VirtualMachineConfig config = fnConfig.apply(builder).build();
             forceCreateNewVirtualMachine(name, config);
 
@@ -219,42 +237,66 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
             assertThat(result.payloadStarted).isTrue();
             stats.collect(result);
         }
-        return stats;
+
+        reportMetrics(stats.get(BootTimeMetric.TOTAL), "boot_time", "ms");
+        if (fullDebug) {
+            reportMetrics(stats.get(BootTimeMetric.VM_START), "vm_starting_time", "ms");
+            reportMetrics(stats.get(BootTimeMetric.BOOTLOADER), "bootloader_time", "ms");
+            reportMetrics(stats.get(BootTimeMetric.KERNEL), "kernel_boot_time", "ms");
+            reportMetrics(stats.get(BootTimeMetric.USERSPACE), "userspace_boot_time", "ms");
+        }
     }
 
     @Test
     public void testMicrodroidBootTime()
             throws VirtualMachineException, InterruptedException, IOException {
-        BootTimeStats stats =
-                runBootTimeTest(
-                        "test_vm_boot_time",
-                        (builder) -> builder.setCpuTopology(CPU_TOPOLOGY_ONE_CPU));
-        reportMetrics(stats.get(BootTimeMetric.TOTAL), "boot_time", "ms");
+        runBootTimeTest(
+                "test_vm_boot_time",
+                "assets/" + os() + "/vm_config.json",
+                /* fullDebug */ false,
+                (builder) -> builder.setCpuTopology(CPU_TOPOLOGY_ONE_CPU));
     }
-
     @Test
     public void testMicrodroidHostCpuTopologyBootTime()
             throws VirtualMachineException, InterruptedException, IOException {
-        BootTimeStats stats =
-                runBootTimeTest(
-                        "test_vm_boot_time_host_topology",
-                        (builder) -> builder.setCpuTopology(CPU_TOPOLOGY_MATCH_HOST));
-        reportMetrics(stats.get(BootTimeMetric.TOTAL), "boot_time", "ms");
+        runBootTimeTest(
+                "test_vm_boot_time_host_topology",
+                "assets/" + os() + "/vm_config.json",
+                /* fullDebug */ false,
+                (builder) -> builder.setCpuTopology(CPU_TOPOLOGY_MATCH_HOST));
     }
 
     @Test
     public void testMicrodroidDebugBootTime()
             throws VirtualMachineException, InterruptedException, IOException {
-        BootTimeStats stats =
-                runBootTimeTest(
-                        "test_vm_boot_time_debug",
-                        (builder) ->
-                                builder.setDebugLevel(DEBUG_LEVEL_FULL).setVmOutputCaptured(true));
-        reportMetrics(stats.get(BootTimeMetric.TOTAL), "boot_time", "ms");
-        reportMetrics(stats.get(BootTimeMetric.VM_START), "vm_starting_time", "ms");
-        reportMetrics(stats.get(BootTimeMetric.BOOTLOADER), "bootloader_time", "ms");
-        reportMetrics(stats.get(BootTimeMetric.KERNEL), "kernel_boot_time", "ms");
-        reportMetrics(stats.get(BootTimeMetric.USERSPACE), "userspace_boot_time", "ms");
+        runBootTimeTest(
+                "test_vm_boot_time_debug",
+                "assets/" + os() + "/vm_config.json",
+                /* fullDebug */ true,
+                (builder) -> builder);
+    }
+
+    @Test
+    public void testMicrodroidDebugBootTime_withVendorPartition() throws Exception {
+        assume().withMessage("Cuttlefish doesn't support device tree under" + " /proc/device-tree")
+                .that(isCuttlefish())
+                .isFalse();
+        // TODO(b/317567210): Boots fails with vendor partition in HWASAN enabled microdroid
+        // after introducing verification based on DT and fstab in microdroid vendor partition.
+        assume().withMessage("Boot with vendor partition is failing in HWASAN enabled Microdroid.")
+                .that(isHwasan())
+                .isFalse();
+        assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
+
+        File vendorDiskImage = new File("/vendor/etc/avf/microdroid/microdroid_vendor.img");
+        assume().withMessage("Microdroid vendor image doesn't exist, skip")
+                .that(vendorDiskImage.exists())
+                .isTrue();
+        runBootTimeTest(
+                "test_vm_boot_time_debug_with_vendor_partition",
+                "assets/" + os() + "/vm_config.json",
+                /* fullDebug */ true,
+                (builder) -> builder.setVendorDiskImage(vendorDiskImage));
     }
 
     @Test
@@ -281,8 +323,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     @Test
     public void testVsockTransferFromHostToVM() throws Exception {
         VirtualMachineConfig config =
-                newVmConfigBuilder()
-                        .setPayloadConfigPath("assets/vm_config_io.json")
+                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config_io.json")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
                         .build();
         List<Double> transferRates = new ArrayList<>(IO_TEST_TRIAL_COUNT);
@@ -308,8 +349,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
 
     private void testVirtioBlkReadRate(boolean isRand) throws Exception {
         VirtualMachineConfig config =
-                newVmConfigBuilder()
-                        .setPayloadConfigPath("assets/vm_config_io.json")
+                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config_io.json")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
                         .build();
         List<Double> readRates = new ArrayList<>(IO_TEST_TRIAL_COUNT);
@@ -455,8 +495,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     public void testMemoryUsage() throws Exception {
         final String vmName = "test_vm_mem_usage";
         VirtualMachineConfig config =
-                newVmConfigBuilder()
-                        .setPayloadConfigPath("assets/vm_config_io.json")
+                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config_io.json")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
                         .setMemoryBytes(256 * ONE_MEBI)
                         .build();
@@ -466,6 +505,8 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         setupDebugfs();
 
         BenchmarkVmListener.create(listener).runToFinish(TAG, vm);
+
+        assertWithMessage("VM failed to start").that(listener.mCrosvm).isNotNull();
 
         double mem_overall = 256.0;
         double mem_total = (double) listener.mMemTotal / 1024.0;
@@ -540,14 +581,15 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     public void testMemoryReclaim() throws Exception {
         final String vmName = "test_vm_mem_reclaim";
         VirtualMachineConfig config =
-                newVmConfigBuilder()
-                        .setPayloadConfigPath("assets/vm_config_io.json")
+                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config_io.json")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
                         .setMemoryBytes(256 * ONE_MEBI)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine(vmName, config);
         MemoryReclaimListener listener = new MemoryReclaimListener(this::executeCommand);
         BenchmarkVmListener.create(listener).runToFinish(TAG, vm);
+        assertWithMessage("VM failed to start").that(listener.mPreCrosvm).isNotNull();
+        assertWithMessage("Post trim stats not available").that(listener.mPostCrosvm).isNotNull();
 
         double mem_pre_crosvm_host_rss = (double) listener.mPreCrosvm.mHostRss / 1024.0;
         double mem_pre_crosvm_host_pss = (double) listener.mPreCrosvm.mHostPss / 1024.0;
@@ -658,8 +700,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         final int NUM_REQUESTS = 10_000;
 
         VirtualMachineConfig config =
-                newVmConfigBuilder()
-                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
                         .build();
 
@@ -707,8 +748,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         final int NUM_REQUESTS = 10_000;
 
         VirtualMachineConfig config =
-                newVmConfigBuilder()
-                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
                         .build();
 
@@ -761,5 +801,35 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
             }
         }
         reportMetrics(requestLatencies, "latency/vsock", "us");
+    }
+
+    @Test
+    public void testVmKillTime() throws Exception {
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config_io.json")
+                        .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .build();
+        List<Double> vmKillTime = new ArrayList<>(TEST_TRIAL_COUNT);
+
+        for (int i = 0; i < TEST_TRIAL_COUNT; ++i) {
+            VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_kill_time" + i, config);
+            VmEventListener listener =
+                    new VmEventListener() {
+                        @Override
+                        public void onPayloadReady(VirtualMachine vm) {
+                            long start = System.nanoTime();
+                            try {
+                                vm.stop();
+                            } catch (Exception e) {
+                                Log.e(TAG, "Error in vm.stop():" + e);
+                                throw new RuntimeException(e);
+                            }
+                            vmKillTime.add((double) (System.nanoTime() - start) / NANO_TO_MICRO);
+                            super.onPayloadReady(vm);
+                        }
+                    };
+            listener.runToFinish(TAG, vm);
+        }
+        reportMetrics(vmKillTime, "vm_kill_time", "microsecond");
     }
 }

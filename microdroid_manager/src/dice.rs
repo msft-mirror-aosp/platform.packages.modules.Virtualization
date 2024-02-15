@@ -1,10 +1,10 @@
-// Copyright 2022, The Android Open Source Project
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//      http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,181 +12,126 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Logic for handling the DICE values and boot operations.
-
-use anyhow::{anyhow, bail, Context, Error, Result};
-use byteorder::{NativeEndian, ReadBytesExt};
-use ciborium::{cbor, ser};
-use diced_open_dice::{
-    bcc_handover_parse, retry_bcc_main_flow, BccHandover, Config, DiceArtifacts, DiceMode, Hash,
-    Hidden, InputValues, OwnedDiceArtifacts,
-};
-use keystore2_crypto::ZVec;
-use libc::{c_void, mmap, munmap, MAP_FAILED, MAP_PRIVATE, PROT_READ};
+use crate::dice_driver::DiceDriver;
+use crate::instance::{ApexData, ApkData};
+use crate::{is_debuggable, MicrodroidData};
+use anyhow::{bail, Context, Result};
+use ciborium::{cbor, Value};
+use coset::CborSerializable;
+use diced_open_dice::OwnedDiceArtifacts;
 use microdroid_metadata::PayloadMetadata;
-use openssl::hkdf::hkdf;
-use openssl::md::Md;
-use std::fs;
-use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
-use std::ptr::null_mut;
-use std::slice;
+use openssl::sha::{sha512, Sha512};
+use std::iter::once;
 
-/// Derives a sealing key from the DICE sealing CDI.
-pub fn derive_sealing_key(
-    dice_artifacts: &dyn DiceArtifacts,
-    salt: &[u8],
-    info: &[u8],
-    key: &mut [u8],
-) -> Result<()> {
-    Ok(hkdf(key, Md::sha256(), dice_artifacts.cdi_seal(), salt, info)?)
+/// Perform an open DICE derivation for the payload.
+pub fn dice_derivation(
+    dice: DiceDriver,
+    instance_data: &MicrodroidData,
+    payload_metadata: &PayloadMetadata,
+) -> Result<OwnedDiceArtifacts> {
+    let subcomponents = build_subcomponent_list(instance_data);
+    let config_descriptor = format_payload_config_descriptor(payload_metadata, subcomponents)
+        .context("Building config descriptor")?;
+
+    // Calculate compound digests of code and authorities
+    let mut code_hash_ctx = Sha512::new();
+    let mut authority_hash_ctx = Sha512::new();
+    code_hash_ctx.update(instance_data.apk_data.root_hash.as_ref());
+    authority_hash_ctx.update(instance_data.apk_data.cert_hash.as_ref());
+    for extra_apk in &instance_data.extra_apks_data {
+        code_hash_ctx.update(extra_apk.root_hash.as_ref());
+        authority_hash_ctx.update(extra_apk.cert_hash.as_ref());
+    }
+    for apex in &instance_data.apex_data {
+        code_hash_ctx.update(apex.root_digest.as_ref());
+        authority_hash_ctx.update(apex.public_key.as_ref());
+    }
+    let code_hash = code_hash_ctx.finish();
+    let authority_hash = authority_hash_ctx.finish();
+
+    // Check debuggability, conservatively assuming it is debuggable
+    let debuggable = is_debuggable()?;
+
+    // Send the details to diced
+    let hidden = instance_data.salt.clone().try_into().unwrap();
+    dice.derive(code_hash, &config_descriptor, authority_hash, debuggable, hidden)
 }
 
-/// Artifacts that are mapped into the process address space from the driver.
-pub enum DiceDriver<'a> {
-    Real {
-        driver_path: PathBuf,
-        mmap_addr: *mut c_void,
-        mmap_size: usize,
-        bcc_handover: BccHandover<'a>,
-    },
-    Fake(OwnedDiceArtifacts),
+struct Subcomponent {
+    name: String,
+    version: u64,
+    code_hash: Vec<u8>,
+    authority_hash: Vec<u8>,
 }
 
-impl DiceDriver<'_> {
-    fn dice_artifacts(&self) -> &dyn DiceArtifacts {
-        match self {
-            Self::Real { bcc_handover, .. } => bcc_handover,
-            Self::Fake(owned_dice_artifacts) => owned_dice_artifacts,
+impl Subcomponent {
+    fn into_value(self) -> Result<Value> {
+        Ok(cbor!({
+           1 => self.name,
+           2 => self.version,
+           3 => Value::Bytes(self.code_hash),
+           4 => Value::Bytes(self.authority_hash),
+        })?)
+    }
+
+    fn for_apk(apk: &ApkData) -> Self {
+        Self {
+            name: format!("apk:{}", apk.package_name),
+            version: apk.version_code,
+            code_hash: apk.root_hash.clone(),
+            authority_hash: apk.cert_hash.clone(),
         }
     }
 
-    pub fn new(driver_path: &Path) -> Result<Self> {
-        if driver_path.exists() {
-            log::info!("Using DICE values from driver");
-        } else if super::is_strict_boot() {
-            bail!("Strict boot requires DICE value from driver but none were found");
-        } else {
-            log::warn!("Using sample DICE values");
-            let dice_artifacts = diced_sample_inputs::make_sample_bcc_and_cdis()
-                .expect("Failed to create sample dice artifacts.");
-            return Ok(Self::Fake(dice_artifacts));
-        };
-
-        let mut file = fs::File::open(driver_path)
-            .map_err(|error| Error::new(error).context("Opening driver"))?;
-        let mmap_size =
-            file.read_u64::<NativeEndian>()
-                .map_err(|error| Error::new(error).context("Reading driver"))? as usize;
-        // It's safe to map the driver as the service will only create a single
-        // mapping per process.
-        let mmap_addr = unsafe {
-            let fd = file.as_raw_fd();
-            mmap(null_mut(), mmap_size, PROT_READ, MAP_PRIVATE, fd, 0)
-        };
-        if mmap_addr == MAP_FAILED {
-            bail!("Failed to mmap {:?}", driver_path);
-        }
-        // The slice is created for the region of memory that was just
-        // successfully mapped into the process address space so it will be
-        // accessible and not referenced from anywhere else.
-        let mmap_buf =
-            unsafe { slice::from_raw_parts((mmap_addr as *const u8).as_ref().unwrap(), mmap_size) };
-        let bcc_handover =
-            bcc_handover_parse(mmap_buf).map_err(|_| anyhow!("Failed to parse Bcc Handover"))?;
-        Ok(Self::Real {
-            driver_path: driver_path.to_path_buf(),
-            mmap_addr,
-            mmap_size,
-            bcc_handover,
-        })
-    }
-
-    /// Derives a sealing key of `key_length` bytes from the DICE sealing CDI.
-    pub fn get_sealing_key(&self, identifier: &[u8], key_length: usize) -> Result<ZVec> {
-        // Deterministically derive a key to use for sealing data, rather than using the CDI
-        // directly, so we have the chance to rotate the key if needed. A salt isn't needed as the
-        // input key material is already cryptographically strong.
-        let mut key = ZVec::new(key_length)?;
-        let salt = &[];
-        derive_sealing_key(self.dice_artifacts(), salt, identifier, &mut key)?;
-        Ok(key)
-    }
-
-    pub fn derive(
-        self,
-        code_hash: Hash,
-        config_desc: &[u8],
-        authority_hash: Hash,
-        debug: bool,
-        hidden: Hidden,
-    ) -> Result<OwnedDiceArtifacts> {
-        let input_values = InputValues::new(
-            code_hash,
-            Config::Descriptor(config_desc),
-            authority_hash,
-            if debug { DiceMode::kDiceModeDebug } else { DiceMode::kDiceModeNormal },
-            hidden,
-        );
-        let current_dice_artifacts = self.dice_artifacts();
-        let next_dice_artifacts = retry_bcc_main_flow(
-            current_dice_artifacts.cdi_attest(),
-            current_dice_artifacts.cdi_seal(),
-            current_dice_artifacts.bcc().ok_or_else(|| anyhow!("bcc is none"))?,
-            &input_values,
-        )
-        .context("DICE derive from driver")?;
-        if let Self::Real { driver_path, .. } = &self {
-            // Writing to the device wipes the artifacts. The string is ignored by the driver but
-            // included for documentation.
-            fs::write(driver_path, "wipe")
-                .map_err(|err| Error::new(err).context("Wiping driver"))?;
-        }
-        Ok(next_dice_artifacts)
-    }
-}
-
-impl Drop for DiceDriver<'_> {
-    fn drop(&mut self) {
-        if let &mut Self::Real { mmap_addr, mmap_size, .. } = self {
-            // All references to the mapped region have the same lifetime as self. Since self is
-            // being dropped, so are all the references to the mapped region meaning its safe to
-            // unmap.
-            let ret = unsafe { munmap(mmap_addr, mmap_size) };
-            if ret != 0 {
-                log::warn!("Failed to munmap ({})", ret);
-            }
+    fn for_apex(apex: &ApexData) -> Self {
+        // Note that this is only reachable if the dice_changes flag is on, in which case
+        // the manifest data will always be present.
+        Self {
+            name: format!("apex:{}", apex.manifest_name.as_ref().unwrap()),
+            version: apex.manifest_version.unwrap() as u64,
+            code_hash: apex.root_digest.clone(),
+            authority_hash: sha512(&apex.public_key).to_vec(),
         }
     }
 }
 
-/// Returns a configuration descriptor of the given payload following the BCC's specification:
-/// https://cs.android.com/android/platform/superproject/+/master:hardware/interfaces/security/rkp/aidl/android/hardware/security/keymint/ProtectedData.aidl
-/// {
-///   -70002: "Microdroid payload",
-///   ? -71000: tstr // payload_config_path
-///   ? -71001: PayloadConfig
-/// }
-/// PayloadConfig = {
-///   1: tstr // payload_binary_name
-/// }
-pub fn format_payload_config_descriptor(payload_metadata: &PayloadMetadata) -> Result<Vec<u8>> {
-    const MICRODROID_PAYLOAD_COMPONENT_NAME: &str = "Microdroid payload";
-
-    let config_descriptor_cbor_value = match payload_metadata {
-        PayloadMetadata::config_path(payload_config_path) => cbor!({
-            -70002 => MICRODROID_PAYLOAD_COMPONENT_NAME,
-            -71000 => payload_config_path
-        }),
-        PayloadMetadata::config(payload_config) => cbor!({
-            -70002 => MICRODROID_PAYLOAD_COMPONENT_NAME,
-            -71001 => {1 => payload_config.payload_binary_name}
-        }),
+fn build_subcomponent_list(instance_data: &MicrodroidData) -> Vec<Subcomponent> {
+    if !cfg!(dice_changes) {
+        return vec![];
     }
-    .context("Failed to build a CBOR Value from payload metadata")?;
-    let mut config_descriptor = Vec::new();
-    ser::into_writer(&config_descriptor_cbor_value, &mut config_descriptor)?;
-    Ok(config_descriptor)
+
+    let apks = once(&instance_data.apk_data)
+        .chain(&instance_data.extra_apks_data)
+        .map(Subcomponent::for_apk);
+    let apexes = instance_data.apex_data.iter().map(Subcomponent::for_apex);
+    apks.chain(apexes).collect()
+}
+
+// Returns a configuration descriptor of the given payload. See vm_config.cddl for the definition
+// of the format.
+fn format_payload_config_descriptor(
+    payload: &PayloadMetadata,
+    subcomponents: Vec<Subcomponent>,
+) -> Result<Vec<u8>> {
+    let mut map = Vec::new();
+    map.push((cbor!(-70002)?, cbor!("Microdroid payload")?));
+    map.push(match payload {
+        PayloadMetadata::ConfigPath(payload_config_path) => {
+            (cbor!(-71000)?, cbor!(payload_config_path)?)
+        }
+        PayloadMetadata::Config(payload_config) => {
+            (cbor!(-71001)?, cbor!({1 => payload_config.payload_binary_name})?)
+        }
+        _ => bail!("Failed to match the payload against a config type: {:?}", payload),
+    });
+
+    if !subcomponents.is_empty() {
+        let values =
+            subcomponents.into_iter().map(Subcomponent::into_value).collect::<Result<Vec<_>>>()?;
+        map.push((cbor!(-71002)?, cbor!(values)?));
+    }
+
+    Ok(Value::Map(map).to_vec()?)
 }
 
 #[cfg(test)]
@@ -194,17 +139,30 @@ mod tests {
     use super::*;
     use microdroid_metadata::PayloadConfig;
 
+    const NO_SUBCOMPONENTS: Vec<Subcomponent> = Vec::new();
+
+    fn assert_eq_bytes(expected: &[u8], actual: &[u8]) {
+        assert_eq!(
+            expected,
+            actual,
+            "Expected {}, got {}",
+            hex::encode(expected),
+            hex::encode(actual)
+        )
+    }
+
     #[test]
     fn payload_metadata_with_path_formats_correctly() -> Result<()> {
-        let payload_metadata = PayloadMetadata::config_path("/config_path".to_string());
-        let config_descriptor = format_payload_config_descriptor(&payload_metadata)?;
+        let payload_metadata = PayloadMetadata::ConfigPath("/config_path".to_string());
+        let config_descriptor =
+            format_payload_config_descriptor(&payload_metadata, NO_SUBCOMPONENTS)?;
         static EXPECTED_CONFIG_DESCRIPTOR: &[u8] = &[
             0xa2, 0x3a, 0x00, 0x01, 0x11, 0x71, 0x72, 0x4d, 0x69, 0x63, 0x72, 0x6f, 0x64, 0x72,
             0x6f, 0x69, 0x64, 0x20, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x3a, 0x00, 0x01,
             0x15, 0x57, 0x6c, 0x2f, 0x63, 0x6f, 0x6e, 0x66, 0x69, 0x67, 0x5f, 0x70, 0x61, 0x74,
             0x68,
         ];
-        assert_eq!(EXPECTED_CONFIG_DESCRIPTOR, &config_descriptor);
+        assert_eq_bytes(EXPECTED_CONFIG_DESCRIPTOR, &config_descriptor);
         Ok(())
     }
 
@@ -214,15 +172,48 @@ mod tests {
             payload_binary_name: "payload_binary".to_string(),
             ..Default::default()
         };
-        let payload_metadata = PayloadMetadata::config(payload_config);
-        let config_descriptor = format_payload_config_descriptor(&payload_metadata)?;
+        let payload_metadata = PayloadMetadata::Config(payload_config);
+        let config_descriptor =
+            format_payload_config_descriptor(&payload_metadata, NO_SUBCOMPONENTS)?;
         static EXPECTED_CONFIG_DESCRIPTOR: &[u8] = &[
             0xa2, 0x3a, 0x00, 0x01, 0x11, 0x71, 0x72, 0x4d, 0x69, 0x63, 0x72, 0x6f, 0x64, 0x72,
             0x6f, 0x69, 0x64, 0x20, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x3a, 0x00, 0x01,
             0x15, 0x58, 0xa1, 0x01, 0x6e, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x5f, 0x62,
             0x69, 0x6e, 0x61, 0x72, 0x79,
         ];
-        assert_eq!(EXPECTED_CONFIG_DESCRIPTOR, &config_descriptor);
+        assert_eq_bytes(EXPECTED_CONFIG_DESCRIPTOR, &config_descriptor);
+        Ok(())
+    }
+
+    #[test]
+    fn payload_metadata_with_subcomponents_formats_correctly() -> Result<()> {
+        let payload_metadata = PayloadMetadata::ConfigPath("/config_path".to_string());
+        let subcomponents = vec![
+            Subcomponent {
+                name: "apk1".to_string(),
+                version: 1,
+                code_hash: vec![42, 43],
+                authority_hash: vec![17],
+            },
+            Subcomponent {
+                name: "apk2".to_string(),
+                version: 0x1000_0000_0001,
+                code_hash: vec![43],
+                authority_hash: vec![19, 20],
+            },
+        ];
+        let config_descriptor = format_payload_config_descriptor(&payload_metadata, subcomponents)?;
+        // Verified using cbor.me.
+        static EXPECTED_CONFIG_DESCRIPTOR: &[u8] = &[
+            0xa3, 0x3a, 0x00, 0x01, 0x11, 0x71, 0x72, 0x4d, 0x69, 0x63, 0x72, 0x6f, 0x64, 0x72,
+            0x6f, 0x69, 0x64, 0x20, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x3a, 0x00, 0x01,
+            0x15, 0x57, 0x6c, 0x2f, 0x63, 0x6f, 0x6e, 0x66, 0x69, 0x67, 0x5f, 0x70, 0x61, 0x74,
+            0x68, 0x3a, 0x00, 0x01, 0x15, 0x59, 0x82, 0xa4, 0x01, 0x64, 0x61, 0x70, 0x6b, 0x31,
+            0x02, 0x01, 0x03, 0x42, 0x2a, 0x2b, 0x04, 0x41, 0x11, 0xa4, 0x01, 0x64, 0x61, 0x70,
+            0x6b, 0x32, 0x02, 0x1b, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x41,
+            0x2b, 0x04, 0x42, 0x13, 0x14,
+        ];
+        assert_eq_bytes(EXPECTED_CONFIG_DESCRIPTOR, &config_descriptor);
         Ok(())
     }
 }

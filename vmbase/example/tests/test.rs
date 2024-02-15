@@ -35,12 +35,16 @@ use vmclient::{DeathReason, VmInstance};
 const VMBASE_EXAMPLE_PATH: &str =
     "/data/local/tmp/vmbase_example.integration_test/arm64/vmbase_example.bin";
 const TEST_DISK_IMAGE_PATH: &str = "/data/local/tmp/vmbase_example.integration_test/test_disk.img";
+const EMPTY_DISK_IMAGE_PATH: &str =
+    "/data/local/tmp/vmbase_example.integration_test/empty_disk.img";
 
 /// Runs the vmbase_example VM as an unprotected VM via VirtualizationService.
 #[test]
 fn test_run_example_vm() -> Result<(), Error> {
     android_logger::init_once(
-        android_logger::Config::default().with_tag("vmbase").with_min_level(log::Level::Debug),
+        android_logger::Config::default()
+            .with_tag("vmbase")
+            .with_max_level(log::LevelFilter::Debug),
     );
 
     // Redirect panic messages to logcat.
@@ -76,24 +80,43 @@ fn test_run_example_vm() -> Result<(), Error> {
     let test_image = ParcelFileDescriptor::new(test_image);
     let disk_image = DiskImage { image: Some(test_image), writable: false, partitions: vec![] };
 
+    // Make file for empty test disk image.
+    let empty_image = File::options()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(EMPTY_DISK_IMAGE_PATH)
+        .with_context(|| format!("Failed to open empty disk image {}", EMPTY_DISK_IMAGE_PATH))?;
+    let empty_image = ParcelFileDescriptor::new(empty_image);
+    let empty_disk_image =
+        DiskImage { image: Some(empty_image), writable: false, partitions: vec![] };
+
     let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
         name: String::from("VmBaseTest"),
         kernel: None,
         initrd: None,
         params: None,
         bootloader: Some(bootloader),
-        disks: vec![disk_image],
+        disks: vec![disk_image, empty_disk_image],
         protectedVm: false,
         memoryMib: 300,
         cpuTopology: CpuTopology::ONE_CPU,
         platformVersion: "~1.0".to_string(),
-        taskProfiles: vec![],
         gdbPort: 0, // no gdb
+        ..Default::default()
     });
     let (handle, console) = android_log_fd()?;
     let (mut log_reader, log_writer) = pipe()?;
-    let vm = VmInstance::create(service.as_ref(), &config, Some(console), Some(log_writer), None)
-        .context("Failed to create VM")?;
+    let vm = VmInstance::create(
+        service.as_ref(),
+        &config,
+        Some(console),
+        /* consoleIn */ None,
+        Some(log_writer),
+        None,
+    )
+    .context("Failed to create VM")?;
     vm.start().context("Failed to start VM")?;
     info!("Started example VM.");
 
@@ -122,6 +145,7 @@ fn pipe() -> io::Result<(File, File)> {
 
     // SAFETY: These are new FDs with no previous owner.
     let reader = unsafe { File::from_raw_fd(reader_fd) };
+    // SAFETY: These are new FDs with no previous owner.
     let writer = unsafe { File::from_raw_fd(writer_fd) };
 
     Ok((reader, writer))

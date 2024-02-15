@@ -4,6 +4,7 @@ package {
 
 cc_binary {
     name: "microdroid_kexec",
+    defaults: ["avf_build_flags_cc"],
     stem: "kexec_load",
     srcs: ["kexec.c"],
     installable: false,
@@ -13,11 +14,15 @@ cc_binary {
 
 cc_binary {
     name: "microdroid_crashdump",
+    defaults: ["avf_build_flags_cc"],
     stem: "crashdump",
     srcs: ["crashdump.c"],
     static_executable: true,
     installable: false,
     compile_multilib: "64",
+    sanitize: {
+        hwaddress: false, // HWASAN setup fails when run as init process
+    },
 }
 
 android_filesystem {

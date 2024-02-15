@@ -14,27 +14,28 @@
 
 //! Support for the pvmfw configuration data format.
 
-use crate::helpers;
 use core::fmt;
 use core::mem;
+use core::num::NonZeroUsize;
 use core::ops::Range;
 use core::result;
-use zerocopy::{FromBytes, LayoutVerified};
+use log::{info, warn};
+use static_assertions::const_assert_eq;
+use vmbase::util::RangeExt;
+use zerocopy::{FromBytes, FromZeroes};
 
 /// Configuration data header.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug, FromBytes)]
+#[derive(Clone, Copy, Debug, FromZeroes, FromBytes)]
 struct Header {
     /// Magic number; must be `Header::MAGIC`.
     magic: u32,
     /// Version of the header format.
-    version: u32,
+    version: Version,
     /// Total size of the configuration data.
     total_size: u32,
     /// Feature flags; currently reserved and must be zero.
     flags: u32,
-    /// (offset, size) pairs used to locate individual entries appended to the header.
-    entries: [HeaderEntry; Entry::COUNT],
 }
 
 #[derive(Debug)]
@@ -46,15 +47,15 @@ pub enum Error {
     /// Header doesn't contain the expect magic value.
     InvalidMagic,
     /// Version of the header isn't supported.
-    UnsupportedVersion(u16, u16),
-    /// Header sets flags incorrectly or uses reserved flags.
-    InvalidFlags(u32),
+    UnsupportedVersion(Version),
     /// Header describes configuration data that doesn't fit in the expected buffer.
     InvalidSize(usize),
     /// Header entry is missing.
     MissingEntry(Entry),
-    /// Header entry is invalid.
-    InvalidEntry(Entry, EntryError),
+    /// Range described by entry does not fit within config data.
+    EntryOutOfBounds(Entry, Range<usize>, Range<usize>),
+    /// Entries are in out of order
+    EntryOutOfOrder,
 }
 
 impl fmt::Display for Error {
@@ -63,183 +64,241 @@ impl fmt::Display for Error {
             Self::BufferTooSmall => write!(f, "Reserved region is smaller than config header"),
             Self::HeaderMisaligned => write!(f, "Reserved region is misaligned"),
             Self::InvalidMagic => write!(f, "Wrong magic number"),
-            Self::UnsupportedVersion(x, y) => write!(f, "Version {x}.{y} not supported"),
-            Self::InvalidFlags(v) => write!(f, "Flags value {v:#x} is incorrect or reserved"),
+            Self::UnsupportedVersion(v) => write!(f, "Version {v} not supported"),
             Self::InvalidSize(sz) => write!(f, "Total size ({sz:#x}) overflows reserved region"),
             Self::MissingEntry(entry) => write!(f, "Mandatory {entry:?} entry is missing"),
-            Self::InvalidEntry(entry, e) => write!(f, "Invalid {entry:?} entry: {e}"),
+            Self::EntryOutOfBounds(entry, range, limits) => {
+                write!(
+                    f,
+                    "Entry {entry:?} out of bounds: {range:#x?} must be within range {limits:#x?}"
+                )
+            }
+            Self::EntryOutOfOrder => write!(f, "Entries are out of order"),
         }
     }
 }
 
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Debug)]
-pub enum EntryError {
-    /// Offset isn't between the fixed minimum value and size of configuration data.
-    InvalidOffset(usize),
-    /// Size must be zero when offset is and not be when it isn't.
-    InvalidSize(usize),
-    /// Entry isn't fully within the configuration data structure.
-    OutOfBounds { offset: usize, size: usize, limit: usize },
-}
-
-impl fmt::Display for EntryError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::InvalidOffset(offset) => write!(f, "Invalid offset: {offset:#x?}"),
-            Self::InvalidSize(sz) => write!(f, "Invalid size: {sz:#x?}"),
-            Self::OutOfBounds { offset, size, limit } => {
-                let range = Header::PADDED_SIZE..*limit;
-                let entry = *offset..(*offset + *size);
-                write!(f, "Out of bounds: {entry:#x?} must be within range {range:#x?}")
-            }
-        }
-    }
-}
-
 impl Header {
     const MAGIC: u32 = u32::from_ne_bytes(*b"pvmf");
-    const VERSION_1_0: u32 = Self::version(1, 0);
-    const PADDED_SIZE: usize =
-        helpers::unchecked_align_up(mem::size_of::<Self>(), mem::size_of::<u64>());
-
-    pub const fn version(major: u16, minor: u16) -> u32 {
-        ((major as u32) << 16) | (minor as u32)
-    }
-
-    pub const fn version_tuple(&self) -> (u16, u16) {
-        ((self.version >> 16) as u16, self.version as u16)
-    }
+    const VERSION_1_0: Version = Version { major: 1, minor: 0 };
+    const VERSION_1_1: Version = Version { major: 1, minor: 1 };
+    const VERSION_1_2: Version = Version { major: 1, minor: 2 };
 
     pub fn total_size(&self) -> usize {
         self.total_size as usize
     }
 
-    pub fn body_size(&self) -> usize {
-        self.total_size() - Self::PADDED_SIZE
+    pub fn body_lowest_bound(&self) -> Result<usize> {
+        let entries_offset = mem::size_of::<Self>();
+
+        // Ensure that the entries are properly aligned and do not require padding.
+        const_assert_eq!(mem::align_of::<Header>() % mem::align_of::<HeaderEntry>(), 0);
+        const_assert_eq!(mem::size_of::<Header>() % mem::align_of::<HeaderEntry>(), 0);
+
+        let entries_size = self.entry_count()?.checked_mul(mem::size_of::<HeaderEntry>()).unwrap();
+
+        Ok(entries_offset.checked_add(entries_size).unwrap())
     }
 
-    fn get_body_range(&self, entry: Entry) -> Result<Option<Range<usize>>> {
-        let e = self.entries[entry as usize];
-        let offset = e.offset as usize;
-        let size = e.size as usize;
-
-        match self._get_body_range(offset, size) {
-            Ok(r) => Ok(r),
-            Err(EntryError::InvalidSize(0)) => {
-                // As our bootloader currently uses this (non-compliant) case, permit it for now.
-                log::warn!("Config entry {entry:?} uses non-zero offset with zero size");
-                // TODO(b/262181812): Either make this case valid or fix the bootloader.
-                Ok(None)
+    pub fn entry_count(&self) -> Result<usize> {
+        let last_entry = match self.version {
+            Self::VERSION_1_0 => Entry::DebugPolicy,
+            Self::VERSION_1_1 => Entry::VmDtbo,
+            Self::VERSION_1_2 => Entry::VmBaseDtbo,
+            v @ Version { major: 1, .. } => {
+                const LATEST: Version = Header::VERSION_1_2;
+                warn!("Parsing unknown config data version {v} as version {LATEST}");
+                return Ok(Entry::COUNT);
             }
-            Err(e) => Err(Error::InvalidEntry(entry, e)),
-        }
-    }
+            v => return Err(Error::UnsupportedVersion(v)),
+        };
 
-    fn _get_body_range(
-        &self,
-        offset: usize,
-        size: usize,
-    ) -> result::Result<Option<Range<usize>>, EntryError> {
-        match (offset, size) {
-            (0, 0) => Ok(None),
-            (0, size) | (_, size @ 0) => Err(EntryError::InvalidSize(size)),
-            _ => {
-                let start = offset
-                    .checked_sub(Header::PADDED_SIZE)
-                    .ok_or(EntryError::InvalidOffset(offset))?;
-                let end = start
-                    .checked_add(size)
-                    .filter(|x| *x <= self.body_size())
-                    .ok_or(EntryError::OutOfBounds { offset, size, limit: self.total_size() })?;
-
-                Ok(Some(start..end))
-            }
-        }
+        Ok(last_entry as usize + 1)
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum Entry {
-    Bcc = 0,
-    DebugPolicy = 1,
+    Bcc,
+    DebugPolicy,
+    VmDtbo,
+    VmBaseDtbo,
+    #[allow(non_camel_case_types)] // TODO: Use mem::variant_count once stable.
+    _VARIANT_COUNT,
 }
 
 impl Entry {
-    const COUNT: usize = 2;
+    const COUNT: usize = Self::_VARIANT_COUNT as usize;
+
+    const ALL_ENTRIES: [Entry; Self::COUNT] =
+        [Self::Bcc, Self::DebugPolicy, Self::VmDtbo, Self::VmBaseDtbo];
+}
+
+#[derive(Default)]
+pub struct Entries<'a> {
+    pub bcc: &'a mut [u8],
+    pub debug_policy: Option<&'a [u8]>,
+    pub vm_dtbo: Option<&'a mut [u8]>,
+    pub vm_ref_dt: Option<&'a [u8]>,
 }
 
 #[repr(packed)]
-#[derive(Clone, Copy, Debug, FromBytes)]
+#[derive(Clone, Copy, Debug, FromZeroes, FromBytes)]
 struct HeaderEntry {
     offset: u32,
     size: u32,
 }
 
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Eq, FromZeroes, FromBytes, PartialEq)]
+pub struct Version {
+    minor: u16,
+    major: u16,
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // Copy the fields to local variables to prevent unaligned access.
+        let (major, minor) = (self.major, self.minor);
+        write!(f, "{}.{}", major, minor)
+    }
+}
+
+/// Range with non-empty length.
+#[derive(Debug, Copy, Clone)]
+struct NonEmptyRange {
+    start: usize,
+    size: NonZeroUsize,
+}
+
+impl NonEmptyRange {
+    pub fn new(start: usize, size: usize) -> Option<Self> {
+        // Ensure end() is safe.
+        start.checked_add(size).unwrap();
+
+        Some(Self { start, size: NonZeroUsize::new(size)? })
+    }
+
+    fn end(&self) -> usize {
+        self.start + self.len()
+    }
+
+    fn len(&self) -> usize {
+        self.size.into()
+    }
+
+    fn as_range(&self) -> Range<usize> {
+        self.start..self.end()
+    }
+}
+
 #[derive(Debug)]
 pub struct Config<'a> {
     body: &'a mut [u8],
-    bcc_range: Range<usize>,
-    dp_range: Option<Range<usize>>,
+    ranges: [Option<NonEmptyRange>; Entry::COUNT],
 }
 
 impl<'a> Config<'a> {
     /// Take ownership of a pvmfw configuration consisting of its header and following entries.
-    ///
-    /// SAFETY - 'data' should respect the alignment of Header.
-    pub unsafe fn new(data: &'a mut [u8]) -> Result<Self> {
-        let header = data.get(..Header::PADDED_SIZE).ok_or(Error::BufferTooSmall)?;
+    pub fn new(bytes: &'a mut [u8]) -> Result<Self> {
+        const HEADER_SIZE: usize = mem::size_of::<Header>();
+        if bytes.len() < HEADER_SIZE {
+            return Err(Error::BufferTooSmall);
+        }
 
-        let (header, _) =
-            LayoutVerified::<_, Header>::new_from_prefix(header).ok_or(Error::HeaderMisaligned)?;
+        let (header, rest) =
+            zerocopy::Ref::<_, Header>::new_from_prefix(bytes).ok_or(Error::HeaderMisaligned)?;
         let header = header.into_ref();
 
         if header.magic != Header::MAGIC {
             return Err(Error::InvalidMagic);
         }
 
-        if header.version != Header::VERSION_1_0 {
-            let (major, minor) = header.version_tuple();
-            return Err(Error::UnsupportedVersion(major, minor));
+        let header_flags = header.flags;
+        if header_flags != 0 {
+            warn!("Ignoring unknown config flags: {header_flags:#x}");
         }
 
-        if header.flags != 0 {
-            return Err(Error::InvalidFlags(header.flags));
-        }
+        info!("pvmfw config version: {}", header.version);
 
-        let bcc_range =
-            header.get_body_range(Entry::Bcc)?.ok_or(Error::MissingEntry(Entry::Bcc))?;
-        let dp_range = header.get_body_range(Entry::DebugPolicy)?;
+        // Validate that we won't get an invalid alignment in the following due to padding to u64.
+        const_assert_eq!(HEADER_SIZE % mem::size_of::<u64>(), 0);
 
-        let body_size = header.body_size();
+        // Ensure that Header::total_size isn't larger than anticipated by the caller and resize
+        // the &[u8] to catch OOB accesses to entries/blobs.
         let total_size = header.total_size();
-        let body = data
-            .get_mut(Header::PADDED_SIZE..)
-            .ok_or(Error::BufferTooSmall)?
-            .get_mut(..body_size)
-            .ok_or(Error::InvalidSize(total_size))?;
-
-        Ok(Self { body, bcc_range, dp_range })
-    }
-
-    /// Get slice containing the platform BCC.
-    pub fn get_entries(&mut self) -> (&mut [u8], Option<&mut [u8]>) {
-        let bcc_start = self.bcc_range.start;
-        let bcc_end = self.bcc_range.len();
-        let (_, rest) = self.body.split_at_mut(bcc_start);
-        let (bcc, rest) = rest.split_at_mut(bcc_end);
-
-        let dp = if let Some(dp_range) = &self.dp_range {
-            let dp_start = dp_range.start.checked_sub(self.bcc_range.end).unwrap();
-            let dp_end = dp_range.len();
-            let (_, rest) = rest.split_at_mut(dp_start);
-            let (dp, _) = rest.split_at_mut(dp_end);
-            Some(dp)
+        let rest = if let Some(rest_size) = total_size.checked_sub(HEADER_SIZE) {
+            rest.get_mut(..rest_size).ok_or(Error::InvalidSize(total_size))?
         } else {
-            None
+            return Err(Error::InvalidSize(total_size));
         };
 
-        (bcc, dp)
+        let (header_entries, body) =
+            zerocopy::Ref::<_, [HeaderEntry]>::new_slice_from_prefix(rest, header.entry_count()?)
+                .ok_or(Error::BufferTooSmall)?;
+
+        // Validate that we won't get an invalid alignment in the following due to padding to u64.
+        const_assert_eq!(mem::size_of::<HeaderEntry>() % mem::size_of::<u64>(), 0);
+
+        // Ensure entries are in the body.
+        let limits = header.body_lowest_bound()?..total_size;
+        let mut ranges: [Option<NonEmptyRange>; Entry::COUNT] = [None; Entry::COUNT];
+        let mut last_end = 0;
+        for entry in Entry::ALL_ENTRIES {
+            let Some(header_entry) = header_entries.get(entry as usize) else { continue };
+            let entry_offset = header_entry.offset.try_into().unwrap();
+            let entry_size = header_entry.size.try_into().unwrap();
+            let Some(range) = NonEmptyRange::new(entry_offset, entry_size) else { continue };
+            let range = range.as_range();
+            if !range.is_within(&limits) {
+                return Err(Error::EntryOutOfBounds(entry, range, limits));
+            }
+
+            if last_end > range.start {
+                return Err(Error::EntryOutOfOrder);
+            }
+            last_end = range.end;
+
+            ranges[entry as usize] = NonEmptyRange::new(
+                entry_offset - limits.start, // is_within() validates safety of this.
+                entry_size,
+            );
+        }
+        // Ensures that BCC exists.
+        ranges[Entry::Bcc as usize].ok_or(Error::MissingEntry(Entry::Bcc))?;
+
+        Ok(Self { body, ranges })
+    }
+
+    /// Locate the various config entries.
+    pub fn get_entries(self) -> Entries<'a> {
+        // We require the blobs to be in the same order as the `Entry` enum (and this is checked
+        // in `new` above)
+        // So we can just work through the body range and split off the parts we are interested in.
+        let mut offset = 0;
+        let mut body = self.body;
+
+        let mut entries: [Option<&mut [u8]>; Entry::COUNT] = Default::default();
+        for (i, range) in self.ranges.iter().enumerate() {
+            if let Some(range) = range {
+                body = &mut body[range.start - offset..];
+                let (chunk, rest) = body.split_at_mut(range.len());
+                offset = range.end();
+                body = rest;
+                entries[i] = Some(chunk);
+            }
+        }
+        let [bcc, debug_policy, vm_dtbo, vm_ref_dt] = entries;
+
+        // The platform BCC has always been required.
+        let bcc = bcc.unwrap();
+
+        // We have no reason to mutate so drop the `mut`.
+        let debug_policy = debug_policy.map(|x| &*x);
+        let vm_ref_dt = vm_ref_dt.map(|x| &*x);
+
+        Entries { bcc, debug_policy, vm_dtbo, vm_ref_dt }
     }
 }

@@ -18,16 +18,21 @@ package android.system.virtualmachine;
 
 import static java.util.Objects.requireNonNull;
 
+import android.annotation.FlaggedApi;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.RequiresFeature;
 import android.annotation.RequiresPermission;
+import android.annotation.StringDef;
 import android.annotation.SystemApi;
+import android.annotation.TestApi;
 import android.annotation.WorkerThread;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.os.RemoteException;
 import android.sysprop.HypervisorProperties;
+import android.system.virtualizationservice.IVirtualizationService;
 import android.util.ArrayMap;
 
 import com.android.internal.annotations.GuardedBy;
@@ -35,6 +40,8 @@ import com.android.internal.annotations.GuardedBy;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.ref.WeakReference;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -85,15 +92,71 @@ public class VirtualMachineManager {
     })
     public @interface Capability {}
 
-    /* The implementation supports creating protected VMs, whose memory is inaccessible to the
-     * host OS.
+    /**
+     * The implementation supports creating protected VMs, whose memory is inaccessible to the host
+     * OS.
+     *
+     * @see VirtualMachineConfig.Builder#setProtectedVm
      */
     public static final int CAPABILITY_PROTECTED_VM = 1;
 
-    /* The implementation supports creating non-protected VMs, whose memory is accessible to the
+    /**
+     * The implementation supports creating non-protected VMs, whose memory is accessible to the
      * host OS.
+     *
+     * @see VirtualMachineConfig.Builder#setProtectedVm
      */
     public static final int CAPABILITY_NON_PROTECTED_VM = 2;
+
+    /**
+     * Features provided by {@link VirtualMachineManager}.
+     *
+     * @hide
+     */
+    @Retention(RetentionPolicy.SOURCE)
+    @StringDef(
+            prefix = "FEATURE_",
+            value = {
+                FEATURE_DICE_CHANGES,
+                FEATURE_MULTI_TENANT,
+                FEATURE_REMOTE_ATTESTATION,
+                FEATURE_VENDOR_MODULES
+            })
+    public @interface Features {}
+
+    /**
+     * Feature to include new data in the VM DICE chain.
+     *
+     * @hide
+     */
+    @TestApi
+    public static final String FEATURE_DICE_CHANGES = IVirtualizationService.FEATURE_DICE_CHANGES;
+
+    /**
+     * Feature to run payload as non-root user.
+     *
+     * @hide
+     */
+    @TestApi
+    public static final String FEATURE_MULTI_TENANT = IVirtualizationService.FEATURE_MULTI_TENANT;
+
+    /**
+     * Feature to allow remote attestation in Microdroid.
+     *
+     * @hide
+     */
+    @TestApi
+    public static final String FEATURE_REMOTE_ATTESTATION =
+            IVirtualizationService.FEATURE_REMOTE_ATTESTATION;
+
+    /**
+     * Feature to allow vendor modules in Microdroid.
+     *
+     * @hide
+     */
+    @TestApi
+    public static final String FEATURE_VENDOR_MODULES =
+            IVirtualizationService.FEATURE_VENDOR_MODULES;
 
     /**
      * Returns a set of flags indicating what this implementation of virtualization is capable of.
@@ -162,7 +225,7 @@ public class VirtualMachineManager {
      *
      * @see #getOrCreate
      * @throws VirtualMachineException if the virtual machine exists but could not be successfully
-     *     retrieved.
+     *     retrieved. This can be resolved by calling {@link #delete} on the VM.
      * @hide
      */
     @SystemApi
@@ -276,5 +339,42 @@ public class VirtualMachineManager {
             }
         }
         return null;
+    }
+
+    /**
+     * Returns a list of supported OS names.
+     *
+     * @hide
+     */
+    @TestApi
+    @FlaggedApi("RELEASE_AVF_ENABLE_VENDOR_MODULES")
+    @NonNull
+    public List<String> getSupportedOSList() throws VirtualMachineException {
+        synchronized (sCreateLock) {
+            VirtualizationService service = VirtualizationService.getInstance();
+            try {
+                return Arrays.asList(service.getBinder().getSupportedOSList());
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            }
+        }
+    }
+
+    /**
+     * Returns {@code true} if given {@code featureName} is enabled.
+     *
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION)
+    public boolean isFeatureEnabled(@Features String featureName) throws VirtualMachineException {
+        synchronized (sCreateLock) {
+            VirtualizationService service = VirtualizationService.getInstance();
+            try {
+                return service.getBinder().isFeatureEnabled(featureName);
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            }
+        }
     }
 }

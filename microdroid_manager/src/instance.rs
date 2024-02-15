@@ -33,7 +33,7 @@
 //! The payload of a partition is encrypted/signed by a key that is unique to the loader and to the
 //! VM as well. Failing to decrypt/authenticate a partition by a loader stops the boot process.
 
-use crate::dice::DiceDriver;
+use crate::dice_driver::DiceDriver;
 use crate::ioutil;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -287,21 +287,23 @@ impl MicrodroidData {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApkData {
-    pub root_hash: Box<RootHash>,
-    pub pubkey: Box<[u8]>,
+    pub root_hash: Vec<u8>,
+    pub cert_hash: Vec<u8>,
+    pub package_name: String,
+    pub version_code: u64,
 }
 
 impl ApkData {
     pub fn root_hash_eq(&self, root_hash: &[u8]) -> bool {
-        self.root_hash.as_ref() == root_hash
+        self.root_hash == root_hash
     }
 }
-
-pub type RootHash = [u8];
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApexData {
     pub name: String,
+    pub manifest_name: Option<String>,
+    pub manifest_version: Option<i64>,
     pub public_key: Vec<u8>,
     pub root_digest: Vec<u8>,
     pub last_update_seconds: u64,

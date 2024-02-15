@@ -40,7 +40,9 @@ fn main() {
 
 fn try_main() -> Result<()> {
     android_logger::init_once(
-        android_logger::Config::default().with_tag("compsvc").with_min_level(log::Level::Debug),
+        android_logger::Config::default()
+            .with_tag("compsvc")
+            .with_max_level(log::LevelFilter::Debug),
     );
     // Redirect panic messages to logcat.
     panic::set_hook(Box::new(|panic_info| {
@@ -50,14 +52,11 @@ fn try_main() -> Result<()> {
     debug!("compsvc is starting as a rpc service.");
     let param = ptr::null_mut();
     let mut service = compsvc::new_binder()?.as_binder();
-    unsafe {
-        // SAFETY: We hold a strong pointer, so the raw pointer remains valid. The bindgen AIBinder
-        // is the same type as sys::AIBinder.
-        let service = service.as_native_mut() as *mut AIBinder;
-        // SAFETY: It is safe for on_ready to be invoked at any time, with any parameter.
-        AVmPayload_runVsockRpcServer(service, COMPOS_VSOCK_PORT, Some(on_ready), param);
-    }
-    Ok(())
+    let service = service.as_native_mut() as *mut AIBinder;
+    // SAFETY: We hold a strong pointer, so the raw pointer remains valid. The bindgen AIBinder
+    // is the same type as sys::AIBinder. It is safe for on_ready to be invoked at any time, with
+    // any parameter.
+    unsafe { AVmPayload_runVsockRpcServer(service, COMPOS_VSOCK_PORT, Some(on_ready), param) }
 }
 
 extern "C" fn on_ready(_param: *mut c_void) {

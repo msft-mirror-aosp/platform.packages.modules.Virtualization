@@ -15,34 +15,54 @@
 //! High-level FDT functions.
 
 use crate::bootargs::BootArgsIterator;
-use crate::cstr;
-use crate::helpers::flatten;
-use crate::helpers::RangeExt;
+use crate::device_assignment::{DeviceAssignmentInfo, VmDtbo};
 use crate::helpers::GUEST_PAGE_SIZE;
-use crate::helpers::SIZE_4KB;
-use crate::memory::BASE_ADDR;
-use crate::memory::MAX_ADDR;
 use crate::Box;
 use crate::RebootReason;
+use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
 use alloc::vec::Vec;
 use core::cmp::max;
 use core::cmp::min;
 use core::ffi::CStr;
+use core::fmt;
 use core::mem::size_of;
 use core::ops::Range;
+use cstr::cstr;
 use fdtpci::PciMemoryFlags;
 use fdtpci::PciRangeType;
 use libfdt::AddressRange;
 use libfdt::CellIterator;
 use libfdt::Fdt;
 use libfdt::FdtError;
-use libfdt::FdtNode;
+use libfdt::FdtNodeMut;
 use log::debug;
 use log::error;
 use log::info;
 use log::warn;
+use static_assertions::const_assert;
 use tinyvec::ArrayVec;
+use vmbase::fdt::SwiotlbInfo;
+use vmbase::layout::{crosvm::MEM_START, MAX_VIRT_ADDR};
+use vmbase::memory::SIZE_4KB;
+use vmbase::util::flatten;
+use vmbase::util::RangeExt as _;
+use zerocopy::AsBytes as _;
+
+/// An enumeration of errors that can occur during the FDT validation.
+#[derive(Clone, Debug)]
+pub enum FdtValidationError {
+    /// Invalid CPU count.
+    InvalidCpuCount(usize),
+}
+
+impl fmt::Display for FdtValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::InvalidCpuCount(num_cpus) => write!(f, "Invalid CPU count: {num_cpus}"),
+        }
+    }
+}
 
 /// Extract from /config the address range containing the pre-loaded kernel. Absence of /config is
 /// not an error.
@@ -107,16 +127,27 @@ fn patch_bootargs(fdt: &mut Fdt, bootargs: &CStr) -> libfdt::Result<()> {
     node.setprop(cstr!("bootargs"), bootargs.to_bytes_with_nul())
 }
 
-/// Read the first range in /memory node in DT
-fn read_memory_range_from(fdt: &Fdt) -> libfdt::Result<Range<usize>> {
-    fdt.memory()?.ok_or(FdtError::NotFound)?.next().ok_or(FdtError::NotFound)
-}
-
-/// Check if memory range is ok
-fn validate_memory_range(range: &Range<usize>) -> Result<(), RebootReason> {
+/// Reads and validates the memory range in the DT.
+///
+/// Only one memory range is expected with the crosvm setup for now.
+fn read_and_validate_memory_range(fdt: &Fdt) -> Result<Range<usize>, RebootReason> {
+    let mut memory = fdt.memory().map_err(|e| {
+        error!("Failed to read memory range from DT: {e}");
+        RebootReason::InvalidFdt
+    })?;
+    let range = memory.next().ok_or_else(|| {
+        error!("The /memory node in the DT contains no range.");
+        RebootReason::InvalidFdt
+    })?;
+    if memory.next().is_some() {
+        warn!(
+            "The /memory node in the DT contains more than one memory range, \
+             while only one is expected."
+        );
+    }
     let base = range.start;
-    if base != BASE_ADDR {
-        error!("Memory base address {:#x} is not {:#x}", base, BASE_ADDR);
+    if base != MEM_START {
+        error!("Memory base address {:#x} is not {:#x}", base, MEM_START);
         return Err(RebootReason::InvalidFdt);
     }
 
@@ -130,47 +161,94 @@ fn validate_memory_range(range: &Range<usize>) -> Result<(), RebootReason> {
         error!("Memory size is 0");
         return Err(RebootReason::InvalidFdt);
     }
-    Ok(())
+    Ok(range)
 }
 
 fn patch_memory_range(fdt: &mut Fdt, memory_range: &Range<usize>) -> libfdt::Result<()> {
-    let size = memory_range.len() as u64;
+    let addr = u64::try_from(MEM_START).unwrap();
+    let size = u64::try_from(memory_range.len()).unwrap();
     fdt.node_mut(cstr!("/memory"))?
         .ok_or(FdtError::NotFound)?
-        .setprop_inplace(cstr!("reg"), flatten(&[BASE_ADDR.to_be_bytes(), size.to_be_bytes()]))
+        .setprop_inplace(cstr!("reg"), [addr.to_be(), size.to_be()].as_bytes())
 }
 
-/// Read the number of CPUs from DT
-fn read_num_cpus_from(fdt: &Fdt) -> libfdt::Result<usize> {
-    Ok(fdt.compatible_nodes(cstr!("arm,arm-v8"))?.count())
-}
+#[derive(Debug, Default)]
+struct CpuInfo {}
 
-/// Validate number of CPUs
-fn validate_num_cpus(num_cpus: usize) -> Result<(), RebootReason> {
-    if num_cpus == 0 {
-        error!("Number of CPU can't be 0");
-        return Err(RebootReason::InvalidFdt);
+fn read_cpu_info_from(fdt: &Fdt) -> libfdt::Result<ArrayVec<[CpuInfo; DeviceTreeInfo::MAX_CPUS]>> {
+    let mut cpus = ArrayVec::new();
+
+    let mut cpu_nodes = fdt.compatible_nodes(cstr!("arm,arm-v8"))?;
+    for _cpu in cpu_nodes.by_ref().take(cpus.capacity()) {
+        let info = CpuInfo {};
+        cpus.push(info);
     }
-    if DeviceTreeInfo::GIC_REDIST_SIZE_PER_CPU.checked_mul(num_cpus.try_into().unwrap()).is_none() {
-        error!("Too many CPUs for gic: {}", num_cpus);
-        return Err(RebootReason::InvalidFdt);
+    if cpu_nodes.next().is_some() {
+        warn!("DT has more than {} CPU nodes: discarding extra nodes.", cpus.capacity());
+    }
+
+    Ok(cpus)
+}
+
+fn validate_cpu_info(cpus: &[CpuInfo]) -> Result<(), FdtValidationError> {
+    if cpus.is_empty() {
+        return Err(FdtValidationError::InvalidCpuCount(0));
+    }
+
+    Ok(())
+}
+
+fn patch_cpus(fdt: &mut Fdt, cpus: &[CpuInfo]) -> libfdt::Result<()> {
+    const COMPAT: &CStr = cstr!("arm,arm-v8");
+    let mut next = fdt.root_mut()?.next_compatible(COMPAT)?;
+    for _cpu in cpus {
+        next = next.ok_or(FdtError::NoSpace)?.next_compatible(COMPAT)?;
+    }
+    while let Some(current) = next {
+        next = current.delete_and_next_compatible(COMPAT)?;
     }
     Ok(())
 }
 
-/// Patch DT by keeping `num_cpus` number of arm,arm-v8 compatible nodes, and pruning the rest.
-fn patch_num_cpus(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
-    let cpu = cstr!("arm,arm-v8");
-    let mut next = fdt.root_mut()?.next_compatible(cpu)?;
-    for _ in 0..num_cpus {
-        next = if let Some(current) = next {
-            current.next_compatible(cpu)?
-        } else {
-            return Err(FdtError::NoSpace);
-        };
+/// Read candidate properties' names from DT which could be overlaid
+fn parse_vm_ref_dt(fdt: &Fdt) -> libfdt::Result<BTreeMap<CString, Vec<u8>>> {
+    let mut property_map = BTreeMap::new();
+    if let Some(avf_node) = fdt.node(cstr!("/avf"))? {
+        for property in avf_node.properties()? {
+            let name = property.name()?;
+            let value = property.value()?;
+            property_map.insert(
+                CString::new(name.to_bytes()).map_err(|_| FdtError::BadValue)?,
+                value.to_vec(),
+            );
+        }
     }
-    while let Some(current) = next {
-        next = current.delete_and_next_compatible(cpu)?;
+    Ok(property_map)
+}
+
+/// Overlay VM reference DT into VM DT based on the props_info. Property is overlaid in vm_dt only
+/// when it exists both in vm_ref_dt and props_info. If the values mismatch, it returns error.
+fn validate_vm_ref_dt(
+    vm_dt: &mut Fdt,
+    vm_ref_dt: &Fdt,
+    props_info: &BTreeMap<CString, Vec<u8>>,
+) -> libfdt::Result<()> {
+    let mut root_vm_dt = vm_dt.root_mut()?;
+    let mut avf_vm_dt = root_vm_dt.add_subnode(cstr!("avf"))?;
+    // TODO(b/318431677): Validate nodes beyond /avf.
+    let avf_node = vm_ref_dt.node(cstr!("/avf"))?.ok_or(FdtError::NotFound)?;
+    for (name, value) in props_info.iter() {
+        if let Some(ref_value) = avf_node.getprop(name)? {
+            if value != ref_value {
+                error!(
+                    "Property mismatches while applying overlay VM reference DT. \
+                    Name:{:?}, Value from host as hex:{:x?}, Value from VM reference DT as hex:{:x?}",
+                    name, value, ref_value
+                );
+                return Err(FdtError::BadValue);
+            }
+            avf_vm_dt.setprop(name, ref_value)?;
+        }
     }
     Ok(())
 }
@@ -185,7 +263,7 @@ struct PciInfo {
 impl PciInfo {
     const IRQ_MASK_CELLS: usize = 4;
     const IRQ_MAP_CELLS: usize = 10;
-    const MAX_IRQS: usize = 8;
+    const MAX_IRQS: usize = 10;
 }
 
 type PciAddrRange = AddressRange<(u32, u64), u64, u64>;
@@ -224,14 +302,22 @@ fn read_pci_info_from(fdt: &Fdt) -> libfdt::Result<PciInfo> {
     let range1 = ranges.next().ok_or(FdtError::NotFound)?;
 
     let irq_masks = node.getprop_cells(cstr!("interrupt-map-mask"))?.ok_or(FdtError::NotFound)?;
-    let irq_masks = CellChunkIterator::<{ PciInfo::IRQ_MASK_CELLS }>::new(irq_masks);
-    let irq_masks: ArrayVec<[PciIrqMask; PciInfo::MAX_IRQS]> =
-        irq_masks.take(PciInfo::MAX_IRQS).collect();
+    let mut chunks = CellChunkIterator::<{ PciInfo::IRQ_MASK_CELLS }>::new(irq_masks);
+    let irq_masks = (&mut chunks).take(PciInfo::MAX_IRQS).collect();
+
+    if chunks.next().is_some() {
+        warn!("Input DT has more than {} PCI entries!", PciInfo::MAX_IRQS);
+        return Err(FdtError::NoSpace);
+    }
 
     let irq_maps = node.getprop_cells(cstr!("interrupt-map"))?.ok_or(FdtError::NotFound)?;
-    let irq_maps = CellChunkIterator::<{ PciInfo::IRQ_MAP_CELLS }>::new(irq_maps);
-    let irq_maps: ArrayVec<[PciIrqMap; PciInfo::MAX_IRQS]> =
-        irq_maps.take(PciInfo::MAX_IRQS).collect();
+    let mut chunks = CellChunkIterator::<{ PciInfo::IRQ_MAP_CELLS }>::new(irq_maps);
+    let irq_maps = (&mut chunks).take(PciInfo::MAX_IRQS).collect();
+
+    if chunks.next().is_some() {
+        warn!("Input DT has more than {} PCI entries!", PciInfo::MAX_IRQS);
+        return Err(FdtError::NoSpace);
+    }
 
     Ok(PciInfo { ranges: [range0, range1], irq_masks, irq_maps })
 }
@@ -278,7 +364,7 @@ fn validate_pci_addr_range(
         error!("PCI address range size {:#x} overflows", size);
         return Err(RebootReason::InvalidFdt);
     };
-    if bus_end > MAX_ADDR.try_into().unwrap() {
+    if bus_end > MAX_VIRT_ADDR.try_into().unwrap() {
         error!("PCI address end {:#x} is outside of translatable range", bus_end);
         return Err(RebootReason::InvalidFdt);
     }
@@ -409,11 +495,17 @@ impl SerialInfo {
 }
 
 fn read_serial_info_from(fdt: &Fdt) -> libfdt::Result<SerialInfo> {
-    let mut addrs: ArrayVec<[u64; SerialInfo::MAX_SERIALS]> = Default::default();
-    for node in fdt.compatible_nodes(cstr!("ns16550a"))?.take(SerialInfo::MAX_SERIALS) {
-        let reg = node.reg()?.ok_or(FdtError::NotFound)?.next().ok_or(FdtError::NotFound)?;
+    let mut addrs = ArrayVec::new();
+
+    let mut serial_nodes = fdt.compatible_nodes(cstr!("ns16550a"))?;
+    for node in serial_nodes.by_ref().take(addrs.capacity()) {
+        let reg = node.first_reg()?;
         addrs.push(reg.addr);
     }
+    if serial_nodes.next().is_some() {
+        warn!("DT has more than {} UART nodes: discarding extra nodes.", addrs.capacity());
+    }
+
     Ok(SerialInfo { addrs })
 }
 
@@ -422,11 +514,8 @@ fn patch_serial_info(fdt: &mut Fdt, serial_info: &SerialInfo) -> libfdt::Result<
     let name = cstr!("ns16550a");
     let mut next = fdt.root_mut()?.next_compatible(name);
     while let Some(current) = next? {
-        let reg = FdtNode::from_mut(&current)
-            .reg()?
-            .ok_or(FdtError::NotFound)?
-            .next()
-            .ok_or(FdtError::NotFound)?;
+        let reg =
+            current.as_node().reg()?.ok_or(FdtError::NotFound)?.next().ok_or(FdtError::NotFound)?;
         next = if !serial_info.addrs.contains(&reg.addr) {
             current.delete_and_next_compatible(name)
         } else {
@@ -434,38 +523,6 @@ fn patch_serial_info(fdt: &mut Fdt, serial_info: &SerialInfo) -> libfdt::Result<
         }
     }
     Ok(())
-}
-
-#[derive(Debug)]
-pub struct SwiotlbInfo {
-    addr: Option<usize>,
-    size: usize,
-    align: usize,
-}
-
-impl SwiotlbInfo {
-    pub fn fixed_range(&self) -> Option<Range<usize>> {
-        self.addr.map(|addr| addr..addr + self.size)
-    }
-}
-
-fn read_swiotlb_info_from(fdt: &Fdt) -> libfdt::Result<SwiotlbInfo> {
-    let node =
-        fdt.compatible_nodes(cstr!("restricted-dma-pool"))?.next().ok_or(FdtError::NotFound)?;
-    let align =
-        node.getprop_u64(cstr!("alignment"))?.ok_or(FdtError::NotFound)?.try_into().unwrap();
-
-    let (addr, size) = if let Some(mut reg) = node.reg()? {
-        let reg = reg.next().ok_or(FdtError::NotFound)?;
-        let size = reg.size.ok_or(FdtError::NotFound)?;
-        reg.addr.checked_add(size).ok_or(FdtError::BadValue)?;
-        (Some(reg.addr.try_into().unwrap()), size.try_into().unwrap())
-    } else {
-        let size = node.getprop_u64(cstr!("size"))?.ok_or(FdtError::NotFound)?.try_into().unwrap();
-        (None, size)
-    };
-
-    Ok(SwiotlbInfo { addr, size, align })
 }
 
 fn validate_swiotlb_info(
@@ -480,11 +537,17 @@ fn validate_swiotlb_info(
         return Err(RebootReason::InvalidFdt);
     }
 
-    if (align % GUEST_PAGE_SIZE) != 0 {
+    if let Some(align) = align.filter(|&a| a % GUEST_PAGE_SIZE != 0) {
         error!("Invalid swiotlb alignment {:#x}", align);
         return Err(RebootReason::InvalidFdt);
     }
 
+    if let Some(addr) = swiotlb_info.addr {
+        if addr.checked_add(size).is_none() {
+            error!("Invalid swiotlb range: addr:{addr:#x} size:{size:#x}");
+            return Err(RebootReason::InvalidFdt);
+        }
+    }
     if let Some(range) = swiotlb_info.fixed_range() {
         if !range.is_within(memory) {
             error!("swiotlb range {range:#x?} not part of memory range {memory:#x?}");
@@ -498,16 +561,19 @@ fn validate_swiotlb_info(
 fn patch_swiotlb_info(fdt: &mut Fdt, swiotlb_info: &SwiotlbInfo) -> libfdt::Result<()> {
     let mut node =
         fdt.root_mut()?.next_compatible(cstr!("restricted-dma-pool"))?.ok_or(FdtError::NotFound)?;
-    node.setprop_inplace(cstr!("alignment"), &swiotlb_info.align.to_be_bytes())?;
 
     if let Some(range) = swiotlb_info.fixed_range() {
-        node.appendprop_addrrange(
+        node.setprop_addrrange_inplace(
             cstr!("reg"),
             range.start.try_into().unwrap(),
             range.len().try_into().unwrap(),
         )?;
+        node.nop_property(cstr!("size"))?;
+        node.nop_property(cstr!("alignment"))?;
     } else {
+        node.nop_property(cstr!("reg"))?;
         node.setprop_inplace(cstr!("size"), &swiotlb_info.size.to_be_bytes())?;
+        node.setprop_inplace(cstr!("alignment"), &swiotlb_info.align.unwrap().to_be_bytes())?;
     }
 
     Ok(())
@@ -520,22 +586,17 @@ fn patch_gic(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
     let mut range1 = ranges.next().ok_or(FdtError::NotFound)?;
 
     let addr = range0.addr;
-    // SAFETY - doesn't overflow. checked in validate_num_cpus
-    let size: u64 =
-        DeviceTreeInfo::GIC_REDIST_SIZE_PER_CPU.checked_mul(num_cpus.try_into().unwrap()).unwrap();
+    // `read_cpu_info_from()` guarantees that we have at most MAX_CPUS.
+    const_assert!(DeviceTreeInfo::gic_patched_size(DeviceTreeInfo::MAX_CPUS).is_some());
+    let size = u64::try_from(DeviceTreeInfo::gic_patched_size(num_cpus).unwrap()).unwrap();
 
     // range1 is just below range0
     range1.addr = addr - size;
     range1.size = Some(size);
 
-    let range0 = range0.to_cells();
-    let range1 = range1.to_cells();
-    let value = [
-        range0.0,          // addr
-        range0.1.unwrap(), //size
-        range1.0,          // addr
-        range1.1.unwrap(), //size
-    ];
+    let (addr0, size0) = range0.to_cells();
+    let (addr1, size1) = range1.to_cells();
+    let value = [addr0, size0.unwrap(), addr1, size1.unwrap()];
 
     let mut node =
         fdt.root_mut()?.next_compatible(cstr!("arm,gic-v3"))?.ok_or(FdtError::NotFound)?;
@@ -559,17 +620,11 @@ fn patch_timer(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
         *v = v.to_be();
     }
 
-    // SAFETY - array size is the same
-    let value = unsafe {
-        core::mem::transmute::<
-            [u32; NUM_INTERRUPTS * CELLS_PER_INTERRUPT],
-            [u8; NUM_INTERRUPTS * CELLS_PER_INTERRUPT * size_of::<u32>()],
-        >(value.into_inner())
-    };
+    let value = value.into_inner();
 
     let mut node =
         fdt.root_mut()?.next_compatible(cstr!("arm,armv8-timer"))?.ok_or(FdtError::NotFound)?;
-    node.setprop_inplace(cstr!("interrupts"), value.as_slice())
+    node.setprop_inplace(cstr!("interrupts"), value.as_bytes())
 }
 
 #[derive(Debug)]
@@ -578,30 +633,98 @@ pub struct DeviceTreeInfo {
     pub initrd_range: Option<Range<usize>>,
     pub memory_range: Range<usize>,
     bootargs: Option<CString>,
-    num_cpus: usize,
+    cpus: ArrayVec<[CpuInfo; DeviceTreeInfo::MAX_CPUS]>,
     pci_info: PciInfo,
     serial_info: SerialInfo,
     pub swiotlb_info: SwiotlbInfo,
+    device_assignment: Option<DeviceAssignmentInfo>,
+    vm_ref_dt_props_info: BTreeMap<CString, Vec<u8>>,
 }
 
 impl DeviceTreeInfo {
-    const GIC_REDIST_SIZE_PER_CPU: u64 = (32 * SIZE_4KB) as u64;
+    const MAX_CPUS: usize = 16;
+
+    const fn gic_patched_size(num_cpus: usize) -> Option<usize> {
+        const GIC_REDIST_SIZE_PER_CPU: usize = 32 * SIZE_4KB;
+
+        GIC_REDIST_SIZE_PER_CPU.checked_mul(num_cpus)
+    }
 }
 
-pub fn sanitize_device_tree(fdt: &mut Fdt) -> Result<DeviceTreeInfo, RebootReason> {
-    let info = parse_device_tree(fdt)?;
-    debug!("Device tree info: {:?}", info);
+pub fn sanitize_device_tree(
+    fdt: &mut [u8],
+    vm_dtbo: Option<&mut [u8]>,
+    vm_ref_dt: Option<&[u8]>,
+) -> Result<DeviceTreeInfo, RebootReason> {
+    let fdt = Fdt::from_mut_slice(fdt).map_err(|e| {
+        error!("Failed to load FDT: {e}");
+        RebootReason::InvalidFdt
+    })?;
 
-    fdt.copy_from_slice(pvmfw_fdt_template::RAW).map_err(|e| {
+    let vm_dtbo = match vm_dtbo {
+        Some(vm_dtbo) => Some(VmDtbo::from_mut_slice(vm_dtbo).map_err(|e| {
+            error!("Failed to load VM DTBO: {e}");
+            RebootReason::InvalidFdt
+        })?),
+        None => None,
+    };
+
+    let info = parse_device_tree(fdt, vm_dtbo.as_deref())?;
+
+    // SAFETY: We trust that the template (hardcoded in our RO data) is a valid DT.
+    let fdt_template = unsafe { Fdt::unchecked_from_slice(pvmfw_fdt_template::RAW) };
+    fdt.clone_from(fdt_template).map_err(|e| {
         error!("Failed to instantiate FDT from the template DT: {e}");
         RebootReason::InvalidFdt
     })?;
 
+    fdt.unpack().map_err(|e| {
+        error!("Failed to unpack DT for patching: {e}");
+        RebootReason::InvalidFdt
+    })?;
+
+    if let Some(device_assignment_info) = &info.device_assignment {
+        let vm_dtbo = vm_dtbo.unwrap();
+        device_assignment_info.filter(vm_dtbo).map_err(|e| {
+            error!("Failed to filter VM DTBO: {e}");
+            RebootReason::InvalidFdt
+        })?;
+        // SAFETY: Damaged VM DTBO isn't used in this API after this unsafe block.
+        // VM DTBO can't be reused in any way as Fdt nor VmDtbo outside of this API because
+        // it can only be instantiated after validation.
+        unsafe {
+            fdt.apply_overlay(vm_dtbo.as_mut()).map_err(|e| {
+                error!("Failed to apply filtered VM DTBO: {e}");
+                RebootReason::InvalidFdt
+            })?;
+        }
+    }
+
+    if let Some(vm_ref_dt) = vm_ref_dt {
+        let vm_ref_dt = Fdt::from_slice(vm_ref_dt).map_err(|e| {
+            error!("Failed to load VM reference DT: {e}");
+            RebootReason::InvalidFdt
+        })?;
+
+        validate_vm_ref_dt(fdt, vm_ref_dt, &info.vm_ref_dt_props_info).map_err(|e| {
+            error!("Failed to apply VM reference DT: {e}");
+            RebootReason::InvalidFdt
+        })?;
+    }
+
     patch_device_tree(fdt, &info)?;
+
+    // TODO(b/317201360): Ensure no overlapping in <reg> among devices
+
+    fdt.pack().map_err(|e| {
+        error!("Failed to unpack DT after patching: {e}");
+        RebootReason::InvalidFdt
+    })?;
+
     Ok(info)
 }
 
-fn parse_device_tree(fdt: &libfdt::Fdt) -> Result<DeviceTreeInfo, RebootReason> {
+fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeInfo, RebootReason> {
     let kernel_range = read_kernel_range_from(fdt).map_err(|e| {
         error!("Failed to read kernel range from DT: {e}");
         RebootReason::InvalidFdt
@@ -612,22 +735,21 @@ fn parse_device_tree(fdt: &libfdt::Fdt) -> Result<DeviceTreeInfo, RebootReason> 
         RebootReason::InvalidFdt
     })?;
 
-    let memory_range = read_memory_range_from(fdt).map_err(|e| {
-        error!("Failed to read memory range from DT: {e}");
-        RebootReason::InvalidFdt
-    })?;
-    validate_memory_range(&memory_range)?;
+    let memory_range = read_and_validate_memory_range(fdt)?;
 
     let bootargs = read_bootargs_from(fdt).map_err(|e| {
         error!("Failed to read bootargs from DT: {e}");
         RebootReason::InvalidFdt
     })?;
 
-    let num_cpus = read_num_cpus_from(fdt).map_err(|e| {
-        error!("Failed to read num cpus from DT: {e}");
+    let cpus = read_cpu_info_from(fdt).map_err(|e| {
+        error!("Failed to read CPU info from DT: {e}");
         RebootReason::InvalidFdt
     })?;
-    validate_num_cpus(num_cpus)?;
+    validate_cpu_info(&cpus).map_err(|e| {
+        error!("Failed to validate CPU info from DT: {e}");
+        RebootReason::InvalidFdt
+    })?;
 
     let pci_info = read_pci_info_from(fdt).map_err(|e| {
         error!("Failed to read pci info from DT: {e}");
@@ -640,30 +762,49 @@ fn parse_device_tree(fdt: &libfdt::Fdt) -> Result<DeviceTreeInfo, RebootReason> 
         RebootReason::InvalidFdt
     })?;
 
-    let swiotlb_info = read_swiotlb_info_from(fdt).map_err(|e| {
+    let swiotlb_info = SwiotlbInfo::new_from_fdt(fdt).map_err(|e| {
         error!("Failed to read swiotlb info from DT: {e}");
         RebootReason::InvalidFdt
     })?;
     validate_swiotlb_info(&swiotlb_info, &memory_range)?;
+
+    let device_assignment = match vm_dtbo {
+        Some(vm_dtbo) => {
+            if let Some(hypervisor) = hyp::get_device_assigner() {
+                DeviceAssignmentInfo::parse(fdt, vm_dtbo, hypervisor).map_err(|e| {
+                    error!("Failed to parse device assignment from DT and VM DTBO: {e}");
+                    RebootReason::InvalidFdt
+                })?
+            } else {
+                warn!(
+                    "Device assignment is ignored because device assigning hypervisor is missing"
+                );
+                None
+            }
+        }
+        None => None,
+    };
+
+    let vm_ref_dt_props_info = parse_vm_ref_dt(fdt).map_err(|e| {
+        error!("Failed to read names of properties under /avf from DT: {e}");
+        RebootReason::InvalidFdt
+    })?;
 
     Ok(DeviceTreeInfo {
         kernel_range,
         initrd_range,
         memory_range,
         bootargs,
-        num_cpus,
+        cpus,
         pci_info,
         serial_info,
         swiotlb_info,
+        device_assignment,
+        vm_ref_dt_props_info,
     })
 }
 
 fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootReason> {
-    fdt.unpack().map_err(|e| {
-        error!("Failed to unpack DT for patching: {e}");
-        RebootReason::InvalidFdt
-    })?;
-
     if let Some(initrd_range) = &info.initrd_range {
         patch_initrd_range(fdt, initrd_range).map_err(|e| {
             error!("Failed to patch initrd range to DT: {e}");
@@ -680,7 +821,7 @@ fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootR
             RebootReason::InvalidFdt
         })?;
     }
-    patch_num_cpus(fdt, info.num_cpus).map_err(|e| {
+    patch_cpus(fdt, &info.cpus).map_err(|e| {
         error!("Failed to patch cpus to DT: {e}");
         RebootReason::InvalidFdt
     })?;
@@ -696,19 +837,22 @@ fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootR
         error!("Failed to patch swiotlb info to DT: {e}");
         RebootReason::InvalidFdt
     })?;
-    patch_gic(fdt, info.num_cpus).map_err(|e| {
+    patch_gic(fdt, info.cpus.len()).map_err(|e| {
         error!("Failed to patch gic info to DT: {e}");
         RebootReason::InvalidFdt
     })?;
-    patch_timer(fdt, info.num_cpus).map_err(|e| {
+    patch_timer(fdt, info.cpus.len()).map_err(|e| {
         error!("Failed to patch timer info to DT: {e}");
         RebootReason::InvalidFdt
     })?;
-
-    fdt.pack().map_err(|e| {
-        error!("Failed to pack DT after patching: {e}");
-        RebootReason::InvalidFdt
-    })?;
+    if let Some(device_assignment) = &info.device_assignment {
+        // Note: We patch values after VM DTBO is overlaid because patch may require more space
+        // then VM DTBO's underlying slice is allocated.
+        device_assignment.patch(fdt).map_err(|e| {
+            error!("Failed to patch device assignment info to DT: {e}");
+            RebootReason::InvalidFdt
+        })?;
+    }
 
     Ok(())
 }
@@ -719,8 +863,9 @@ pub fn modify_for_next_stage(
     bcc: &[u8],
     new_instance: bool,
     strict_boot: bool,
-    debug_policy: Option<&mut [u8]>,
+    debug_policy: Option<&[u8]>,
     debuggable: bool,
+    kaslr_seed: u64,
 ) -> libfdt::Result<()> {
     if let Some(debug_policy) = debug_policy {
         let backup = Vec::from(fdt.as_slice());
@@ -739,9 +884,11 @@ pub fn modify_for_next_stage(
 
     patch_dice_node(fdt, bcc.as_ptr() as usize, bcc.len())?;
 
-    set_or_clear_chosen_flag(fdt, cstr!("avf,strict-boot"), strict_boot)?;
-    set_or_clear_chosen_flag(fdt, cstr!("avf,new-instance"), new_instance)?;
-
+    if let Some(mut chosen) = fdt.chosen_mut()? {
+        empty_or_delete_prop(&mut chosen, cstr!("avf,strict-boot"), strict_boot)?;
+        empty_or_delete_prop(&mut chosen, cstr!("avf,new-instance"), new_instance)?;
+        chosen.setprop_inplace(cstr!("kaslr-seed"), &kaslr_seed.to_be_bytes())?;
+    };
     if !debuggable {
         if let Some(bootargs) = read_bootargs_from(fdt)? {
             filter_out_dangerous_bootargs(fdt, &bootargs)?;
@@ -766,19 +913,18 @@ fn patch_dice_node(fdt: &mut Fdt, addr: usize, size: usize) -> libfdt::Result<()
     node.setprop_inplace(cstr!("reg"), flatten(&[addr.to_be_bytes(), size.to_be_bytes()]))
 }
 
-fn set_or_clear_chosen_flag(fdt: &mut Fdt, flag: &CStr, value: bool) -> libfdt::Result<()> {
-    // TODO(b/249054080): Refactor to not panic if the DT doesn't contain a /chosen node.
-    let mut chosen = fdt.chosen_mut()?.unwrap();
-    if value {
-        chosen.setprop_empty(flag)?;
+fn empty_or_delete_prop(
+    fdt_node: &mut FdtNodeMut,
+    prop_name: &CStr,
+    keep_prop: bool,
+) -> libfdt::Result<()> {
+    if keep_prop {
+        fdt_node.setprop_empty(prop_name)
     } else {
-        match chosen.delprop(flag) {
-            Ok(()) | Err(FdtError::NotFound) => (),
-            Err(e) => return Err(e),
-        }
+        fdt_node
+            .delprop(prop_name)
+            .or_else(|e| if e == FdtError::NotFound { Ok(()) } else { Err(e) })
     }
-
-    Ok(())
 }
 
 /// Apply the debug policy overlay to the guest DT.
@@ -798,10 +944,10 @@ fn apply_debug_policy(
         }
     };
 
-    // SAFETY - on failure, the corrupted DT is restored using the backup.
+    // SAFETY: on failure, the corrupted DT is restored using the backup.
     if let Err(e) = unsafe { fdt.apply_overlay(overlay) } {
         warn!("Failed to apply debug policy: {e}. Recovering...");
-        fdt.copy_from_slice(backup_fdt.as_slice())?;
+        fdt.clone_from(backup_fdt)?;
         // A successful restoration is considered success because an invalid debug policy
         // shouldn't DOS the pvmfw
         Ok(false)
@@ -810,7 +956,7 @@ fn apply_debug_policy(
     }
 }
 
-fn read_common_debug_policy(fdt: &Fdt, debug_feature_name: &CStr) -> libfdt::Result<bool> {
+fn has_common_debug_policy(fdt: &Fdt, debug_feature_name: &CStr) -> libfdt::Result<bool> {
     if let Some(node) = fdt.node(cstr!("/avf/guest/common"))? {
         if let Some(value) = node.getprop_u32(debug_feature_name)? {
             return Ok(value == 1);
@@ -820,8 +966,8 @@ fn read_common_debug_policy(fdt: &Fdt, debug_feature_name: &CStr) -> libfdt::Res
 }
 
 fn filter_out_dangerous_bootargs(fdt: &mut Fdt, bootargs: &CStr) -> libfdt::Result<()> {
-    let has_crashkernel = read_common_debug_policy(fdt, cstr!("ramdump"))?;
-    let has_console = read_common_debug_policy(fdt, cstr!("log"))?;
+    let has_crashkernel = has_common_debug_policy(fdt, cstr!("ramdump"))?;
+    let has_console = has_common_debug_policy(fdt, cstr!("log"))?;
 
     let accepted: &[(&str, Box<dyn Fn(Option<&str>) -> bool>)] = &[
         ("panic", Box::new(|v| if let Some(v) = v { v == "=-1" } else { false })),

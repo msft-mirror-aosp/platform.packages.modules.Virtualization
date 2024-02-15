@@ -2,6 +2,17 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
+android_app_certificate {
+    name: "MicrodroidTestAppCert",
+
+    // The default app cert is the same as the default platform cert
+    // (on a test-keys build), which means we end up getting assigned
+    // the permissions via signature and can't reliably disclaim
+    // them. So instead we use our own custom cert. See b/290582742.
+    // Created via: development/tools/make_key microdroid_test_app '/CN=microdroid_test_app'
+    certificate: "microdroid_test_app",
+}
+
 java_defaults {
     name: "MicrodroidTestAppsDefaults",
     test_suites: [
@@ -12,6 +23,7 @@ java_defaults {
         "com.android.microdroid.testservice-java",
         "com.android.microdroid.test.vmshare_service-java",
     ],
+    certificate: ":MicrodroidTestAppCert",
     sdk_version: "test_current",
     jni_uses_platform_apis: true,
     use_embedded_native_libs: true,
@@ -29,7 +41,7 @@ android_test {
         "androidx.test.ext.junit",
         "authfs_test_apk_assets",
         "cbor-java",
-        "truth-prebuilt",
+        "truth",
         "compatibility-common-util-devicesidelib",
         "measure_io_as_jar",
     ],
@@ -43,7 +55,11 @@ android_test {
     ],
     min_sdk_version: "33",
     // Defined in ../vmshareapp/Android.bp
-    data: [":MicrodroidVmShareApp"],
+    data: [
+        ":MicrodroidVmShareApp",
+        ":test_microdroid_vendor_image",
+        ":test_microdroid_vendor_image_unsigned",
+    ],
 }
 
 // Defaults shared between MicrodroidTestNativeLib and MicrodroidPayloadInOtherAppNativeLib shared
@@ -51,6 +67,7 @@ android_test {
 // (MicrodroidTestApp) can start a payload defined in the another app (MicrodroidVmShareApp).
 cc_defaults {
     name: "MicrodroidTestNativeLibDefaults",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["src/native/testbinary.cpp"],
     stl: "libc++_static",
     header_libs: ["vm_payload_restricted_headers"],
@@ -82,12 +99,14 @@ cc_library_shared {
 
 cc_library_shared {
     name: "MicrodroidTestNativeLibSub",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["src/native/testlib.cpp"],
     stl: "libc++_static",
 }
 
 cc_library_shared {
     name: "MicrodroidIdleNativeLib",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["src/native/idlebinary.cpp"],
     header_libs: ["vm_payload_headers"],
     stl: "libc++_static",
@@ -96,6 +115,7 @@ cc_library_shared {
 // An empty payload missing AVmPayload_main
 cc_library_shared {
     name: "MicrodroidEmptyNativeLib",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["src/native/emptybinary.cpp"],
     stl: "none",
 }
@@ -103,6 +123,7 @@ cc_library_shared {
 // A payload that exits immediately on start
 cc_library_shared {
     name: "MicrodroidExitNativeLib",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["src/native/exitbinary.cpp"],
     header_libs: ["vm_payload_headers"],
     stl: "libc++_static",
@@ -111,6 +132,7 @@ cc_library_shared {
 // A payload which tries to link against libselinux, one of private libraries
 cc_library_shared {
     name: "MicrodroidPrivateLinkingNativeLib",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["src/native/idlebinary.cpp"],
     header_libs: ["vm_payload_headers"],
     // HACK: linking against "libselinux" will embed libselinux.so into the apk
@@ -122,6 +144,7 @@ cc_library_shared {
 // A payload that crashes immediately on start
 cc_library_shared {
     name: "MicrodroidCrashNativeLib",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["src/native/crashbinary.cpp"],
     header_libs: ["vm_payload_headers"],
     stl: "libc++_static",

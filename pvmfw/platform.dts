@@ -37,6 +37,7 @@
 		ranges;
 		swiotlb: restricted_dma_reserved {
 			compatible = "restricted-dma-pool";
+			reg = <PLACEHOLDER4>;
 			size = <PLACEHOLDER2>;
 			alignment = <PLACEHOLDER2>;
 		};
@@ -224,8 +225,12 @@
 			0x3000 0x0 0x0 1 &intc 0 0 GIC_SPI (IRQ_BASE + 5) IRQ_TYPE_LEVEL_HIGH
 			0x3800 0x0 0x0 1 &intc 0 0 GIC_SPI (IRQ_BASE + 6) IRQ_TYPE_LEVEL_HIGH
 			0x4000 0x0 0x0 1 &intc 0 0 GIC_SPI (IRQ_BASE + 7) IRQ_TYPE_LEVEL_HIGH
+			0x4800 0x0 0x0 1 &intc 0 0 GIC_SPI (IRQ_BASE + 8) IRQ_TYPE_LEVEL_HIGH
+			0x5000 0x0 0x0 1 &intc 0 0 GIC_SPI (IRQ_BASE + 9) IRQ_TYPE_LEVEL_HIGH
 		>;
 		interrupt-map-mask = <0xf800 0x0 0x0 0x7
+				      0xf800 0x0 0x0 0x7
+				      0xf800 0x0 0x0 0x7
 				      0xf800 0x0 0x0 0x7
 				      0xf800 0x0 0x0 0x7
 				      0xf800 0x0 0x0 0x7
@@ -255,5 +260,65 @@
 		reg = <0x00 0x3000 0x00 0x1000>;
 		clock-frequency = <10>;
 		timeout-sec = <8>;
+	};
+
+	pviommu_0: pviommu0 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
+	};
+
+	pviommu_1: pviommu1 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
+	};
+
+	pviommu_2: pviommu2 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
+	};
+
+	pviommu_3: pviommu3 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
+	};
+
+	pviommu_4: pviommu4 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
+	};
+
+	pviommu_5: pviommu5 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
+	};
+
+	pviommu_6: pviommu6 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
+	};
+
+	pviommu_7: pviommu7 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
+	};
+
+	pviommu_8: pviommu8 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
+	};
+
+	pviommu_9: pviommu9 {
+		compatible = "pkvm,pviommu";
+		id = <PLACEHOLDER>;
+		#iommu-cells = <1>;
 	};
 };

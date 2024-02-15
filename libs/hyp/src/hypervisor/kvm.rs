@@ -14,11 +14,13 @@
 
 //! Wrappers around calls to the KVM hypervisor.
 
-use super::common::{Hypervisor, HypervisorCap};
+use super::common::{
+    DeviceAssigningHypervisor, Hypervisor, MemSharingHypervisor, MmioGuardedHypervisor,
+};
 use crate::error::{Error, Result};
-use crate::util::{page_address, SIZE_4KB};
+use crate::util::page_address;
 use core::fmt::{self, Display, Formatter};
-use psci::smccc::{
+use smccc::{
     error::{positive_or_error_64, success_or_error_32, success_or_error_64},
     hvc64,
 };
@@ -70,26 +72,46 @@ const VENDOR_HYP_KVM_MMIO_GUARD_ENROLL_FUNC_ID: u32 = 0xc6000006;
 const VENDOR_HYP_KVM_MMIO_GUARD_MAP_FUNC_ID: u32 = 0xc6000007;
 const VENDOR_HYP_KVM_MMIO_GUARD_UNMAP_FUNC_ID: u32 = 0xc6000008;
 
-pub(super) struct KvmHypervisor;
+const VENDOR_HYP_KVM_DEV_REQ_MMIO_FUNC_ID: u32 = 0xc6000012;
+const VENDOR_HYP_KVM_DEV_REQ_DMA_FUNC_ID: u32 = 0xc6000013;
 
-impl KvmHypervisor {
+pub(super) struct RegularKvmHypervisor;
+
+impl RegularKvmHypervisor {
     // Based on ARM_SMCCC_VENDOR_HYP_UID_KVM_REG values listed in Linux kernel source:
     // https://github.com/torvalds/linux/blob/master/include/linux/arm-smccc.h
     pub(super) const UUID: Uuid = uuid!("28b46fb6-2ec5-11e9-a9ca-4b564d003a74");
-    const CAPABILITIES: HypervisorCap = HypervisorCap::DYNAMIC_MEM_SHARE;
 }
 
-impl Hypervisor for KvmHypervisor {
-    fn mmio_guard_init(&self) -> Result<()> {
-        mmio_guard_enroll()?;
-        let mmio_granule = mmio_guard_granule()?;
-        if mmio_granule != SIZE_4KB {
-            return Err(Error::UnsupportedMmioGuardGranule(mmio_granule));
-        }
-        Ok(())
+impl Hypervisor for RegularKvmHypervisor {}
+
+pub(super) struct ProtectedKvmHypervisor;
+
+impl Hypervisor for ProtectedKvmHypervisor {
+    fn as_mmio_guard(&self) -> Option<&dyn MmioGuardedHypervisor> {
+        Some(self)
     }
 
-    fn mmio_guard_map(&self, addr: usize) -> Result<()> {
+    fn as_mem_sharer(&self) -> Option<&dyn MemSharingHypervisor> {
+        Some(self)
+    }
+
+    fn as_device_assigner(&self) -> Option<&dyn DeviceAssigningHypervisor> {
+        Some(self)
+    }
+}
+
+impl MmioGuardedHypervisor for ProtectedKvmHypervisor {
+    fn enroll(&self) -> Result<()> {
+        let args = [0u64; 17];
+        match success_or_error_64(hvc64(VENDOR_HYP_KVM_MMIO_GUARD_ENROLL_FUNC_ID, args)[0]) {
+            Ok(()) => Ok(()),
+            Err(KvmError::NotSupported) => Err(Error::MmioGuardNotSupported),
+            Err(e) => Err(Error::KvmError(e, VENDOR_HYP_KVM_MMIO_GUARD_ENROLL_FUNC_ID)),
+        }
+    }
+
+    fn map(&self, addr: usize) -> Result<()> {
         let mut args = [0u64; 17];
         args[0] = page_address(addr);
 
@@ -99,7 +121,7 @@ impl Hypervisor for KvmHypervisor {
             .map_err(|e| Error::KvmError(e, VENDOR_HYP_KVM_MMIO_GUARD_MAP_FUNC_ID))
     }
 
-    fn mmio_guard_unmap(&self, addr: usize) -> Result<()> {
+    fn unmap(&self, addr: usize) -> Result<()> {
         let mut args = [0u64; 17];
         args[0] = page_address(addr);
 
@@ -111,44 +133,52 @@ impl Hypervisor for KvmHypervisor {
         }
     }
 
-    fn mem_share(&self, base_ipa: u64) -> Result<()> {
+    fn granule(&self) -> Result<usize> {
+        let args = [0u64; 17];
+        let granule = checked_hvc64(VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID, args)?;
+        Ok(granule.try_into().unwrap())
+    }
+}
+
+impl MemSharingHypervisor for ProtectedKvmHypervisor {
+    fn share(&self, base_ipa: u64) -> Result<()> {
         let mut args = [0u64; 17];
         args[0] = base_ipa;
 
         checked_hvc64_expect_zero(ARM_SMCCC_KVM_FUNC_MEM_SHARE, args)
     }
 
-    fn mem_unshare(&self, base_ipa: u64) -> Result<()> {
+    fn unshare(&self, base_ipa: u64) -> Result<()> {
         let mut args = [0u64; 17];
         args[0] = base_ipa;
 
         checked_hvc64_expect_zero(ARM_SMCCC_KVM_FUNC_MEM_UNSHARE, args)
     }
 
-    fn memory_protection_granule(&self) -> Result<usize> {
+    fn granule(&self) -> Result<usize> {
         let args = [0u64; 17];
         let granule = checked_hvc64(ARM_SMCCC_KVM_FUNC_HYP_MEMINFO, args)?;
         Ok(granule.try_into().unwrap())
     }
+}
 
-    fn has_cap(&self, cap: HypervisorCap) -> bool {
-        Self::CAPABILITIES.contains(cap)
+impl DeviceAssigningHypervisor for ProtectedKvmHypervisor {
+    fn get_phys_mmio_token(&self, base_ipa: u64, size: u64) -> Result<u64> {
+        let mut args = [0u64; 17];
+        args[0] = base_ipa;
+        args[1] = size;
+
+        let ret = checked_hvc64_expect_results(VENDOR_HYP_KVM_DEV_REQ_MMIO_FUNC_ID, args)?;
+        Ok(ret[0])
     }
-}
 
-fn mmio_guard_granule() -> Result<usize> {
-    let args = [0u64; 17];
+    fn get_phys_iommu_token(&self, pviommu_id: u64, vsid: u64) -> Result<(u64, u64)> {
+        let mut args = [0u64; 17];
+        args[0] = pviommu_id;
+        args[1] = vsid;
 
-    let granule = checked_hvc64(VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID, args)?;
-    Ok(granule.try_into().unwrap())
-}
-
-fn mmio_guard_enroll() -> Result<()> {
-    let args = [0u64; 17];
-    match success_or_error_64(hvc64(VENDOR_HYP_KVM_MMIO_GUARD_ENROLL_FUNC_ID, args)[0]) {
-        Ok(_) => Ok(()),
-        Err(KvmError::NotSupported) => Err(Error::MmioGuardNotsupported),
-        Err(e) => Err(Error::KvmError(e, VENDOR_HYP_KVM_MMIO_GUARD_ENROLL_FUNC_ID)),
+        let ret = checked_hvc64_expect_results(VENDOR_HYP_KVM_DEV_REQ_DMA_FUNC_ID, args)?;
+        Ok((ret[0], ret[1]))
     }
 }
 
@@ -158,4 +188,10 @@ fn checked_hvc64_expect_zero(function: u32, args: [u64; 17]) -> Result<()> {
 
 fn checked_hvc64(function: u32, args: [u64; 17]) -> Result<u64> {
     positive_or_error_64(hvc64(function, args)[0]).map_err(|e| Error::KvmError(e, function))
+}
+
+fn checked_hvc64_expect_results(function: u32, args: [u64; 17]) -> Result<[u64; 17]> {
+    let [ret, results @ ..] = hvc64(function, args);
+    success_or_error_64(ret).map_err(|e| Error::KvmError(e, function))?;
+    Ok(results)
 }

@@ -15,20 +15,28 @@
  */
 package android.system.virtualizationservice;
 
+import android.system.virtualizationservice.AssignableDevice;
 import android.system.virtualizationservice.IVirtualMachine;
 import android.system.virtualizationservice.PartitionType;
 import android.system.virtualizationservice.VirtualMachineConfig;
 import android.system.virtualizationservice.VirtualMachineDebugInfo;
 
 interface IVirtualizationService {
+    const String FEATURE_DICE_CHANGES = "com.android.kvm.DICE_CHANGES";
+    const String FEATURE_MULTI_TENANT = "com.android.kvm.MULTI_TENANT";
+    const String FEATURE_REMOTE_ATTESTATION = "com.android.kvm.REMOTE_ATTESTATION";
+    const String FEATURE_VENDOR_MODULES = "com.android.kvm.VENDOR_MODULES";
+
     /**
      * Create the VM with the given config file, and return a handle to it ready to start it. If
-     * `consoleFd` is provided then console output from the VM will be sent to it. If `osLogFd` is
+     * `consoleOutFd` is provided then console output from the VM will be sent to it. If
+     * `consoleInFd` is provided then console input to the VM will be read from it. If `osLogFd` is
      * provided then the OS-level logs will be sent to it. `osLogFd` is supported only when the OS
      * running in the VM has the logging system. In case of Microdroid, the logging system is logd.
      */
     IVirtualMachine createVm(in VirtualMachineConfig config,
-            in @nullable ParcelFileDescriptor consoleFd,
+            in @nullable ParcelFileDescriptor consoleOutFd,
+            in @nullable ParcelFileDescriptor consoleInFd,
             in @nullable ParcelFileDescriptor osLogFd);
 
     /**
@@ -53,4 +61,23 @@ interface IVirtualizationService {
      * and as such is only permitted from the shell user.
      */
     VirtualMachineDebugInfo[] debugListVms();
+
+    /**
+     * Get a list of assignable device types.
+     */
+    AssignableDevice[] getAssignableDevices();
+
+    /**
+     * Get a list of supported OSes.
+     */
+    String[] getSupportedOSList();
+
+    /** Returns whether given feature is enabled. */
+    boolean isFeatureEnabled(in String feature);
+
+    /**
+     * Provisions a key pair for the VM attestation testing, a fake certificate will be
+     * associated to the fake key pair when the VM requests attestation in testing mode.
+     */
+    void enableTestAttestation();
 }

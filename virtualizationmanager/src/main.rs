@@ -20,6 +20,7 @@ mod composite;
 mod crosvm;
 mod debug_config;
 mod payload;
+mod reference_dt;
 mod selinux;
 
 use crate::aidl::{GLOBAL_SERVICE, VirtualizationService};
@@ -27,7 +28,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
 use anyhow::{bail, Context, Result};
 use binder::{BinderFeatures, ProcessState};
 use lazy_static::lazy_static;
-use log::{info, Level};
+use log::{info, LevelFilter};
 use rpcbinder::{FileDescriptorTransportMode, RpcServer};
 use std::os::unix::io::{FromRawFd, OwnedFd, RawFd};
 use clap::Parser;
@@ -86,7 +87,7 @@ fn take_fd_ownership(raw_fd: RawFd, owned_fds: &mut Vec<RawFd>) -> Result<OwnedF
     }
     owned_fds.push(raw_fd);
 
-    // SAFETY - Initializing OwnedFd for a RawFd provided in cmdline arguments.
+    // SAFETY: Initializing OwnedFd for a RawFd provided in cmdline arguments.
     // We checked that the integer value corresponds to a valid FD and that this
     // is the first argument to claim its ownership.
     Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
@@ -107,8 +108,8 @@ fn main() {
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag(LOG_TAG)
-            .with_min_level(Level::Info)
-            .with_log_id(android_logger::LogId::System),
+            .with_max_level(LevelFilter::Info)
+            .with_log_buffer(android_logger::LogId::System),
     );
 
     check_vm_support().unwrap();

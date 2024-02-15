@@ -22,39 +22,38 @@ extern crate alloc;
 mod bcc;
 mod bootargs;
 mod config;
-mod crypto;
+mod device_assignment;
 mod dice;
 mod entry;
 mod exceptions;
 mod fdt;
 mod gpt;
-mod heap;
 mod helpers;
-mod hvc;
 mod instance;
 mod memory;
-mod mmu;
-mod rand;
-mod virtio;
 
 use crate::bcc::Bcc;
 use crate::dice::PartialInputs;
 use crate::entry::RebootReason;
 use crate::fdt::modify_for_next_stage;
-use crate::helpers::flush;
 use crate::helpers::GUEST_PAGE_SIZE;
 use crate::instance::get_or_generate_instance_salt;
-use crate::memory::MemoryTracker;
-use crate::virtio::pci;
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use core::ops::Range;
-use diced_open_dice::{bcc_handover_main_flow, bcc_handover_parse, DiceArtifacts};
+use diced_open_dice::{bcc_handover_parse, DiceArtifacts};
 use fdtpci::{PciError, PciInfo};
 use libfdt::Fdt;
 use log::{debug, error, info, trace, warn};
 use pvmfw_avb::verify_payload;
+use pvmfw_avb::Capability;
 use pvmfw_avb::DebugLevel;
 use pvmfw_embedded_key::PUBLIC_KEY;
+use vmbase::heap;
+use vmbase::memory::flush;
+use vmbase::memory::MEMORY;
+use vmbase::rand;
+use vmbase::virtio::pci;
 
 const NEXT_BCC_SIZE: usize = GUEST_PAGE_SIZE;
 
@@ -63,8 +62,7 @@ fn main(
     signed_kernel: &[u8],
     ramdisk: Option<&[u8]>,
     current_bcc_handover: &[u8],
-    mut debug_policy: Option<&mut [u8]>,
-    memory: &mut MemoryTracker,
+    mut debug_policy: Option<&[u8]>,
 ) -> Result<Range<usize>, RebootReason> {
     info!("pVM firmware");
     debug!("FDT: {:?}", fdt.as_ptr());
@@ -99,12 +97,47 @@ fn main(
     // Set up PCI bus for VirtIO devices.
     let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;
     debug!("PCI: {:#x?}", pci_info);
-    let mut pci_root = pci::initialise(pci_info, memory)?;
+    let mut pci_root = pci::initialize(pci_info, MEMORY.lock().as_mut().unwrap()).map_err(|e| {
+        error!("Failed to initialize PCI: {e}");
+        RebootReason::InternalError
+    })?;
 
     let verified_boot_data = verify_payload(signed_kernel, ramdisk, PUBLIC_KEY).map_err(|e| {
         error!("Failed to verify the payload: {e}");
         RebootReason::PayloadVerificationError
     })?;
+    let debuggable = verified_boot_data.debug_level != DebugLevel::None;
+    if debuggable {
+        info!("Successfully verified a debuggable payload.");
+        info!("Please disregard any previous libavb ERROR about initrd_normal.");
+    }
+
+    if verified_boot_data.has_capability(Capability::RemoteAttest) {
+        info!("Service VM capable of remote attestation detected");
+        if service_vm_version::VERSION != verified_boot_data.rollback_index {
+            // For RKP VM, we only boot if the version in the AVB footer of its kernel matches
+            // the one embedded in pvmfw at build time.
+            // This prevents the pvmfw from booting a roll backed RKP VM.
+            error!(
+                "Service VM version mismatch: expected {}, found {}",
+                service_vm_version::VERSION,
+                verified_boot_data.rollback_index
+            );
+            return Err(RebootReason::InvalidPayload);
+        }
+    }
+
+    if verified_boot_data.has_capability(Capability::SecretkeeperProtection) {
+        info!("Guest OS is capable of Secretkeeper protection");
+        // For Secretkeeper based Antirollback protection, rollback_index of the image > 0
+        if verified_boot_data.rollback_index == 0 {
+            error!(
+                "Expected positive rollback_index, found {:?}",
+                verified_boot_data.rollback_index
+            );
+            return Err(RebootReason::InvalidPayload);
+        };
+    }
 
     let next_bcc = heap::aligned_boxed_slice(NEXT_BCC_SIZE, GUEST_PAGE_SIZE).ok_or_else(|| {
         error!("Failed to allocate the next-stage BCC");
@@ -124,37 +157,45 @@ fn main(
         })?;
     trace!("Got salt from instance.img: {salt:x?}");
 
-    let mut config_descriptor_buffer = [0; 128];
-    let dice_inputs =
-        dice_inputs.into_input_values(&salt, &mut config_descriptor_buffer).map_err(|e| {
-            error!("Failed to generate DICE inputs: {e:?}");
+    let new_bcc_handover = if cfg!(dice_changes) {
+        Cow::Borrowed(current_bcc_handover)
+    } else {
+        // It is possible that the DICE chain we were given is rooted in the UDS. We do not want to
+        // give such a chain to the payload, or even the associated CDIs. So remove the
+        // entire chain we were given and taint the CDIs. Note that the resulting CDIs are
+        // still deterministically derived from those we received, so will vary iff they do.
+        // TODO(b/280405545): Remove this post Android 14.
+        let truncated_bcc_handover = bcc::truncate(bcc_handover).map_err(|e| {
+            error!("{e}");
             RebootReason::InternalError
         })?;
+        Cow::Owned(truncated_bcc_handover)
+    };
 
-    // It is possible that the DICE chain we were given is rooted in the UDS. We do not want to give
-    // such a chain to the payload, or even the associated CDIs. So remove the entire chain we
-    // were given and taint the CDIs. Note that the resulting CDIs are still deterministically
-    // derived from those we received, so will vary iff they do.
-    // TODO(b/280405545): Remove this post Android 14.
-    let truncated_bcc_handover = bcc::truncate(bcc_handover).map_err(|e| {
-        error!("{e}");
-        RebootReason::InternalError
+    dice_inputs.write_next_bcc(new_bcc_handover.as_ref(), &salt, next_bcc).map_err(|e| {
+        error!("Failed to derive next-stage DICE secrets: {e:?}");
+        RebootReason::SecretDerivationError
     })?;
-
-    let _ = bcc_handover_main_flow(truncated_bcc_handover.as_slice(), &dice_inputs, next_bcc)
-        .map_err(|e| {
-            error!("Failed to derive next-stage DICE secrets: {e:?}");
-            RebootReason::SecretDerivationError
-        })?;
     flush(next_bcc);
 
+    let kaslr_seed = u64::from_ne_bytes(rand::random_array().map_err(|e| {
+        error!("Failed to generated guest KASLR seed: {e}");
+        RebootReason::InternalError
+    })?);
     let strict_boot = true;
-    let debuggable = verified_boot_data.debug_level != DebugLevel::None;
-    modify_for_next_stage(fdt, next_bcc, new_instance, strict_boot, debug_policy, debuggable)
-        .map_err(|e| {
-            error!("Failed to configure device tree: {e}");
-            RebootReason::InternalError
-        })?;
+    modify_for_next_stage(
+        fdt,
+        next_bcc,
+        new_instance,
+        strict_boot,
+        debug_policy,
+        debuggable,
+        kaslr_seed,
+    )
+    .map_err(|e| {
+        error!("Failed to configure device tree: {e}");
+        RebootReason::InternalError
+    })?;
 
     info!("Starting payload...");
 

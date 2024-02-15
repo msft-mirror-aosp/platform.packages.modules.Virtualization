@@ -1,3 +1,5 @@
+// When adding or removing tests here, don't forget to amend _all_modules list in
+// wireless/android/busytown/ath_config/configs/prod/avf/tests.gcl
 {
   "avf-presubmit" : [
     {
@@ -5,6 +7,12 @@
     },
     {
       "name" : "libpvmfw.bootargs.test"
+    },
+    {
+      "name" : "libpvmfw.device_assignment.test"
+    },
+    {
+      "name" : "libpvmfw.dice.test"
     }
   ]
 }

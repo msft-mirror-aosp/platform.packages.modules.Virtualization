@@ -21,6 +21,7 @@ import static android.os.ParcelFileDescriptor.MODE_READ_ONLY;
 
 import static java.util.Objects.requireNonNull;
 
+import android.annotation.FlaggedApi;
 import android.annotation.IntDef;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
@@ -48,6 +49,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.zip.ZipFile;
 
@@ -61,10 +66,11 @@ import java.util.zip.ZipFile;
 @SystemApi
 public final class VirtualMachineConfig {
     private static final String TAG = "VirtualMachineConfig";
-    private static final String[] EMPTY_STRING_ARRAY = {};
+
+    private static String[] EMPTY_STRING_ARRAY = {};
 
     // These define the schema of the config file persisted on disk.
-    private static final int VERSION = 6;
+    private static final int VERSION = 8;
     private static final String KEY_VERSION = "version";
     private static final String KEY_PACKAGENAME = "packageName";
     private static final String KEY_APKPATH = "apkPath";
@@ -76,6 +82,10 @@ public final class VirtualMachineConfig {
     private static final String KEY_CPU_TOPOLOGY = "cpuTopology";
     private static final String KEY_ENCRYPTED_STORAGE_BYTES = "encryptedStorageBytes";
     private static final String KEY_VM_OUTPUT_CAPTURED = "vmOutputCaptured";
+    private static final String KEY_VM_CONSOLE_INPUT_SUPPORTED = "vmConsoleInputSupported";
+    private static final String KEY_VENDOR_DISK_IMAGE_PATH = "vendorDiskImagePath";
+    private static final String KEY_OS = "os";
+    private static final String KEY_EXTRA_APKS = "extraApks";
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -121,7 +131,7 @@ public final class VirtualMachineConfig {
 
     /**
      * Run VM with vCPU topology matching the physical CPU topology of the host. Usually takes
-     * longer to boot and cosumes more resources compared to a single vCPU. Typically a good option
+     * longer to boot and consumes more resources compared to a single vCPU. Typically a good option
      * for long-running workloads that benefit from parallel execution.
      *
      * @hide
@@ -133,6 +143,8 @@ public final class VirtualMachineConfig {
 
     /** Absolute path to the APK file containing the VM payload. */
     @Nullable private final String mApkPath;
+
+    private final List<String> mExtraApks;
 
     @DebugLevel private final int mDebugLevel;
 
@@ -164,9 +176,18 @@ public final class VirtualMachineConfig {
     /** Whether the app can read console and log output. */
     private final boolean mVmOutputCaptured;
 
+    /** Whether the app can write console input to the VM */
+    private final boolean mVmConsoleInputSupported;
+
+    @Nullable private final File mVendorDiskImage;
+
+    /** OS name of the VM using payload binaries. null if the VM uses a payload config file. */
+    @Nullable private final String mOs;
+
     private VirtualMachineConfig(
             @Nullable String packageName,
             @Nullable String apkPath,
+            List<String> extraApks,
             @Nullable String payloadConfigPath,
             @Nullable String payloadBinaryName,
             @DebugLevel int debugLevel,
@@ -174,10 +195,18 @@ public final class VirtualMachineConfig {
             long memoryBytes,
             @CpuTopology int cpuTopology,
             long encryptedStorageBytes,
-            boolean vmOutputCaptured) {
+            boolean vmOutputCaptured,
+            boolean vmConsoleInputSupported,
+            @Nullable File vendorDiskImage,
+            @Nullable String os) {
         // This is only called from Builder.build(); the builder handles parameter validation.
         mPackageName = packageName;
         mApkPath = apkPath;
+        mExtraApks =
+                extraApks.isEmpty()
+                        ? Collections.emptyList()
+                        : Collections.unmodifiableList(
+                                Arrays.asList(extraApks.toArray(new String[0])));
         mPayloadConfigPath = payloadConfigPath;
         mPayloadBinaryName = payloadBinaryName;
         mDebugLevel = debugLevel;
@@ -186,6 +215,9 @@ public final class VirtualMachineConfig {
         mCpuTopology = cpuTopology;
         mEncryptedStorageBytes = encryptedStorageBytes;
         mVmOutputCaptured = vmOutputCaptured;
+        mVmConsoleInputSupported = vmConsoleInputSupported;
+        mVendorDiskImage = vendorDiskImage;
+        mOs = os;
     }
 
     /** Loads a config from a file. */
@@ -260,6 +292,24 @@ public final class VirtualMachineConfig {
             builder.setEncryptedStorageBytes(encryptedStorageBytes);
         }
         builder.setVmOutputCaptured(b.getBoolean(KEY_VM_OUTPUT_CAPTURED));
+        builder.setVmConsoleInputSupported(b.getBoolean(KEY_VM_CONSOLE_INPUT_SUPPORTED));
+
+        String vendorDiskImagePath = b.getString(KEY_VENDOR_DISK_IMAGE_PATH);
+        if (vendorDiskImagePath != null) {
+            builder.setVendorDiskImage(new File(vendorDiskImagePath));
+        }
+
+        String os = b.getString(KEY_OS);
+        if (os != null) {
+            builder.setOs(os);
+        }
+
+        String[] extraApks = b.getStringArray(KEY_EXTRA_APKS);
+        if (extraApks != null) {
+            for (String extraApk : extraApks) {
+                builder.addExtraApk(extraApk);
+            }
+        }
 
         return builder.build();
     }
@@ -295,6 +345,15 @@ public final class VirtualMachineConfig {
             b.putLong(KEY_ENCRYPTED_STORAGE_BYTES, mEncryptedStorageBytes);
         }
         b.putBoolean(KEY_VM_OUTPUT_CAPTURED, mVmOutputCaptured);
+        b.putBoolean(KEY_VM_CONSOLE_INPUT_SUPPORTED, mVmConsoleInputSupported);
+        if (mVendorDiskImage != null) {
+            b.putString(KEY_VENDOR_DISK_IMAGE_PATH, mVendorDiskImage.getAbsolutePath());
+        }
+        b.putString(KEY_OS, mOs);
+        if (!mExtraApks.isEmpty()) {
+            String[] extraApks = mExtraApks.toArray(new String[0]);
+            b.putStringArray(KEY_EXTRA_APKS, extraApks);
+        }
         b.writeToStream(output);
     }
 
@@ -308,6 +367,19 @@ public final class VirtualMachineConfig {
     @Nullable
     public String getApkPath() {
         return mApkPath;
+    }
+
+    /**
+     * Returns the package names of any extra APKs that have been requested for the VM. They are
+     * returned in the order in which they were added via {@link Builder#addExtraApk}.
+     *
+     * @hide
+     */
+    @TestApi
+    @FlaggedApi("RELEASE_AVF_ENABLE_MULTI_TENANT_MICRODROID_VM")
+    @NonNull
+    public List<String> getExtraApks() {
+        return mExtraApks;
     }
 
     /**
@@ -413,6 +485,30 @@ public final class VirtualMachineConfig {
     }
 
     /**
+     * Returns whether the app can write to the VM console.
+     *
+     * @see Builder#setVmConsoleInputSupported
+     * @hide
+     */
+    @TestApi
+    public boolean isVmConsoleInputSupported() {
+        return mVmConsoleInputSupported;
+    }
+
+    /**
+     * Returns the OS of the VM using a payload binary. Returns null if the VM uses payload config.
+     *
+     * @see Builder#setOs
+     * @hide
+     */
+    @TestApi
+    @FlaggedApi("RELEASE_AVF_ENABLE_VENDOR_MODULES")
+    @Nullable
+    public String getOs() {
+        return mOs;
+    }
+
+    /**
      * Tests if this config is compatible with other config. Being compatible means that the configs
      * can be interchangeably used for the same virtual machine; they do not change the VM identity
      * or secrets. Such changes include varying the number of CPUs or the size of the RAM. Changes
@@ -431,10 +527,12 @@ public final class VirtualMachineConfig {
                 && this.mProtectedVm == other.mProtectedVm
                 && this.mEncryptedStorageBytes == other.mEncryptedStorageBytes
                 && this.mVmOutputCaptured == other.mVmOutputCaptured
+                && this.mVmConsoleInputSupported == other.mVmConsoleInputSupported
                 && Objects.equals(this.mPayloadConfigPath, other.mPayloadConfigPath)
                 && Objects.equals(this.mPayloadBinaryName, other.mPayloadBinaryName)
                 && Objects.equals(this.mPackageName, other.mPackageName)
-                && Objects.equals(this.mApkPath, other.mApkPath);
+                && Objects.equals(this.mOs, other.mOs)
+                && Objects.equals(this.mExtraApks, other.mExtraApks);
     }
 
     /**
@@ -458,6 +556,8 @@ public final class VirtualMachineConfig {
         if (mPayloadBinaryName != null) {
             VirtualMachinePayloadConfig payloadConfig = new VirtualMachinePayloadConfig();
             payloadConfig.payloadBinaryName = mPayloadBinaryName;
+            payloadConfig.osName = mOs;
+            payloadConfig.extraApks = Collections.emptyList();
             vsConfig.payload =
                     VirtualMachineAppConfig.Payload.payloadConfig(payloadConfig);
         } else {
@@ -482,8 +582,21 @@ public final class VirtualMachineConfig {
                 vsConfig.cpuTopology = android.system.virtualizationservice.CpuTopology.ONE_CPU;
                 break;
         }
-        // Don't allow apps to set task profiles ... at least for now.
-        vsConfig.taskProfiles = EMPTY_STRING_ARRAY;
+        if (mVendorDiskImage != null) {
+            VirtualMachineAppConfig.CustomConfig customConfig =
+                    new VirtualMachineAppConfig.CustomConfig();
+            customConfig.taskProfiles = EMPTY_STRING_ARRAY;
+            customConfig.devices = EMPTY_STRING_ARRAY;
+            try {
+                customConfig.vendorImage =
+                        ParcelFileDescriptor.open(mVendorDiskImage, MODE_READ_ONLY);
+            } catch (FileNotFoundException e) {
+                throw new VirtualMachineException(
+                        "Failed to open vendor disk image " + mVendorDiskImage.getAbsolutePath(),
+                        e);
+            }
+            vsConfig.customConfig = customConfig;
+        }
         return vsConfig;
     }
 
@@ -543,8 +656,11 @@ public final class VirtualMachineConfig {
      */
     @SystemApi
     public static final class Builder {
+        private final String DEFAULT_OS = "microdroid";
+
         @Nullable private final String mPackageName;
         @Nullable private String mApkPath;
+        private final List<String> mExtraApks = new ArrayList<>();
         @Nullable private String mPayloadConfigPath;
         @Nullable private String mPayloadBinaryName;
         @DebugLevel private int mDebugLevel = DEBUG_LEVEL_NONE;
@@ -554,6 +670,9 @@ public final class VirtualMachineConfig {
         @CpuTopology private int mCpuTopology = CPU_TOPOLOGY_ONE_CPU;
         private long mEncryptedStorageBytes;
         private boolean mVmOutputCaptured = false;
+        private boolean mVmConsoleInputSupported = false;
+        @Nullable private File mVendorDiskImage;
+        @Nullable private String mOs;
 
         /**
          * Creates a builder for the given context.
@@ -593,14 +712,28 @@ public final class VirtualMachineConfig {
                 throw new IllegalStateException("apkPath or packageName must be specified");
             }
 
+            String os = null;
             if (mPayloadBinaryName == null) {
                 if (mPayloadConfigPath == null) {
                     throw new IllegalStateException("setPayloadBinaryName must be called");
+                }
+                if (mOs != null) {
+                    throw new IllegalStateException(
+                            "setPayloadConfigPath and setOs may not both be called");
+                }
+                if (!mExtraApks.isEmpty()) {
+                    throw new IllegalStateException(
+                            "setPayloadConfigPath and addExtraApk may not both be called");
                 }
             } else {
                 if (mPayloadConfigPath != null) {
                     throw new IllegalStateException(
                             "setPayloadBinaryName and setPayloadConfigPath may not both be called");
+                }
+                if (mOs != null) {
+                    os = mOs;
+                } else {
+                    os = DEFAULT_OS;
                 }
             }
 
@@ -612,9 +745,14 @@ public final class VirtualMachineConfig {
                 throw new IllegalStateException("debug level must be FULL to capture output");
             }
 
+            if (mVmConsoleInputSupported && mDebugLevel != DEBUG_LEVEL_FULL) {
+                throw new IllegalStateException("debug level must be FULL to use console input");
+            }
+
             return new VirtualMachineConfig(
                     packageName,
                     apkPath,
+                    mExtraApks,
                     mPayloadConfigPath,
                     mPayloadBinaryName,
                     mDebugLevel,
@@ -622,7 +760,10 @@ public final class VirtualMachineConfig {
                     mMemoryBytes,
                     mCpuTopology,
                     mEncryptedStorageBytes,
-                    mVmOutputCaptured);
+                    mVmOutputCaptured,
+                    mVmConsoleInputSupported,
+                    mVendorDiskImage,
+                    os);
         }
 
         /**
@@ -640,6 +781,21 @@ public final class VirtualMachineConfig {
                 throw new IllegalArgumentException("APK path must be an absolute path");
             }
             mApkPath = apkPath;
+            return this;
+        }
+
+        /**
+         * Specify the package name of an extra APK to be included in the VM. Each extra APK is
+         * mounted, in unzipped form, inside the VM, allowing access to the code and/or data within
+         * it. The VM entry point must be in the main APK.
+         *
+         * @hide
+         */
+        @TestApi
+        @FlaggedApi("RELEASE_AVF_ENABLE_MULTI_TENANT_MICRODROID_VM")
+        @NonNull
+        public Builder addExtraApk(@NonNull String packageName) {
+            mExtraApks.add(requireNonNull(packageName, "extra APK package name must not be null"));
             return this;
         }
 
@@ -820,6 +976,54 @@ public final class VirtualMachineConfig {
         @NonNull
         public Builder setVmOutputCaptured(boolean captured) {
             mVmOutputCaptured = captured;
+            return this;
+        }
+
+        /**
+         * Sets whether to allow the app to write to the VM console. Default is {@code false}.
+         *
+         * <p>Setting this as {@code true} will allow the app to directly write into {@linkplain
+         * VirtualMachine#getConsoleInput console input}.
+         *
+         * <p>The {@linkplain #setDebugLevel debug level} must be {@link #DEBUG_LEVEL_FULL} to be
+         * set as true.
+         *
+         * @hide
+         */
+        @TestApi
+        @NonNull
+        public Builder setVmConsoleInputSupported(boolean supported) {
+            mVmConsoleInputSupported = supported;
+            return this;
+        }
+
+        /**
+         * Sets the path to the disk image with vendor-specific modules.
+         *
+         * @hide
+         */
+        @TestApi
+        @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
+        @FlaggedApi("RELEASE_AVF_ENABLE_VENDOR_MODULES")
+        @NonNull
+        public Builder setVendorDiskImage(@NonNull File vendorDiskImage) {
+            mVendorDiskImage =
+                    requireNonNull(vendorDiskImage, "vendor disk image must not be null");
+            return this;
+        }
+
+        /**
+         * Sets an OS for the VM. Defaults to {@code "microdroid"}.
+         *
+         * <p>See {@link VirtualMachineManager#getSupportedOSList} for available OS names.
+         *
+         * @hide
+         */
+        @TestApi
+        @FlaggedApi("RELEASE_AVF_ENABLE_VENDOR_MODULES")
+        @NonNull
+        public Builder setOs(@NonNull String os) {
+            mOs = requireNonNull(os, "os must not be null");
             return this;
         }
     }

@@ -42,7 +42,7 @@ pvmfw currently only supports AArch64.
 
 [AVF]: https://source.android.com/docs/core/virtualization
 [why-avf]: https://source.android.com/docs/core/virtualization/whyavf
-[BCC]: https://pigweed.googlesource.com/open-dice/+/master/src/android/README.md
+[BCC]: https://pigweed.googlesource.com/open-dice/+/refs/heads/main/docs/android.md
 [pKVM]: https://source.android.com/docs/core/virtualization/architecture#hypervisor
 [open-dice]: https://pigweed.googlesource.com/open-dice/+/refs/heads/main/docs/specification.md
 
@@ -139,18 +139,34 @@ The configuration data is described using the following [header]:
 |  offset = (SECOND - HEAD)     |
 |  size = (SECOND_END - SECOND) |
 +-------------------------------+
+|           [Entry 2]           | <-- Entry 2 is present since version 1.1
+|  offset = (THIRD - HEAD)      |
+|  size = (THIRD_END - THIRD)   |
++-------------------------------+
+|           [Entry 3]           | <-- Entry 3 is present since version 1.2
+|  offset = (FOURTH - HEAD)     |
+|  size = (FOURTH_END - FOURTH) |
++-------------------------------+
 |              ...              |
 +-------------------------------+
 |           [Entry n]           |
 +~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~+
 | (Padding to 8-byte alignment) |
 +===============================+ <-- FIRST
-|        {First blob: BCC}      |
+|       {First blob: BCC}       |
 +~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~+ <-- FIRST_END
 | (Padding to 8-byte alignment) |
 +===============================+ <-- SECOND
-|        {Second blob: DP}      |
+|       {Second blob: DP}       |
 +~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~+ <-- SECOND_END
+| (Padding to 8-byte alignment) |
++===============================+ <-- THIRD
+|     {Third blob: VM DTBO}     |
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~+ <-- THIRD_END
+| (Padding to 8-byte alignment) |
++===============================+ <-- FOURTH
+| {Fourth blob: VM reference DT}|
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~+ <-- FOURTH_END
 | (Padding to 8-byte alignment) |
 +===============================+
 |              ...              |
@@ -174,10 +190,43 @@ The header format itself is agnostic of the internal format of the individual
 blos it refers to. In version 1.0, it describes two blobs:
 
 - entry 0 must point to a valid BCC Handover (see below)
-- entry 1 may point to a [DTBO] to be applied to the pVM device tree
+- entry 1 may point to a [DTBO] to be applied to the pVM device tree. See
+  [debug policy][debug_policy] for an example.
+
+In version 1.1, a third blob is added.
+
+- entry 2 may point to a [DTBO] that describes VM DTBO for device assignment.
+  pvmfw will provision assigned devices with the VM DTBO.
+
+In version 1.2, a fourth blob is added.
+
+- entry 3 if present contains the VM reference DT. This defines properties that
+  may be included in the device tree passed to a protected VM. pvmfw validates
+  that if any of these properties is included in the VM's device tree, the
+  property value exactly matches what is in the VM reference DT.
+
+  The bootloader should ensure that the same properties, with the same values,
+  are added under the "/avf/reference" node in the host Android device tree.
+
+  This provides a mechanism to allow configuration information to be securely
+  passed to the VM via the host. pvmfw does not interpret the content of VM
+  reference DT, nor does it apply it to the VM's device tree, it just ensures
+  that if matching properties are present in the VM device tree they contain the
+  correct values.
+
+  Use-cases of VM reference DT include:
+
+  - Passing the [public key of the Secretkeeper][secretkeeper_key] HAL
+    implementation to each VM.
+
+  - Passing the [vendor hashtree digest][vendor_hashtree_digest] to run
+    Microdroid with verified vendor image.
 
 [header]: src/config.rs
-[DTBO]: https://android.googlesource.com/platform/external/dtc/+/refs/heads/master/Documentation/dt-object-internal.txt
+[DTBO]: https://android.googlesource.com/platform/external/dtc/+/refs/heads/main/Documentation/dt-object-internal.txt
+[debug_policy]: ../docs/debug/README.md#debug-policy
+[secretkeeper_key]: https://android.googlesource.com/platform/system/secretkeeper/+/refs/heads/main/README.md#secretkeeper-public-key
+[vendor_hashtree_digest]: ../microdroid/README.md#verification-of-vendor-image
 
 #### Virtual Platform Boot Certificate Chain Handover
 
@@ -239,37 +288,6 @@ device tree node marked as [`compatible=”google,open-dice”`][dice-dt].
 [dice-dt]: https://www.kernel.org/doc/Documentation/devicetree/bindings/reserved-memory/google%2Copen-dice.yaml
 [Layering]: https://pigweed.googlesource.com/open-dice/+/refs/heads/main/docs/specification.md#layering-details
 [Trusty-BCC]: https://android.googlesource.com/trusty/lib/+/1696be0a8f3a7103/lib/hwbcc/common/swbcc.c#554
-
-#### pVM Device Tree Overlay
-
-Config header can provide a DTBO to be overlaid on top of the baseline device
-tree from crosvm.
-
-The DTBO may contain debug policies. Debug policies MUST NOT be provided for
-locked devices for security reasons.
-
-Here are an example of DTBO.
-
-```
-/ {
-    fragment@avf {
-        target-path = "/";
-
-        __overlay__ {
-            avf {
-                /* your debug policy here */
-            };
-        };
-    };
-}; /* end of avf */
-```
-
-For specifying DTBO, host bootloader should apply the DTBO to both host
-OS's device tree and config header of `pvmfw`. Both `virtualizationmanager` and
-`pvmfw` will prepare for debugging features.
-
-For details about device tree properties for debug policies, see
-[microdroid's debugging policy guide](../microdroid/README.md#option-1-running-microdroid-on-avf-debug-policy-configured-device).
 
 ### Platform Requirements
 
@@ -432,4 +450,42 @@ the signing described above is recommended to be done through an
 `avb_add_hash_footer` Soong module (see [how we sign the Microdroid
 kernel][soong-udroid]).
 
-[soong-udroid]: https://cs.android.com/android/platform/superproject/+/master:packages/modules/Virtualization/microdroid/Android.bp;l=427;drc=ca0049be4d84897b8c9956924cfae506773103eb
+[soong-udroid]: https://cs.android.com/android/platform/superproject/main/+/main:packages/modules/Virtualization/microdroid/Android.bp;l=425;drc=b94a5cf516307c4279f6c16a63803527a8affc6d
+
+## Development
+
+For faster iteration, you can build pvmfw, adb-push it to the device, and use
+it directly for a new pVM, without having to flash it to the physical
+partition. To do that, the binary image composition performed by ABL described
+above must be replicated to produce a single file containing the pvmfw binary
+and its configuration data.
+
+As a quick prototyping solution, a valid BCC (such as the [bcc.dat] test file)
+can be appended to the `pvmfw.bin` image with `pvmfw-tool`.
+
+```shell
+m pvmfw-tool pvmfw_bin
+PVMFW_BIN=${ANDROID_PRODUCT_OUT}/system/etc/pvmfw.bin
+BCC_DAT=${ANDROID_BUILD_TOP}/packages/modules/Virtualization/tests/pvmfw/assets/bcc.dat
+
+pvmfw-tool custom_pvmfw ${PVMFW_BIN} ${BCC_DAT}
+```
+
+The result can then be pushed to the device. Pointing the system property
+`hypervisor.pvmfw.path` to it will cause AVF to use that image as pvmfw:
+
+```shell
+adb push custom_pvmfw /data/local/tmp/pvmfw
+adb root
+adb shell setprop hypervisor.pvmfw.path /data/local/tmp/pvmfw
+```
+
+Then run a protected VM, for example:
+
+```shell
+adb shell /apex/com.android.virt/bin/vm run-microdroid --protected
+```
+
+Note: `adb root` is required to set the system property.
+
+[bcc.dat]: https://cs.android.com/android/platform/superproject/main/+/main:packages/modules/Virtualization/tests/pvmfw/assets/bcc.dat
