@@ -21,6 +21,7 @@ use crate::Box;
 use crate::RebootReason;
 use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
+use alloc::format;
 use alloc::vec::Vec;
 use core::cmp::max;
 use core::cmp::min;
@@ -35,7 +36,9 @@ use libfdt::AddressRange;
 use libfdt::CellIterator;
 use libfdt::Fdt;
 use libfdt::FdtError;
+use libfdt::FdtNode;
 use libfdt::FdtNodeMut;
+use libfdt::Phandle;
 use log::debug;
 use log::error;
 use log::info;
@@ -54,12 +57,22 @@ use zerocopy::AsBytes as _;
 pub enum FdtValidationError {
     /// Invalid CPU count.
     InvalidCpuCount(usize),
+    /// Invalid VCpufreq Range.
+    InvalidVcpufreq(u64, u64),
+    /// Forbidden /avf/untrusted property.
+    ForbiddenUntrustedProp(&'static CStr),
 }
 
 impl fmt::Display for FdtValidationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::InvalidCpuCount(num_cpus) => write!(f, "Invalid CPU count: {num_cpus}"),
+            Self::InvalidVcpufreq(addr, size) => {
+                write!(f, "Invalid vcpufreq region: ({addr:#x}, {size:#x})")
+            }
+            Self::ForbiddenUntrustedProp(name) => {
+                write!(f, "Forbidden /avf/untrusted property '{name:?}'")
+            }
         }
     }
 }
@@ -173,41 +186,261 @@ fn patch_memory_range(fdt: &mut Fdt, memory_range: &Range<usize>) -> libfdt::Res
 }
 
 #[derive(Debug, Default)]
-struct CpuInfo {}
+struct CpuInfo {
+    opptable_info: Option<ArrayVec<[u64; CpuInfo::MAX_OPPTABLES]>>,
+    cpu_capacity: Option<u32>,
+}
 
-fn read_cpu_info_from(fdt: &Fdt) -> libfdt::Result<ArrayVec<[CpuInfo; DeviceTreeInfo::MAX_CPUS]>> {
+impl CpuInfo {
+    const MAX_OPPTABLES: usize = 20;
+}
+
+fn read_opp_info_from(
+    opp_node: FdtNode,
+) -> libfdt::Result<ArrayVec<[u64; CpuInfo::MAX_OPPTABLES]>> {
+    let mut table = ArrayVec::new();
+    for subnode in opp_node.subnodes()? {
+        let prop = subnode.getprop_u64(cstr!("opp-hz"))?.ok_or(FdtError::NotFound)?;
+        table.push(prop);
+    }
+
+    Ok(table)
+}
+
+#[derive(Debug, Default)]
+struct ClusterTopology {
+    // TODO: Support multi-level clusters & threads.
+    cores: [Option<usize>; ClusterTopology::MAX_CORES_PER_CLUSTER],
+}
+
+impl ClusterTopology {
+    const MAX_CORES_PER_CLUSTER: usize = 6;
+}
+
+#[derive(Debug, Default)]
+struct CpuTopology {
+    // TODO: Support sockets.
+    clusters: [Option<ClusterTopology>; CpuTopology::MAX_CLUSTERS],
+}
+
+impl CpuTopology {
+    const MAX_CLUSTERS: usize = 3;
+}
+
+fn read_cpu_map_from(fdt: &Fdt) -> libfdt::Result<Option<BTreeMap<Phandle, (usize, usize)>>> {
+    let Some(cpu_map) = fdt.node(cstr!("/cpus/cpu-map"))? else {
+        return Ok(None);
+    };
+
+    let mut topology = BTreeMap::new();
+    for n in 0..CpuTopology::MAX_CLUSTERS {
+        let name = CString::new(format!("cluster{n}")).unwrap();
+        let Some(cluster) = cpu_map.subnode(&name)? else {
+            break;
+        };
+        for m in 0..ClusterTopology::MAX_CORES_PER_CLUSTER {
+            let name = CString::new(format!("core{m}")).unwrap();
+            let Some(core) = cluster.subnode(&name)? else {
+                break;
+            };
+            let cpu = core.getprop_u32(cstr!("cpu"))?.ok_or(FdtError::NotFound)?;
+            let prev = topology.insert(cpu.try_into()?, (n, m));
+            if prev.is_some() {
+                return Err(FdtError::BadValue);
+            }
+        }
+    }
+
+    Ok(Some(topology))
+}
+
+fn read_cpu_info_from(
+    fdt: &Fdt,
+) -> libfdt::Result<(ArrayVec<[CpuInfo; DeviceTreeInfo::MAX_CPUS]>, Option<CpuTopology>)> {
     let mut cpus = ArrayVec::new();
 
+    let cpu_map = read_cpu_map_from(fdt)?;
+    let mut topology: CpuTopology = Default::default();
+
     let mut cpu_nodes = fdt.compatible_nodes(cstr!("arm,arm-v8"))?;
-    for _cpu in cpu_nodes.by_ref().take(cpus.capacity()) {
-        let info = CpuInfo {};
+    for (idx, cpu) in cpu_nodes.by_ref().take(cpus.capacity()).enumerate() {
+        let cpu_capacity = cpu.getprop_u32(cstr!("capacity-dmips-mhz"))?;
+        let opp_phandle = cpu.getprop_u32(cstr!("operating-points-v2"))?;
+        let opptable_info = if let Some(phandle) = opp_phandle {
+            let phandle = phandle.try_into()?;
+            let node = fdt.node_with_phandle(phandle)?.ok_or(FdtError::NotFound)?;
+            Some(read_opp_info_from(node)?)
+        } else {
+            None
+        };
+        let info = CpuInfo { opptable_info, cpu_capacity };
         cpus.push(info);
+
+        if let Some(ref cpu_map) = cpu_map {
+            let phandle = cpu.get_phandle()?.ok_or(FdtError::NotFound)?;
+            let (cluster, core_idx) = cpu_map.get(&phandle).ok_or(FdtError::BadValue)?;
+            let cluster = topology.clusters[*cluster].get_or_insert(Default::default());
+            if cluster.cores[*core_idx].is_some() {
+                return Err(FdtError::BadValue);
+            }
+            cluster.cores[*core_idx] = Some(idx);
+        }
     }
+
     if cpu_nodes.next().is_some() {
         warn!("DT has more than {} CPU nodes: discarding extra nodes.", cpus.capacity());
     }
 
-    Ok(cpus)
+    Ok((cpus, cpu_map.map(|_| topology)))
 }
 
 fn validate_cpu_info(cpus: &[CpuInfo]) -> Result<(), FdtValidationError> {
     if cpus.is_empty() {
         return Err(FdtValidationError::InvalidCpuCount(0));
     }
+    Ok(())
+}
+
+fn read_vcpufreq_info(fdt: &Fdt) -> libfdt::Result<Option<VcpufreqInfo>> {
+    let mut nodes = fdt.compatible_nodes(cstr!("virtual,android-v-only-cpufreq"))?;
+    let Some(node) = nodes.next() else {
+        return Ok(None);
+    };
+
+    if nodes.next().is_some() {
+        warn!("DT has more than 1 cpufreq node: discarding extra nodes.");
+    }
+
+    let mut regs = node.reg()?.ok_or(FdtError::NotFound)?;
+    let reg = regs.next().ok_or(FdtError::NotFound)?;
+    let size = reg.size.ok_or(FdtError::NotFound)?;
+
+    Ok(Some(VcpufreqInfo { addr: reg.addr, size }))
+}
+
+fn validate_vcpufreq_info(
+    vcpufreq_info: &VcpufreqInfo,
+    cpus: &[CpuInfo],
+) -> Result<(), FdtValidationError> {
+    const VCPUFREQ_BASE_ADDR: u64 = 0x1040000;
+    const VCPUFREQ_SIZE_PER_CPU: u64 = 0x8;
+
+    let base = vcpufreq_info.addr;
+    let size = vcpufreq_info.size;
+    let expected_size = VCPUFREQ_SIZE_PER_CPU * cpus.len() as u64;
+
+    if (base, size) != (VCPUFREQ_BASE_ADDR, expected_size) {
+        return Err(FdtValidationError::InvalidVcpufreq(base, size));
+    }
 
     Ok(())
 }
 
-fn patch_cpus(fdt: &mut Fdt, cpus: &[CpuInfo]) -> libfdt::Result<()> {
-    const COMPAT: &CStr = cstr!("arm,arm-v8");
-    let mut next = fdt.root_mut()?.next_compatible(COMPAT)?;
-    for _cpu in cpus {
-        next = next.ok_or(FdtError::NoSpace)?.next_compatible(COMPAT)?;
+fn patch_opptable(
+    node: FdtNodeMut,
+    opptable: Option<ArrayVec<[u64; CpuInfo::MAX_OPPTABLES]>>,
+) -> libfdt::Result<()> {
+    let oppcompat = cstr!("operating-points-v2");
+    let next = node.next_compatible(oppcompat)?.ok_or(FdtError::NoSpace)?;
+
+    let Some(opptable) = opptable else {
+        return next.nop();
+    };
+
+    let mut next_subnode = next.first_subnode()?;
+
+    for entry in opptable {
+        let mut subnode = next_subnode.ok_or(FdtError::NoSpace)?;
+        subnode.setprop_inplace(cstr!("opp-hz"), &entry.to_be_bytes())?;
+        next_subnode = subnode.next_subnode()?;
     }
+
+    while let Some(current) = next_subnode {
+        next_subnode = current.delete_and_next_subnode()?;
+    }
+
+    Ok(())
+}
+
+// TODO(ptosi): Rework FdtNodeMut and replace this function.
+fn get_nth_compatible<'a>(
+    fdt: &'a mut Fdt,
+    n: usize,
+    compat: &CStr,
+) -> libfdt::Result<Option<FdtNodeMut<'a>>> {
+    let mut node = fdt.root_mut()?.next_compatible(compat)?;
+    for _ in 0..n {
+        node = node.ok_or(FdtError::NoSpace)?.next_compatible(compat)?;
+    }
+    Ok(node)
+}
+
+fn patch_cpus(
+    fdt: &mut Fdt,
+    cpus: &[CpuInfo],
+    topology: &Option<CpuTopology>,
+) -> libfdt::Result<()> {
+    const COMPAT: &CStr = cstr!("arm,arm-v8");
+    let mut cpu_phandles = Vec::new();
+    for (idx, cpu) in cpus.iter().enumerate() {
+        let mut cur = get_nth_compatible(fdt, idx, COMPAT)?.ok_or(FdtError::NoSpace)?;
+        let phandle = cur.as_node().get_phandle()?.unwrap();
+        cpu_phandles.push(phandle);
+        if let Some(cpu_capacity) = cpu.cpu_capacity {
+            cur.setprop_inplace(cstr!("capacity-dmips-mhz"), &cpu_capacity.to_be_bytes())?;
+        }
+        patch_opptable(cur, cpu.opptable_info)?;
+    }
+    let mut next = get_nth_compatible(fdt, cpus.len(), COMPAT)?;
     while let Some(current) = next {
         next = current.delete_and_next_compatible(COMPAT)?;
     }
+
+    if let Some(topology) = topology {
+        for (n, cluster) in topology.clusters.iter().enumerate() {
+            let path = CString::new(format!("/cpus/cpu-map/cluster{n}")).unwrap();
+            let cluster_node = fdt.node_mut(&path)?.unwrap();
+            if let Some(cluster) = cluster {
+                let mut iter = cluster_node.first_subnode()?;
+                for core in cluster.cores {
+                    let mut core_node = iter.unwrap();
+                    iter = if let Some(core_idx) = core {
+                        let phandle = *cpu_phandles.get(core_idx).unwrap();
+                        let value = u32::from(phandle).to_be_bytes();
+                        core_node.setprop_inplace(cstr!("cpu"), &value)?;
+                        core_node.next_subnode()?
+                    } else {
+                        core_node.delete_and_next_subnode()?
+                    };
+                }
+                assert!(iter.is_none());
+            } else {
+                cluster_node.nop()?;
+            }
+        }
+    } else {
+        fdt.node_mut(cstr!("/cpus/cpu-map"))?.unwrap().nop()?;
+    }
+
     Ok(())
+}
+
+/// Reads the /avf/untrusted DT node, which the host can use to pass properties (no subnodes) to
+/// the guest that don't require being validated by pvmfw.
+fn parse_untrusted_props(fdt: &Fdt) -> libfdt::Result<BTreeMap<CString, Vec<u8>>> {
+    let mut props = BTreeMap::new();
+    if let Some(node) = fdt.node(cstr!("/avf/untrusted"))? {
+        for property in node.properties()? {
+            let name = property.name()?;
+            let value = property.value()?;
+            props.insert(CString::from(name), value.to_vec());
+        }
+        if node.subnodes()?.next().is_some() {
+            warn!("Discarding unexpected /avf/untrusted subnodes.");
+        }
+    }
+
+    Ok(props)
 }
 
 /// Read candidate properties' names from DT which could be overlaid
@@ -226,6 +459,19 @@ fn parse_vm_ref_dt(fdt: &Fdt) -> libfdt::Result<BTreeMap<CString, Vec<u8>>> {
     Ok(property_map)
 }
 
+fn validate_untrusted_props(props: &BTreeMap<CString, Vec<u8>>) -> Result<(), FdtValidationError> {
+    const FORBIDDEN_PROPS: &[&CStr] =
+        &[cstr!("compatible"), cstr!("linux,phandle"), cstr!("phandle")];
+
+    for name in FORBIDDEN_PROPS {
+        if props.contains_key(*name) {
+            return Err(FdtValidationError::ForbiddenUntrustedProp(name));
+        }
+    }
+
+    Ok(())
+}
+
 /// Overlay VM reference DT into VM DT based on the props_info. Property is overlaid in vm_dt only
 /// when it exists both in vm_ref_dt and props_info. If the values mismatch, it returns error.
 fn validate_vm_ref_dt(
@@ -233,7 +479,7 @@ fn validate_vm_ref_dt(
     vm_ref_dt: &Fdt,
     props_info: &BTreeMap<CString, Vec<u8>>,
 ) -> libfdt::Result<()> {
-    let mut root_vm_dt = vm_dt.root_mut()?;
+    let root_vm_dt = vm_dt.root_mut()?;
     let mut avf_vm_dt = root_vm_dt.add_subnode(cstr!("avf"))?;
     // TODO(b/318431677): Validate nodes beyond /avf.
     let avf_node = vm_ref_dt.node(cstr!("/avf"))?.ok_or(FdtError::NotFound)?;
@@ -627,6 +873,38 @@ fn patch_timer(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
     node.setprop_inplace(cstr!("interrupts"), value.as_bytes())
 }
 
+fn patch_untrusted_props(fdt: &mut Fdt, props: &BTreeMap<CString, Vec<u8>>) -> libfdt::Result<()> {
+    let avf_node = if let Some(node) = fdt.node_mut(cstr!("/avf"))? {
+        node
+    } else {
+        fdt.root_mut()?.add_subnode(cstr!("avf"))?
+    };
+
+    // The node shouldn't already be present; if it is, return the error.
+    let mut node = avf_node.add_subnode(cstr!("untrusted"))?;
+
+    for (name, value) in props {
+        node.setprop(name, value)?;
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct VcpufreqInfo {
+    addr: u64,
+    size: u64,
+}
+
+fn patch_vcpufreq(fdt: &mut Fdt, vcpufreq_info: &Option<VcpufreqInfo>) -> libfdt::Result<()> {
+    let mut node = fdt.node_mut(cstr!("/cpufreq"))?.unwrap();
+    if let Some(info) = vcpufreq_info {
+        node.setprop_addrrange_inplace(cstr!("reg"), info.addr, info.size)
+    } else {
+        node.nop()
+    }
+}
+
 #[derive(Debug)]
 pub struct DeviceTreeInfo {
     pub kernel_range: Option<Range<usize>>,
@@ -634,11 +912,14 @@ pub struct DeviceTreeInfo {
     pub memory_range: Range<usize>,
     bootargs: Option<CString>,
     cpus: ArrayVec<[CpuInfo; DeviceTreeInfo::MAX_CPUS]>,
+    cpu_topology: Option<CpuTopology>,
     pci_info: PciInfo,
     serial_info: SerialInfo,
     pub swiotlb_info: SwiotlbInfo,
     device_assignment: Option<DeviceAssignmentInfo>,
+    untrusted_props: BTreeMap<CString, Vec<u8>>,
     vm_ref_dt_props_info: BTreeMap<CString, Vec<u8>>,
+    vcpufreq_info: Option<VcpufreqInfo>,
 }
 
 impl DeviceTreeInfo {
@@ -742,7 +1023,7 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
         RebootReason::InvalidFdt
     })?;
 
-    let cpus = read_cpu_info_from(fdt).map_err(|e| {
+    let (cpus, cpu_topology) = read_cpu_info_from(fdt).map_err(|e| {
         error!("Failed to read CPU info from DT: {e}");
         RebootReason::InvalidFdt
     })?;
@@ -750,6 +1031,17 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
         error!("Failed to validate CPU info from DT: {e}");
         RebootReason::InvalidFdt
     })?;
+
+    let vcpufreq_info = read_vcpufreq_info(fdt).map_err(|e| {
+        error!("Failed to read vcpufreq info from DT: {e}");
+        RebootReason::InvalidFdt
+    })?;
+    if let Some(ref info) = vcpufreq_info {
+        validate_vcpufreq_info(info, &cpus).map_err(|e| {
+            error!("Failed to validate vcpufreq info from DT: {e}");
+            RebootReason::InvalidFdt
+        })?;
+    }
 
     let pci_info = read_pci_info_from(fdt).map_err(|e| {
         error!("Failed to read pci info from DT: {e}");
@@ -785,6 +1077,15 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
         None => None,
     };
 
+    let untrusted_props = parse_untrusted_props(fdt).map_err(|e| {
+        error!("Failed to read untrusted properties: {e}");
+        RebootReason::InvalidFdt
+    })?;
+    validate_untrusted_props(&untrusted_props).map_err(|e| {
+        error!("Failed to validate untrusted properties: {e}");
+        RebootReason::InvalidFdt
+    })?;
+
     let vm_ref_dt_props_info = parse_vm_ref_dt(fdt).map_err(|e| {
         error!("Failed to read names of properties under /avf from DT: {e}");
         RebootReason::InvalidFdt
@@ -796,11 +1097,14 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
         memory_range,
         bootargs,
         cpus,
+        cpu_topology,
         pci_info,
         serial_info,
         swiotlb_info,
         device_assignment,
+        untrusted_props,
         vm_ref_dt_props_info,
+        vcpufreq_info,
     })
 }
 
@@ -821,8 +1125,12 @@ fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootR
             RebootReason::InvalidFdt
         })?;
     }
-    patch_cpus(fdt, &info.cpus).map_err(|e| {
+    patch_cpus(fdt, &info.cpus, &info.cpu_topology).map_err(|e| {
         error!("Failed to patch cpus to DT: {e}");
+        RebootReason::InvalidFdt
+    })?;
+    patch_vcpufreq(fdt, &info.vcpufreq_info).map_err(|e| {
+        error!("Failed to patch vcpufreq info to DT: {e}");
         RebootReason::InvalidFdt
     })?;
     patch_pci_info(fdt, &info.pci_info).map_err(|e| {
@@ -853,6 +1161,10 @@ fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootR
             RebootReason::InvalidFdt
         })?;
     }
+    patch_untrusted_props(fdt, &info.untrusted_props).map_err(|e| {
+        error!("Failed to patch untrusted properties: {e}");
+        RebootReason::InvalidFdt
+    })?;
 
     Ok(())
 }

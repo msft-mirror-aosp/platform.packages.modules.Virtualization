@@ -47,6 +47,7 @@ import com.android.tradefed.device.ITestDevice;
 import com.android.tradefed.device.TestDevice;
 import com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestMetrics;
 import com.android.tradefed.util.CommandResult;
+import com.android.tradefed.util.CommandStatus;
 import com.android.tradefed.util.FileUtil;
 import com.android.tradefed.util.RunUtil;
 import com.android.tradefed.util.xml.AbstractXmlParser;
@@ -985,23 +986,71 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     public void testDeviceAssignment() throws Exception {
-        assumeProtectedVm();
+        // Check for preconditions
         assumeVfioPlatformSupported();
 
         List<String> devices = getAssignableDevices();
         assumeFalse("no assignable devices", devices.isEmpty());
 
+        String vmFdtPath = "/sys/firmware/fdt";
+        File testDir = FileUtil.createTempDir("device_assignment_test");
+        File baseFdtFile = new File(testDir, "base_fdt.dtb");
+        File fdtFile = new File(testDir, "fdt.dtb");
+
+        // Generates baseline DT
+        launchWithDeviceAssignment(/* device= */ null);
+        assertThat(mMicrodroidDevice.pullFile(vmFdtPath, baseFdtFile)).isTrue();
+        getAndroidDevice().shutdownMicrodroid(mMicrodroidDevice);
+
+        // Prepares to run dtdiff. It requires dtc.
+        File dtdiff = findTestFile("dtdiff");
+        RunUtil runner = new RunUtil();
+        String separator = System.getProperty("path.separator");
+        String path = dtdiff.getParent() + separator + System.getenv("PATH");
+        runner.setEnvVariable("PATH", path);
+
+        // Try assign devices one by one
+        for (String device : devices) {
+            assertThat(device).isNotNull();
+            launchWithDeviceAssignment(device);
+            assertThat(mMicrodroidDevice.pullFile(vmFdtPath, fdtFile)).isTrue();
+            getAndroidDevice().shutdownMicrodroid(mMicrodroidDevice);
+
+            CommandResult result =
+                    runner.runTimedCmd(
+                            500,
+                            dtdiff.getAbsolutePath(),
+                            baseFdtFile.getPath(),
+                            fdtFile.getPath());
+
+            assertWithMessage(
+                            "VM's device tree hasn't changed when assigning "
+                                    + device
+                                    + ", result="
+                                    + result)
+                    .that(result.getStatus())
+                    .isNotEqualTo(CommandStatus.SUCCESS);
+        }
+
+        mMicrodroidDevice = null;
+    }
+
+    private void launchWithDeviceAssignment(String device) throws Exception {
         final String configPath = "assets/" + mOs + "/vm_config.json";
-        mMicrodroidDevice =
+
+        MicrodroidBuilder builder =
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
-                        .protectedVm(true)
-                        .addAssignableDevice(devices.get(0))
-                        .build(getAndroidDevice());
+                        .protectedVm(mProtectedVm);
+        if (device != null) {
+            builder.addAssignableDevice(device);
+        }
+        mMicrodroidDevice = builder.build(getAndroidDevice());
 
-        mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
+        assertThat(mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT)).isTrue();
+        assertThat(mMicrodroidDevice.enableAdbRoot()).isTrue();
     }
 
     @Test
@@ -1035,6 +1084,13 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         }
 
         mOs = (mGki != null) ? "microdroid_gki-" + mGki : "microdroid";
+
+        new CommandRunner(getDevice())
+                .tryRun(
+                        "pm",
+                        "grant",
+                        SHELL_PACKAGE_NAME,
+                        "android.permission.USE_CUSTOM_VIRTUAL_MACHINE");
     }
 
     @After
@@ -1049,21 +1105,13 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 mTestLogs, getDevice(), LOG_PATH, "vm.log-" + mTestName.getMethodName());
 
         getDevice().uninstallPackage(PACKAGE_NAME);
-
-        // testCustomVirtualMachinePermission revokes this permission. Grant it again as cleanup
-        new CommandRunner(getDevice())
-                .tryRun(
-                        "pm",
-                        "grant",
-                        SHELL_PACKAGE_NAME,
-                        "android.permission.USE_CUSTOM_VIRTUAL_MACHINE");
     }
 
-    private void assumeProtectedVm() throws Exception {
+    private void assumeProtectedVm() {
         assumeTrue("This test is only for protected VM.", mProtectedVm);
     }
 
-    private void assumeNonProtectedVm() throws Exception {
+    private void assumeNonProtectedVm() {
         assumeFalse("This test is only for non-protected VM.", mProtectedVm);
     }
 

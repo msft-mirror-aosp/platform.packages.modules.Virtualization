@@ -73,7 +73,6 @@ import com.google.common.truth.BooleanSubject;
 
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.function.ThrowingRunnable;
@@ -119,8 +118,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
 
-    private static final String KERNEL_VERSION = SystemProperties.get("ro.kernel.version");
-
     @Parameterized.Parameters(name = "protectedVm={0},gki={1}")
     public static Collection<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
@@ -143,13 +140,17 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Before
     public void setup() {
         prepareTestSetup(mProtectedVm, mGki);
-        // USE_CUSTOM_VIRTUAL_MACHINE permission has protection level signature|development, meaning
-        // that it will be automatically granted when test apk is installed. We have some tests
-        // checking the behavior when caller doesn't have this permission (e.g.
-        // createVmWithConfigRequiresPermission). Proactively revoke the permission so that such
-        // tests can pass when ran by itself, e.g.:
-        // atest com.android.microdroid.test.MicrodroidTests#createVmWithConfigRequiresPermission
-        revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        if (mGki != null) {
+            // Using a non-default VM always needs the custom permission.
+            grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        } else {
+            // USE_CUSTOM_VIRTUAL_MACHINE permission has protection level signature|development,
+            // meaning that it will be automatically granted when test apk is installed.
+            // But most callers shouldn't need this permission, so by default we run tests with it
+            // revoked.
+            // Tests that rely on the state of the permission should explicitly grant or revoke it.
+            revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        }
     }
 
     @After
@@ -591,6 +592,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 .isFalse();
         assertConfigCompatible(baseline, newBaselineBuilder().setPayloadBinaryName("different"))
                 .isFalse();
+        assertConfigCompatible(
+                        baseline, newBaselineBuilder().setVendorDiskImage(new File("/foo/bar")))
+                .isFalse();
         int capabilities = getVirtualMachineManager().getCapabilities();
         if ((capabilities & CAPABILITY_PROTECTED_VM) != 0
                 && (capabilities & CAPABILITY_NON_PROTECTED_VM) != 0) {
@@ -640,6 +644,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig.Builder otherOsBuilder =
                 newBaselineBuilder().setOs("microdroid_gki-android14-6.1");
         assertConfigCompatible(microdroidOsConfig, otherOsBuilder).isFalse();
+
     }
 
     private VirtualMachineConfig.Builder newBaselineBuilder() {
@@ -779,6 +784,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     })
     public void createVmWithConfigRequiresPermission() throws Exception {
         assumeSupportedDevice();
+        revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
 
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config.json")
@@ -2137,6 +2143,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assumeFalse(
                 "boot with vendor partition is failing in HWASAN enabled Microdroid.", isHwasan());
         assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
+        revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
 
         File vendorDiskImage =
                 new File("/data/local/tmp/cts/microdroid/test_microdroid_vendor_image.img");
@@ -2157,10 +2164,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 .contains("android.permission.USE_CUSTOM_VIRTUAL_MACHINE permission");
     }
 
-    // TODO(b/323768068): Enable this test when we can inject vendor digest for test purpose.
-    // After introducing VM reference DT, non-pVM cannot trust test_microdroid_vendor_image.img
-    // as well, because it doesn't pass the hashtree digest of testing image into VM.
-    @Ignore
     @Test
     public void bootsWithVendorPartition() throws Exception {
         assumeSupportedDevice();
@@ -2174,8 +2177,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
 
-        File vendorDiskImage =
-                new File("/data/local/tmp/cts/microdroid/test_microdroid_vendor_image.img");
+        File vendorDiskImage = new File("/vendor/etc/avf/microdroid/microdroid_vendor.img");
+        assumeTrue("Microdroid vendor image doesn't exist, skip", vendorDiskImage.exists());
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setVendorDiskImage(vendorDiskImage)
@@ -2317,10 +2320,4 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         return 0;
     }
 
-    private void assumeSupportedDevice() {
-        assume()
-                .withMessage("Skip on 5.4 kernel. b/218303240")
-                .that(KERNEL_VERSION)
-                .isNotEqualTo("5.4");
-    }
 }

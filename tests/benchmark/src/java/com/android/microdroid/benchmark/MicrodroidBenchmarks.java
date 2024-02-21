@@ -49,7 +49,6 @@ import com.android.microdroid.testservice.ITestService;
 
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
@@ -277,10 +276,6 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                 (builder) -> builder);
     }
 
-    // TODO(b/323768068): Enable this test when we can inject vendor digest for test purpose.
-    // After introducing VM reference DT, non-pVM cannot trust test_microdroid_vendor_image.img
-    // as well, because it doesn't pass the hashtree digest of testing image into VM.
-    @Ignore
     @Test
     public void testMicrodroidDebugBootTime_withVendorPartition() throws Exception {
         assume().withMessage("Cuttlefish doesn't support device tree under" + " /proc/device-tree")
@@ -293,8 +288,10 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                 .isFalse();
         assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
 
-        File vendorDiskImage =
-                new File("/data/local/tmp/microdroid-bench/microdroid_vendor_image.img");
+        File vendorDiskImage = new File("/vendor/etc/avf/microdroid/microdroid_vendor.img");
+        assume().withMessage("Microdroid vendor image doesn't exist, skip")
+                .that(vendorDiskImage.exists())
+                .isTrue();
         runBootTimeTest(
                 "test_vm_boot_time_debug_with_vendor_partition",
                 "assets/" + os() + "/vm_config.json",
@@ -418,8 +415,9 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                 long guestRss = 0;
                 long guestPss = 0;
                 boolean hasGuestMaps = false;
-                for (ProcessUtil.SMapEntry entry :
-                        ProcessUtil.getProcessSmaps(vmPid, shellExecutor)) {
+                List<ProcessUtil.SMapEntry> smaps =
+                        ProcessUtil.getProcessSmaps(vmPid, shellExecutor);
+                for (ProcessUtil.SMapEntry entry : smaps) {
                     long rss = entry.metrics.get("Rss");
                     long pss = entry.metrics.get("Pss");
                     if (entry.name.contains("crosvm_guest")) {
@@ -432,8 +430,12 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                     }
                 }
                 if (!hasGuestMaps) {
+                    StringBuilder sb = new StringBuilder();
+                    for (ProcessUtil.SMapEntry entry : smaps) {
+                        sb.append(entry.toString());
+                    }
                     throw new IllegalStateException(
-                            "found no crosvm_guest smap entry in crosvm process");
+                            "found no crosvm_guest smap entry in crosvm process: " + sb);
                 }
                 mHostRss = hostRss;
                 mHostPss = hostPss;

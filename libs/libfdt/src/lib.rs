@@ -17,23 +17,22 @@
 
 #![no_std]
 
-mod ctypes;
 mod iterators;
 mod libfdt;
 mod result;
+mod safe_types;
 
-pub use ctypes::Phandle;
 pub use iterators::{
     AddressRange, CellIterator, CompatibleIterator, DescendantsIterator, MemRegIterator,
     PropertyIterator, RangesIterator, Reg, RegIterator, SubnodeIterator,
 };
 pub use result::{FdtError, Result};
+pub use safe_types::{FdtHeader, NodeOffset, Phandle, PropOffset, StringOffset};
 
-use core::ffi::{c_int, c_void, CStr};
+use core::ffi::{c_void, CStr};
 use core::ops::Range;
 use cstr::cstr;
 use libfdt::get_slice_at_ptr;
-use result::{fdt_err, fdt_err_expect_zero, fdt_err_or_option};
 use zerocopy::AsBytes as _;
 
 use crate::libfdt::{Libfdt, LibfdtMut};
@@ -94,12 +93,12 @@ impl AsRef<FdtPropertyStruct> for libfdt_bindgen::fdt_property {
 }
 
 impl FdtPropertyStruct {
-    fn from_offset(fdt: &Fdt, offset: c_int) -> Result<&Self> {
+    fn from_offset(fdt: &Fdt, offset: PropOffset) -> Result<&Self> {
         Ok(fdt.get_property_by_offset(offset)?.as_ref())
     }
 
-    fn name_offset(&self) -> c_int {
-        u32::from_be(self.0.nameoff).try_into().unwrap()
+    fn name_offset(&self) -> StringOffset {
+        StringOffset(u32::from_be(self.0.nameoff).try_into().unwrap())
     }
 
     fn data_len(&self) -> usize {
@@ -115,12 +114,12 @@ impl FdtPropertyStruct {
 #[derive(Clone, Copy, Debug)]
 pub struct FdtProperty<'a> {
     fdt: &'a Fdt,
-    offset: c_int,
+    offset: PropOffset,
     property: &'a FdtPropertyStruct,
 }
 
 impl<'a> FdtProperty<'a> {
-    fn new(fdt: &'a Fdt, offset: c_int) -> Result<Self> {
+    fn new(fdt: &'a Fdt, offset: PropOffset) -> Result<Self> {
         let property = FdtPropertyStruct::from_offset(fdt, offset)?;
         Ok(Self { fdt, offset, property })
     }
@@ -148,7 +147,7 @@ impl<'a> FdtProperty<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct FdtNode<'a> {
     fdt: &'a Fdt,
-    offset: c_int,
+    offset: NodeOffset,
 }
 
 impl<'a> FdtNode<'a> {
@@ -356,7 +355,7 @@ impl<'a> PartialEq for FdtNode<'a> {
 #[derive(Debug)]
 pub struct FdtNodeMut<'a> {
     fdt: &'a mut Fdt,
-    offset: c_int,
+    offset: NodeOffset,
 }
 
 impl<'a> FdtNodeMut<'a> {
@@ -434,7 +433,7 @@ impl<'a> FdtNodeMut<'a> {
     }
 
     /// Adds new subnodes to the given node.
-    pub fn add_subnodes(&mut self, names: &[&CStr]) -> Result<()> {
+    pub fn add_subnodes(self, names: &[&CStr]) -> Result<()> {
         for name in names {
             self.fdt.add_subnode_namelen(self.offset, name.to_bytes())?;
         }
@@ -442,7 +441,7 @@ impl<'a> FdtNodeMut<'a> {
     }
 
     /// Adds a new subnode to the given node and return it as a FdtNodeMut on success.
-    pub fn add_subnode(&'a mut self, name: &CStr) -> Result<Self> {
+    pub fn add_subnode(self, name: &CStr) -> Result<Self> {
         let name = name.to_bytes();
         let offset = self.fdt.add_subnode_namelen(self.offset, name)?;
 
@@ -451,7 +450,7 @@ impl<'a> FdtNodeMut<'a> {
 
     /// Adds a new subnode to the given node with name and namelen, and returns it as a FdtNodeMut
     /// on success.
-    pub fn add_subnode_with_namelen(&'a mut self, name: &CStr, namelen: usize) -> Result<Self> {
+    pub fn add_subnode_with_namelen(self, name: &CStr, namelen: usize) -> Result<Self> {
         let name = &name.to_bytes()[..namelen];
         let offset = self.fdt.add_subnode_namelen(self.offset, name)?;
 
@@ -459,7 +458,7 @@ impl<'a> FdtNodeMut<'a> {
     }
 
     /// Returns the first subnode of this
-    pub fn first_subnode(&'a mut self) -> Result<Option<Self>> {
+    pub fn first_subnode(self) -> Result<Option<Self>> {
         let offset = self.fdt.first_subnode(self.offset)?;
 
         Ok(offset.map(|offset| Self { fdt: self.fdt, offset }))
@@ -493,6 +492,7 @@ impl<'a> FdtNodeMut<'a> {
             let next_node = self.delete_and_next(Some(offset))?.unwrap();
             Ok(Some((next_node, depth)))
         } else {
+            self.delete_and_next(None)?;
             Ok(None)
         }
     }
@@ -526,7 +526,7 @@ impl<'a> FdtNodeMut<'a> {
         self.delete_and_next(next_offset)
     }
 
-    fn delete_and_next(self, next_offset: Option<c_int>) -> Result<Option<Self>> {
+    fn delete_and_next(self, next_offset: Option<NodeOffset>) -> Result<Option<Self>> {
         if Some(self.offset) == next_offset {
             return Err(FdtError::Internal);
         }
@@ -637,40 +637,30 @@ impl Fdt {
 
     /// Unpacks the DT to cover the whole slice it is contained in.
     pub fn unpack(&mut self) -> Result<()> {
-        // SAFETY: "Opens" the DT in-place (supported use-case) by updating its header and
-        // internal structures to make use of the whole self.fdt slice but performs no accesses
-        // outside of it and leaves the DT in a state that will be detected by other functions.
-        let ret = unsafe {
-            libfdt_bindgen::fdt_open_into(
-                self.as_ptr(),
-                self.as_mut_ptr(),
-                self.capacity().try_into().map_err(|_| FdtError::Internal)?,
-            )
-        };
-        fdt_err_expect_zero(ret)
+        self.open_into_self()
     }
 
     /// Packs the DT to take a minimum amount of memory.
     ///
     /// Doesn't shrink the underlying memory slice.
     pub fn pack(&mut self) -> Result<()> {
-        // SAFETY: "Closes" the DT in-place by updating its header and relocating its structs.
-        let ret = unsafe { libfdt_bindgen::fdt_pack(self.as_mut_ptr()) };
-        fdt_err_expect_zero(ret)
+        LibfdtMut::pack(self)
     }
 
     /// Applies a DT overlay on the base DT.
     ///
     /// # Safety
     ///
-    /// On failure, the library corrupts the DT and overlay so both must be discarded.
-    pub unsafe fn apply_overlay<'a>(&'a mut self, overlay: &'a mut Fdt) -> Result<&'a mut Self> {
-        let ret =
-        // SAFETY: Both pointers are valid because they come from references, and fdt_overlay_apply
-        // doesn't keep them after it returns. It may corrupt their contents if there is an error,
-        // but that's our caller's responsibility.
-            unsafe { libfdt_bindgen::fdt_overlay_apply(self.as_mut_ptr(), overlay.as_mut_ptr()) };
-        fdt_err_expect_zero(ret)?;
+    /// As libfdt corrupts the input DT on failure, `self` should be discarded on error:
+    ///
+    ///     let fdt = fdt.apply_overlay(overlay)?;
+    ///
+    /// Furthermore, `overlay` is _always_ corrupted by libfdt and will never refer to a valid
+    /// `Fdt` after this function returns and must therefore be discarded by the caller.
+    pub unsafe fn apply_overlay<'a>(&'a mut self, overlay: &mut Fdt) -> Result<&'a mut Self> {
+        // SAFETY: Our caller will properly discard overlay and/or self as needed.
+        unsafe { self.overlay_apply(overlay) }?;
+
         Ok(self)
     }
 
@@ -679,7 +669,7 @@ impl Fdt {
     ///
     /// NOTE: This does not support individual "/memory@XXXX" banks.
     pub fn memory(&self) -> Result<MemRegIterator> {
-        let node = self.node(cstr!("/memory"))?.ok_or(FdtError::NotFound)?;
+        let node = self.root()?.subnode(cstr!("memory"))?.ok_or(FdtError::NotFound)?;
         if node.device_type()? != Some(cstr!("memory")) {
             return Err(FdtError::BadValue);
         }
@@ -693,7 +683,7 @@ impl Fdt {
 
     /// Returns the standard /chosen node.
     pub fn chosen(&self) -> Result<Option<FdtNode>> {
-        self.node(cstr!("/chosen"))
+        self.root()?.subnode(cstr!("chosen"))
     }
 
     /// Returns the standard /chosen node as mutable.
@@ -703,12 +693,12 @@ impl Fdt {
 
     /// Returns the root node of the tree.
     pub fn root(&self) -> Result<FdtNode> {
-        self.node(cstr!("/"))?.ok_or(FdtError::Internal)
+        Ok(FdtNode { fdt: self, offset: NodeOffset::ROOT })
     }
 
     /// Returns the standard /__symbols__ node.
     pub fn symbols(&self) -> Result<Option<FdtNode>> {
-        self.node(cstr!("/__symbols__"))
+        self.root()?.subnode(cstr!("__symbols__"))
     }
 
     /// Returns the standard /__symbols__ node as mutable
@@ -749,7 +739,7 @@ impl Fdt {
 
     /// Returns the mutable root node of the tree.
     pub fn root_mut(&mut self) -> Result<FdtNodeMut> {
-        self.node_mut(cstr!("/"))?.ok_or(FdtError::Internal)
+        Ok(FdtNodeMut { fdt: self, offset: NodeOffset::ROOT })
     }
 
     /// Returns a mutable tree node by its full path.
@@ -759,7 +749,11 @@ impl Fdt {
         Ok(offset.map(|offset| FdtNodeMut { fdt: self, offset }))
     }
 
-    fn next_node_skip_subnodes(&self, node: c_int, depth: usize) -> Result<Option<(c_int, usize)>> {
+    fn next_node_skip_subnodes(
+        &self,
+        node: NodeOffset,
+        depth: usize,
+    ) -> Result<Option<(NodeOffset, usize)>> {
         let mut iter = self.next_node(node, depth)?;
         while let Some((offset, next_depth)) = iter {
             if next_depth <= depth {
@@ -785,21 +779,14 @@ impl Fdt {
         self.buffer.as_ptr().cast()
     }
 
-    fn as_mut_ptr(&mut self) -> *mut c_void {
-        self.buffer.as_mut_ptr().cast::<_>()
-    }
-
-    fn capacity(&self) -> usize {
-        self.buffer.len()
-    }
-
-    fn header(&self) -> &libfdt_bindgen::fdt_header {
-        let p = self.as_ptr().cast();
+    fn header(&self) -> &FdtHeader {
+        let p = self.as_ptr().cast::<libfdt_bindgen::fdt_header>();
         // SAFETY: A valid FDT (verified by constructor) must contain a valid fdt_header.
-        unsafe { &*p }
+        let header = unsafe { &*p };
+        header.as_ref()
     }
 
     fn totalsize(&self) -> usize {
-        u32::from_be(self.header().totalsize) as usize
+        self.header().totalsize.get().try_into().unwrap()
     }
 }
