@@ -73,7 +73,6 @@ import com.google.common.truth.BooleanSubject;
 
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.function.ThrowingRunnable;
@@ -119,8 +118,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
 
-    private static final String KERNEL_VERSION = SystemProperties.get("ro.kernel.version");
-
     @Parameterized.Parameters(name = "protectedVm={0},gki={1}")
     public static Collection<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
@@ -142,26 +139,28 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Before
     public void setup() {
-        grantPermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
         prepareTestSetup(mProtectedVm, mGki);
-        // USE_CUSTOM_VIRTUAL_MACHINE permission has protection level signature|development, meaning
-        // that it will be automatically granted when test apk is installed. We have some tests
-        // checking the behavior when caller doesn't have this permission (e.g.
-        // createVmWithConfigRequiresPermission). Proactively revoke the permission so that such
-        // tests can pass when ran by itself, e.g.:
-        // atest com.android.microdroid.test.MicrodroidTests#createVmWithConfigRequiresPermission
-        revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        if (mGki != null) {
+            // Using a non-default VM always needs the custom permission.
+            grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        } else {
+            // USE_CUSTOM_VIRTUAL_MACHINE permission has protection level signature|development,
+            // meaning that it will be automatically granted when test apk is installed.
+            // But most callers shouldn't need this permission, so by default we run tests with it
+            // revoked.
+            // Tests that rely on the state of the permission should explicitly grant or revoke it.
+            revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        }
     }
 
     @After
     public void tearDown() {
-        revokePermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
         revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
     }
 
     private static final long ONE_MEBI = 1024 * 1024;
 
-    private static final long MIN_MEM_ARM64 = 160 * ONE_MEBI;
+    private static final long MIN_MEM_ARM64 = 170 * ONE_MEBI;
     private static final long MIN_MEM_X86_64 = 196 * ONE_MEBI;
     private static final String EXAMPLE_STRING = "Literally any string!! :)";
 
@@ -229,32 +228,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         testResults.assertNoException();
         assertThat(testResults.mAddInteger).isEqualTo(37 + 73);
     }
-
-    @Test
-    @CddTest(
-            requirements = {
-                "9.17/C-1-1",
-                "9.17/C-1-2",
-                "9.17/C-1-4",
-            })
-    public void createVmRequiresPermission() {
-        assumeSupportedDevice();
-
-        revokePermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
-
-        VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
-                        .setMemoryBytes(minMemoryRequired())
-                        .build();
-
-        SecurityException e =
-                assertThrows(
-                        SecurityException.class,
-                        () -> forceCreateNewVirtualMachine("test_vm_requires_permission", config));
-        assertThat(e).hasMessageThat()
-                .contains("android.permission.MANAGE_VIRTUAL_MACHINE permission");
-    }
-
     @Test
     @CddTest(requirements = {"9.17/C-1-1"})
     public void autoCloseVm() throws Exception {
@@ -481,29 +454,32 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         // Minimal has as little as specified as possible; everything that can be is defaulted.
         VirtualMachineConfig.Builder minimalBuilder =
                 new VirtualMachineConfig.Builder(getContext())
-                        .setPayloadBinaryName("binary.so")
+                        .setPayloadConfigPath("config/path")
                         .setProtectedVm(isProtectedVm());
         VirtualMachineConfig minimal = minimalBuilder.build();
 
         assertThat(minimal.getApkPath()).isNull();
+        assertThat(minimal.getExtraApks()).isEmpty();
         assertThat(minimal.getDebugLevel()).isEqualTo(DEBUG_LEVEL_NONE);
         assertThat(minimal.getMemoryBytes()).isEqualTo(0);
         assertThat(minimal.getCpuTopology()).isEqualTo(CPU_TOPOLOGY_ONE_CPU);
-        assertThat(minimal.getPayloadBinaryName()).isEqualTo("binary.so");
-        assertThat(minimal.getPayloadConfigPath()).isNull();
+        assertThat(minimal.getPayloadBinaryName()).isNull();
+        assertThat(minimal.getPayloadConfigPath()).isEqualTo("config/path");
         assertThat(minimal.isProtectedVm()).isEqualTo(isProtectedVm());
         assertThat(minimal.isEncryptedStorageEnabled()).isFalse();
         assertThat(minimal.getEncryptedStorageBytes()).isEqualTo(0);
         assertThat(minimal.isVmOutputCaptured()).isEqualTo(false);
-        assertThat(minimal.getOs()).isEqualTo("microdroid");
+        assertThat(minimal.getOs()).isNull();
 
         // Maximal has everything that can be set to some non-default value. (And has different
         // values than minimal for the required fields.)
         VirtualMachineConfig.Builder maximalBuilder =
                 new VirtualMachineConfig.Builder(getContext())
                         .setProtectedVm(mProtectedVm)
-                        .setPayloadConfigPath("config/path")
+                        .setPayloadBinaryName("binary.so")
                         .setApkPath("/apk/path")
+                        .addExtraApk("package.name1")
+                        .addExtraApk("package.name2")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .setMemoryBytes(42)
                         .setCpuTopology(CPU_TOPOLOGY_MATCH_HOST)
@@ -512,25 +488,28 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig maximal = maximalBuilder.build();
 
         assertThat(maximal.getApkPath()).isEqualTo("/apk/path");
+        assertThat(maximal.getExtraApks())
+                .containsExactly("package.name1", "package.name2")
+                .inOrder();
         assertThat(maximal.getDebugLevel()).isEqualTo(DEBUG_LEVEL_FULL);
         assertThat(maximal.getMemoryBytes()).isEqualTo(42);
         assertThat(maximal.getCpuTopology()).isEqualTo(CPU_TOPOLOGY_MATCH_HOST);
-        assertThat(maximal.getPayloadBinaryName()).isNull();
-        assertThat(maximal.getPayloadConfigPath()).isEqualTo("config/path");
+        assertThat(maximal.getPayloadBinaryName()).isEqualTo("binary.so");
+        assertThat(maximal.getPayloadConfigPath()).isNull();
         assertThat(maximal.isProtectedVm()).isEqualTo(isProtectedVm());
         assertThat(maximal.isEncryptedStorageEnabled()).isTrue();
         assertThat(maximal.getEncryptedStorageBytes()).isEqualTo(1_000_000);
         assertThat(maximal.isVmOutputCaptured()).isEqualTo(true);
-        assertThat(maximal.getOs()).isNull();
+        assertThat(maximal.getOs()).isEqualTo("microdroid");
 
         assertThat(minimal.isCompatibleWith(maximal)).isFalse();
         assertThat(minimal.isCompatibleWith(minimal)).isTrue();
         assertThat(maximal.isCompatibleWith(maximal)).isTrue();
 
-        VirtualMachineConfig os = minimalBuilder.setOs("microdroid_gki-android14-6.1").build();
+        VirtualMachineConfig os = maximalBuilder.setOs("microdroid_gki-android14-6.1").build();
         assertThat(os.getPayloadBinaryName()).isEqualTo("binary.so");
         assertThat(os.getOs()).isEqualTo("microdroid_gki-android14-6.1");
-        assertThat(os.isCompatibleWith(minimal)).isFalse();
+        assertThat(os.isCompatibleWith(maximal)).isFalse();
     }
 
     @Test
@@ -542,6 +521,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         // All your null are belong to me.
         assertThrows(NullPointerException.class, () -> new VirtualMachineConfig.Builder(null));
         assertThrows(NullPointerException.class, () -> builder.setApkPath(null));
+        assertThrows(NullPointerException.class, () -> builder.addExtraApk(null));
         assertThrows(NullPointerException.class, () -> builder.setPayloadConfigPath(null));
         assertThrows(NullPointerException.class, () -> builder.setPayloadBinaryName(null));
         assertThrows(NullPointerException.class, () -> builder.setVendorDiskImage(null));
@@ -607,9 +587,13 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 .isTrue();
 
         // Changes that must be incompatible, since they must change the VM identity.
+        assertConfigCompatible(baseline, newBaselineBuilder().addExtraApk("foo")).isFalse();
         assertConfigCompatible(baseline, newBaselineBuilder().setDebugLevel(DEBUG_LEVEL_FULL))
                 .isFalse();
         assertConfigCompatible(baseline, newBaselineBuilder().setPayloadBinaryName("different"))
+                .isFalse();
+        assertConfigCompatible(
+                        baseline, newBaselineBuilder().setVendorDiskImage(new File("/foo/bar")))
                 .isFalse();
         int capabilities = getVirtualMachineManager().getCapabilities();
         if ((capabilities & CAPABILITY_PROTECTED_VM) != 0
@@ -660,6 +644,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig.Builder otherOsBuilder =
                 newBaselineBuilder().setOs("microdroid_gki-android14-6.1");
         assertConfigCompatible(microdroidOsConfig, otherOsBuilder).isFalse();
+
     }
 
     private VirtualMachineConfig.Builder newBaselineBuilder() {
@@ -799,6 +784,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     })
     public void createVmWithConfigRequiresPermission() throws Exception {
         assumeSupportedDevice();
+        revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
 
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config.json")
@@ -931,7 +917,34 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         vm,
                         (ts, tr) -> {
                             tr.mExtraApkTestProp =
-                                    ts.readProperty("debug.microdroid.test.extra_apk");
+                                    ts.readProperty(
+                                            "debug.microdroid.test.extra_apk_build_manifest");
+                        });
+        assertThat(testResults.mExtraApkTestProp).isEqualTo("PASS");
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    public void extraApkInVmConfig() throws Exception {
+        assumeSupportedDevice();
+        assumeFeatureEnabled(VirtualMachineManager.FEATURE_MULTI_TENANT);
+
+        grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                        .setMemoryBytes(minMemoryRequired())
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .addExtraApk(VM_SHARE_APP_PACKAGE_NAME)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_extra_apk", config);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mExtraApkTestProp =
+                                    ts.readProperty("debug.microdroid.test.extra_apk_vm_share");
                         });
         assertThat(testResults.mExtraApkTestProp).isEqualTo("PASS");
     }
@@ -994,8 +1007,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setDebugLevel(fromLevel)
                         .setVmOutputCaptured(false);
         VirtualMachineConfig normalConfig = builder.build();
-        forceCreateNewVirtualMachine("test_vm", normalConfig);
-        assertThat(tryBootVm(TAG, "test_vm").payloadStarted).isTrue();
+        assertThat(tryBootVmWithConfig(normalConfig, "test_vm").payloadStarted).isTrue();
 
         // Try to run the VM again with the previous instance.img
         // We need to make sure that no changes on config don't invalidate the identity, to compare
@@ -1159,18 +1171,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThrows(Exception.class, () -> launchVmAndGetCdis("test_vm"));
     }
 
-    @Test
-    public void isFeatureEnabled_requiresManagePermission() throws Exception {
-        revokePermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
-
-        VirtualMachineManager vmm = getVirtualMachineManager();
-        SecurityException e =
-                assertThrows(SecurityException.class, () -> vmm.isFeatureEnabled("whatever"));
-        assertThat(e)
-                .hasMessageThat()
-                .contains("android.permission.MANAGE_VIRTUAL_MACHINE permission");
-    }
-
     private static final UUID MICRODROID_PARTITION_UUID =
             UUID.fromString("cf9afe9a-0662-11ec-a329-c32663a09d75");
     private static final UUID PVM_FW_PARTITION_UUID =
@@ -1208,8 +1208,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
 
-        forceCreateNewVirtualMachine(vmName, config);
-        assertThat(tryBootVm(TAG, vmName).payloadStarted).isTrue();
+        assertThat(tryBootVmWithConfig(config, vmName).payloadStarted).isTrue();
         File instanceImgPath = getVmFile(vmName, "instance.img");
         return new RandomAccessFile(instanceImgPath, "rw");
     }
@@ -1262,13 +1261,12 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     public void bootFailsWhenConfigIsInvalid() throws Exception {
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
-        VirtualMachineConfig normalConfig =
+        VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config_no_task.json")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
-        forceCreateNewVirtualMachine("test_vm_invalid_config", normalConfig);
 
-        BootResult bootResult = tryBootVm(TAG, "test_vm_invalid_config");
+        BootResult bootResult = tryBootVmWithConfig(config, "test_vm_invalid_config");
         assertThat(bootResult.payloadStarted).isFalse();
         assertThat(bootResult.deathReason).isEqualTo(
                 VirtualMachineCallback.STOP_REASON_MICRODROID_INVALID_PAYLOAD_CONFIG);
@@ -1276,15 +1274,47 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     public void bootFailsWhenBinaryNameIsInvalid() throws Exception {
-        VirtualMachineConfig.Builder builder =
-                newVmConfigBuilderWithPayloadBinary("DoesNotExist.so");
-        VirtualMachineConfig normalConfig = builder.setDebugLevel(DEBUG_LEVEL_FULL).build();
-        forceCreateNewVirtualMachine("test_vm_invalid_binary_path", normalConfig);
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("DoesNotExist.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
 
-        BootResult bootResult = tryBootVm(TAG, "test_vm_invalid_binary_path");
+        BootResult bootResult = tryBootVmWithConfig(config, "test_vm_invalid_binary_path");
         assertThat(bootResult.payloadStarted).isFalse();
         assertThat(bootResult.deathReason)
                 .isEqualTo(VirtualMachineCallback.STOP_REASON_MICRODROID_UNKNOWN_RUNTIME_ERROR);
+    }
+
+    @Test
+    public void bootFailsWhenApkPathIsInvalid() {
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setApkPath("/does/not/exist")
+                        .build();
+
+        assertThrowsVmExceptionContaining(
+                () -> tryBootVmWithConfig(config, "test_vm_invalid_apk_path"),
+                "Failed to open APK");
+    }
+
+    @Test
+    public void bootFailsWhenExtraApkPackageIsInvalid() {
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .addExtraApk("com.example.nosuch.package")
+                        .build();
+        assertThrowsVmExceptionContaining(
+                () -> tryBootVmWithConfig(config, "test_vm_invalid_extra_apk_package"),
+                "Extra APK package not found");
+    }
+
+    private BootResult tryBootVmWithConfig(VirtualMachineConfig config, String vmName)
+            throws Exception {
+        try (VirtualMachine ignored = forceCreateNewVirtualMachine(vmName, config)) {
+            return tryBootVm(TAG, vmName);
+        }
     }
 
     // Checks whether microdroid_launcher started but payload failed. reason must be recorded in the
@@ -2103,28 +2133,34 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         }
     }
 
-    @Test
-    public void configuringVendorDiskImageRequiresCustomPermission() throws Exception {
+    private VirtualMachineConfig buildVmConfigWithVendor(File vendorDiskImage) throws Exception {
         assumeSupportedDevice();
+        // TODO(b/325094712): Boot fails with vendor partition in Cuttlefish.
         assumeFalse(
                 "Cuttlefish doesn't support device tree under /proc/device-tree", isCuttlefish());
-        // TODO(b/317567210): Boots fails with vendor partition in HWASAN enabled microdroid
+        // TODO(b/317567210): Boot fails with vendor partition in HWASAN enabled microdroid
         // after introducing verification based on DT and fstab in microdroid vendor partition.
         assumeFalse(
                 "boot with vendor partition is failing in HWASAN enabled Microdroid.", isHwasan());
         assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
-
-        File vendorDiskImage =
-                new File("/data/local/tmp/cts/microdroid/test_microdroid_vendor_image.img");
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setVendorDiskImage(vendorDiskImage)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
+        grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        return config;
+    }
+
+    @Test
+    public void configuringVendorDiskImageRequiresCustomPermission() throws Exception {
+        File vendorDiskImage =
+                new File("/data/local/tmp/cts/microdroid/test_microdroid_vendor_image.img");
+        VirtualMachineConfig config = buildVmConfigWithVendor(vendorDiskImage);
+        revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
 
         VirtualMachine vm =
                 forceCreateNewVirtualMachine("test_vendor_image_req_custom_permission", config);
-
         SecurityException e =
                 assertThrows(
                         SecurityException.class, () -> runVmTestService(TAG, vm, (ts, tr) -> {}));
@@ -2133,33 +2169,13 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 .contains("android.permission.USE_CUSTOM_VIRTUAL_MACHINE permission");
     }
 
-    // TODO(b/323768068): Enable this test when we can inject vendor hashkey for test purpose.
-    // After introducing VM reference DT, non-pVM cannot trust test_microdroid_vendor_image.img
-    // as well, because it doesn't pass the hashtree digest of testing image into VM.
-    @Ignore
     @Test
     public void bootsWithVendorPartition() throws Exception {
-        assumeSupportedDevice();
-        assumeFalse(
-                "Cuttlefish doesn't support device tree under /proc/device-tree", isCuttlefish());
-        // TODO(b/317567210): Boots fails with vendor partition in HWASAN enabled microdroid
-        // after introducing verification based on DT and fstab in microdroid vendor partition.
-        assumeFalse(
-                "Boot with vendor partition is failing in HWASAN enabled Microdroid.", isHwasan());
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
-
-        grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
-
-        File vendorDiskImage =
-                new File("/data/local/tmp/cts/microdroid/test_microdroid_vendor_image.img");
-        VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
-                        .setVendorDiskImage(vendorDiskImage)
-                        .setDebugLevel(DEBUG_LEVEL_FULL)
-                        .build();
+        File vendorDiskImage = new File("/vendor/etc/avf/microdroid/microdroid_vendor.img");
+        assumeTrue("Microdroid vendor image doesn't exist, skip", vendorDiskImage.exists());
+        VirtualMachineConfig config = buildVmConfigWithVendor(vendorDiskImage);
 
         VirtualMachine vm = forceCreateNewVirtualMachine("test_boot_with_vendor", config);
-
         TestResults testResults =
                 runVmTestService(
                         TAG,
@@ -2167,38 +2183,54 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         (ts, tr) -> {
                             tr.mMountFlags = ts.getMountFlags("/vendor");
                         });
-
         assertThat(testResults.mException).isNull();
         int expectedFlags = MS_NOATIME | MS_RDONLY;
         assertThat(testResults.mMountFlags & expectedFlags).isEqualTo(expectedFlags);
     }
 
     @Test
-    public void creationFailsWithUnsignedVendorPartition() throws Exception {
-        assumeSupportedDevice();
-        assumeFalse(
-                "Cuttlefish doesn't support device tree under /proc/device-tree", isCuttlefish());
-        // TODO(b/317567210): Boots fails with vendor partition in HWASAN enabled microdroid
-        // after introducing verification based on DT and fstab in microdroid vendor partition.
-        assumeFalse(
-                "boot with vendor partition is failing in HWASAN enabled Microdroid.", isHwasan());
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
+    public void bootsWithCustomVendorPartitionForNonPvm() throws Exception {
+        assumeNonProtectedVM();
+        File vendorDiskImage =
+                new File("/data/local/tmp/cts/microdroid/test_microdroid_vendor_image.img");
+        VirtualMachineConfig config = buildVmConfigWithVendor(vendorDiskImage);
 
-        grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        VirtualMachine vm =
+                forceCreateNewVirtualMachine("test_boot_with_custom_vendor_non_pvm", config);
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mMountFlags = ts.getMountFlags("/vendor");
+                        });
+        assertThat(testResults.mException).isNull();
+        int expectedFlags = MS_NOATIME | MS_RDONLY;
+        assertThat(testResults.mMountFlags & expectedFlags).isEqualTo(expectedFlags);
+    }
 
-        File unsignedVendorDiskImage =
-                new File(
-                        "/data/local/tmp/cts/microdroid/test_microdroid_vendor_image_unsigned.img");
-        VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
-                        .setVendorDiskImage(unsignedVendorDiskImage)
-                        .setDebugLevel(DEBUG_LEVEL_FULL)
-                        .build();
+    @Test
+    public void bootFailsWithCustomVendorPartitionForPvm() throws Exception {
+        assumeProtectedVM();
+        File vendorDiskImage =
+                new File("/data/local/tmp/cts/microdroid/test_microdroid_vendor_image.img");
+        VirtualMachineConfig config = buildVmConfigWithVendor(vendorDiskImage);
 
-        VirtualMachine vm = forceCreateNewVirtualMachine("test_boot_with_unsigned_vendor", config);
-        BootResult bootResult = tryBootVm(TAG, "test_boot_with_unsigned_vendor");
+        BootResult bootResult = tryBootVmWithConfig(config, "test_boot_with_custom_vendor_pvm");
         assertThat(bootResult.payloadStarted).isFalse();
         assertThat(bootResult.deathReason).isEqualTo(VirtualMachineCallback.STOP_REASON_REBOOT);
+    }
+
+    @Test
+    public void creationFailsWithUnsignedVendorPartition() throws Exception {
+        File vendorDiskImage =
+                new File(
+                        "/data/local/tmp/cts/microdroid/test_microdroid_vendor_image_unsigned.img");
+        VirtualMachineConfig config = buildVmConfigWithVendor(vendorDiskImage);
+
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_boot_with_unsigned_vendor", config);
+        assertThrowsVmExceptionContaining(
+                () -> vm.run(), "Failed to extract vendor hashtree digest");
     }
 
     @Test
@@ -2294,10 +2326,4 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         return 0;
     }
 
-    private void assumeSupportedDevice() {
-        assume()
-                .withMessage("Skip on 5.4 kernel. b/218303240")
-                .that(KERNEL_VERSION)
-                .isNotEqualTo("5.4");
-    }
 }

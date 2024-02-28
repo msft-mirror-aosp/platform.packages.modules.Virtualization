@@ -1,5 +1,4 @@
 package {
-    default_team: "trendy_team_virtualization",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -18,6 +17,7 @@ android_app {
 
 cc_library {
     name: "MicrodroidEmptyPayloadJniLib",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["empty_binary.cpp"],
     shared_libs: ["libvm_payload#current"],
     installable: true,

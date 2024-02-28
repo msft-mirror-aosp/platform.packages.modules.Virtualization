@@ -1,5 +1,4 @@
 package {
-    default_team: "trendy_team_virtualization",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -24,6 +23,7 @@ rust_defaults {
     rustlibs: [
         "android.hardware.security.rkp-V3-rust",
         "android.system.virtualizationcommon-rust",
+        "android.system.virtualizationmaintenance-rust",
         "android.system.virtualizationservice-rust",
         "android.system.virtualizationservice_internal-rust",
         "android.system.virtualmachineservice-rust",
@@ -32,15 +32,16 @@ rust_defaults {
         "libanyhow",
         "libavflog",
         "libbinder_rs",
+        "libhex",
         "libhypervisor_props",
         "liblazy_static",
         "liblibc",
         "liblog_rust",
         "libnix",
         "libopenssl",
+        "librand",
         "librkpd_client",
         "librustutils",
-        "libvmclient",
         "libstatslog_virtualization_rust",
         "libtombstoned_client_rust",
         "libvsock",

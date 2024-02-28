@@ -276,9 +276,9 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                 (builder) -> builder);
     }
 
-    @Test
-    public void testMicrodroidDebugBootTime_withVendorPartition() throws Exception {
-        assume().withMessage("Cuttlefish doesn't support device tree under" + " /proc/device-tree")
+    private void testMicrodroidDebugBootTime_withVendorBase(File vendorDiskImage) throws Exception {
+        // TODO(b/325094712): Boot fails with vendor partition in Cuttlefish.
+        assume().withMessage("Cuttlefish doesn't support device tree under /proc/device-tree")
                 .that(isCuttlefish())
                 .isFalse();
         // TODO(b/317567210): Boots fails with vendor partition in HWASAN enabled microdroid
@@ -286,20 +286,33 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         assume().withMessage("Boot with vendor partition is failing in HWASAN enabled Microdroid.")
                 .that(isHwasan())
                 .isFalse();
-        assume().withMessage(
-                        "Skip test for protected VM, pvmfw config data doesn't contain any"
-                                + " information of test images, such as root digest.")
-                .that(mProtectedVm)
-                .isFalse();
         assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
-
-        File vendorDiskImage =
-                new File("/data/local/tmp/microdroid-bench/microdroid_vendor_image.img");
         runBootTimeTest(
                 "test_vm_boot_time_debug_with_vendor_partition",
                 "assets/" + os() + "/vm_config.json",
                 /* fullDebug */ true,
                 (builder) -> builder.setVendorDiskImage(vendorDiskImage));
+    }
+
+    @Test
+    public void testMicrodroidDebugBootTime_withVendorPartition() throws Exception {
+        File vendorDiskImage = new File("/vendor/etc/avf/microdroid/microdroid_vendor.img");
+        assume().withMessage("Microdroid vendor image doesn't exist, skip")
+                .that(vendorDiskImage.exists())
+                .isTrue();
+        testMicrodroidDebugBootTime_withVendorBase(vendorDiskImage);
+    }
+
+    @Test
+    public void testMicrodroidDebugBootTime_withCustomVendorPartition() throws Exception {
+        assume().withMessage(
+                        "Skip test for protected VM, pvmfw config data doesn't contain any"
+                                + " information of test images, such as root digest.")
+                .that(mProtectedVm)
+                .isFalse();
+        File vendorDiskImage =
+                new File("/data/local/tmp/microdroid-bench/microdroid_vendor_image.img");
+        testMicrodroidDebugBootTime_withVendorBase(vendorDiskImage);
     }
 
     @Test
@@ -418,8 +431,9 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                 long guestRss = 0;
                 long guestPss = 0;
                 boolean hasGuestMaps = false;
-                for (ProcessUtil.SMapEntry entry :
-                        ProcessUtil.getProcessSmaps(vmPid, shellExecutor)) {
+                List<ProcessUtil.SMapEntry> smaps =
+                        ProcessUtil.getProcessSmaps(vmPid, shellExecutor);
+                for (ProcessUtil.SMapEntry entry : smaps) {
                     long rss = entry.metrics.get("Rss");
                     long pss = entry.metrics.get("Pss");
                     if (entry.name.contains("crosvm_guest")) {
@@ -432,8 +446,12 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                     }
                 }
                 if (!hasGuestMaps) {
+                    StringBuilder sb = new StringBuilder();
+                    for (ProcessUtil.SMapEntry entry : smaps) {
+                        sb.append(entry.toString());
+                    }
                     throw new IllegalStateException(
-                            "found no crosvm_guest smap entry in crosvm process");
+                            "found no crosvm_guest smap entry in crosvm process: " + sb);
                 }
                 mHostRss = hostRss;
                 mHostPss = hostPss;

@@ -1,5 +1,4 @@
 package {
-    default_team: "trendy_team_virtualization",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -45,6 +44,26 @@ aidl_interface {
     backend: {
         java: {
             sdk_version: "module_current",
+        },
+        rust: {
+            enabled: true,
+            apex_available: [
+                "com.android.virt",
+            ],
+        },
+    },
+}
+
+aidl_interface {
+    name: "android.system.virtualizationmaintenance",
+    srcs: ["android/system/virtualizationmaintenance/**/*.aidl"],
+    unstable: true,
+    backend: {
+        java: {
+            sdk_version: "module_current",
+            apex_available: [
+                "com.android.virt",
+            ],
         },
         rust: {
             enabled: true,

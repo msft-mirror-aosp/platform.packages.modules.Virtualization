@@ -1,5 +1,4 @@
 package {
-    default_team: "trendy_team_virtualization",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -8,6 +7,7 @@ rust_binary {
     srcs: ["src/composd_main.rs"],
     edition: "2021",
     prefer_rlib: true,
+    defaults: ["avf_build_flags_rust"],
     rustlibs: [
         "android.system.composd-rust",
         "android.system.virtualizationservice-rust",

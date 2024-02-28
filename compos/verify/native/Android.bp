@@ -1,5 +1,4 @@
 package {
-    default_team: "trendy_team_virtualization",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -25,6 +24,7 @@ rust_library {
 
 cc_library_static {
     name: "libcompos_verify_native_cpp",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["verify_native.cpp"],
     static_libs: ["libcompos_key"],
     shared_libs: [

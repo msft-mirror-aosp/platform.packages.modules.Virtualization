@@ -22,6 +22,8 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     CpuTopology::CpuTopology, IVirtualizationService::IVirtualizationService,
     PartitionType::PartitionType, VirtualMachineAppConfig::DebugLevel::DebugLevel,
 };
+#[cfg(not(llpvm_changes))]
+use anyhow::anyhow;
 use anyhow::{Context, Error};
 use binder::{ProcessState, Strong};
 use clap::{Args, Parser};
@@ -44,10 +46,6 @@ pub struct CommonConfig {
     /// Run VM with vCPU topology matching that of the host. If unspecified, defaults to 1 vCPU.
     #[arg(long, default_value = "one_cpu", value_parser = parse_cpu_topology)]
     cpu_topology: CpuTopology,
-
-    /// Comma separated list of task profile names to apply to the VM
-    #[arg(long)]
-    task_profiles: Vec<String>,
 
     /// Memory size (in MiB) of the VM. If unspecified, defaults to the value of `memory_mib`
     /// in the VM config file.
@@ -166,6 +164,11 @@ pub struct RunAppConfig {
     /// Path to the instance image. Created if not exists.
     instance: PathBuf,
 
+    /// Path to file containing instance_id. Required iff llpvm feature is enabled.
+    #[cfg(llpvm_changes)]
+    #[arg(long = "instance-id-file")]
+    instance_id: PathBuf,
+
     /// Path to VM config JSON within APK (e.g. assets/vm_config.json)
     #[arg(long)]
     config_path: Option<String>,
@@ -195,6 +198,27 @@ impl RunAppConfig {
     #[cfg(not(multi_tenant))]
     fn extra_apks(&self) -> &[PathBuf] {
         &[]
+    }
+
+    #[cfg(llpvm_changes)]
+    fn instance_id(&self) -> Result<PathBuf, Error> {
+        Ok(self.instance_id.clone())
+    }
+
+    #[cfg(not(llpvm_changes))]
+    fn instance_id(&self) -> Result<PathBuf, Error> {
+        Err(anyhow!("LLPVM feature is disabled, --instance_id flag not supported"))
+    }
+
+    #[cfg(llpvm_changes)]
+    fn set_instance_id(&mut self, instance_id_file: PathBuf) -> Result<(), Error> {
+        self.instance_id = instance_id_file;
+        Ok(())
+    }
+
+    #[cfg(not(llpvm_changes))]
+    fn set_instance_id(&mut self, _: PathBuf) -> Result<(), Error> {
+        Err(anyhow!("LLPVM feature is disabled, --instance_id flag not supported"))
     }
 }
 
@@ -232,6 +256,8 @@ pub struct RunCustomVmConfig {
 
 #[derive(Parser)]
 enum Opt {
+    /// Check if the feature is enabled on device.
+    CheckFeatureEnabled { feature: String },
     /// Run a virtual machine with a config in APK
     RunApp {
         #[command(flatten)]
@@ -304,6 +330,13 @@ fn get_service() -> Result<Strong<dyn IVirtualizationService>, Error> {
     virtmgr.connect().context("Failed to connect to VirtualizationService")
 }
 
+fn command_check_feature_enabled(feature: &str) {
+    println!(
+        "Feature {feature} is {}",
+        if avf_features::is_feature_enabled(feature) { "enabled" } else { "disabled" }
+    );
+}
+
 fn main() -> Result<(), Error> {
     env_logger::init();
     let opt = Opt::parse();
@@ -312,6 +345,10 @@ fn main() -> Result<(), Error> {
     ProcessState::start_thread_pool();
 
     match opt {
+        Opt::CheckFeatureEnabled { feature } => {
+            command_check_feature_enabled(&feature);
+            Ok(())
+        }
         Opt::RunApp { config } => command_run_app(config),
         Opt::RunMicrodroid { config } => command_run_microdroid(config),
         Opt::Run { config } => command_run(config),

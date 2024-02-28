@@ -15,13 +15,14 @@ For in-depth explanations about individual topics and components, visit the foll
 
 AVF components:
 * [pVM firmware](pvmfw/README.md)
+* [Android Boot Loader (ABL)](docs/abl.md)
 * [Microdroid](microdroid/README.md)
 * [Microdroid kernel](microdroid/kernel/README.md)
 * [Microdroid payload](microdroid/payload/README.md)
 * [vmbase](vmbase/README.md)
 
 AVF APIs:
-* [Java API](javalib/README.md)
+* [Java API](java/framework/README.md)
 * [VM Payload API](vm_payload/README.md)
 
 How-Tos:
@@ -29,3 +30,4 @@ How-Tos:
 * [Building and running a demo app in C++](demo_native/README.md)
 * [Debugging](docs/debug)
 * [Using custom VM](docs/custom_vm.md)
+* [Device assignment](docs/device_assignment.md)

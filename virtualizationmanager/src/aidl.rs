@@ -19,9 +19,9 @@ use crate::atom::{write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmContext, VmInstance, VmState};
 use crate::debug_config::DebugConfig;
+use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
 use crate::selinux::{getfilecon, SeContext};
-use crate::reference_dt;
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::{
     Certificate::Certificate,
@@ -35,9 +35,6 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService,
-    IVirtualizationService::FEATURE_MULTI_TENANT,
-    IVirtualizationService::FEATURE_VENDOR_MODULES,
-    IVirtualizationService::FEATURE_DICE_CHANGES,
     MemoryTrimLevel::MemoryTrimLevel,
     Partition::Partition,
     PartitionType::PartitionType,
@@ -68,6 +65,7 @@ use binder::{
     Status, StatusCode, Strong,
     IntoBinderResult,
 };
+use cstr::cstr;
 use disk::QcowFile;
 use glob::glob;
 use lazy_static::lazy_static;
@@ -79,15 +77,17 @@ use rustutils::system_properties;
 use semver::VersionReq;
 use std::collections::HashSet;
 use std::convert::TryInto;
+use std::fs;
 use std::ffi::CStr;
 use std::fs::{canonicalize, read_dir, remove_file, File, OpenOptions};
 use std::io::{BufRead, BufReader, Error, ErrorKind, Seek, SeekFrom, Write};
 use std::iter;
 use std::num::{NonZeroU16, NonZeroU32};
-use std::os::unix::io::{FromRawFd, IntoRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::raw::pid_t;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use vbmeta::VbMetaImage;
 use vmconfig::VmConfig;
 use vsock::VsockStream;
 use zip::ZipArchive;
@@ -109,14 +109,15 @@ const ANDROID_VM_INSTANCE_VERSION: u16 = 1;
 
 const MICRODROID_OS_NAME: &str = "microdroid";
 
-// TODO(b/291213394): Use 'default' instance for secretkeeper instead of 'nonsecure'
 const SECRETKEEPER_IDENTIFIER: &str =
-    "android.hardware.security.secretkeeper.ISecretkeeper/nonsecure";
+    "android.hardware.security.secretkeeper.ISecretkeeper/default";
 
 const UNFORMATTED_STORAGE_MAGIC: &str = "UNFORMATTED-STORAGE";
 
 /// crosvm requires all partitions to be a multiple of 4KiB.
 const PARTITION_GRANULARITY_BYTES: u64 = 4096;
+
+const VM_REFERENCE_DT_ON_HOST_PATH: &str = "/proc/device-tree/avf/reference";
 
 lazy_static! {
     pub static ref GLOBAL_SERVICE: Strong<dyn IVirtualizationServiceInternal> =
@@ -228,6 +229,11 @@ impl IVirtualizationService for VirtualizationService {
         ret
     }
 
+    /// Allocate a new instance_id to the VM
+    fn allocateInstanceId(&self) -> binder::Result<[u8; 64]> {
+        GLOBAL_SERVICE.allocateInstanceId()
+    }
+
     /// Initialise an empty partition image of the given size to be used as a writable partition.
     fn initializeWritablePartition(
         &self,
@@ -301,18 +307,11 @@ impl IVirtualizationService for VirtualizationService {
     /// Returns whether given feature is enabled
     fn isFeatureEnabled(&self, feature: &str) -> binder::Result<bool> {
         check_manage_access()?;
+        Ok(avf_features::is_feature_enabled(feature))
+    }
 
-        // This approach is quite cumbersome, but will do the work for the short term.
-        // TODO(b/298012279): make this scalable.
-        match feature {
-            FEATURE_DICE_CHANGES => Ok(cfg!(dice_changes)),
-            FEATURE_MULTI_TENANT => Ok(cfg!(multi_tenant)),
-            FEATURE_VENDOR_MODULES => Ok(cfg!(vendor_modules)),
-            _ => {
-                warn!("unknown feature {feature}");
-                Ok(false)
-            }
-        }
+    fn enableTestAttestation(&self) -> binder::Result<()> {
+        GLOBAL_SERVICE.enableTestAttestation()
     }
 }
 
@@ -376,12 +375,59 @@ impl VirtualizationService {
             check_gdb_allowed(config)?;
         }
 
-        let reference_dt = reference_dt::parse_reference_dt(&temporary_directory)
-            .context("Failed to create VM reference DT")
+        // Currently, VirtMgr adds the host copy of reference DT & an untrusted prop (instance-id)
+        let host_ref_dt = Path::new(VM_REFERENCE_DT_ON_HOST_PATH);
+        let host_ref_dt = if host_ref_dt.exists()
+            && read_dir(host_ref_dt).or_service_specific_exception(-1)?.next().is_some()
+        {
+            Some(host_ref_dt)
+        } else {
+            warn!("VM reference DT doesn't exist in host DT");
+            None
+        };
+
+        let vendor_hashtree_digest = extract_vendor_hashtree_digest(config)
+            .context("Failed to extract vendor hashtree digest")
             .or_service_specific_exception(-1)?;
-        if reference_dt.is_none() {
-            warn!("VM reference DT doesn't exist");
-        }
+
+        let trusted_props = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
+            info!(
+                "Passing vendor hashtree digest to pvmfw. This will be rejected if it doesn't \
+                match the trusted digest in the pvmfw config, causing the VM to fail to start."
+            );
+            vec![(
+                cstr!("vendor_hashtree_descriptor_root_digest"),
+                vendor_hashtree_digest.as_slice(),
+            )]
+        } else {
+            vec![]
+        };
+
+        let instance_id;
+        let untrusted_props = if cfg!(llpvm_changes) {
+            instance_id = extract_instance_id(config);
+            vec![(cstr!("instance-id"), &instance_id[..])]
+        } else {
+            vec![]
+        };
+
+        let device_tree_overlay =
+            if host_ref_dt.is_some() || !untrusted_props.is_empty() || !trusted_props.is_empty() {
+                let dt_output = temporary_directory.join(VM_DT_OVERLAY_PATH);
+                let mut data = [0_u8; VM_DT_OVERLAY_MAX_SIZE];
+                let fdt = create_device_tree_overlay(
+                    &mut data,
+                    host_ref_dt,
+                    &untrusted_props,
+                    &trusted_props,
+                )
+                .map_err(|e| anyhow!("Failed to create DT overlay, {e:?}"))
+                .or_service_specific_exception(-1)?;
+                fs::write(&dt_output, fdt.as_slice()).or_service_specific_exception(-1)?;
+                Some(File::open(dt_output).or_service_specific_exception(-1)?)
+            } else {
+                None
+            };
 
         let debug_level = match config {
             VirtualMachineConfig::AppConfig(config) => config.debugLevel,
@@ -441,6 +487,11 @@ impl VirtualizationService {
             })
             .try_for_each(check_label_for_partition)
             .or_service_specific_exception(-1)?;
+
+        // Check if files for payloads and bases are NOT coming from /vendor and /odm, as they may
+        // have unstable interfaces.
+        // TODO(b/316431494): remove once Treble interfaces are stabilized.
+        check_partitions_for_files(config).or_service_specific_exception(-1)?;
 
         let kernel = maybe_clone_file(&config.kernel)?;
         let initrd = maybe_clone_file(&config.initrd)?;
@@ -520,7 +571,6 @@ impl VirtualizationService {
             memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
             cpus,
             host_cpu_topology,
-            task_profiles: config.taskProfiles.clone(),
             console_out_fd,
             console_in_fd,
             log_fd,
@@ -531,7 +581,7 @@ impl VirtualizationService {
             gdb_port,
             vfio_devices,
             dtbo,
-            reference_dt,
+            device_tree_overlay,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -569,14 +619,44 @@ fn is_custom_config(config: &VirtualMachineConfig) -> bool {
             } else {
                 // Additional custom features not included in CustomConfig:
                 // - specifying a config file;
-                // - specifying extra APKs.
+                // - specifying extra APKs;
+                // - specifying an OS other than Microdroid.
                 match &config.payload {
                     Payload::ConfigPath(_) => true,
-                    Payload::PayloadConfig(payload_config) => !payload_config.extraApks.is_empty(),
+                    Payload::PayloadConfig(payload_config) => {
+                        !payload_config.extraApks.is_empty()
+                            || payload_config.osName != MICRODROID_OS_NAME
+                    }
                 }
             }
         }
     }
+}
+
+fn extract_vendor_hashtree_digest(config: &VirtualMachineConfig) -> Result<Option<Vec<u8>>> {
+    let VirtualMachineConfig::AppConfig(config) = config else {
+        return Ok(None);
+    };
+    let Some(custom_config) = &config.customConfig else {
+        return Ok(None);
+    };
+    let Some(file) = custom_config.vendorImage.as_ref() else {
+        return Ok(None);
+    };
+
+    let file = clone_file(file)?;
+    let size =
+        file.metadata().context("Failed to get metadata from microdroid vendor image")?.len();
+    let vbmeta = VbMetaImage::verify_reader_region(&file, 0, size)
+        .context("Failed to get vbmeta from microdroid-vendor.img")?;
+
+    for descriptor in vbmeta.descriptors()?.iter() {
+        if let vbmeta::Descriptor::Hashtree(_) = descriptor {
+            let root_digest = hex::encode(descriptor.to_hashtree()?.root_digest());
+            return Ok(Some(root_digest.as_bytes().to_vec()));
+        }
+    }
+    Err(anyhow!("No hashtree digest is extracted from microdroid vendor image"))
 }
 
 fn write_zero_filler(zero_filler_path: &Path) -> Result<()> {
@@ -748,7 +828,6 @@ fn load_app_config(
         if let Some(file) = custom_config.customKernelImage.as_ref() {
             vm_config.kernel = Some(ParcelFileDescriptor::new(clone_file(file)?))
         }
-        vm_config.taskProfiles = custom_config.taskProfiles.clone();
         vm_config.gdbPort = custom_config.gdbPort;
 
         if let Some(file) = custom_config.vendorImage.as_ref() {
@@ -783,6 +862,38 @@ fn load_app_config(
     )?;
 
     Ok(vm_config)
+}
+
+fn check_partition_for_file(fd: &ParcelFileDescriptor) -> Result<()> {
+    let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+    let link = fs::read_link(&path).context(format!("can't read_link {path}"))?;
+
+    // microdroid vendor image is OK
+    if cfg!(vendor_modules) && link == Path::new("/vendor/etc/avf/microdroid/microdroid_vendor.img")
+    {
+        return Ok(());
+    }
+
+    if link.starts_with("/vendor") || link.starts_with("/odm") {
+        bail!("vendor or odm file {} can't be used for VM", link.display());
+    }
+
+    Ok(())
+}
+
+fn check_partitions_for_files(config: &VirtualMachineRawConfig) -> Result<()> {
+    config
+        .disks
+        .iter()
+        .flat_map(|disk| disk.partitions.iter())
+        .filter_map(|partition| partition.image.as_ref())
+        .try_for_each(check_partition_for_file)?;
+
+    config.kernel.as_ref().map_or(Ok(()), check_partition_for_file)?;
+    config.initrd.as_ref().map_or(Ok(()), check_partition_for_file)?;
+    config.bootloader.as_ref().map_or(Ok(()), check_partition_for_file)?;
+
+    Ok(())
 }
 
 fn load_vm_payload_config_from_file(apk_file: &File, config_path: &str) -> Result<VmPayloadConfig> {
@@ -1199,6 +1310,13 @@ fn check_gdb_allowed(config: &VirtualMachineConfig) -> binder::Result<()> {
     }
 }
 
+fn extract_instance_id(config: &VirtualMachineConfig) -> [u8; 64] {
+    match config {
+        VirtualMachineConfig::RawConfig(config) => config.instanceId,
+        VirtualMachineConfig::AppConfig(config) => config.instanceId,
+    }
+}
+
 fn extract_gdb_port(config: &VirtualMachineConfig) -> Option<NonZeroU16> {
     match config {
         VirtualMachineConfig::RawConfig(config) => NonZeroU16::new(config.gdbPort as u16),
@@ -1391,8 +1509,8 @@ impl IVirtualMachineService for VirtualMachineService {
         Ok(sk.map(|s| BnSecretkeeper::new_binder(SecretkeeperProxy(s), BinderFeatures::default())))
     }
 
-    fn requestAttestation(&self, csr: &[u8]) -> binder::Result<Vec<Certificate>> {
-        GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32)
+    fn requestAttestation(&self, csr: &[u8], test_mode: bool) -> binder::Result<Vec<Certificate>> {
+        GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32, test_mode)
     }
 }
 
@@ -1407,6 +1525,70 @@ impl VirtualMachineService {
             VirtualMachineService { state, cid },
             BinderFeatures::default(),
         )
+    }
+}
+
+struct SecretkeeperProxy(Strong<dyn ISecretkeeper>);
+
+impl Interface for SecretkeeperProxy {}
+
+impl ISecretkeeper for SecretkeeperProxy {
+    fn processSecretManagementRequest(&self, req: &[u8]) -> binder::Result<Vec<u8>> {
+        // Pass the request to the channel, and read the response.
+        self.0.processSecretManagementRequest(req)
+    }
+
+    fn getAuthGraphKe(&self) -> binder::Result<Strong<dyn IAuthGraphKeyExchange>> {
+        let ag = AuthGraphKeyExchangeProxy(self.0.getAuthGraphKe()?);
+        Ok(BnAuthGraphKeyExchange::new_binder(ag, BinderFeatures::default()))
+    }
+
+    fn deleteIds(&self, ids: &[SecretId]) -> binder::Result<()> {
+        self.0.deleteIds(ids)
+    }
+
+    fn deleteAll(&self) -> binder::Result<()> {
+        self.0.deleteAll()
+    }
+}
+
+struct AuthGraphKeyExchangeProxy(Strong<dyn IAuthGraphKeyExchange>);
+
+impl Interface for AuthGraphKeyExchangeProxy {}
+
+impl IAuthGraphKeyExchange for AuthGraphKeyExchangeProxy {
+    fn create(&self) -> binder::Result<SessionInitiationInfo> {
+        self.0.create()
+    }
+
+    fn init(
+        &self,
+        peer_pub_key: &PubKey,
+        peer_id: &Identity,
+        peer_nonce: &[u8],
+        peer_version: i32,
+    ) -> binder::Result<KeInitResult> {
+        self.0.init(peer_pub_key, peer_id, peer_nonce, peer_version)
+    }
+
+    fn finish(
+        &self,
+        peer_pub_key: &PubKey,
+        peer_id: &Identity,
+        peer_signature: &SessionIdSignature,
+        peer_nonce: &[u8],
+        peer_version: i32,
+        own_key: &Key,
+    ) -> binder::Result<SessionInfo> {
+        self.0.finish(peer_pub_key, peer_id, peer_signature, peer_nonce, peer_version, own_key)
+    }
+
+    fn authenticationComplete(
+        &self,
+        peer_signature: &SessionIdSignature,
+        shared_keys: &[AuthgraphArc; 2],
+    ) -> binder::Result<[AuthgraphArc; 2]> {
+        self.0.authenticationComplete(peer_signature, shared_keys)
     }
 }
 
@@ -1624,69 +1806,5 @@ mod tests {
             bail!("Expected {:?} but was {:?}", os_names, result);
         }
         Ok(())
-    }
-}
-
-struct SecretkeeperProxy(Strong<dyn ISecretkeeper>);
-
-impl Interface for SecretkeeperProxy {}
-
-impl ISecretkeeper for SecretkeeperProxy {
-    fn processSecretManagementRequest(&self, req: &[u8]) -> binder::Result<Vec<u8>> {
-        // Pass the request to the channel, and read the response.
-        self.0.processSecretManagementRequest(req)
-    }
-
-    fn getAuthGraphKe(&self) -> binder::Result<Strong<dyn IAuthGraphKeyExchange>> {
-        let ag = AuthGraphKeyExchangeProxy(self.0.getAuthGraphKe()?);
-        Ok(BnAuthGraphKeyExchange::new_binder(ag, BinderFeatures::default()))
-    }
-
-    fn deleteIds(&self, ids: &[SecretId]) -> binder::Result<()> {
-        self.0.deleteIds(ids)
-    }
-
-    fn deleteAll(&self) -> binder::Result<()> {
-        self.0.deleteAll()
-    }
-}
-
-struct AuthGraphKeyExchangeProxy(Strong<dyn IAuthGraphKeyExchange>);
-
-impl Interface for AuthGraphKeyExchangeProxy {}
-
-impl IAuthGraphKeyExchange for AuthGraphKeyExchangeProxy {
-    fn create(&self) -> binder::Result<SessionInitiationInfo> {
-        self.0.create()
-    }
-
-    fn init(
-        &self,
-        peer_pub_key: &PubKey,
-        peer_id: &Identity,
-        peer_nonce: &[u8],
-        peer_version: i32,
-    ) -> binder::Result<KeInitResult> {
-        self.0.init(peer_pub_key, peer_id, peer_nonce, peer_version)
-    }
-
-    fn finish(
-        &self,
-        peer_pub_key: &PubKey,
-        peer_id: &Identity,
-        peer_signature: &SessionIdSignature,
-        peer_nonce: &[u8],
-        peer_version: i32,
-        own_key: &Key,
-    ) -> binder::Result<SessionInfo> {
-        self.0.finish(peer_pub_key, peer_id, peer_signature, peer_nonce, peer_version, own_key)
-    }
-
-    fn authenticationComplete(
-        &self,
-        peer_signature: &SessionIdSignature,
-        shared_keys: &[AuthgraphArc; 2],
-    ) -> binder::Result<[AuthgraphArc; 2]> {
-        self.0.authenticationComplete(peer_signature, shared_keys)
     }
 }
