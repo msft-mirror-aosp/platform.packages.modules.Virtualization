@@ -478,14 +478,38 @@ impl<'a> FdtNodeMut<'a> {
         self.delete_and_next(next_offset)
     }
 
-    /// Returns the next node
+    /// Returns the next node. Use this API to travel descendant of a node.
+    ///
+    /// Returned depth is relative to the initial node that had called with any of next node APIs.
+    /// Returns None if end of FDT reached or depth becomes negative.
+    ///
+    /// See also: [`next_node_skip_subnodes`], and [`delete_and_next_node`]
     pub fn next_node(self, depth: usize) -> Result<Option<(Self, usize)>> {
         let next = self.fdt.next_node(self.offset, depth)?;
 
         Ok(next.map(|(offset, depth)| (Self { fdt: self.fdt, offset }, depth)))
     }
 
-    /// Deletes this and returns the next node
+    /// Returns the next node skipping subnodes. Use this API to travel descendants of a node while
+    /// ignoring certain node.
+    ///
+    /// Returned depth is relative to the initial node that had called with any of next node APIs.
+    /// Returns None if end of FDT reached or depth becomes negative.
+    ///
+    /// See also: [`next_node`], and [`delete_and_next_node`]
+    pub fn next_node_skip_subnodes(self, depth: usize) -> Result<Option<(Self, usize)>> {
+        let next = self.fdt.next_node_skip_subnodes(self.offset, depth)?;
+
+        Ok(next.map(|(offset, depth)| (Self { fdt: self.fdt, offset }, depth)))
+    }
+
+    /// Deletes this and returns the next node. Use this API to travel descendants of a node while
+    /// removing certain node.
+    ///
+    /// Returned depth is relative to the initial node that had called with any of next node APIs.
+    /// Returns None if end of FDT reached or depth becomes negative.
+    ///
+    /// See also: [`next_node`], and [`next_node_skip_subnodes`]
     pub fn delete_and_next_node(self, depth: usize) -> Result<Option<(Self, usize)>> {
         let next_node = self.fdt.next_node_skip_subnodes(self.offset, depth)?;
         if let Some((offset, depth)) = next_node {
@@ -669,7 +693,7 @@ impl Fdt {
     ///
     /// NOTE: This does not support individual "/memory@XXXX" banks.
     pub fn memory(&self) -> Result<MemRegIterator> {
-        let node = self.root()?.subnode(cstr!("memory"))?.ok_or(FdtError::NotFound)?;
+        let node = self.root().subnode(cstr!("memory"))?.ok_or(FdtError::NotFound)?;
         if node.device_type()? != Some(cstr!("memory")) {
             return Err(FdtError::BadValue);
         }
@@ -683,7 +707,7 @@ impl Fdt {
 
     /// Returns the standard /chosen node.
     pub fn chosen(&self) -> Result<Option<FdtNode>> {
-        self.root()?.subnode(cstr!("chosen"))
+        self.root().subnode(cstr!("chosen"))
     }
 
     /// Returns the standard /chosen node as mutable.
@@ -692,13 +716,13 @@ impl Fdt {
     }
 
     /// Returns the root node of the tree.
-    pub fn root(&self) -> Result<FdtNode> {
-        Ok(FdtNode { fdt: self, offset: NodeOffset::ROOT })
+    pub fn root(&self) -> FdtNode {
+        FdtNode { fdt: self, offset: NodeOffset::ROOT }
     }
 
     /// Returns the standard /__symbols__ node.
     pub fn symbols(&self) -> Result<Option<FdtNode>> {
-        self.root()?.subnode(cstr!("__symbols__"))
+        self.root().subnode(cstr!("__symbols__"))
     }
 
     /// Returns the standard /__symbols__ node as mutable
@@ -738,8 +762,8 @@ impl Fdt {
     }
 
     /// Returns the mutable root node of the tree.
-    pub fn root_mut(&mut self) -> Result<FdtNodeMut> {
-        Ok(FdtNodeMut { fdt: self, offset: NodeOffset::ROOT })
+    pub fn root_mut(&mut self) -> FdtNodeMut {
+        FdtNodeMut { fdt: self, offset: NodeOffset::ROOT }
     }
 
     /// Returns a mutable tree node by its full path.

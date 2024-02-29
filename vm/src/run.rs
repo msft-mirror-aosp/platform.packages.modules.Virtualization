@@ -35,6 +35,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use std::fs;
 use std::fs::File;
 use std::io;
+use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use vmclient::{ErrorCode, VmInstance};
@@ -83,6 +84,24 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
             PartitionType::ANDROID_VM_INSTANCE,
         )?;
     }
+
+    let instance_id = if cfg!(llpvm_changes) {
+        let id_file = config.instance_id()?;
+        if id_file.exists() {
+            let mut id = [0u8; 64];
+            let mut instance_id_file = File::open(id_file)?;
+            instance_id_file.read_exact(&mut id)?;
+            id
+        } else {
+            let id = service.allocateInstanceId().context("Failed to allocate instance_id")?;
+            let mut instance_id_file = File::create(id_file)?;
+            instance_id_file.write_all(&id)?;
+            id
+        }
+    } else {
+        // if llpvm feature flag is disabled, instance_id is not used.
+        [0u8; 64]
+    };
 
     let storage = if let Some(ref path) = config.microdroid.storage {
         if !path.exists() {
@@ -136,7 +155,6 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
     let custom_config = CustomConfig {
         customKernelImage: None,
         gdbPort: config.debug.gdb.map(u16::from).unwrap_or(0) as i32, // 0 means no gdb
-        taskProfiles: config.common.task_profiles,
         vendorImage: vendor,
         devices: config
             .microdroid
@@ -154,6 +172,7 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         idsig: idsig_fd.into(),
         extraIdsigs: extra_idsig_fds,
         instanceImage: open_parcel_file(&config.instance, true /* writable */)?.into(),
+        instanceId: instance_id,
         encryptedStorageImage: storage,
         payload,
         debugLevel: config.debug.debug,
@@ -205,7 +224,7 @@ pub fn command_run_microdroid(config: RunMicrodroidConfig) -> Result<(), Error> 
     let instance_img = work_dir.join("instance.img");
     println!("instance.img path: {}", instance_img.display());
 
-    let app_config = RunAppConfig {
+    let mut app_config = RunAppConfig {
         common: config.common,
         debug: config.debug,
         microdroid: config.microdroid,
@@ -215,6 +234,12 @@ pub fn command_run_microdroid(config: RunMicrodroidConfig) -> Result<(), Error> 
         payload_binary_name: Some("MicrodroidEmptyPayloadJniLib.so".to_owned()),
         ..Default::default()
     };
+
+    if cfg!(llpvm_changes) {
+        app_config.set_instance_id(work_dir.join("instance_id"))?;
+        println!("instance_id file path: {}", app_config.instance_id()?.display());
+    }
+
     command_run_app(app_config)
 }
 
@@ -235,7 +260,6 @@ pub fn command_run(config: RunCustomVmConfig) -> Result<(), Error> {
         vm_config.gdbPort = gdb.get() as i32;
     }
     vm_config.cpuTopology = config.common.cpu_topology;
-    vm_config.taskProfiles = config.common.task_profiles;
     run(
         get_service()?.as_ref(),
         &VirtualMachineConfig::RawConfig(vm_config),

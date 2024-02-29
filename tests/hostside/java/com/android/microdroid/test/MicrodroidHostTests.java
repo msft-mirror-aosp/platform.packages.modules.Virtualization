@@ -553,7 +553,8 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         mMicrodroidDevice.enableAdbRoot();
 
         CommandRunner microdroid = new CommandRunner(mMicrodroidDevice);
-        microdroid.run(crashCommand);
+        // can crash in the middle of crashCommand; fail is ok
+        microdroid.tryRun(crashCommand);
 
         // check until microdroid is shut down
         waitForCrosvmExit(android, testStartTime);
@@ -616,6 +617,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         final String apkPath = getPathForPackage(PACKAGE_NAME);
         final String idsigPath = TEST_ROOT + "idsig";
         final String instanceImgPath = TEST_ROOT + "instance.img";
+        final String instanceIdPath = TEST_ROOT + "instance_id";
         List<String> cmd =
                 new ArrayList<>(
                         Arrays.asList(
@@ -626,6 +628,11 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                                 apkPath,
                                 idsigPath,
                                 instanceImgPath));
+        if (isFeatureEnabled("com.android.kvm.LLPVM_CHANGES")) {
+            cmd.add("--instance-id-file");
+            cmd.add(instanceIdPath);
+        }
+        ;
         if (protectedVm) {
             cmd.add("--protected");
         }
@@ -886,7 +893,6 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         final String apkPath = getPathForPackage(PACKAGE_NAME);
         final String idSigPath = TEST_ROOT + "idsig";
         android.run(VIRT_APEX + "bin/vm", "create-idsig", apkPath, idSigPath);
-
         // Create the instance image for the VM
         final String instanceImgPath = TEST_ROOT + "instance.img";
         android.run(
@@ -896,17 +902,22 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 instanceImgPath,
                 Integer.toString(10 * 1024 * 1024));
 
-        final String ret =
-                android.runForResult(
+        List<String> cmd =
+                new ArrayList<>(
+                        Arrays.asList(
                                 VIRT_APEX + "bin/vm",
                                 "run-app",
                                 "--payload-binary-name",
                                 "./MicrodroidTestNativeLib.so",
                                 apkPath,
                                 idSigPath,
-                                instanceImgPath)
-                        .getStderr()
-                        .trim();
+                                instanceImgPath));
+        if (isFeatureEnabled("com.android.kvm.LLPVM_CHANGES")) {
+            cmd.add("--instance-id-file");
+            cmd.add(TEST_ROOT + "instance_id");
+        }
+
+        final String ret = android.runForResult(String.join(" ", cmd)).getStderr().trim();
 
         assertThat(ret).contains("Payload binary name must not specify a path");
     }
@@ -943,7 +954,43 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertThat(hasDebugPolicy).isFalse();
     }
 
+    private boolean isLz4(String path) throws Exception {
+        File lz4tool = findTestFile("lz4");
+        CommandResult result =
+                new RunUtil().runTimedCmd(5000, lz4tool.getAbsolutePath(), "-t", path);
+        return result.getStatus() == CommandStatus.SUCCESS;
+    }
+
+    private void decompressLz4(String inputPath, String outputPath) throws Exception {
+        File lz4tool = findTestFile("lz4");
+        CommandResult result =
+                new RunUtil()
+                        .runTimedCmd(
+                                5000, lz4tool.getAbsolutePath(), "-d", "-f", inputPath, outputPath);
+        String out = result.getStdout();
+        String err = result.getStderr();
+        assertWithMessage(
+                        "lz4 image "
+                                + inputPath
+                                + " decompression failed."
+                                + "\n\tout: "
+                                + out
+                                + "\n\terr: "
+                                + err
+                                + "\n")
+                .about(command_results())
+                .that(result)
+                .isSuccess();
+    }
+
     private String avbInfo(String image_path) throws Exception {
+        if (isLz4(image_path)) {
+            File decompressedImage = FileUtil.createTempFile("decompressed", ".img");
+            decompressedImage.deleteOnExit();
+            decompressLz4(image_path, decompressedImage.getAbsolutePath());
+            image_path = decompressedImage.getAbsolutePath();
+        }
+
         File avbtool = findTestFile("avbtool");
         List<String> command =
                 Arrays.asList(avbtool.getAbsolutePath(), "info_image", "--image", image_path);
@@ -1084,6 +1131,13 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         }
 
         mOs = (mGki != null) ? "microdroid_gki-" + mGki : "microdroid";
+
+        new CommandRunner(getDevice())
+                .tryRun(
+                        "pm",
+                        "grant",
+                        SHELL_PACKAGE_NAME,
+                        "android.permission.USE_CUSTOM_VIRTUAL_MACHINE");
     }
 
     @After
@@ -1098,21 +1152,13 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 mTestLogs, getDevice(), LOG_PATH, "vm.log-" + mTestName.getMethodName());
 
         getDevice().uninstallPackage(PACKAGE_NAME);
-
-        // testCustomVirtualMachinePermission revokes this permission. Grant it again as cleanup
-        new CommandRunner(getDevice())
-                .tryRun(
-                        "pm",
-                        "grant",
-                        SHELL_PACKAGE_NAME,
-                        "android.permission.USE_CUSTOM_VIRTUAL_MACHINE");
     }
 
-    private void assumeProtectedVm() throws Exception {
+    private void assumeProtectedVm() {
         assumeTrue("This test is only for protected VM.", mProtectedVm);
     }
 
-    private void assumeNonProtectedVm() throws Exception {
+    private void assumeNonProtectedVm() {
         assumeFalse("This test is only for non-protected VM.", mProtectedVm);
     }
 

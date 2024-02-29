@@ -35,10 +35,6 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService,
-    IVirtualizationService::FEATURE_MULTI_TENANT,
-    IVirtualizationService::FEATURE_VENDOR_MODULES,
-    IVirtualizationService::FEATURE_DICE_CHANGES,
-    IVirtualizationService::FEATURE_REMOTE_ATTESTATION,
     MemoryTrimLevel::MemoryTrimLevel,
     Partition::Partition,
     PartitionType::PartitionType,
@@ -87,10 +83,11 @@ use std::fs::{canonicalize, read_dir, remove_file, File, OpenOptions};
 use std::io::{BufRead, BufReader, Error, ErrorKind, Seek, SeekFrom, Write};
 use std::iter;
 use std::num::{NonZeroU16, NonZeroU32};
-use std::os::unix::io::{FromRawFd, IntoRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::raw::pid_t;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use vbmeta::VbMetaImage;
 use vmconfig::VmConfig;
 use vsock::VsockStream;
 use zip::ZipArchive;
@@ -112,9 +109,8 @@ const ANDROID_VM_INSTANCE_VERSION: u16 = 1;
 
 const MICRODROID_OS_NAME: &str = "microdroid";
 
-// TODO(b/291213394): Use 'default' instance for secretkeeper instead of 'nonsecure'
 const SECRETKEEPER_IDENTIFIER: &str =
-    "android.hardware.security.secretkeeper.ISecretkeeper/nonsecure";
+    "android.hardware.security.secretkeeper.ISecretkeeper/default";
 
 const UNFORMATTED_STORAGE_MAGIC: &str = "UNFORMATTED-STORAGE";
 
@@ -233,6 +229,11 @@ impl IVirtualizationService for VirtualizationService {
         ret
     }
 
+    /// Allocate a new instance_id to the VM
+    fn allocateInstanceId(&self) -> binder::Result<[u8; 64]> {
+        GLOBAL_SERVICE.allocateInstanceId()
+    }
+
     /// Initialise an empty partition image of the given size to be used as a writable partition.
     fn initializeWritablePartition(
         &self,
@@ -306,19 +307,7 @@ impl IVirtualizationService for VirtualizationService {
     /// Returns whether given feature is enabled
     fn isFeatureEnabled(&self, feature: &str) -> binder::Result<bool> {
         check_manage_access()?;
-
-        // This approach is quite cumbersome, but will do the work for the short term.
-        // TODO(b/298012279): make this scalable.
-        match feature {
-            FEATURE_DICE_CHANGES => Ok(cfg!(dice_changes)),
-            FEATURE_MULTI_TENANT => Ok(cfg!(multi_tenant)),
-            FEATURE_REMOTE_ATTESTATION => Ok(cfg!(remote_attestation)),
-            FEATURE_VENDOR_MODULES => Ok(cfg!(vendor_modules)),
-            _ => {
-                warn!("unknown feature {feature}");
-                Ok(false)
-            }
-        }
+        Ok(avf_features::is_feature_enabled(feature))
     }
 
     fn enableTestAttestation(&self) -> binder::Result<()> {
@@ -397,25 +386,48 @@ impl VirtualizationService {
             None
         };
 
+        let vendor_hashtree_digest = extract_vendor_hashtree_digest(config)
+            .context("Failed to extract vendor hashtree digest")
+            .or_service_specific_exception(-1)?;
+
+        let trusted_props = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
+            info!(
+                "Passing vendor hashtree digest to pvmfw. This will be rejected if it doesn't \
+                match the trusted digest in the pvmfw config, causing the VM to fail to start."
+            );
+            vec![(
+                cstr!("vendor_hashtree_descriptor_root_digest"),
+                vendor_hashtree_digest.as_slice(),
+            )]
+        } else {
+            vec![]
+        };
+
+        let instance_id;
         let untrusted_props = if cfg!(llpvm_changes) {
-            // TODO(b/291213394): Replace this with a per-VM instance Id.
-            let instance_id = b"sixtyfourbyteslonghardcoded_indeed_sixtyfourbyteslonghardcoded_h";
+            instance_id = extract_instance_id(config);
             vec![(cstr!("instance-id"), &instance_id[..])]
         } else {
             vec![]
         };
 
-        let device_tree_overlay = if host_ref_dt.is_some() || !untrusted_props.is_empty() {
-            let dt_output = temporary_directory.join(VM_DT_OVERLAY_PATH);
-            let mut data = [0_u8; VM_DT_OVERLAY_MAX_SIZE];
-            let fdt = create_device_tree_overlay(&mut data, host_ref_dt, &untrusted_props)
+        let device_tree_overlay =
+            if host_ref_dt.is_some() || !untrusted_props.is_empty() || !trusted_props.is_empty() {
+                let dt_output = temporary_directory.join(VM_DT_OVERLAY_PATH);
+                let mut data = [0_u8; VM_DT_OVERLAY_MAX_SIZE];
+                let fdt = create_device_tree_overlay(
+                    &mut data,
+                    host_ref_dt,
+                    &untrusted_props,
+                    &trusted_props,
+                )
                 .map_err(|e| anyhow!("Failed to create DT overlay, {e:?}"))
                 .or_service_specific_exception(-1)?;
-            fs::write(&dt_output, fdt.as_slice()).or_service_specific_exception(-1)?;
-            Some(File::open(dt_output).or_service_specific_exception(-1)?)
-        } else {
-            None
-        };
+                fs::write(&dt_output, fdt.as_slice()).or_service_specific_exception(-1)?;
+                Some(File::open(dt_output).or_service_specific_exception(-1)?)
+            } else {
+                None
+            };
 
         let debug_level = match config {
             VirtualMachineConfig::AppConfig(config) => config.debugLevel,
@@ -475,6 +487,11 @@ impl VirtualizationService {
             })
             .try_for_each(check_label_for_partition)
             .or_service_specific_exception(-1)?;
+
+        // Check if files for payloads and bases are NOT coming from /vendor and /odm, as they may
+        // have unstable interfaces.
+        // TODO(b/316431494): remove once Treble interfaces are stabilized.
+        check_partitions_for_files(config).or_service_specific_exception(-1)?;
 
         let kernel = maybe_clone_file(&config.kernel)?;
         let initrd = maybe_clone_file(&config.initrd)?;
@@ -554,7 +571,6 @@ impl VirtualizationService {
             memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
             cpus,
             host_cpu_topology,
-            task_profiles: config.taskProfiles.clone(),
             console_out_fd,
             console_in_fd,
             log_fd,
@@ -603,14 +619,44 @@ fn is_custom_config(config: &VirtualMachineConfig) -> bool {
             } else {
                 // Additional custom features not included in CustomConfig:
                 // - specifying a config file;
-                // - specifying extra APKs.
+                // - specifying extra APKs;
+                // - specifying an OS other than Microdroid.
                 match &config.payload {
                     Payload::ConfigPath(_) => true,
-                    Payload::PayloadConfig(payload_config) => !payload_config.extraApks.is_empty(),
+                    Payload::PayloadConfig(payload_config) => {
+                        !payload_config.extraApks.is_empty()
+                            || payload_config.osName != MICRODROID_OS_NAME
+                    }
                 }
             }
         }
     }
+}
+
+fn extract_vendor_hashtree_digest(config: &VirtualMachineConfig) -> Result<Option<Vec<u8>>> {
+    let VirtualMachineConfig::AppConfig(config) = config else {
+        return Ok(None);
+    };
+    let Some(custom_config) = &config.customConfig else {
+        return Ok(None);
+    };
+    let Some(file) = custom_config.vendorImage.as_ref() else {
+        return Ok(None);
+    };
+
+    let file = clone_file(file)?;
+    let size =
+        file.metadata().context("Failed to get metadata from microdroid vendor image")?.len();
+    let vbmeta = VbMetaImage::verify_reader_region(&file, 0, size)
+        .context("Failed to get vbmeta from microdroid-vendor.img")?;
+
+    for descriptor in vbmeta.descriptors()?.iter() {
+        if let vbmeta::Descriptor::Hashtree(_) = descriptor {
+            let root_digest = hex::encode(descriptor.to_hashtree()?.root_digest());
+            return Ok(Some(root_digest.as_bytes().to_vec()));
+        }
+    }
+    Err(anyhow!("No hashtree digest is extracted from microdroid vendor image"))
 }
 
 fn write_zero_filler(zero_filler_path: &Path) -> Result<()> {
@@ -782,7 +828,6 @@ fn load_app_config(
         if let Some(file) = custom_config.customKernelImage.as_ref() {
             vm_config.kernel = Some(ParcelFileDescriptor::new(clone_file(file)?))
         }
-        vm_config.taskProfiles = custom_config.taskProfiles.clone();
         vm_config.gdbPort = custom_config.gdbPort;
 
         if let Some(file) = custom_config.vendorImage.as_ref() {
@@ -817,6 +862,38 @@ fn load_app_config(
     )?;
 
     Ok(vm_config)
+}
+
+fn check_partition_for_file(fd: &ParcelFileDescriptor) -> Result<()> {
+    let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+    let link = fs::read_link(&path).context(format!("can't read_link {path}"))?;
+
+    // microdroid vendor image is OK
+    if cfg!(vendor_modules) && link == Path::new("/vendor/etc/avf/microdroid/microdroid_vendor.img")
+    {
+        return Ok(());
+    }
+
+    if link.starts_with("/vendor") || link.starts_with("/odm") {
+        bail!("vendor or odm file {} can't be used for VM", link.display());
+    }
+
+    Ok(())
+}
+
+fn check_partitions_for_files(config: &VirtualMachineRawConfig) -> Result<()> {
+    config
+        .disks
+        .iter()
+        .flat_map(|disk| disk.partitions.iter())
+        .filter_map(|partition| partition.image.as_ref())
+        .try_for_each(check_partition_for_file)?;
+
+    config.kernel.as_ref().map_or(Ok(()), check_partition_for_file)?;
+    config.initrd.as_ref().map_or(Ok(()), check_partition_for_file)?;
+    config.bootloader.as_ref().map_or(Ok(()), check_partition_for_file)?;
+
+    Ok(())
 }
 
 fn load_vm_payload_config_from_file(apk_file: &File, config_path: &str) -> Result<VmPayloadConfig> {
@@ -1230,6 +1307,13 @@ fn check_gdb_allowed(config: &VirtualMachineConfig) -> binder::Result<()> {
                 Ok(())
             }
         }
+    }
+}
+
+fn extract_instance_id(config: &VirtualMachineConfig) -> [u8; 64] {
+    match config {
+        VirtualMachineConfig::RawConfig(config) => config.instanceId,
+        VirtualMachineConfig::AppConfig(config) => config.instanceId,
     }
 }
 

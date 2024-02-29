@@ -35,6 +35,7 @@ use libc::VMADDR_CID_HOST;
 use log::{error, info, warn};
 use nix::unistd::{chown, Uid};
 use openssl::x509::X509;
+use rand::Fill;
 use rkpd_client::get_rkpd_attestation_key;
 use rustutils::system_properties;
 use serde::Deserialize;
@@ -59,15 +60,15 @@ use virtualizationservice_internal::{
     IGlobalVmContext::{BnGlobalVmContext, IGlobalVmContext},
     IVfioHandler::VfioDev::VfioDev,
     IVfioHandler::{BpVfioHandler, IVfioHandler},
-    IVirtualizationServiceInternal::IVirtualizationServiceInternal,
+    IVirtualizationServiceInternal::{
+        BnVirtualizationServiceInternal, IVirtualizationServiceInternal,
+    },
 };
 use virtualmachineservice::IVirtualMachineService::VM_TOMBSTONES_SERVICE_PORT;
 use vsock::{VsockListener, VsockStream};
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
 pub type Cid = u32;
-
-pub const BINDER_SERVICE_IDENTIFIER: &str = "android.system.virtualizationservice";
 
 /// Directory in which to write disk image files used while running VMs.
 pub const TEMPORARY_DIRECTORY: &str = "/data/misc/virtualizationservice";
@@ -165,7 +166,7 @@ pub struct VirtualizationServiceInternal {
 }
 
 impl VirtualizationServiceInternal {
-    pub fn init() -> VirtualizationServiceInternal {
+    pub fn init() -> Strong<dyn IVirtualizationServiceInternal> {
         let service = VirtualizationServiceInternal::default();
 
         std::thread::spawn(|| {
@@ -174,7 +175,7 @@ impl VirtualizationServiceInternal {
             }
         });
 
-        service
+        BnVirtualizationServiceInternal::new_binder(service, BinderFeatures::default())
     }
 }
 
@@ -377,6 +378,17 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         let state = &mut *self.state.lock().unwrap();
         let file = state.get_dtbo_file().or_service_specific_exception(-1)?;
         Ok(ParcelFileDescriptor::new(file))
+    }
+
+    // TODO(b/294177871) Persist this Id, along with client uuid.
+    fn allocateInstanceId(&self) -> binder::Result<[u8; 64]> {
+        let mut id = [0u8; 64];
+        id.try_fill(&mut rand::thread_rng())
+            .context("Failed to allocate instance_id")
+            .or_service_specific_exception(-1)?;
+        let uid = get_calling_uid();
+        info!("Allocated a VM's instance_id: {:?}, for uid: {:?}", hex::encode(id), uid);
+        Ok(id)
     }
 }
 

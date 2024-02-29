@@ -23,6 +23,9 @@ parcelable VirtualMachineAppConfig {
     /** Name of VM */
     String name;
 
+    /** Id of the VM instance */
+    byte[64] instanceId;
+
     /** Main APK */
     ParcelFileDescriptor apk;
 
@@ -100,11 +103,6 @@ parcelable VirtualMachineAppConfig {
          *
          */
         int gdbPort = 0;
-
-        /**
-         * List of task profile names to apply for the VM
-         */
-        String[] taskProfiles;
 
         /** A disk image containing vendor specific modules. */
         @nullable ParcelFileDescriptor vendorImage;
