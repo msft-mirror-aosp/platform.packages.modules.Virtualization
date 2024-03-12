@@ -73,6 +73,8 @@ pub enum DeviceAssignmentError {
     DuplicatedIommuIds,
     /// Duplicated pvIOMMU IDs exist
     DuplicatedPvIommuIds,
+    /// Unsupported path format. Only supports full path.
+    UnsupportedPathFormat,
     /// Unsupported overlay target syntax. Only supports <target-path> with full path.
     UnsupportedOverlayTarget,
     /// Unsupported PhysIommu,
@@ -120,6 +122,9 @@ impl fmt::Display for DeviceAssignmentError {
             Self::DuplicatedPvIommuIds => {
                 write!(f, "Duplicated pvIOMMU IDs exist. IDs must unique among iommu node")
             }
+            Self::UnsupportedPathFormat => {
+                write!(f, "Unsupported UnsupportedPathFormat. Only supports full path")
+            }
             Self::UnsupportedOverlayTarget => {
                 write!(f, "Unsupported overlay target. Only supports 'target-path = \"/\"'")
             }
@@ -139,6 +144,67 @@ impl fmt::Display for DeviceAssignmentError {
 }
 
 pub type Result<T> = core::result::Result<T, DeviceAssignmentError>;
+
+#[derive(Clone, Default, Ord, PartialOrd, Eq, PartialEq)]
+pub struct DtPathTokens<'a> {
+    tokens: Vec<&'a [u8]>,
+}
+
+impl<'a> fmt::Debug for DtPathTokens<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut list = f.debug_list();
+        for token in &self.tokens {
+            let mut bytes = token.to_vec();
+            bytes.push(b'\0');
+            match CString::from_vec_with_nul(bytes) {
+                Ok(string) => list.entry(&string),
+                Err(_) => list.entry(token),
+            };
+        }
+        list.finish()
+    }
+}
+
+impl<'a> DtPathTokens<'a> {
+    fn new(path: &'a CStr) -> Result<Self> {
+        if path.to_bytes().first() != Some(&b'/') {
+            return Err(DeviceAssignmentError::UnsupportedPathFormat);
+        }
+        let tokens: Vec<_> = path
+            .to_bytes()
+            .split(|char| *char == b'/')
+            .filter(|&component| !component.is_empty())
+            .collect();
+        Ok(Self { tokens })
+    }
+
+    fn to_overlay_target_path(&self) -> Result<Self> {
+        if !self.is_overlayable_node() {
+            return Err(DeviceAssignmentError::InvalidDtbo);
+        }
+        Ok(Self { tokens: self.tokens.as_slice()[2..].to_vec() })
+    }
+
+    fn to_cstring(&self) -> CString {
+        if self.tokens.is_empty() {
+            return CString::new(*b"/\0").unwrap();
+        }
+
+        let size = self.tokens.iter().fold(0, |sum, token| sum + token.len() + 1);
+        let mut path = Vec::with_capacity(size + 1);
+        for token in &self.tokens {
+            path.push(b'/');
+            path.extend_from_slice(token);
+        }
+        path.push(b'\0');
+
+        CString::from_vec_with_nul(path).unwrap()
+    }
+
+    fn is_overlayable_node(&self) -> bool {
+        self.tokens.get(1) == Some(&&b"__overlay__"[..])
+    }
+}
 
 /// Represents VM DTBO
 #[repr(transparent)]
@@ -167,9 +233,7 @@ impl VmDtbo {
     //           rng { ... };      // Actual device node is here. If overlaid, path would be "/rng"
     //         };
     //       };
-    //       __symbols__ {         // List of assignable devices
-    //         // Each property describes an assigned device device information.
-    //         // property name is the device label, and property value is the path in the VM DTBO.
+    //       __symbols__ {         // Contains list of assignable devices
     //         rng = "/fragment@rng/__overlay__/rng";
     //       };
     //    };
@@ -181,14 +245,9 @@ impl VmDtbo {
     // node and/or properties. The enforcement is for compatibility reason.
     fn locate_overlay_target_path(
         &self,
-        dtbo_node_path: &CStr,
+        dtbo_node_path: &DtPathTokens,
         dtbo_node: &FdtNode,
     ) -> Result<CString> {
-        let dtbo_node_path_bytes = dtbo_node_path.to_bytes();
-        if dtbo_node_path_bytes.first() != Some(&b'/') {
-            return Err(DeviceAssignmentError::UnsupportedOverlayTarget);
-        }
-
         let fragment_node = dtbo_node.supernode_at_depth(1)?;
         let target_path = fragment_node
             .getprop_str(cstr!("target-path"))?
@@ -197,22 +256,8 @@ impl VmDtbo {
             return Err(DeviceAssignmentError::UnsupportedOverlayTarget);
         }
 
-        let mut components = dtbo_node_path_bytes
-            .split(|char| *char == b'/')
-            .filter(|&component| !component.is_empty())
-            .skip(1);
-        let overlay_node_name = components.next();
-        if overlay_node_name != Some(b"__overlay__") {
-            return Err(DeviceAssignmentError::InvalidDtbo);
-        }
-        let mut overlaid_path = Vec::with_capacity(dtbo_node_path_bytes.len());
-        for component in components {
-            overlaid_path.push(b'/');
-            overlaid_path.extend_from_slice(component);
-        }
-        overlaid_path.push(b'\0');
-
-        Ok(CString::from_vec_with_nul(overlaid_path).unwrap())
+        let overlaid_path = dtbo_node_path.to_overlay_target_path()?;
+        Ok(overlaid_path.to_cstring())
     }
 
     fn parse_physical_iommus(physical_node: &FdtNode) -> Result<BTreeMap<Phandle, PhysIommu>> {
@@ -283,15 +328,17 @@ impl VmDtbo {
         let phys_iommus = Self::parse_physical_iommus(&physical_node)?;
         Self::parse_physical_devices_with_iommus(&physical_node, &phys_iommus)
     }
-}
 
-fn is_overlayable_node(dtbo_path: &CStr) -> bool {
-    dtbo_path
-        .to_bytes()
-        .split(|char| *char == b'/')
-        .filter(|&component| !component.is_empty())
-        .nth(1)
-        .map_or(false, |name| name == b"__overlay__")
+    fn node(&self, path: &DtPathTokens) -> Result<Option<FdtNode>> {
+        let mut node = self.as_ref().root();
+        for token in &path.tokens {
+            let Some(subnode) = node.subnode_with_name_bytes(token)? else {
+                return Ok(None);
+            };
+            node = subnode;
+        }
+        Ok(Some(node))
+    }
 }
 
 fn filter_dangling_symbols(fdt: &mut Fdt) -> Result<()> {
@@ -460,8 +507,6 @@ impl PhysicalDeviceInfo {
 struct AssignedDeviceInfo {
     // Node path of assigned device (e.g. "/rng")
     node_path: CString,
-    // DTBO node path of the assigned device (e.g. "/fragment@rng/__overlay__/rng")
-    dtbo_node_path: CString,
     // <reg> property from the crosvm DT
     reg: Vec<DeviceReg>,
     // <interrupts> property from the crosvm DT
@@ -570,21 +615,24 @@ impl AssignedDeviceInfo {
     fn parse(
         fdt: &Fdt,
         vm_dtbo: &VmDtbo,
-        dtbo_node_path: &CStr,
+        dtbo_node_path: &DtPathTokens,
         physical_devices: &BTreeMap<Phandle, PhysicalDeviceInfo>,
         pviommus: &BTreeMap<Phandle, PvIommu>,
         hypervisor: &dyn DeviceAssigningHypervisor,
     ) -> Result<Option<Self>> {
         let dtbo_node =
-            vm_dtbo.as_ref().node(dtbo_node_path)?.ok_or(DeviceAssignmentError::InvalidSymbols)?;
+            vm_dtbo.node(dtbo_node_path)?.ok_or(DeviceAssignmentError::InvalidSymbols)?;
         let node_path = vm_dtbo.locate_overlay_target_path(dtbo_node_path, &dtbo_node)?;
 
         let Some(node) = fdt.node(&node_path)? else { return Ok(None) };
 
-        // Note: Currently can only assign devices backed by physical devices.
+        // Currently can only assign devices backed by physical devices.
         let phandle = dtbo_node.get_phandle()?.ok_or(DeviceAssignmentError::InvalidDtbo)?;
-        let physical_device =
-            physical_devices.get(&phandle).ok_or(DeviceAssignmentError::InvalidDtbo)?;
+        let Some(physical_device) = physical_devices.get(&phandle) else {
+            // If labeled DT node isn't backed by physical device node, then just return None.
+            // It's not an error because such node can be a dependency of assignable device nodes.
+            return Ok(None);
+        };
 
         let reg = parse_node_reg(&node)?;
         Self::validate_reg(&reg, &physical_device.reg, hypervisor)?;
@@ -594,7 +642,7 @@ impl AssignedDeviceInfo {
         let iommus = Self::parse_iommus(&node, pviommus)?;
         Self::validate_iommus(&iommus, &physical_device.iommus, hypervisor)?;
 
-        Ok(Some(Self { node_path, dtbo_node_path: dtbo_node_path.into(), reg, interrupts, iommus }))
+        Ok(Some(Self { node_path, reg, interrupts, iommus }))
     }
 
     fn patch(&self, fdt: &mut Fdt, pviommu_phandles: &BTreeMap<PvIommu, Phandle>) -> Result<()> {
@@ -680,13 +728,14 @@ impl DeviceAssignmentInfo {
             let symbol_prop_value = symbol_prop.value()?;
             let dtbo_node_path = CStr::from_bytes_with_nul(symbol_prop_value)
                 .or(Err(DeviceAssignmentError::InvalidSymbols))?;
-            if !is_overlayable_node(dtbo_node_path) {
+            let dtbo_node_path = DtPathTokens::new(dtbo_node_path)?;
+            if !dtbo_node_path.is_overlayable_node() {
                 continue;
             }
             let assigned_device = AssignedDeviceInfo::parse(
                 fdt,
                 vm_dtbo,
-                dtbo_node_path,
+                &dtbo_node_path,
                 &physical_devices,
                 &pviommus,
                 hypervisor,
@@ -694,7 +743,7 @@ impl DeviceAssignmentInfo {
             if let Some(assigned_device) = assigned_device {
                 assigned_devices.push(assigned_device);
             } else {
-                filtered_dtbo_paths.push(dtbo_node_path.into());
+                filtered_dtbo_paths.push(dtbo_node_path.to_cstring());
             }
         }
         if assigned_devices.is_empty() {
@@ -705,7 +754,6 @@ impl DeviceAssignmentInfo {
 
         // Clean up any nodes that wouldn't be overlaid but may contain reference to filtered nodes.
         // Otherwise, `fdt_apply_overlay()` would fail because of missing phandle reference.
-        filtered_dtbo_paths.push(CString::new("/__symbols__").unwrap());
         // TODO(b/277993056): Also filter other unused nodes/props in __local_fixups__
         filtered_dtbo_paths.push(CString::new("/__local_fixups__/host").unwrap());
 
@@ -718,7 +766,6 @@ impl DeviceAssignmentInfo {
     /// Filters VM DTBO to only contain necessary information for booting pVM
     /// In detail, this will remove followings by setting nop node / nop property.
     ///   - Removes unassigned devices
-    ///   - Removes /__symbols__ node
     // TODO(b/277993056): remove unused dependencies in VM DTBO.
     // TODO(b/277993056): remove supernodes' properties.
     // TODO(b/277993056): remove unused alises.
@@ -731,7 +778,7 @@ impl DeviceAssignmentInfo {
             node.nop()?;
         }
 
-        Ok(())
+        filter_dangling_symbols(vm_dtbo)
     }
 
     fn patch_pviommus(&self, fdt: &mut Fdt) -> Result<BTreeMap<PvIommu, Phandle>> {
@@ -923,7 +970,6 @@ mod tests {
 
         let expected = [AssignedDeviceInfo {
             node_path: CString::new("/bus0/backlight").unwrap(),
-            dtbo_node_path: cstr!("/fragment@backlight/__overlay__/bus0/backlight").into(),
             reg: vec![[0x9, 0xFF].into()],
             interrupts: into_fdt_prop(vec![0x0, 0xF, 0x4]),
             iommus: vec![],
@@ -947,7 +993,6 @@ mod tests {
 
         let expected = [AssignedDeviceInfo {
             node_path: CString::new("/rng").unwrap(),
-            dtbo_node_path: cstr!("/fragment@rng/__overlay__/rng").into(),
             reg: vec![[0x9, 0xFF].into()],
             interrupts: into_fdt_prop(vec![0x0, 0xF, 0x4]),
             iommus: vec![(PvIommu { id: 0x4 }, Vsid(0xFF0))],
@@ -972,21 +1017,27 @@ mod tests {
 
         let vm_dtbo = vm_dtbo.as_mut();
 
-        let rng = vm_dtbo.node(cstr!("/fragment@rng/__overlay__/rng")).unwrap();
+        let symbols = vm_dtbo.symbols().unwrap().unwrap();
+
+        let rng = vm_dtbo.node(cstr!("/fragment@0/__overlay__/rng")).unwrap();
         assert_ne!(rng, None);
+        let rng_symbol = symbols.getprop_str(cstr!("rng")).unwrap();
+        assert_eq!(Some(cstr!("/fragment@0/__overlay__/rng")), rng_symbol);
 
-        let light = vm_dtbo.node(cstr!("/fragment@rng/__overlay__/light")).unwrap();
+        let light = vm_dtbo.node(cstr!("/fragment@0/__overlay__/light")).unwrap();
         assert_eq!(light, None);
+        let light_symbol = symbols.getprop_str(cstr!("light")).unwrap();
+        assert_eq!(None, light_symbol);
 
-        let led = vm_dtbo.node(cstr!("/fragment@led/__overlay__/led")).unwrap();
+        let led = vm_dtbo.node(cstr!("/fragment@0/__overlay__/led")).unwrap();
         assert_eq!(led, None);
+        let led_symbol = symbols.getprop_str(cstr!("led")).unwrap();
+        assert_eq!(None, led_symbol);
 
-        let backlight =
-            vm_dtbo.node(cstr!("/fragment@backlight/__overlay__/bus0/backlight")).unwrap();
+        let backlight = vm_dtbo.node(cstr!("/fragment@0/__overlay__/bus0/backlight")).unwrap();
         assert_eq!(backlight, None);
-
-        let symbols_node = vm_dtbo.symbols().unwrap();
-        assert_eq!(symbols_node, None);
+        let backlight_symbol = symbols.getprop_str(cstr!("backlight")).unwrap();
+        assert_eq!(None, backlight_symbol);
     }
 
     #[test]
