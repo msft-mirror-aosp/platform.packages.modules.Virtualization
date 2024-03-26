@@ -269,6 +269,13 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             .context("Failed to generate ECDSA P-256 key pair for testing")
             .with_log()
             .or_service_specific_exception(-1)?;
+        // Wait until the service VM shuts down, so that the Service VM will be restarted when
+        // the key generated in the current session will be used for attestation.
+        // This ensures that different Service VM sessions have the same KEK for the key blob.
+        service_vm_manager::wait_until_service_vm_shuts_down()
+            .context("Failed to wait until the service VM shuts down")
+            .with_log()
+            .or_service_specific_exception(-1)?;
         match res {
             Response::GenerateEcdsaP256KeyPair(key_pair) => {
                 FAKE_PROVISIONED_KEY_BLOB_FOR_TESTING
@@ -296,6 +303,13 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
                     "requestAttestation is not supported with the remote_attestation feature \
                      disabled",
                 ),
+            ))
+            .with_log();
+        }
+        if !remotely_provisioned_component_service_exists()? {
+            return Err(Status::new_exception_str(
+                ExceptionCode::UNSUPPORTED_OPERATION,
+                Some("AVF remotely provisioned component service is not declared"),
             ))
             .with_log();
         }
@@ -348,13 +362,17 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         Ok(certificate_chain)
     }
 
+    fn isRemoteAttestationSupported(&self) -> binder::Result<bool> {
+        remotely_provisioned_component_service_exists()
+    }
+
     fn getAssignableDevices(&self) -> binder::Result<Vec<AssignableDevice>> {
         check_use_custom_virtual_machine()?;
 
         Ok(get_assignable_devices()?
             .device
             .into_iter()
-            .map(|x| AssignableDevice { node: x.sysfs_path, kind: x.kind })
+            .map(|x| AssignableDevice { node: x.sysfs_path, dtbo_label: x.dtbo_label })
             .collect::<Vec<_>>())
     }
 
@@ -399,7 +417,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         if let Some(sk_state) = &mut state.sk_state {
             let user_id = multiuser_get_user_id(uid);
             let app_id = multiuser_get_app_id(uid);
-            info!("Recording potential existence of state for (user_id={user_id}, app_id={app_id}");
+            info!("Recording possible existence of state for (user_id={user_id}, app_id={app_id})");
             if let Err(e) = sk_state.add_id(&id, user_id, app_id) {
                 error!("Failed to record the instance_id: {e:?}");
             }
@@ -415,6 +433,28 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             sk_state.delete_ids(&[*instance_id]);
         } else {
             info!("ignoring removeVmInstance() as no ISecretkeeper");
+        }
+        Ok(())
+    }
+
+    fn claimVmInstance(&self, instance_id: &[u8; 64]) -> binder::Result<()> {
+        let state = &mut *self.state.lock().unwrap();
+        if let Some(sk_state) = &mut state.sk_state {
+            let uid = get_calling_uid();
+            info!(
+                "Claiming a VM's instance_id: {:?}, for uid: {:?}",
+                hex::encode(instance_id),
+                uid
+            );
+
+            let user_id = multiuser_get_user_id(uid);
+            let app_id = multiuser_get_app_id(uid);
+            info!("Recording possible new owner of state for (user_id={user_id}, app_id={app_id})");
+            if let Err(e) = sk_state.add_id(instance_id, user_id, app_id) {
+                error!("Failed to update the instance_id owner: {e:?}");
+            }
+        } else {
+            info!("ignoring claimVmInstance() as no ISecretkeeper");
         }
         Ok(())
     }
@@ -445,17 +485,21 @@ impl IVirtualizationMaintenance for VirtualizationServiceInternal {
 
     fn performReconciliation(
         &self,
-        _callback: &Strong<dyn IVirtualizationReconciliationCallback>,
+        callback: &Strong<dyn IVirtualizationReconciliationCallback>,
     ) -> binder::Result<()> {
-        Err(anyhow!("performReconciliation not supported"))
-            .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION)
+        let state = &mut *self.state.lock().unwrap();
+        if let Some(sk_state) = &mut state.sk_state {
+            info!("performReconciliation()");
+            sk_state.reconcile(callback).or_service_specific_exception(-1)?;
+        } else {
+            info!("ignoring performReconciliation()");
+        }
+        Ok(())
     }
 }
 
-// KEEP IN SYNC WITH assignable_devices.xsd
 #[derive(Debug, Deserialize)]
 struct Device {
-    kind: String,
     dtbo_label: String,
     sysfs_path: String,
 }
@@ -761,6 +805,10 @@ fn handle_tombstone(stream: &mut VsockStream) -> Result<()> {
     info!("Received {} bytes from guest & wrote to tombstone file", num_bytes_read);
     tb_connection.notify_completion()?;
     Ok(())
+}
+
+fn remotely_provisioned_component_service_exists() -> binder::Result<bool> {
+    Ok(binder::is_declared(REMOTELY_PROVISIONED_COMPONENT_SERVICE_NAME)?)
 }
 
 /// Checks whether the caller has a specific permission

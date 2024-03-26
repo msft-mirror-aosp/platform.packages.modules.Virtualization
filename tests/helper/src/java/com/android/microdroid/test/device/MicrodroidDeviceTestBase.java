@@ -43,6 +43,8 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import com.android.microdroid.test.common.DeviceProperties;
 import com.android.microdroid.test.common.MetricsProcessor;
 import com.android.microdroid.testservice.ITestService;
+import com.android.virt.vm_attestation.testservice.IAttestationService;
+import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
@@ -127,6 +129,7 @@ public abstract class MicrodroidDeviceTestBase {
     public VirtualMachineConfig.Builder newVmConfigBuilderWithPayloadConfig(String configPath) {
         return new VirtualMachineConfig.Builder(mCtx)
                 .setProtectedVm(mProtectedVm)
+                .setOs(os())
                 .setPayloadConfigPath(configPath);
     }
 
@@ -203,6 +206,12 @@ public abstract class MicrodroidDeviceTestBase {
         assume().withMessage("Skip on 5.4 kernel. b/218303240")
                 .that(KERNEL_VERSION)
                 .isNotEqualTo("5.4");
+    }
+
+    protected void assumeNoUpdatableVmSupport() throws VirtualMachineException {
+        assume().withMessage("Secretkeeper not supported")
+                .that(getVirtualMachineManager().isUpdatableVmSupported())
+                .isFalse();
     }
 
     public abstract static class VmEventListener implements VirtualMachineCallback {
@@ -521,6 +530,40 @@ public abstract class MicrodroidDeviceTestBase {
                 throw new RuntimeException(mException);
             }
         }
+    }
+
+    protected SigningResult runVmAttestationService(
+            String logTag, VirtualMachine vm, byte[] challenge, byte[] messageToSign)
+            throws Exception {
+
+        CompletableFuture<Exception> exception = new CompletableFuture<>();
+        CompletableFuture<Boolean> payloadReady = new CompletableFuture<>();
+        CompletableFuture<SigningResult> signingResultFuture = new CompletableFuture<>();
+        VmEventListener listener =
+                new VmEventListener() {
+                    @Override
+                    public void onPayloadReady(VirtualMachine vm) {
+                        payloadReady.complete(true);
+                        try {
+                            IAttestationService service =
+                                    IAttestationService.Stub.asInterface(
+                                            vm.connectToVsockServer(IAttestationService.PORT));
+                            signingResultFuture.complete(
+                                    service.signWithAttestationKey(challenge, messageToSign));
+                        } catch (Exception e) {
+                            exception.complete(e);
+                        } finally {
+                            forceStop(vm);
+                        }
+                    }
+                };
+        listener.runToFinish(TAG, vm);
+
+        assertThat(payloadReady.getNow(false)).isTrue();
+        assertThat(exception.getNow(null)).isNull();
+        SigningResult signingResult = signingResultFuture.getNow(null);
+        assertThat(signingResult).isNotNull();
+        return signingResult;
     }
 
     protected TestResults runVmTestService(

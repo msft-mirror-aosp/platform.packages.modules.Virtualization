@@ -82,6 +82,7 @@ import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.Objects;
 
 @RunWith(DeviceJUnit4Parameterized.class)
 @UseParametersRunnerFactory(DeviceJUnit4ClassRunnerWithParameters.RunnerFactory.class)
@@ -153,7 +154,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
             throws Exception {
         PayloadMetadata.write(
                 PayloadMetadata.metadata(
-                        "/mnt/apk/assets/" + mOs + "/vm_config.json",
+                        "/mnt/apk/assets/vm_config.json",
                         PayloadMetadata.apk("microdroid-apk"),
                         apexes.stream()
                                 .map(apex -> PayloadMetadata.apex(apex.name))
@@ -412,7 +413,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     public void protectedVmRunsPvmfw() throws Exception {
         // Arrange
         assumeProtectedVm();
-        final String configPath = "assets/" + mOs + "/vm_config_apex.json";
+        final String configPath = "assets/vm_config_apex.json";
 
         // Act
         mMicrodroidDevice =
@@ -421,6 +422,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(true)
+                        .gki(mGki)
                         .build(getAndroidDevice());
 
         // Assert
@@ -548,6 +550,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(protectedVm)
+                        .gki(mGki)
                         .build(getAndroidDevice());
         mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
         mMicrodroidDevice.enableAdbRoot();
@@ -569,7 +572,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertThat(
                         isTombstoneGeneratedWithCmd(
                                 mProtectedVm,
-                                "assets/" + mOs + "/vm_config.json",
+                                "assets/vm_config.json",
                                 "kill",
                                 "-SIGSEGV",
                                 "$(pidof microdroid_launcher)"))
@@ -583,7 +586,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertThat(
                         isTombstoneGeneratedWithCmd(
                                 mProtectedVm,
-                                "assets/" + mOs + "/vm_config_no_tombstone.json",
+                                "assets/vm_config_no_tombstone.json",
                                 "kill",
                                 "-SIGSEGV",
                                 "$(pidof microdroid_launcher)"))
@@ -597,7 +600,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertThat(
                         isTombstoneGeneratedWithCmd(
                                 mProtectedVm,
-                                "assets/" + mOs + "/vm_config.json",
+                                "assets/vm_config.json",
                                 "echo",
                                 "c",
                                 ">",
@@ -636,6 +639,10 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         if (protectedVm) {
             cmd.add("--protected");
         }
+        if (mGki != null) {
+            cmd.add("--gki");
+            cmd.add(mGki);
+        }
         Collections.addAll(cmd, additionalArgs);
 
         android.run(cmd.toArray(new String[0]));
@@ -667,10 +674,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     private boolean isTombstoneGeneratedWithCrashConfig(boolean protectedVm, boolean debuggable)
             throws Exception {
         return isTombstoneGeneratedWithVmRunApp(
-                protectedVm,
-                debuggable,
-                "--config-path",
-                "assets/" + mOs + "/vm_config_crash.json");
+                protectedVm, debuggable, "--config-path", "assets/vm_config_crash.json");
     }
 
     @Test
@@ -705,13 +709,14 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
         // Create VM with microdroid
         TestDevice device = getAndroidDevice();
-        final String configPath = "assets/" + mOs + "/vm_config_apex.json"; // path inside the APK
+        final String configPath = "assets/vm_config_apex.json"; // path inside the APK
         ITestDevice microdroid =
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(mProtectedVm)
+                        .gki(mGki)
                         .build(device);
         microdroid.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
         device.shutdownMicrodroid(microdroid);
@@ -797,7 +802,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 getDevice().pullFileContents(CONSOLE_PATH) + getDevice().pullFileContents(LOG_PATH);
         assertWithMessage("Unexpected denials during VM boot")
                 .that(logText)
-                .doesNotContainMatch("avc:\s+denied");
+                .doesNotContainMatch("avc:\\s+denied");
 
         assertThat(getDeviceNumCpus(microdroid)).isEqualTo(getDeviceNumCpus(android));
 
@@ -833,24 +838,26 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-1-2", "9.17/C/1-3"})
     public void testMicrodroidBoots() throws Exception {
-        final String configPath = "assets/" + mOs + "/vm_config.json"; // path inside the APK
+        final String configPath = "assets/vm_config.json"; // path inside the APK
         testMicrodroidBootsWithBuilder(
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
-                        .protectedVm(mProtectedVm));
+                        .protectedVm(mProtectedVm)
+                        .gki(mGki));
     }
 
     @Test
     public void testMicrodroidRamUsage() throws Exception {
-        final String configPath = "assets/" + mOs + "/vm_config.json";
+        final String configPath = "assets/vm_config.json";
         mMicrodroidDevice =
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(mProtectedVm)
+                        .gki(mGki)
                         .build(getAndroidDevice());
         mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
         mMicrodroidDevice.enableAdbRoot();
@@ -1035,65 +1042,48 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         // Check for preconditions
         assumeVfioPlatformSupported();
 
-        List<String> devices = getAssignableDevices();
+        List<AssignableDevice> devices = getAssignableDevices();
         assumeFalse("no assignable devices", devices.isEmpty());
 
-        String vmFdtPath = "/sys/firmware/fdt";
-        File testDir = FileUtil.createTempDir("device_assignment_test");
-        File baseFdtFile = new File(testDir, "base_fdt.dtb");
-        File fdtFile = new File(testDir, "fdt.dtb");
-
-        // Generates baseline DT
-        launchWithDeviceAssignment(/* device= */ null);
-        assertThat(mMicrodroidDevice.pullFile(vmFdtPath, baseFdtFile)).isTrue();
-        getAndroidDevice().shutdownMicrodroid(mMicrodroidDevice);
-
-        // Prepares to run dtdiff. It requires dtc.
-        File dtdiff = findTestFile("dtdiff");
-        RunUtil runner = new RunUtil();
-        String separator = System.getProperty("path.separator");
-        String path = dtdiff.getParent() + separator + System.getenv("PATH");
-        runner.setEnvVariable("PATH", path);
+        String dtSysfsPath = "/proc/device-tree/";
 
         // Try assign devices one by one
-        for (String device : devices) {
-            assertThat(device).isNotNull();
-            launchWithDeviceAssignment(device);
-            assertThat(mMicrodroidDevice.pullFile(vmFdtPath, fdtFile)).isTrue();
+        for (AssignableDevice device : devices) {
+            launchWithDeviceAssignment(device.node);
+
+            String dtPath =
+                    new CommandRunner(mMicrodroidDevice)
+                            .run("cat", dtSysfsPath + "__symbols__/" + device.dtbo_label);
+            assertThat(dtPath).isNotEmpty();
+
+            String resolvedDtPath =
+                    new CommandRunner(mMicrodroidDevice)
+                            .run("readlink", "-e", dtSysfsPath + dtPath);
+            assertThat(resolvedDtPath).isNotEmpty();
+
+            String allDevices =
+                    new CommandRunner(mMicrodroidDevice)
+                            .run("readlink", "-e", "/sys/bus/platform/devices/*/of_node");
+            assertThat(allDevices.split("\n")).asList().contains(resolvedDtPath);
+
             getAndroidDevice().shutdownMicrodroid(mMicrodroidDevice);
-
-            CommandResult result =
-                    runner.runTimedCmd(
-                            500,
-                            dtdiff.getAbsolutePath(),
-                            baseFdtFile.getPath(),
-                            fdtFile.getPath());
-
-            assertWithMessage(
-                            "VM's device tree hasn't changed when assigning "
-                                    + device
-                                    + ", result="
-                                    + result)
-                    .that(result.getStatus())
-                    .isNotEqualTo(CommandStatus.SUCCESS);
+            mMicrodroidDevice = null;
         }
-
-        mMicrodroidDevice = null;
     }
 
     private void launchWithDeviceAssignment(String device) throws Exception {
-        final String configPath = "assets/" + mOs + "/vm_config.json";
+        Objects.requireNonNull(device);
+        final String configPath = "assets/vm_config.json";
 
-        MicrodroidBuilder builder =
+        mMicrodroidDevice =
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
-                        .protectedVm(mProtectedVm);
-        if (device != null) {
-            builder.addAssignableDevice(device);
-        }
-        mMicrodroidDevice = builder.build(getAndroidDevice());
+                        .protectedVm(mProtectedVm)
+                        .gki(mGki)
+                        .addAssignableDevice(device)
+                        .build(getAndroidDevice());
 
         assertThat(mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT)).isTrue();
         assertThat(mMicrodroidDevice.enableAdbRoot()).isTrue();

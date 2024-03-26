@@ -22,7 +22,7 @@ use android_system_virtualizationservice::{
     binder::{ParcelFileDescriptor, ProcessState},
 };
 use anyhow::{bail, Context, Result};
-use bssl_avf::{sha256, EcKey, PKey};
+use bssl_avf::{rand_bytes, sha256, EcKey, PKey};
 use client_vm_csr::generate_attestation_key_and_csr;
 use coset::{CborSerializable, CoseMac0, CoseSign};
 use hwtrust::{rkp, session::Session};
@@ -52,8 +52,12 @@ const UNSIGNED_RIALTO_PATH: &str = "/data/local/tmp/rialto_test/arm64/rialto_uns
 const INSTANCE_IMG_PATH: &str = "/data/local/tmp/rialto_test/arm64/instance.img";
 const TEST_CERT_CHAIN_PATH: &str = "testdata/rkp_cert_chain.der";
 
+#[cfg(dice_changes)]
 #[test]
 fn process_requests_in_protected_vm() -> Result<()> {
+    // The test is skipped if the feature flag |dice_changes| is not enabled, because when
+    // the flag is off, the DICE chain is truncated in the pvmfw, and the service VM cannot
+    // verify the chain due to the missing entries in the chain.
     check_processing_requests(VmType::ProtectedVm)
 }
 
@@ -302,12 +306,18 @@ fn vm_instance(vm_type: VmType) -> Result<VmInstance> {
 
 fn nonprotected_vm_instance() -> Result<VmInstance> {
     let rialto = File::open(UNSIGNED_RIALTO_PATH).context("Failed to open Rialto kernel binary")?;
+    // Do not use `#allocateInstanceId` to generate the instance ID because the method
+    // also adds an instance ID to the database it manages.
+    // This is not necessary for this test.
+    let mut instance_id = [0u8; 64];
+    rand_bytes(&mut instance_id).unwrap();
     let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
         name: String::from("Non protected rialto"),
         bootloader: Some(ParcelFileDescriptor::new(rialto)),
         protectedVm: false,
         memoryMib: 300,
         platformVersion: "~1.0".to_string(),
+        instanceId: instance_id,
         ..Default::default()
     });
     let console = Some(service_vm_manager::android_log_fd()?);

@@ -18,6 +18,7 @@ package android.system.virtualmachine;
 
 import static android.os.ParcelFileDescriptor.AutoCloseInputStream;
 import static android.os.ParcelFileDescriptor.MODE_READ_ONLY;
+import static android.os.ParcelFileDescriptor.MODE_READ_WRITE;
 
 import static java.util.Objects.requireNonNull;
 
@@ -27,6 +28,7 @@ import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.RequiresPermission;
+import android.annotation.StringDef;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
 import android.content.Context;
@@ -36,11 +38,18 @@ import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.PersistableBundle;
 import android.sysprop.HypervisorProperties;
+import android.system.virtualizationservice.DiskImage;
+import android.system.virtualizationservice.Partition;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
 import android.system.virtualizationservice.VirtualMachinePayloadConfig;
+import android.system.virtualizationservice.VirtualMachineRawConfig;
 import android.util.Log;
 
 import com.android.system.virtualmachine.flags.Flags;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -51,6 +60,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -77,6 +88,7 @@ public final class VirtualMachineConfig {
     private static final String KEY_PACKAGENAME = "packageName";
     private static final String KEY_APKPATH = "apkPath";
     private static final String KEY_PAYLOADCONFIGPATH = "payloadConfigPath";
+    private static final String KEY_RAWCONFIGPATH = "rawConfigPath";
     private static final String KEY_PAYLOADBINARYNAME = "payloadBinaryPath";
     private static final String KEY_DEBUGLEVEL = "debugLevel";
     private static final String KEY_PROTECTED_VM = "protectedVm";
@@ -172,6 +184,9 @@ public final class VirtualMachineConfig {
     /** Name of the payload binary file within the APK that will be executed within the VM. */
     @Nullable private final String mPayloadBinaryName;
 
+    /** Path within the raw config file to launch the VM. */
+    @Nullable private final String mRawConfigPath;
+
     /** The size of storage in bytes. 0 indicates that encryptedStorage is not required */
     private final long mEncryptedStorageBytes;
 
@@ -183,8 +198,25 @@ public final class VirtualMachineConfig {
 
     @Nullable private final File mVendorDiskImage;
 
-    /** OS name of the VM using payload binaries. null if the VM uses a payload config file. */
-    @Nullable private final String mOs;
+    /** OS name of the VM using payload binaries. */
+    @NonNull @OsName private final String mOs;
+
+    @Retention(RetentionPolicy.SOURCE)
+    @StringDef(
+            prefix = "MICRODROID",
+            value = {MICRODROID})
+    private @interface OsName {}
+
+    /**
+     * OS name of microdroid using microdroid kernel.
+     *
+     * @see Builder#setOs
+     * @hide
+     */
+    @TestApi
+    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
+    @OsName
+    public static final String MICRODROID = "microdroid";
 
     private VirtualMachineConfig(
             @Nullable String packageName,
@@ -192,6 +224,7 @@ public final class VirtualMachineConfig {
             List<String> extraApks,
             @Nullable String payloadConfigPath,
             @Nullable String payloadBinaryName,
+            @Nullable String rawConfigPath,
             @DebugLevel int debugLevel,
             boolean protectedVm,
             long memoryBytes,
@@ -200,7 +233,7 @@ public final class VirtualMachineConfig {
             boolean vmOutputCaptured,
             boolean vmConsoleInputSupported,
             @Nullable File vendorDiskImage,
-            @Nullable String os) {
+            @NonNull @OsName String os) {
         // This is only called from Builder.build(); the builder handles parameter validation.
         mPackageName = packageName;
         mApkPath = apkPath;
@@ -211,6 +244,7 @@ public final class VirtualMachineConfig {
                                 Arrays.asList(extraApks.toArray(new String[0])));
         mPayloadConfigPath = payloadConfigPath;
         mPayloadBinaryName = payloadBinaryName;
+        mRawConfigPath = rawConfigPath;
         mDebugLevel = debugLevel;
         mProtectedVm = protectedVm;
         mMemoryBytes = memoryBytes;
@@ -272,10 +306,14 @@ public final class VirtualMachineConfig {
         }
 
         String payloadConfigPath = b.getString(KEY_PAYLOADCONFIGPATH);
-        if (payloadConfigPath == null) {
-            builder.setPayloadBinaryName(b.getString(KEY_PAYLOADBINARYNAME));
-        } else {
+        String payloadBinaryName = b.getString(KEY_PAYLOADBINARYNAME);
+        String rawConfigPath = b.getString(KEY_RAWCONFIGPATH);
+        if (rawConfigPath != null) {
+            builder.setRawConfigPath(rawConfigPath);
+        } else if (payloadConfigPath != null) {
             builder.setPayloadConfigPath(payloadConfigPath);
+        } else {
+            builder.setPayloadBinaryName(payloadBinaryName);
         }
 
         @DebugLevel int debugLevel = b.getInt(KEY_DEBUGLEVEL);
@@ -301,10 +339,7 @@ public final class VirtualMachineConfig {
             builder.setVendorDiskImage(new File(vendorDiskImagePath));
         }
 
-        String os = b.getString(KEY_OS);
-        if (os != null) {
-            builder.setOs(os);
-        }
+        builder.setOs(b.getString(KEY_OS));
 
         String[] extraApks = b.getStringArray(KEY_EXTRA_APKS);
         if (extraApks != null) {
@@ -337,6 +372,7 @@ public final class VirtualMachineConfig {
         }
         b.putString(KEY_PAYLOADCONFIGPATH, mPayloadConfigPath);
         b.putString(KEY_PAYLOADBINARYNAME, mPayloadBinaryName);
+        b.putString(KEY_RAWCONFIGPATH, mRawConfigPath);
         b.putInt(KEY_DEBUGLEVEL, mDebugLevel);
         b.putBoolean(KEY_PROTECTED_VM, mProtectedVm);
         b.putInt(KEY_CPU_TOPOLOGY, mCpuTopology);
@@ -394,6 +430,16 @@ public final class VirtualMachineConfig {
     @Nullable
     public String getPayloadConfigPath() {
         return mPayloadConfigPath;
+    }
+
+    /**
+     * Returns the path within the raw config file to launch the VM.
+     *
+     * @hide
+     */
+    @Nullable
+    public String getRawConfigPath() {
+        return mRawConfigPath;
     }
 
     /**
@@ -498,14 +544,15 @@ public final class VirtualMachineConfig {
     }
 
     /**
-     * Returns the OS of the VM using a payload binary. Returns null if the VM uses payload config.
+     * Returns the OS of the VM.
      *
      * @see Builder#setOs
      * @hide
      */
     @TestApi
     @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
-    @Nullable
+    @NonNull
+    @OsName
     public String getOs() {
         return mOs;
     }
@@ -538,6 +585,99 @@ public final class VirtualMachineConfig {
                 && Objects.equals(this.mExtraApks, other.mExtraApks);
     }
 
+    // Needs to sync with packages/modules/Virtualization/libs/vmconfig/src/lib.rs
+    VirtualMachineRawConfig toVsRawConfig() throws IllegalStateException {
+        VirtualMachineRawConfig config = new VirtualMachineRawConfig();
+
+        try {
+            String rawJson = new String(Files.readAllBytes(Path.of(mRawConfigPath)));
+            JSONObject json = new JSONObject(rawJson);
+            config.name = json.optString("name", "");
+            config.instanceId = new byte[64];
+            if (json.has("kernel")) {
+                config.kernel =
+                        ParcelFileDescriptor.open(
+                                new File(json.getString("kernel")), MODE_READ_ONLY);
+            }
+            if (json.has("initrd")) {
+                config.initrd =
+                        ParcelFileDescriptor.open(
+                                new File(json.getString("initrd")), MODE_READ_ONLY);
+            }
+            if (json.has("params")) {
+                config.params = json.getString("params");
+            }
+            if (json.has("bootloader")) {
+                config.bootloader =
+                        ParcelFileDescriptor.open(
+                                new File(json.getString("bootloader")), MODE_READ_ONLY);
+            }
+            if (json.has("disks")) {
+                JSONArray diskArr = json.getJSONArray("disks");
+                config.disks = new DiskImage[diskArr.length()];
+                for (int i = 0; i < diskArr.length(); i++) {
+                    config.disks[i] = new DiskImage();
+                    JSONObject item = diskArr.getJSONObject(i);
+                    config.disks[i].writable = item.optBoolean("writable", false);
+                    if (item.has("image")) {
+                        config.disks[i].image =
+                                ParcelFileDescriptor.open(
+                                        new File(item.getString("image")),
+                                        config.disks[i].writable
+                                                ? MODE_READ_WRITE
+                                                : MODE_READ_ONLY);
+                    }
+                    if (item.has("partition")) {
+                        JSONArray partitionArr = json.getJSONArray("partition");
+                        config.disks[i].partitions = new Partition[partitionArr.length()];
+                        for (int j = 0; j < partitionArr.length(); j++) {
+                            config.disks[i].partitions[j] = new Partition();
+                            JSONObject partitionItem = partitionArr.getJSONObject(j);
+                            config.disks[i].partitions[j].writable =
+                                    partitionItem.optBoolean("writable", false);
+                            config.disks[i].partitions[j].label = partitionItem.getString("label");
+                            config.disks[i].partitions[j].image =
+                                    ParcelFileDescriptor.open(
+                                            new File(partitionItem.getString("image")),
+                                            config.disks[i].partitions[j].writable
+                                                    ? MODE_READ_WRITE
+                                                    : MODE_READ_ONLY);
+                        }
+                    } else {
+                        config.disks[i].partitions = new Partition[0];
+                    }
+                }
+            } else {
+                config.disks = new DiskImage[0];
+            }
+            // The value which is set by setProtectedVm is used.
+            if (json.has("protected")) {
+                Log.d(TAG, "'protected' field is ignored, the value from setProtectedVm is used");
+            }
+            config.protectedVm = this.mProtectedVm;
+            config.memoryMib = json.optInt("memory_mib", 0);
+            if (json.optString("cpu_topology", "one_cpu").equals("match_host")) {
+                config.cpuTopology = CPU_TOPOLOGY_MATCH_HOST;
+            } else {
+                config.cpuTopology = CPU_TOPOLOGY_ONE_CPU;
+            }
+            config.platformVersion = json.getString("platform_version");
+            if (json.has("devices")) {
+                JSONArray arr = json.getJSONArray("devices");
+                config.devices = new String[arr.length()];
+                for (int i = 0; i < arr.length(); i++) {
+                    config.devices[i] = arr.getString(i);
+                }
+            } else {
+                config.devices = new String[0];
+            }
+
+        } catch (JSONException | IOException e) {
+            throw new IllegalStateException("malformed input", e);
+        }
+        return config;
+    }
+
     /**
      * Converts this config object into the parcelable type used when creating a VM via the
      * virtualization service. Notice that the files are not passed as paths, but as file
@@ -559,7 +699,6 @@ public final class VirtualMachineConfig {
         if (mPayloadBinaryName != null) {
             VirtualMachinePayloadConfig payloadConfig = new VirtualMachinePayloadConfig();
             payloadConfig.payloadBinaryName = mPayloadBinaryName;
-            payloadConfig.osName = mOs;
             payloadConfig.extraApks = Collections.emptyList();
             vsConfig.payload =
                     VirtualMachineAppConfig.Payload.payloadConfig(payloadConfig);
@@ -567,6 +706,7 @@ public final class VirtualMachineConfig {
             vsConfig.payload =
                     VirtualMachineAppConfig.Payload.configPath(mPayloadConfigPath);
         }
+        vsConfig.osName = mOs;
         switch (mDebugLevel) {
             case DEBUG_LEVEL_FULL:
                 vsConfig.debugLevel = VirtualMachineAppConfig.DebugLevel.FULL;
@@ -658,12 +798,13 @@ public final class VirtualMachineConfig {
      */
     @SystemApi
     public static final class Builder {
-        private final String DEFAULT_OS = "microdroid";
+        @OsName private final String DEFAULT_OS = MICRODROID;
 
         @Nullable private final String mPackageName;
         @Nullable private String mApkPath;
         private final List<String> mExtraApks = new ArrayList<>();
         @Nullable private String mPayloadConfigPath;
+        @Nullable private String mRawConfigPath;
         @Nullable private String mPayloadBinaryName;
         @DebugLevel private int mDebugLevel = DEBUG_LEVEL_NONE;
         private boolean mProtectedVm;
@@ -674,7 +815,7 @@ public final class VirtualMachineConfig {
         private boolean mVmOutputCaptured = false;
         private boolean mVmConsoleInputSupported = false;
         @Nullable private File mVendorDiskImage;
-        @Nullable private String mOs;
+        @NonNull @OsName private String mOs = DEFAULT_OS;
 
         /**
          * Creates a builder for the given context.
@@ -713,15 +854,15 @@ public final class VirtualMachineConfig {
                 // This should never happen, unless we're deserializing a bad config
                 throw new IllegalStateException("apkPath or packageName must be specified");
             }
-
-            String os = null;
-            if (mPayloadBinaryName == null) {
+            if (mRawConfigPath != null) {
+                if (mPayloadBinaryName != null || mPayloadConfigPath != null) {
+                    throw new IllegalStateException(
+                            "setRawConfigPath and (setPayloadBinaryName or setPayloadConfigPath)"
+                                    + " may not both be called");
+                }
+            } else if (mPayloadBinaryName == null) {
                 if (mPayloadConfigPath == null) {
                     throw new IllegalStateException("setPayloadBinaryName must be called");
-                }
-                if (mOs != null) {
-                    throw new IllegalStateException(
-                            "setPayloadConfigPath and setOs may not both be called");
                 }
                 if (!mExtraApks.isEmpty()) {
                     throw new IllegalStateException(
@@ -731,11 +872,6 @@ public final class VirtualMachineConfig {
                 if (mPayloadConfigPath != null) {
                     throw new IllegalStateException(
                             "setPayloadBinaryName and setPayloadConfigPath may not both be called");
-                }
-                if (mOs != null) {
-                    os = mOs;
-                } else {
-                    os = DEFAULT_OS;
                 }
             }
 
@@ -757,6 +893,7 @@ public final class VirtualMachineConfig {
                     mExtraApks,
                     mPayloadConfigPath,
                     mPayloadBinaryName,
+                    mRawConfigPath,
                     mDebugLevel,
                     mProtectedVm,
                     mMemoryBytes,
@@ -765,7 +902,7 @@ public final class VirtualMachineConfig {
                     mVmOutputCaptured,
                     mVmConsoleInputSupported,
                     mVendorDiskImage,
-                    os);
+                    mOs);
         }
 
         /**
@@ -814,6 +951,29 @@ public final class VirtualMachineConfig {
         public Builder setPayloadConfigPath(@NonNull String payloadConfigPath) {
             mPayloadConfigPath =
                     requireNonNull(payloadConfigPath, "payloadConfigPath must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the path within the raw config file to launch the VM. The file is a JSON file; see
+         * packages/modules/Virtualization/libs/vmconfig/src/lib.rs for the format.
+         *
+         * @hide
+         */
+        @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
+        @NonNull
+        public Builder setRawConfigPath(@NonNull String rawConfigPath) {
+            // TODO: This method will be removed when the builder support more structured methods
+            // for that like below.
+            //    builder
+            //      .setLinuxKernelConfig(new LinuxKernelConfig()
+            //        .setKernelPath(...)
+            //        .setInitRamdiskPath(...)
+            //        .setKernelCommandLine(...))
+            //      .setDiskConfig(new DiskConfig()
+            //        .addDisk(...)
+            //        .addDisk(...))
+            mRawConfigPath = requireNonNull(rawConfigPath, "rawConfigPath must not be null");
             return this;
         }
 
@@ -1025,7 +1185,7 @@ public final class VirtualMachineConfig {
         @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
         @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
         @NonNull
-        public Builder setOs(@NonNull String os) {
+        public Builder setOs(@NonNull @OsName String os) {
             mOs = requireNonNull(os, "os must not be null");
             return this;
         }

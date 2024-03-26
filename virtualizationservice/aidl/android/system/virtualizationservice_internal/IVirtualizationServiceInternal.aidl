@@ -77,6 +77,11 @@ interface IVirtualizationServiceInternal {
     void enableTestAttestation();
 
     /**
+     * Returns {@code true} if the pVM remote attestation feature is supported
+     */
+    boolean isRemoteAttestationSupported();
+
+    /**
      * Get a list of assignable devices.
      */
     AssignableDevice[] getAssignableDevices();
@@ -103,4 +108,12 @@ interface IVirtualizationServiceInternal {
      * @param instanceId The ID for the VM.
      */
     void removeVmInstance(in byte[64] instanceId);
+
+    /**
+     * Notification that ownership of a VM has been claimed by the caller.  Note that no permission
+     * checks (with respect to the previous owner) are performed.
+     *
+     * @param instanceId The ID for the VM.
+     */
+    void claimVmInstance(in byte[64] instanceId);
 }
