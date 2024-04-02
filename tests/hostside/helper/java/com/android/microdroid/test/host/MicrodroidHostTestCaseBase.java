@@ -31,10 +31,12 @@ import com.android.tradefed.device.ITestDevice;
 import com.android.tradefed.device.TestDevice;
 import com.android.tradefed.testtype.junit4.BaseHostJUnit4Test;
 import com.android.tradefed.util.CommandResult;
+import com.android.tradefed.util.CommandStatus;
 import com.android.tradefed.util.FileUtil;
 import com.android.tradefed.util.RunUtil;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
@@ -48,12 +50,16 @@ import java.util.stream.Collectors;
 
 public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
     protected static final String TEST_ROOT = "/data/local/tmp/virt/";
+    protected static final String TRADEFED_TEST_ROOT = "/data/local/tmp/virt/tradefed/";
     protected static final String LOG_PATH = TEST_ROOT + "log.txt";
     protected static final String CONSOLE_PATH = TEST_ROOT + "console.txt";
+    protected static final String TRADEFED_CONSOLE_PATH = TRADEFED_TEST_ROOT + "console.txt";
     private static final int TEST_VM_ADB_PORT = 8000;
     private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
     private static final String INSTANCE_IMG = "instance.img";
     protected static final String VIRT_APEX = "/apex/com.android.virt/";
+    protected static final String SECRETKEEPER_AIDL =
+            "android.hardware.security.secretkeeper.ISecretkeeper/default";
 
     private static final long MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES = 5;
     protected static final long MICRODROID_COMMAND_TIMEOUT_MILLIS = 30000;
@@ -64,6 +70,17 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
 
     protected static final Set<String> SUPPORTED_GKI_VERSIONS =
             Collections.unmodifiableSet(new HashSet(Arrays.asList("android14-6.1")));
+
+    /* Keep this sync with AssignableDevice.aidl */
+    public static final class AssignableDevice {
+        public final String node;
+        public final String dtbo_label;
+
+        public AssignableDevice(String node, String dtbo_label) {
+            this.node = node;
+            this.dtbo_label = dtbo_label;
+        }
+    }
 
     public static void prepareVirtualizationTestSetup(ITestDevice androidDevice)
             throws DeviceNotAvailableException {
@@ -186,18 +203,26 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         return pathLine.substring("package:".length());
     }
 
-    public List<String> parseStringArrayFieldsFromVmInfo(String header) throws Exception {
+    public String parseFieldFromVmInfo(String header) throws Exception {
         CommandRunner android = new CommandRunner(getDevice());
         String result = android.run("/apex/com.android.virt/bin/vm", "info");
-        List<String> ret = new ArrayList<>();
         for (String line : result.split("\n")) {
             if (!line.startsWith(header)) continue;
 
-            JSONArray jsonArray = new JSONArray(line.substring(header.length()));
+            return line.substring(header.length());
+        }
+        return "";
+    }
+
+    public List<String> parseStringArrayFieldsFromVmInfo(String header) throws Exception {
+        String field = parseFieldFromVmInfo(header);
+
+        List<String> ret = new ArrayList<>();
+        if (!field.isEmpty()) {
+            JSONArray jsonArray = new JSONArray(field);
             for (int i = 0; i < jsonArray.length(); i++) {
                 ret.add(jsonArray.getString(i));
             }
-            break;
         }
         return ret;
     }
@@ -208,8 +233,31 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         return result.contains("enabled");
     }
 
-    public List<String> getAssignableDevices() throws Exception {
-        return parseStringArrayFieldsFromVmInfo("Assignable devices: ");
+    public List<AssignableDevice> getAssignableDevices() throws Exception {
+        String field = parseFieldFromVmInfo("Assignable devices: ");
+
+        List<AssignableDevice> ret = new ArrayList<>();
+        if (!field.isEmpty()) {
+            JSONArray jsonArray = new JSONArray(field);
+            for (int i = 0; i < jsonArray.length(); i++) {
+                JSONObject jsonObject = jsonArray.getJSONObject(i);
+                ret.add(
+                        new AssignableDevice(
+                                jsonObject.getString("node"), jsonObject.getString("dtbo_label")));
+            }
+        }
+        return ret;
+    }
+
+    public boolean isUpdatableVmSupported() throws DeviceNotAvailableException {
+        // Updatable VMs are possible iff device supports Secretkeeper.
+        CommandRunner android = new CommandRunner(getDevice());
+        CommandResult result = android.runForResult("service check", SECRETKEEPER_AIDL);
+        assertWithMessage("Failed to run service check. Result= " + result)
+                .that(result.getStatus() == CommandStatus.SUCCESS && result.getExitCode() == 0)
+                .isTrue();
+        boolean is_sk_supported = !result.getStdout().trim().contains("not found");
+        return is_sk_supported;
     }
 
     public List<String> getSupportedOSList() throws Exception {

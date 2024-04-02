@@ -19,12 +19,14 @@ package com.android.microdroid.test;
 import static com.android.microdroid.test.host.CommandResultSubject.command_results;
 import static com.android.tradefed.device.TestDevice.MicrodroidBuilder;
 import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
+import com.android.tradefed.device.DeviceRuntimeException;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
@@ -82,14 +84,18 @@ import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.Objects;
 
 @RunWith(DeviceJUnit4Parameterized.class)
 @UseParametersRunnerFactory(DeviceJUnit4ClassRunnerWithParameters.RunnerFactory.class)
 public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     private static final String APK_NAME = "MicrodroidTestApp.apk";
+    private static final String APK_UPDATED_NAME = "MicrodroidTestAppUpdated.apk";
     private static final String PACKAGE_NAME = "com.android.microdroid.test";
     private static final String SHELL_PACKAGE_NAME = "com.android.shell";
     private static final String VIRT_APEX = "/apex/com.android.virt/";
+    private static final String INSTANCE_IMG = TEST_ROOT + "instance.img";
+    private static final String INSTANCE_ID_FILE = TEST_ROOT + "instance_id";
 
     private static final int MIN_MEM_ARM64 = 170;
     private static final int MIN_MEM_X86_64 = 196;
@@ -408,6 +414,67 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
+    @CddTest
+    public void UpgradedPackageIsAcceptedWithSecretkeeper() throws Exception {
+        assumeUpdatableVmSupported();
+        getDevice().uninstallPackage(PACKAGE_NAME);
+        getDevice().installPackage(findTestFile(APK_NAME), /* reinstall= */ true);
+        ensureMicrodroidBootsSuccessfully(INSTANCE_ID_FILE, INSTANCE_IMG);
+
+        getDevice().uninstallPackage(PACKAGE_NAME);
+        cleanUpVirtualizationTestSetup(getDevice());
+        // Install the updated version of app (versionCode 6)
+        getDevice().installPackage(findTestFile(APK_UPDATED_NAME), /* reinstall= */ true);
+        ensureMicrodroidBootsSuccessfully(INSTANCE_ID_FILE, INSTANCE_IMG);
+    }
+
+    @Test
+    @CddTest
+    public void DowngradedPackageIsRejectedProtectedVm() throws Exception {
+        assumeProtectedVm(); // Rollback protection is provided only for protected VM.
+
+        // Install the upgraded version (v6)
+        getDevice().uninstallPackage(PACKAGE_NAME);
+        getDevice().installPackage(findTestFile(APK_UPDATED_NAME), /* reinstall= */ true);
+        ensureMicrodroidBootsSuccessfully(INSTANCE_ID_FILE, INSTANCE_IMG);
+
+        getDevice().uninstallPackage(PACKAGE_NAME);
+        cleanUpVirtualizationTestSetup(getDevice());
+        // Install the older version (v5)
+        getDevice().installPackage(findTestFile(APK_NAME), /* reinstall= */ true);
+
+        assertThrows(
+                "pVM must fail to boot with downgraded payload apk",
+                DeviceRuntimeException.class,
+                () -> ensureMicrodroidBootsSuccessfully(INSTANCE_ID_FILE, INSTANCE_IMG));
+    }
+
+    private void ensureMicrodroidBootsSuccessfully(String instanceIdPath, String instanceImgPath)
+            throws DeviceNotAvailableException {
+        final String configPath = "assets/vm_config.json";
+        ITestDevice microdroid = null;
+        int timeout = 30000; // 30 seconds
+        try {
+            microdroid =
+                    MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
+                            .debugLevel("full")
+                            .memoryMib(minMemorySize())
+                            .cpuTopology("match_host")
+                            .protectedVm(mProtectedVm)
+                            .instanceIdFile(instanceIdPath)
+                            .instanceImgFile(instanceImgPath)
+                            .setAdbConnectTimeoutMs(timeout)
+                            .build(getAndroidDevice());
+            assertThat(microdroid.waitForBootComplete(timeout)).isTrue();
+            assertThat(microdroid.enableAdbRoot()).isTrue();
+        } finally {
+            if (microdroid != null) {
+                getAndroidDevice().shutdownMicrodroid(microdroid);
+            }
+        }
+    }
+
+    @Test
     @CddTest(requirements = {"9.17/C-2-1", "9.17/C-2-2", "9.17/C-2-6"})
     public void protectedVmRunsPvmfw() throws Exception {
         // Arrange
@@ -426,7 +493,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
         // Assert
         mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
-        String consoleLog = getDevice().pullFileContents(CONSOLE_PATH);
+        String consoleLog = getDevice().pullFileContents(TRADEFED_CONSOLE_PATH);
         assertWithMessage("Failed to verify that pvmfw started")
                 .that(consoleLog)
                 .contains("pVM firmware");
@@ -1041,66 +1108,48 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         // Check for preconditions
         assumeVfioPlatformSupported();
 
-        List<String> devices = getAssignableDevices();
+        List<AssignableDevice> devices = getAssignableDevices();
         assumeFalse("no assignable devices", devices.isEmpty());
 
-        String vmFdtPath = "/sys/firmware/fdt";
-        File testDir = FileUtil.createTempDir("device_assignment_test");
-        File baseFdtFile = new File(testDir, "base_fdt.dtb");
-        File fdtFile = new File(testDir, "fdt.dtb");
-
-        // Generates baseline DT
-        launchWithDeviceAssignment(/* device= */ null);
-        assertThat(mMicrodroidDevice.pullFile(vmFdtPath, baseFdtFile)).isTrue();
-        getAndroidDevice().shutdownMicrodroid(mMicrodroidDevice);
-
-        // Prepares to run dtdiff. It requires dtc.
-        File dtdiff = findTestFile("dtdiff");
-        RunUtil runner = new RunUtil();
-        String separator = System.getProperty("path.separator");
-        String path = dtdiff.getParent() + separator + System.getenv("PATH");
-        runner.setEnvVariable("PATH", path);
+        String dtSysfsPath = "/proc/device-tree/";
 
         // Try assign devices one by one
-        for (String device : devices) {
-            assertThat(device).isNotNull();
-            launchWithDeviceAssignment(device);
-            assertThat(mMicrodroidDevice.pullFile(vmFdtPath, fdtFile)).isTrue();
+        for (AssignableDevice device : devices) {
+            launchWithDeviceAssignment(device.node);
+
+            String dtPath =
+                    new CommandRunner(mMicrodroidDevice)
+                            .run("cat", dtSysfsPath + "__symbols__/" + device.dtbo_label);
+            assertThat(dtPath).isNotEmpty();
+
+            String resolvedDtPath =
+                    new CommandRunner(mMicrodroidDevice)
+                            .run("readlink", "-e", dtSysfsPath + dtPath);
+            assertThat(resolvedDtPath).isNotEmpty();
+
+            String allDevices =
+                    new CommandRunner(mMicrodroidDevice)
+                            .run("readlink", "-e", "/sys/bus/platform/devices/*/of_node");
+            assertThat(allDevices.split("\n")).asList().contains(resolvedDtPath);
+
             getAndroidDevice().shutdownMicrodroid(mMicrodroidDevice);
-
-            CommandResult result =
-                    runner.runTimedCmd(
-                            500,
-                            dtdiff.getAbsolutePath(),
-                            baseFdtFile.getPath(),
-                            fdtFile.getPath());
-
-            assertWithMessage(
-                            "VM's device tree hasn't changed when assigning "
-                                    + device
-                                    + ", result="
-                                    + result)
-                    .that(result.getStatus())
-                    .isNotEqualTo(CommandStatus.SUCCESS);
+            mMicrodroidDevice = null;
         }
-
-        mMicrodroidDevice = null;
     }
 
     private void launchWithDeviceAssignment(String device) throws Exception {
+        Objects.requireNonNull(device);
         final String configPath = "assets/vm_config.json";
 
-        MicrodroidBuilder builder =
+        mMicrodroidDevice =
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
                         .debugLevel("full")
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(mProtectedVm)
-                        .gki(mGki);
-        if (device != null) {
-            builder.addAssignableDevice(device);
-        }
-        mMicrodroidDevice = builder.build(getAndroidDevice());
+                        .gki(mGki)
+                        .addAssignableDevice(device)
+                        .build(getAndroidDevice());
 
         assertThat(mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT)).isTrue();
         assertThat(mMicrodroidDevice.enableAdbRoot()).isTrue();
@@ -1123,7 +1172,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
         prepareVirtualizationTestSetup(getDevice());
 
-        getDevice().installPackage(findTestFile(APK_NAME), /* reinstall */ false);
+        getDevice().installPackage(findTestFile(APK_NAME), /* reinstall= */ false);
 
         // Skip test if given device doesn't support protected or non-protected VM.
         assumeTrue(
@@ -1174,6 +1223,12 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 "Test skipped because VFIO platform is not supported.",
                 device.doesFileExist("/dev/vfio/vfio")
                         && device.doesFileExist("/sys/bus/platform/drivers/vfio-platform"));
+    }
+
+    private void assumeUpdatableVmSupported() throws DeviceNotAvailableException {
+        assumeTrue(
+                "This test is only applicable if if Updatable VMs are supported",
+                isUpdatableVmSupported());
     }
 
     private TestDevice getAndroidDevice() {
