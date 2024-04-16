@@ -17,6 +17,7 @@
 #define LOG_TAG "VirtualizationService"
 
 #include <android-base/unique_fd.h>
+#include <android/avf_cc_flags.h>
 #include <android/binder_ibinder_jni.h>
 #include <jni.h>
 #include <log/log.h>
@@ -66,9 +67,15 @@ Java_android_system_virtualmachine_VirtualizationService_nativeSpawn(
 
     // Wait for the server to signal its readiness by closing its end of the pipe.
     char buf;
-    if (read(waitFd.get(), &buf, sizeof(buf)) < 0) {
+    int ret = read(waitFd.get(), &buf, sizeof(buf));
+    if (ret < 0) {
         env->ThrowNew(env->FindClass("android/system/virtualmachine/VirtualMachineException"),
                       "Failed to wait for VirtualizationService to be ready");
+        return -1;
+    } else if (ret < 1) {
+        env->ThrowNew(env->FindClass("java/lang/SecurityException"),
+                      "Virtmgr didn't send any data through pipe. Please consider checking if "
+                      "android.permission.MANAGE_VIRTUAL_MACHINE permission is granted");
         return -1;
     }
 
@@ -100,4 +107,10 @@ Java_android_system_virtualmachine_VirtualizationService_nativeIsOk(JNIEnv* env,
         return false;
     }
     return pfds[0].revents == 0;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_android_system_virtualmachine_VirtualizationService_nativeIsVendorModulesFlagEnabled(
+        [[maybe_unused]] JNIEnv* env, [[maybe_unused]] jobject obj) {
+    return android::virtualization::IsVendorModulesFlagEnabled();
 }

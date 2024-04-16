@@ -37,6 +37,7 @@ import android.system.virtualmachine.VirtualMachineManager;
 import android.view.Display;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.KeyEvent;
 import android.view.WindowManager;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -126,12 +127,31 @@ public class MainActivity extends Activity {
             }
 
             customImageConfigBuilder.setDisplayConfig(displayConfigBuilder.build());
+            customImageConfigBuilder.useTouch(true);
+            customImageConfigBuilder.useKeyboard(true);
+
             configBuilder.setCustomImageConfig(customImageConfigBuilder.build());
 
         } catch (JSONException | IOException e) {
             throw new IllegalStateException("malformed input", e);
         }
         return configBuilder.build();
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (mVirtualMachine == null) {
+            return false;
+        }
+        return mVirtualMachine.sendKeyEvent(event);
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (mVirtualMachine == null) {
+            return false;
+        }
+        return mVirtualMachine.sendKeyEvent(event);
     }
 
     @Override
@@ -224,6 +244,13 @@ public class MainActivity extends Activity {
         }
 
         SurfaceView surfaceView = findViewById(R.id.surface_view);
+        surfaceView.setOnTouchListener(
+                (v, event) -> {
+                    if (mVirtualMachine == null) {
+                        return false;
+                    }
+                    return mVirtualMachine.sendSingleTouchEvent(event);
+                });
         surfaceView
                 .getHolder()
                 .addCallback(
