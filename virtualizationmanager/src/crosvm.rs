@@ -34,7 +34,7 @@ use std::fs::{read_to_string, File};
 use std::io::{self, Read};
 use std::mem;
 use std::num::{NonZeroU16, NonZeroU32};
-use std::os::unix::io::{AsRawFd, RawFd, FromRawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -44,7 +44,8 @@ use std::thread::{self, JoinHandle};
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::DeathReason::DeathReason;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     MemoryTrimLevel::MemoryTrimLevel,
-    VirtualMachineAppConfig::DebugLevel::DebugLevel
+    VirtualMachineAppConfig::DebugLevel::DebugLevel,
+    DisplayConfig::DisplayConfig as DisplayConfigParcelable,
 };
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IBoundDevice::IBoundDevice;
@@ -118,6 +119,33 @@ pub struct CrosvmConfig {
     pub vfio_devices: Vec<VfioDevice>,
     pub dtbo: Option<File>,
     pub device_tree_overlay: Option<File>,
+    pub display_config: Option<DisplayConfig>,
+    pub input_device_options: Vec<InputDeviceOption>,
+}
+
+#[derive(Debug)]
+pub struct DisplayConfig {
+    pub width: NonZeroU32,
+    pub height: NonZeroU32,
+    pub horizontal_dpi: NonZeroU32,
+    pub vertical_dpi: NonZeroU32,
+    pub refresh_rate: NonZeroU32,
+}
+
+impl DisplayConfig {
+    pub fn new(raw_config: &DisplayConfigParcelable) -> Result<DisplayConfig> {
+        let width = try_into_non_zero_u32(raw_config.width)?;
+        let height = try_into_non_zero_u32(raw_config.height)?;
+        let horizontal_dpi = try_into_non_zero_u32(raw_config.horizontalDpi)?;
+        let vertical_dpi = try_into_non_zero_u32(raw_config.verticalDpi)?;
+        let refresh_rate = try_into_non_zero_u32(raw_config.refreshRate)?;
+        Ok(DisplayConfig { width, height, horizontal_dpi, vertical_dpi, refresh_rate })
+    }
+}
+
+fn try_into_non_zero_u32(value: i32) -> Result<NonZeroU32> {
+    let u32_value = value.try_into()?;
+    NonZeroU32::new(u32_value).ok_or(anyhow!("value should be greater than 0"))
 }
 
 /// A disk image to pass to crosvm for a VM.
@@ -125,6 +153,15 @@ pub struct CrosvmConfig {
 pub struct DiskFile {
     pub image: File,
     pub writable: bool,
+}
+
+/// virtio-input device configuration from `external/crosvm/src/crosvm/config.rs`
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum InputDeviceOption {
+    EvDev(File),
+    SingleTouch { file: File, width: u32, height: u32, name: Option<String> },
+    Keyboard(File),
 }
 
 type VfioDevice = Strong<dyn IBoundDevice>;
@@ -415,12 +452,13 @@ impl VmInstance {
     /// the VM to prevent indefinite hangup and update the payload_state accordingly.
     fn monitor_payload_hangup(&self, child: Arc<SharedChild>) {
         debug!("Starting to monitor hangup for Microdroid({})", child.id());
-        let (_, result) = self
+        let (state, result) = self
             .payload_state_updated
             .wait_timeout_while(self.payload_state.lock().unwrap(), *BOOT_HANGUP_TIMEOUT, |s| {
                 *s < PayloadState::Started
             })
             .unwrap();
+        drop(state); // we are not interested in state
         let child_still_running = child.try_wait().ok() == Some(None);
         if result.timed_out() && child_still_running {
             error!(
@@ -928,6 +966,45 @@ fn run_vm(
         command.arg("--device-tree-overlay").arg(add_preserved_fd(&mut preserved_fds, dt_overlay));
     }
 
+    if cfg!(paravirtualized_devices) {
+        if let Some(display_config) = &config.display_config {
+            command.arg("--gpu")
+            // TODO(b/331708504): support backend config as well
+            .arg("backend=virglrenderer,context-types=virgl2,egl=true,surfaceless=true,glx=false,gles=true")
+            .arg(format!("--gpu-display=mode=windowed[{},{}],dpi=[{},{}],refresh-rate={}", display_config.width, display_config.height, display_config.horizontal_dpi, display_config.vertical_dpi, display_config.refresh_rate))
+            .arg(format!("--android-display-service={}", config.name));
+        }
+    }
+
+    if cfg!(paravirtualized_devices) {
+        // TODO(b/325929096): Need to set up network from the config
+        if rustutils::system_properties::read_bool("ro.crosvm.network.setup.done", false)
+            .unwrap_or(false)
+        {
+            command.arg("--net").arg("tap-name=crosvm_tap");
+        }
+    }
+
+    if cfg!(paravirtualized_devices) {
+        for input_device_option in config.input_device_options.iter() {
+            command.arg("--input");
+            command.arg(match input_device_option {
+                InputDeviceOption::EvDev(file) => {
+                    format!("evdev[path={}]", add_preserved_fd(&mut preserved_fds, file))
+                }
+                InputDeviceOption::Keyboard(file) => {
+                    format!("keyboard[path={}]", add_preserved_fd(&mut preserved_fds, file))
+                }
+                InputDeviceOption::SingleTouch { file, width, height, name } => format!(
+                    "single-touch[path={},width={},height={}{}]",
+                    add_preserved_fd(&mut preserved_fds, file),
+                    width,
+                    height,
+                    name.as_ref().map_or("".into(), |n| format!(",name={}", n))
+                ),
+            });
+        }
+    }
     append_platform_devices(&mut command, &mut preserved_fds, &config)?;
 
     debug!("Preserving FDs {:?}", preserved_fds);
@@ -1006,10 +1083,6 @@ fn format_serial_out_arg(preserved_fds: &mut Vec<RawFd>, file: &Option<File>) ->
 
 /// Creates a new pipe with the `O_CLOEXEC` flag set, and returns the read side and write side.
 fn create_pipe() -> Result<(File, File), Error> {
-    let (raw_read, raw_write) = pipe2(OFlag::O_CLOEXEC)?;
-    // SAFETY: We are the sole owner of this FD as we just created it, and it is valid and open.
-    let read_fd = unsafe { File::from_raw_fd(raw_read) };
-    // SAFETY: We are the sole owner of this FD as we just created it, and it is valid and open.
-    let write_fd = unsafe { File::from_raw_fd(raw_write) };
-    Ok((read_fd, write_fd))
+    let (read_fd, write_fd) = pipe2(OFlag::O_CLOEXEC)?;
+    Ok((read_fd.into(), write_fd.into()))
 }

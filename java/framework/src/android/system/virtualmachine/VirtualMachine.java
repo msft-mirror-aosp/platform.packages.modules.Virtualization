@@ -63,11 +63,14 @@ import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.system.virtualizationcommon.DeathReason;
 import android.system.virtualizationcommon.ErrorCode;
 import android.system.virtualizationservice.IVirtualMachine;
 import android.system.virtualizationservice.IVirtualMachineCallback;
 import android.system.virtualizationservice.IVirtualizationService;
+import android.system.virtualizationservice.InputDevice;
 import android.system.virtualizationservice.MemoryTrimLevel;
 import android.system.virtualizationservice.PartitionType;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
@@ -79,6 +82,8 @@ import android.util.Log;
 import com.android.internal.annotations.GuardedBy;
 import com.android.system.virtualmachine.flags.Flags;
 
+import libcore.io.IoBridge;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -89,6 +94,8 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileVisitResult;
@@ -96,6 +103,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -153,6 +161,9 @@ public class VirtualMachine implements AutoCloseable {
      */
     @SuppressLint("MinMaxConstant") // Won't change: see man 7 vsock.
     public static final long MAX_VSOCK_PORT = (1L << 32) - 1;
+
+    private ParcelFileDescriptor mTouchSock;
+    private ParcelFileDescriptor mKeySock;
 
     /**
      * Status of a virtual machine
@@ -431,10 +442,6 @@ public class VirtualMachine implements AutoCloseable {
                 VirtualMachineConfig config = VirtualMachineConfig.from(vmDescriptor.getConfigFd());
                 vm = new VirtualMachine(context, name, config, VirtualizationService.getInstance());
                 config.serialize(vm.mConfigFilePath);
-                if (vm.mInstanceIdPath != null) {
-                    vm.importInstanceIdFrom(vmDescriptor.getInstanceIdFd());
-                }
-
                 try {
                     vm.mInstanceFilePath.createNewFile();
                 } catch (IOException e) {
@@ -451,13 +458,17 @@ public class VirtualMachine implements AutoCloseable {
                     }
                     vm.importEncryptedStoreFrom(vmDescriptor.getEncryptedStoreFd());
                 }
+                if (vm.mInstanceIdPath != null) {
+                    vm.importInstanceIdFrom(vmDescriptor.getInstanceIdFd());
+                    vm.claimInstance();
+                }
             }
             return vm;
         } catch (VirtualMachineException | RuntimeException e) {
             // If anything goes wrong, delete any files created so far and the VM's directory
             try {
                 deleteRecursively(vmDir);
-            } catch (IOException innerException) {
+            } catch (Exception innerException) {
                 e.addSuppressed(innerException);
             }
             throw e;
@@ -543,8 +554,8 @@ public class VirtualMachine implements AutoCloseable {
         } catch (VirtualMachineException | RuntimeException e) {
             // If anything goes wrong, delete any files created so far and the VM's directory
             try {
-                deleteRecursively(vmDir);
-            } catch (IOException innerException) {
+                vmInstanceCleanup(context, name);
+            } catch (Exception innerException) {
                 e.addSuppressed(innerException);
             }
             throw e;
@@ -586,15 +597,49 @@ public class VirtualMachine implements AutoCloseable {
             // if a new VM is created with the same name (and files) that's unrelated.
             mWasDeleted = true;
         }
-        // TODO(b/294177871): Request deletion of VM secrets.
-        deleteVmDirectory(context, name);
+        vmInstanceCleanup(context, name);
     }
 
-    static void deleteVmDirectory(Context context, String name) throws VirtualMachineException {
+    // Delete the full VM directory and notify VirtualizationService to remove this
+    // VM instance for housekeeping.
+    @GuardedBy("VirtualMachineManager.sCreateLock")
+    static void vmInstanceCleanup(Context context, String name) throws VirtualMachineException {
+        File vmDir = getVmDir(context, name);
+        notifyInstanceRemoval(vmDir, VirtualizationService.getInstance());
         try {
-            deleteRecursively(getVmDir(context, name));
+            deleteRecursively(vmDir);
         } catch (IOException e) {
             throw new VirtualMachineException(e);
+        }
+    }
+
+    private static void notifyInstanceRemoval(
+            File vmDirectory, @NonNull VirtualizationService service) {
+        File instanceIdFile = new File(vmDirectory, INSTANCE_ID_FILE);
+        try {
+            byte[] instanceId = Files.readAllBytes(instanceIdFile.toPath());
+            service.getBinder().removeVmInstance(instanceId);
+        } catch (Exception e) {
+            // Deliberately ignoring error in removing VM instance. This potentially leads to
+            // unaccounted instances in the VS' database. But, nothing much can be done by caller.
+            Log.w(TAG, "Failed to notify VS to remove the VM instance", e);
+        }
+    }
+
+    // Claim the instance. This notifies the global VS about the ownership of this
+    // instance_id for housekeeping purpose.
+    void claimInstance() throws VirtualMachineException {
+        if (mInstanceIdPath != null) {
+            IVirtualizationService service = mVirtualizationService.getBinder();
+            try {
+                byte[] instanceId = Files.readAllBytes(mInstanceIdPath.toPath());
+                service.claimVmInstance(instanceId);
+            }
+            catch (IOException e) {
+                throw new VirtualMachineException("failed to read instance_id", e);
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            }
         }
     }
 
@@ -815,7 +860,100 @@ public class VirtualMachine implements AutoCloseable {
             createVirtualMachineConfigForRawFrom(VirtualMachineConfig vmConfig)
                     throws IllegalStateException, IOException {
         VirtualMachineRawConfig rawConfig = vmConfig.toVsRawConfig();
+
+        // Handle input devices here
+        List<InputDevice> inputDevices = new ArrayList<>();
+        if (vmConfig.getCustomImageConfig() != null
+                && rawConfig.displayConfig != null) {
+            if (vmConfig.getCustomImageConfig().useTouch()) {
+                ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
+                mTouchSock = pfds[0];
+                InputDevice.SingleTouch t = new InputDevice.SingleTouch();
+                t.width = rawConfig.displayConfig.width;
+                t.height = rawConfig.displayConfig.height;
+                t.pfd = pfds[1];
+                inputDevices.add(InputDevice.singleTouch(t));
+            }
+            if (vmConfig.getCustomImageConfig().useKeyboard()) {
+                ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
+                mKeySock = pfds[0];
+                InputDevice.Keyboard k = new InputDevice.Keyboard();
+                k.pfd = pfds[1];
+                inputDevices.add(InputDevice.keyboard(k));
+            }
+        }
+        rawConfig.inputDevices = inputDevices.toArray(new InputDevice[0]);
+
         return android.system.virtualizationservice.VirtualMachineConfig.rawConfig(rawConfig);
+    }
+
+    private static record InputEvent(short type, short code, int value) {}
+
+    /** @hide */
+    public boolean sendKeyEvent(KeyEvent event) {
+        if (mKeySock == null) {
+            Log.d(TAG, "mKeySock == null");
+            return false;
+        }
+        // from include/uapi/linux/input-event-codes.h in the kernel.
+        short EV_SYN = 0x00;
+        short EV_KEY = 0x01;
+        short SYN_REPORT = 0x00;
+        boolean down = event.getAction() != MotionEvent.ACTION_UP;
+
+        return writeEventsToSock(
+                mKeySock,
+                Arrays.asList(
+                        new InputEvent(EV_KEY, (short) event.getScanCode(), down ? 1 : 0),
+                        new InputEvent(EV_SYN, SYN_REPORT, 0)));
+    }
+
+    /** @hide */
+    public boolean sendSingleTouchEvent(MotionEvent event) {
+        if (mTouchSock == null) {
+            Log.d(TAG, "mTouchSock == null");
+            return false;
+        }
+        // from include/uapi/linux/input-event-codes.h in the kernel.
+        short EV_SYN = 0x00;
+        short EV_ABS = 0x03;
+        short EV_KEY = 0x01;
+        short BTN_TOUCH = 0x14a;
+        short ABS_X = 0x00;
+        short ABS_Y = 0x01;
+        short SYN_REPORT = 0x00;
+
+        int x = (int) event.getX();
+        int y = (int) event.getY();
+        boolean down = event.getAction() != MotionEvent.ACTION_UP;
+
+        return writeEventsToSock(
+                mTouchSock,
+                Arrays.asList(
+                        new InputEvent(EV_ABS, ABS_X, x),
+                        new InputEvent(EV_ABS, ABS_Y, y),
+                        new InputEvent(EV_KEY, BTN_TOUCH, down ? 1 : 0),
+                        new InputEvent(EV_SYN, SYN_REPORT, 0)));
+    }
+
+    private boolean writeEventsToSock(ParcelFileDescriptor sock, List<InputEvent> evtList) {
+        ByteBuffer byteBuffer =
+                ByteBuffer.allocate(8 /* (type: u16 + code: u16 + value: i32) */ * evtList.size());
+        byteBuffer.clear();
+        byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
+        for (InputEvent e : evtList) {
+            byteBuffer.putShort(e.type);
+            byteBuffer.putShort(e.code);
+            byteBuffer.putInt(e.value);
+        }
+        try {
+            IoBridge.write(
+                    sock.getFileDescriptor(), byteBuffer.array(), 0, byteBuffer.array().length);
+        } catch (IOException e) {
+            Log.d(TAG, "cannot send event", e);
+            return false;
+        }
+        return true;
     }
 
     private android.system.virtualizationservice.VirtualMachineConfig
