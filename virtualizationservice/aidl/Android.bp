@@ -12,7 +12,10 @@ aidl_interface {
     backend: {
         java: {
             sdk_version: "module_current",
-            apex_available: ["com.android.virt"],
+            apex_available: [
+                "//apex_available:platform",
+                "com.android.virt",
+            ],
         },
         cpp: {
             enabled: true,
@@ -44,6 +47,34 @@ aidl_interface {
     backend: {
         java: {
             sdk_version: "module_current",
+            apex_available: [
+                "com.android.virt",
+            ],
+        },
+        rust: {
+            enabled: true,
+            apex_available: [
+                "com.android.virt",
+            ],
+        },
+        ndk: {
+            apex_available: [
+                "com.android.virt",
+            ],
+        },
+    },
+}
+
+aidl_interface {
+    name: "android.system.virtualizationmaintenance",
+    srcs: ["android/system/virtualizationmaintenance/**/*.aidl"],
+    unstable: true,
+    backend: {
+        java: {
+            sdk_version: "module_current",
+            apex_available: [
+                "com.android.virt",
+            ],
         },
         rust: {
             enabled: true,
@@ -57,11 +88,14 @@ aidl_interface {
 aidl_interface {
     name: "android.system.virtualmachineservice",
     srcs: ["android/system/virtualmachineservice/**/*.aidl"],
-    imports: ["android.system.virtualizationcommon"],
+    imports: [
+        "android.hardware.security.secretkeeper-V1",
+        "android.system.virtualizationcommon",
+    ],
     unstable: true,
     backend: {
         java: {
-            sdk_version: "module_current",
+            enabled: false,
         },
         rust: {
             enabled: true,
@@ -80,7 +114,10 @@ aidl_interface {
     backend: {
         java: {
             sdk_version: "module_current",
-            apex_available: ["com.android.virt"],
+            apex_available: [
+                "com.android.virt",
+                "//apex_available:platform",
+            ],
         },
         ndk: {
             apex_available: [

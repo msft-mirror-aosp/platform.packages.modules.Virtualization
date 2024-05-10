@@ -33,11 +33,11 @@
 //! The payload of a partition is encrypted/signed by a key that is unique to the loader and to the
 //! VM as well. Failing to decrypt/authenticate a partition by a loader stops the boot process.
 
-use crate::dice::DiceDriver;
 use crate::ioutil;
 
 use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use dice_driver::DiceDriver;
 use openssl::symm::{decrypt_aead, encrypt_aead, Cipher};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -273,23 +273,39 @@ fn round_to_multiple(n: u64, unit: u64) -> Result<u64> {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MicrodroidData {
+    // `salt` is obsolete, it was used as a differentiator for non-protected VM instances running
+    // same payload. Instance-id (present in DT) is used for that now.
     pub salt: Vec<u8>, // Should be [u8; 64] but that isn't serializable.
     pub apk_data: ApkData,
     pub extra_apks_data: Vec<ApkData>,
     pub apex_data: Vec<ApexData>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ApkData {
-    pub root_hash: Box<RootHash>,
-    pub pubkey: Box<[u8]>,
+impl MicrodroidData {
+    pub fn extra_apk_root_hash_eq(&self, i: usize, root_hash: &[u8]) -> bool {
+        self.extra_apks_data.get(i).map_or(false, |apk| apk.root_hash_eq(root_hash))
+    }
 }
 
-pub type RootHash = [u8];
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApkData {
+    pub root_hash: Vec<u8>,
+    pub cert_hash: Vec<u8>,
+    pub package_name: String,
+    pub version_code: u64,
+}
+
+impl ApkData {
+    pub fn root_hash_eq(&self, root_hash: &[u8]) -> bool {
+        self.root_hash == root_hash
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApexData {
     pub name: String,
+    pub manifest_name: Option<String>,
+    pub manifest_version: Option<i64>,
     pub public_key: Vec<u8>,
     pub root_digest: Vec<u8>,
     pub last_update_seconds: u64,

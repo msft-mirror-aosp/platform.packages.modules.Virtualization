@@ -27,6 +27,8 @@ sign_virt_apex uses external tools which are assumed to be available via PATH.
 - lpmake, lpunpack, simg2img, img2simg, initrd_bootconfig
 """
 import argparse
+import binascii
+import builtins
 import hashlib
 import os
 import re
@@ -107,6 +109,7 @@ def ParseArgs(argv):
         action='store_true',
         help='This will NOT update the vbmeta related bootconfigs while signing the apex.\
             Used for testing only!!')
+    parser.add_argument('--do_not_validate_avb_version', action='store_true', help='Do not validate the avb_version when updating vbmeta bootconfig. Only use in tests!')
     args = parser.parse_args(argv)
     # preprocess --key_override into a map
     args.key_overrides = {}
@@ -150,12 +153,18 @@ def ExtractAvbPubkey(args, key, output):
                '--key', key, '--output', output])
 
 
+def is_lz4(args, path):
+    # error 44: Unrecognized header
+    result = RunCommand(args, ['lz4', '-t', path], expected_return_values={0, 44})
+    return result[1] == 0
+
+
 def AvbInfo(args, image_path):
     """Parses avbtool --info image output
 
     Args:
       args: program arguments.
-      image_path: The path to the image.
+      image_path: The path to the image, either raw or lz4 compressed
       descriptor_name: Descriptor name of interest.
 
     Returns:
@@ -165,6 +174,11 @@ def AvbInfo(args, image_path):
     """
     if not os.path.exists(image_path):
         raise ValueError(f'Failed to find image: {image_path}')
+
+    if is_lz4(args, image_path):
+        with tempfile.NamedTemporaryFile() as decompressed_image:
+            RunCommand(args, ['lz4', '-d', '-f', image_path, decompressed_image.name])
+            return AvbInfo(args, decompressed_image.name)
 
     output, ret_code = RunCommand(
         args, ['avbtool', 'info_image', '--image', image_path], expected_return_values={0, 1})
@@ -205,45 +219,116 @@ def AvbInfo(args, image_path):
     return info, descriptors
 
 
-# Look up a list of (key, value) with a key. Returns the list of value(s) with the matching key.
-# The order of those values is maintained.
-def LookUp(pairs, key):
+def find_all_values_by_key(pairs, key):
+    """Find all the values of the key in the pairs."""
     return [v for (k, v) in pairs if k == key]
 
+# Extract properties from the descriptors of original vbmeta image,
+# append to command as parameter.
+def AppendPropArgument(cmd, descriptors):
+    for prop in find_all_values_by_key(descriptors, 'Prop'):
+        cmd.append('--prop')
+        result = re.match(r"(.+) -> '(.+)'", prop)
+        cmd.append(result.group(1) + ":" + result.group(2))
 
-def AddHashFooter(args, key, image_path, partition_name, additional_descriptors=None):
+
+def check_resigned_image_avb_info(image_path, original_info, original_descriptors, args):
+    updated_info, updated_descriptors = AvbInfo(args, image_path)
+    assert original_info is not None, f'no avbinfo on original image: {image_path}'
+    assert updated_info is not None, f'no avbinfo on resigned image: {image_path}'
+    assert_different_value(original_info, updated_info, "Public key (sha1)", image_path)
+    updated_public_key = updated_info.pop("Public key (sha1)")
+    if not hasattr(check_resigned_image_avb_info, "new_public_key"):
+        check_resigned_image_avb_info.new_public_key = updated_public_key
+    else:
+        assert check_resigned_image_avb_info.new_public_key == updated_public_key, \
+            "All images should be resigned with the same public key. Expected public key (sha1):" \
+            f" {check_resigned_image_avb_info.new_public_key}, actual public key (sha1): " \
+            f"{updated_public_key}, Path: {image_path}"
+    original_info.pop("Public key (sha1)")
+    assert original_info == updated_info, \
+        f"Original info and updated info should be the same for {image_path}. " \
+        f"Original info: {original_info}, updated info: {updated_info}"
+
+    # Verify the descriptors of the original and updated images.
+    assert len(original_descriptors) == len(updated_descriptors), \
+        f"Number of descriptors should be the same for {image_path}. " \
+        f"Original descriptors: {original_descriptors}, updated descriptors: {updated_descriptors}"
+    original_prop_descriptors = sorted(find_all_values_by_key(original_descriptors, "Prop"))
+    updated_prop_descriptors = sorted(find_all_values_by_key(updated_descriptors, "Prop"))
+    assert original_prop_descriptors == updated_prop_descriptors, \
+        f"Prop descriptors should be the same for {image_path}. " \
+        f"Original prop descriptors: {original_prop_descriptors}, " \
+        f"updated prop descriptors: {updated_prop_descriptors}"
+
+    # Remove digest from hash descriptors before comparing, since some digests should change.
+    original_hash_descriptors = extract_hash_descriptors(original_descriptors, drop_digest)
+    updated_hash_descriptors = extract_hash_descriptors(updated_descriptors, drop_digest)
+    assert original_hash_descriptors == updated_hash_descriptors, \
+        f"Hash descriptors' parameters should be the same for {image_path}. " \
+        f"Original hash descriptors: {original_hash_descriptors}, " \
+        f"updated hash descriptors: {updated_hash_descriptors}"
+
+def drop_digest(descriptor):
+    return {k: v for k, v in descriptor.items() if k != "Digest"}
+
+def AddHashFooter(args, key, image_path, additional_images=()):
     if os.path.basename(image_path) in args.key_overrides:
         key = args.key_overrides[os.path.basename(image_path)]
-    info, _ = AvbInfo(args, image_path)
-    if info:
-        image_size = ReadBytesSize(info['Image size'])
-        algorithm = info['Algorithm']
-        partition_size = str(image_size)
+    info, descriptors = AvbInfo(args, image_path)
+    assert info is not None, f'no avbinfo: {image_path}'
 
-        cmd = ['avbtool', 'add_hash_footer',
-               '--key', key,
-               '--algorithm', algorithm,
-               '--partition_name', partition_name,
-               '--partition_size', partition_size,
-               '--image', image_path]
-        if args.signing_args:
-            cmd.extend(shlex.split(args.signing_args))
-        if additional_descriptors:
-            for image in additional_descriptors:
-                cmd.extend(['--include_descriptors_from_image', image])
-        RunCommand(args, cmd)
+    # Extract hash descriptor of original image.
+    hash_descriptors_original = extract_hash_descriptors(descriptors, drop_digest)
+    for additional_image in additional_images:
+        _, additional_desc = AvbInfo(args, additional_image)
+        hash_descriptors = extract_hash_descriptors(additional_desc, drop_digest)
+        for k, v in hash_descriptors.items():
+            assert v == hash_descriptors_original[k], \
+                f"Hash descriptor of {k} in {additional_image} and {image_path} should be " \
+                f"the same. {additional_image}: {v}, {image_path}: {hash_descriptors_original[k]}"
+            del hash_descriptors_original[k]
+    assert len(hash_descriptors_original) == 1, \
+        f"Only one hash descriptor is expected for {image_path} after removing " \
+        f"additional images. Hash descriptors: {hash_descriptors_original}"
+    [(original_image_partition_name, original_image_descriptor)] = hash_descriptors_original.items()
+    assert info["Original image size"] == original_image_descriptor["Image Size"], \
+        f"Original image size should be the same as the image size in the hash descriptor " \
+        f"for {image_path}. Original image size: {info['Original image size']}, " \
+        f"image size in the hash descriptor: {original_image_descriptor['Image Size']}"
 
+    partition_size = str(ReadBytesSize(info['Image size']))
+    algorithm = info['Algorithm']
+    original_image_salt = original_image_descriptor['Salt']
+
+    cmd = ['avbtool', 'add_hash_footer',
+           '--key', key,
+           '--algorithm', algorithm,
+           '--partition_name', original_image_partition_name,
+           '--salt', original_image_salt,
+           '--partition_size', partition_size,
+           '--image', image_path]
+    AppendPropArgument(cmd, descriptors)
+    if args.signing_args:
+        cmd.extend(shlex.split(args.signing_args))
+    for additional_image in additional_images:
+        cmd.extend(['--include_descriptors_from_image', additional_image])
+    cmd.extend(['--rollback_index', info['Rollback Index']])
+
+    RunCommand(args, cmd)
+    check_resigned_image_avb_info(image_path, info, descriptors, args)
 
 def AddHashTreeFooter(args, key, image_path):
     if os.path.basename(image_path) in args.key_overrides:
         key = args.key_overrides[os.path.basename(image_path)]
     info, descriptors = AvbInfo(args, image_path)
     if info:
-        descriptor = LookUp(descriptors, 'Hashtree descriptor')[0]
+        descriptor = find_all_values_by_key(descriptors, 'Hashtree descriptor')[0]
         image_size = ReadBytesSize(info['Image size'])
         algorithm = info['Algorithm']
         partition_name = descriptor['Partition Name']
         hash_algorithm = descriptor['Hash Algorithm']
+        salt = descriptor['Salt']
         partition_size = str(image_size)
         cmd = ['avbtool', 'add_hashtree_footer',
                '--key', key,
@@ -252,10 +337,13 @@ def AddHashTreeFooter(args, key, image_path):
                '--partition_size', partition_size,
                '--do_not_generate_fec',
                '--hash_algorithm', hash_algorithm,
+               '--salt', salt,
                '--image', image_path]
+        AppendPropArgument(cmd, descriptors)
         if args.signing_args:
             cmd.extend(shlex.split(args.signing_args))
         RunCommand(args, cmd)
+        check_resigned_image_avb_info(image_path, info, descriptors, args)
 
 
 def UpdateVbmetaBootconfig(args, initrds, vbmeta_img):
@@ -279,7 +367,7 @@ def UpdateVbmetaBootconfig(args, initrds, vbmeta_img):
         avb_version_bc = re.search(
             r"androidboot.vbmeta.avb_version = \"([^\"]*)\"", bootconfigs).group(1)
         if avb_version_curr != avb_version_bc:
-            raise Exception(f'AVB version mismatch between current & one & \
+            raise builtins.Exception(f'AVB version mismatch between current & one & \
                 used to build bootconfigs:{avb_version_curr}&{avb_version_bc}')
 
     def calc_vbmeta_digest():
@@ -324,7 +412,8 @@ def UpdateVbmetaBootconfig(args, initrds, vbmeta_img):
             detach_bootconfigs(initrd, tmp_initrd, tmp_bc)
             bc_file = open(tmp_bc, "rt", encoding="utf-8")
             bc_data = bc_file.read()
-            validate_avb_version(bc_data)
+            if not args.do_not_validate_avb_version:
+                validate_avb_version(bc_data)
             bc_data = update_vbmeta_digest(bc_data)
             bc_data = update_vbmeta_size(bc_data)
             bc_file.close()
@@ -370,6 +459,7 @@ def MakeVbmetaImage(args, key, vbmeta_img, images=None, chained_partitions=None)
             cmd.extend(shlex.split(args.signing_args))
 
         RunCommand(args, cmd)
+        check_resigned_image_avb_info(vbmeta_img, info, descriptors, args)
         # libavb expects to be able to read the maximum vbmeta size, so we must provide a partition
         # which matches this or the read will fail.
         with open(vbmeta_img, 'a', encoding='utf8') as f:
@@ -398,26 +488,45 @@ def MakeSuperImage(args, partitions, output):
         RunCommand(args, cmd)
 
 
-def GenVbmetaImage(args, image, output, partition_name):
+def GenVbmetaImage(args, image, output, partition_name, salt):
     cmd = ['avbtool', 'add_hash_footer', '--dynamic_partition_size',
            '--do_not_append_vbmeta_image',
            '--partition_name', partition_name,
+           '--salt', salt,
            '--image', image,
            '--output_vbmeta_image', output]
     RunCommand(args, cmd)
 
+
+gki_versions = ['android14-6.1-pkvm_experimental']
+
 # dict of (key, file) for re-sign/verification. keys are un-versioned for readability.
-virt_apex_files = {
+virt_apex_non_gki_files = {
     'kernel': 'etc/fs/microdroid_kernel',
     'vbmeta.img': 'etc/fs/microdroid_vbmeta.img',
     'super.img': 'etc/fs/microdroid_super.img',
     'initrd_normal.img': 'etc/microdroid_initrd_normal.img',
     'initrd_debuggable.img': 'etc/microdroid_initrd_debuggable.img',
+    'rialto': 'etc/rialto.bin',
 }
 
-
 def TargetFiles(input_dir):
-    return {k: os.path.join(input_dir, v) for k, v in virt_apex_files.items()}
+    ret = {k: os.path.join(input_dir, v) for k, v in virt_apex_non_gki_files.items()}
+
+    for ver in gki_versions:
+        kernel        = os.path.join(input_dir, f'etc/fs/microdroid_gki-{ver}_kernel')
+        initrd_normal = os.path.join(input_dir, f'etc/microdroid_gki-{ver}_initrd_normal.img')
+        initrd_debug  = os.path.join(input_dir, f'etc/microdroid_gki-{ver}_initrd_debuggable.img')
+
+        if os.path.isfile(kernel):
+            ret[f'gki-{ver}_kernel']                = kernel
+            ret[f'gki-{ver}_initrd_normal.img']     = initrd_normal
+            ret[f'gki-{ver}_initrd_debuggable.img'] = initrd_debug
+
+    return ret
+
+def IsInitrdImage(path):
+    return path.endswith('initrd_normal.img') or path.endswith('initrd_debuggable.img')
 
 
 def SignVirtApex(args):
@@ -431,41 +540,184 @@ def SignVirtApex(args):
 
     # re-sign super.img
     # 1. unpack super.img
-    # 2. resign system and vendor
-    # 3. repack super.img out of resigned system and vendor
+    # 2. resign system and vendor (if exists)
+    # 3. repack super.img out of resigned system and vendor (if exists)
     UnpackSuperImg(args, files['super.img'], unpack_dir.name)
     system_a_f = Async(AddHashTreeFooter, args, key, system_a_img)
-    vendor_a_f = Async(AddHashTreeFooter, args, key, vendor_a_img)
-    partitions = {"system_a": system_a_img, "vendor_a": vendor_a_img}
-    Async(MakeSuperImage, args, partitions,
-          files['super.img'], wait=[system_a_f, vendor_a_f])
+    partitions = {"system_a": system_a_img}
+    images = [system_a_img]
+    images_f = [system_a_f]
 
-    # re-generate vbmeta from re-signed {system_a, vendor_a}.img
+    # if vendor_a.img exists, resign it
+    if os.path.exists(vendor_a_img):
+        partitions.update({'vendor_a': vendor_a_img})
+        images.append(vendor_a_img)
+        vendor_a_f = Async(AddHashTreeFooter, args, key, vendor_a_img)
+        images_f.append(vendor_a_f)
+
+    Async(MakeSuperImage, args, partitions,
+          files['super.img'], wait=images_f)
+
+    # re-generate vbmeta from re-signed system_a.img
     vbmeta_f = Async(MakeVbmetaImage, args, key, files['vbmeta.img'],
-                     images=[system_a_img, vendor_a_img],
-                     wait=[system_a_f, vendor_a_f])
+                     images=images,
+                     wait=images_f)
 
     vbmeta_bc_f = None
     if not args.do_not_update_bootconfigs:
-        vbmeta_bc_f = Async(UpdateVbmetaBootconfig, args,
-                            [files['initrd_normal.img'],
-                                files['initrd_debuggable.img']], files['vbmeta.img'],
+        initrd_files = [v for k, v in files.items() if IsInitrdImage(k)]
+        vbmeta_bc_f = Async(UpdateVbmetaBootconfig, args, initrd_files,
+                            files['vbmeta.img'],
                             wait=[vbmeta_f])
 
     # Re-sign kernel. Note kernel's vbmeta contain addition descriptor from ramdisk(s)
-    initrd_normal_hashdesc = tempfile.NamedTemporaryFile(delete=False).name
-    initrd_debug_hashdesc = tempfile.NamedTemporaryFile(delete=False).name
-    initrd_n_f = Async(GenVbmetaImage, args, files['initrd_normal.img'],
-                       initrd_normal_hashdesc, "initrd_normal",
-                       wait=[vbmeta_bc_f] if vbmeta_bc_f is not None else [])
-    initrd_d_f = Async(GenVbmetaImage, args, files['initrd_debuggable.img'],
-                       initrd_debug_hashdesc, "initrd_debug",
-                       wait=[vbmeta_bc_f] if vbmeta_bc_f is not None else [])
-    Async(AddHashFooter, args, key, files['kernel'], partition_name="boot",
-          additional_descriptors=[
-              initrd_normal_hashdesc, initrd_debug_hashdesc],
-          wait=[initrd_n_f, initrd_d_f])
+    def resign_decompressed_kernel(kernel_file, initrd_normal_file, initrd_debug_file):
+        _, kernel_image_descriptors = AvbInfo(args, kernel_file)
+        salts = extract_hash_descriptors(
+            kernel_image_descriptors, lambda descriptor: descriptor['Salt'])
+        initrd_normal_hashdesc = tempfile.NamedTemporaryFile(delete=False).name
+        initrd_debug_hashdesc = tempfile.NamedTemporaryFile(delete=False).name
+        initrd_n_f = Async(GenVbmetaImage, args, initrd_normal_file,
+                           initrd_normal_hashdesc, "initrd_normal", salts["initrd_normal"],
+                           wait=[vbmeta_bc_f] if vbmeta_bc_f is not None else [])
+        initrd_d_f = Async(GenVbmetaImage, args, initrd_debug_file,
+                           initrd_debug_hashdesc, "initrd_debug", salts["initrd_debug"],
+                           wait=[vbmeta_bc_f] if vbmeta_bc_f is not None else [])
+        return Async(AddHashFooter, args, key, kernel_file,
+              additional_images=[initrd_normal_hashdesc, initrd_debug_hashdesc],
+              wait=[initrd_n_f, initrd_d_f])
 
+    def resign_compressed_kernel(kernel_file, initrd_normal_file, initrd_debug_file):
+        # decompress, re-sign, compress again
+        with tempfile.TemporaryDirectory() as work_dir:
+            decompressed_kernel_file = os.path.join(work_dir, os.path.basename(kernel_file))
+            RunCommand(args, ['lz4', '-d', kernel_file, decompressed_kernel_file])
+            resign_decompressed_kernel(decompressed_kernel_file, initrd_normal_file,
+                                       initrd_debug_file).result()
+            RunCommand(args, ['lz4', '-9', '-f', decompressed_kernel_file, kernel_file])
+
+    def resign_kernel(kernel, initrd_normal, initrd_debug):
+        kernel_file = files[kernel]
+        initrd_normal_file = files[initrd_normal]
+        initrd_debug_file = files[initrd_debug]
+
+        # kernel may be compressed with lz4.
+        if is_lz4(args, kernel_file):
+            return Async(resign_compressed_kernel, kernel_file, initrd_normal_file,
+                         initrd_debug_file)
+        else:
+            return resign_decompressed_kernel(kernel_file, initrd_normal_file, initrd_debug_file)
+
+    _, original_kernel_descriptors = AvbInfo(args, files['kernel'])
+    resign_kernel_tasks = [resign_kernel('kernel', 'initrd_normal.img', 'initrd_debuggable.img')]
+    original_kernels = {"kernel" : original_kernel_descriptors}
+
+    for ver in gki_versions:
+        if f'gki-{ver}_kernel' in files:
+            kernel_name = f'gki-{ver}_kernel'
+            _, original_kernel_descriptors = AvbInfo(args, files[kernel_name])
+            task = resign_kernel(
+                kernel_name,
+                f'gki-{ver}_initrd_normal.img',
+                f'gki-{ver}_initrd_debuggable.img')
+            resign_kernel_tasks.append(task)
+            original_kernels[kernel_name] = original_kernel_descriptors
+
+    # Re-sign rialto if it exists. Rialto only exists in arm64 environment.
+    if os.path.exists(files['rialto']):
+        update_initrd_digests_task = Async(
+            update_initrd_digests_of_kernels_in_rialto, original_kernels, args, files,
+            wait=resign_kernel_tasks)
+        Async(resign_rialto, args, key, files['rialto'], wait=[update_initrd_digests_task])
+
+def resign_rialto(args, key, rialto_path):
+    _, original_descriptors = AvbInfo(args, rialto_path)
+    AddHashFooter(args, key, rialto_path)
+
+    # Verify the new AVB footer.
+    updated_info, updated_descriptors = AvbInfo(args, rialto_path)
+    assert len(updated_descriptors) == 2, \
+        f"There should be two descriptors for rialto. Updated descriptors: {updated_descriptors}"
+    updated_prop = find_all_values_by_key(updated_descriptors, "Prop")
+    assert len(updated_prop) == 1, "There should be only one Prop descriptor for rialto. " \
+        f"Updated descriptors: {updated_descriptors}"
+    assert updated_info["Rollback Index"] != "0", "Rollback index should not be zero for rialto."
+
+    # Verify the only hash descriptor of rialto.
+    updated_hash_descriptors = extract_hash_descriptors(updated_descriptors)
+    assert len(updated_hash_descriptors) == 1, \
+        f"There should be only one hash descriptor for rialto. " \
+        f"Updated hash descriptors: {updated_hash_descriptors}"
+    # Since salt is not updated, the change of digest reflects the change of content of rialto
+    # kernel.
+    if not args.do_not_update_bootconfigs:
+        [(_, original_descriptor)] = extract_hash_descriptors(original_descriptors).items()
+        [(_, updated_descriptor)] = updated_hash_descriptors.items()
+        assert_different_value(original_descriptor, updated_descriptor, "Digest",
+                               "rialto_hash_descriptor")
+
+def assert_different_value(original, updated, key, context):
+    assert original[key] != updated[key], \
+        f"Value of '{key}' should change for '{context}'" \
+        f"Original value: {original[key]}, updated value: {updated[key]}"
+
+def update_initrd_digests_of_kernels_in_rialto(original_kernels, args, files):
+    # Update the hashes of initrd_normal and initrd_debug in rialto if the
+    # bootconfigs in them are updated.
+    if args.do_not_update_bootconfigs:
+        return
+
+    with open(files['rialto'], "rb") as file:
+        content = file.read()
+
+    for kernel_name, descriptors in original_kernels.items():
+        content = update_initrd_digests_in_rialto(
+            descriptors, args, files, kernel_name, content)
+
+    with open(files['rialto'], "wb") as file:
+        file.write(content)
+
+def update_initrd_digests_in_rialto(
+        original_descriptors, args, files, kernel_name, content):
+    _, updated_descriptors = AvbInfo(args, files[kernel_name])
+
+    original_digests = extract_hash_descriptors(
+        original_descriptors, lambda x: binascii.unhexlify(x['Digest']))
+    updated_digests = extract_hash_descriptors(
+        updated_descriptors, lambda x: binascii.unhexlify(x['Digest']))
+    assert original_digests.pop("boot") == updated_digests.pop("boot"), \
+        "Hash descriptor of boot should not change for " + kernel_name + \
+        f"\nOriginal descriptors: {original_descriptors}, " \
+        f"\nUpdated descriptors: {updated_descriptors}"
+
+    # Check that the original and updated digests are different before updating rialto.
+    partition_names = {'initrd_normal', 'initrd_debug'}
+    assert set(original_digests.keys()) == set(updated_digests.keys()) == partition_names, \
+        f"Original digests' partitions should be {partition_names}. " \
+        f"Original digests: {original_digests}. Updated digests: {updated_digests}"
+    assert set(original_digests.values()).isdisjoint(updated_digests.values()), \
+        "Digests of initrd_normal and initrd_debug should change. " \
+        f"Original descriptors: {original_descriptors}, " \
+        f"updated descriptors: {updated_descriptors}"
+
+    for partition_name, original_digest in original_digests.items():
+        updated_digest = updated_digests[partition_name]
+        assert len(original_digest) == len(updated_digest), \
+            f"Length of original_digest and updated_digest must be the same for {partition_name}." \
+            f" Original digest: {original_digest}, updated digest: {updated_digest}"
+
+        new_content = content.replace(original_digest, updated_digest)
+        assert len(new_content) == len(content), \
+            "Length of new_content and content must be the same."
+        assert new_content != content, \
+            f"original digest of the partition {partition_name} not found."
+        content = new_content
+
+    return content
+
+def extract_hash_descriptors(descriptors, f=lambda x: x):
+    return {desc["Partition Name"]: f(desc) for desc in
+            find_all_values_by_key(descriptors, "Hash descriptor")}
 
 def VerifyVirtApex(args):
     key = args.key
@@ -475,7 +727,6 @@ def VerifyVirtApex(args):
     # unpacked files
     UnpackSuperImg(args, files['super.img'], unpack_dir.name)
     system_a_img = os.path.join(unpack_dir.name, 'system_a.img')
-    vendor_a_img = os.path.join(unpack_dir.name, 'vendor_a.img')
 
     # Read pubkey digest from the input key
     with tempfile.NamedTemporaryFile() as pubkey_file:
@@ -489,13 +740,15 @@ def VerifyVirtApex(args):
         assert info is not None, f'no avbinfo: {file}'
         assert info['Public key (sha1)'] == pubkey_digest, f'pubkey mismatch: {file}'
 
-    for f in files.values():
-        if f in (files['initrd_normal.img'], files['initrd_debuggable.img']):
+    for k, f in files.items():
+        if IsInitrdImage(k):
             # TODO(b/245277660): Verify that ramdisks contain the correct vbmeta digest
             continue
-        if f == files['super.img']:
+        if k == 'rialto' and not os.path.exists(f):
+            # Rialto only exists in arm64 environment.
+            continue
+        if k == 'super.img':
             Async(check_avb_pubkey, system_a_img)
-            Async(check_avb_pubkey, vendor_a_img)
         else:
             # Check pubkey for other files using avbtool
             Async(check_avb_pubkey, f)

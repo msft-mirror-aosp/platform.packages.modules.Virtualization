@@ -25,7 +25,7 @@ static CONSOLE: SpinMutex<Option<Uart>> = SpinMutex::new(None);
 
 /// Initialises a new instance of the UART driver and returns it.
 fn create() -> Uart {
-    // Safe because BASE_ADDRESS is the base of the MMIO region for a UART and is mapped as device
+    // SAFETY: BASE_ADDRESS is the base of the MMIO region for a UART and is mapped as device
     // memory.
     unsafe { Uart::new(BASE_ADDRESS) }
 }
@@ -40,18 +40,18 @@ pub fn init() {
 /// Writes a string to the console.
 ///
 /// Panics if [`init`] was not called first.
-pub fn write_str(s: &str) {
+pub(crate) fn write_str(s: &str) {
     CONSOLE.lock().as_mut().unwrap().write_str(s).unwrap();
 }
 
 /// Writes a formatted string to the console.
 ///
 /// Panics if [`init`] was not called first.
-pub fn write_args(format_args: Arguments) {
+pub(crate) fn write_args(format_args: Arguments) {
     write(CONSOLE.lock().as_mut().unwrap(), format_args).unwrap();
 }
 
-/// Reinitialises the UART driver and writes a string to it.
+/// Reinitializes the UART driver and writes a string to it.
 ///
 /// This is intended for use in situations where the UART may be in an unknown state or the global
 /// instance may be locked, such as in an exception handler or panic handler.
@@ -60,7 +60,7 @@ pub fn emergency_write_str(s: &str) {
     let _ = uart.write_str(s);
 }
 
-/// Reinitialises the UART driver and writes a formatted string to it.
+/// Reinitializes the UART driver and writes a formatted string to it.
 ///
 /// This is intended for use in situations where the UART may be in an unknown state or the global
 /// instance may be locked, such as in an exception handler or panic handler.
@@ -69,20 +69,10 @@ pub fn emergency_write_args(format_args: Arguments) {
     let _ = write(&mut uart, format_args);
 }
 
-/// Prints the given string to the console.
-///
-/// Panics if the console has not yet been initialised. May hang if used in an exception context;
-/// use `eprint!` instead.
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => ($crate::console::write_args(format_args!($($arg)*)));
-}
-
 /// Prints the given formatted string to the console, followed by a newline.
 ///
-/// Panics if the console has not yet been initialised. May hang if used in an exception context;
+/// Panics if the console has not yet been initialized. May hang if used in an exception context;
 /// use `eprintln!` instead.
-#[macro_export]
 macro_rules! println {
     () => ($crate::console::write_str("\n"));
     ($($arg:tt)*) => ({
@@ -90,6 +80,8 @@ macro_rules! println {
         $crate::console::write_str("\n");
     );
 }
+
+pub(crate) use println; // Make it available in this crate.
 
 /// Prints the given string to the console in an emergency, such as an exception handler.
 ///

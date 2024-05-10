@@ -15,8 +15,8 @@
 //! Functions for running instances of `crosvm`.
 
 use crate::aidl::{remove_temporary_files, Cid, VirtualMachineCallbacks};
-use crate::atom::{get_num_cpus, write_vm_exited_stats};
-use crate::debug_config::should_prepare_console_output;
+use crate::atom::{get_num_cpus, write_vm_exited_stats_sync};
+use crate::debug_config::DebugConfig;
 use anyhow::{anyhow, bail, Context, Error, Result};
 use command_fds::CommandFdExt;
 use lazy_static::lazy_static;
@@ -34,7 +34,7 @@ use std::fs::{read_to_string, File};
 use std::io::{self, Read};
 use std::mem;
 use std::num::{NonZeroU16, NonZeroU32};
-use std::os::unix::io::{AsRawFd, RawFd, FromRawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -44,15 +44,18 @@ use std::thread::{self, JoinHandle};
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::DeathReason::DeathReason;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     MemoryTrimLevel::MemoryTrimLevel,
-    VirtualMachineAppConfig::DebugLevel::DebugLevel
+    VirtualMachineAppConfig::DebugLevel::DebugLevel,
+    DisplayConfig::DisplayConfig as DisplayConfigParcelable,
 };
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
+use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IBoundDevice::IBoundDevice;
 use binder::Strong;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
 use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
 use rpcbinder::RpcServer;
 
 /// external/crosvm
+use base::AsRawDescriptor;
 use base::UnixSeqpacketListener;
 use vm_control::{BalloonControlCommand, VmRequest, VmResponse};
 
@@ -101,18 +104,48 @@ pub struct CrosvmConfig {
     pub disks: Vec<DiskFile>,
     pub params: Option<String>,
     pub protected: bool,
-    pub debug_level: DebugLevel,
+    pub debug_config: DebugConfig,
     pub memory_mib: Option<NonZeroU32>,
     pub cpus: Option<NonZeroU32>,
     pub host_cpu_topology: bool,
-    pub task_profiles: Vec<String>,
-    pub console_fd: Option<File>,
+    pub console_out_fd: Option<File>,
+    pub console_in_fd: Option<File>,
     pub log_fd: Option<File>,
     pub ramdump: Option<File>,
     pub indirect_files: Vec<File>,
     pub platform_version: VersionReq,
     pub detect_hangup: bool,
     pub gdb_port: Option<NonZeroU16>,
+    pub vfio_devices: Vec<VfioDevice>,
+    pub dtbo: Option<File>,
+    pub device_tree_overlay: Option<File>,
+    pub display_config: Option<DisplayConfig>,
+    pub input_device_options: Vec<InputDeviceOption>,
+}
+
+#[derive(Debug)]
+pub struct DisplayConfig {
+    pub width: NonZeroU32,
+    pub height: NonZeroU32,
+    pub horizontal_dpi: NonZeroU32,
+    pub vertical_dpi: NonZeroU32,
+    pub refresh_rate: NonZeroU32,
+}
+
+impl DisplayConfig {
+    pub fn new(raw_config: &DisplayConfigParcelable) -> Result<DisplayConfig> {
+        let width = try_into_non_zero_u32(raw_config.width)?;
+        let height = try_into_non_zero_u32(raw_config.height)?;
+        let horizontal_dpi = try_into_non_zero_u32(raw_config.horizontalDpi)?;
+        let vertical_dpi = try_into_non_zero_u32(raw_config.verticalDpi)?;
+        let refresh_rate = try_into_non_zero_u32(raw_config.refreshRate)?;
+        Ok(DisplayConfig { width, height, horizontal_dpi, vertical_dpi, refresh_rate })
+    }
+}
+
+fn try_into_non_zero_u32(value: i32) -> Result<NonZeroU32> {
+    let u32_value = value.try_into()?;
+    NonZeroU32::new(u32_value).ok_or(anyhow!("value should be greater than 0"))
 }
 
 /// A disk image to pass to crosvm for a VM.
@@ -121,6 +154,17 @@ pub struct DiskFile {
     pub image: File,
     pub writable: bool,
 }
+
+/// virtio-input device configuration from `external/crosvm/src/crosvm/config.rs`
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum InputDeviceOption {
+    EvDev(File),
+    SingleTouch { file: File, width: u32, height: u32, name: Option<String> },
+    Keyboard(File),
+}
+
+type VfioDevice = Strong<dyn IBoundDevice>;
 
 /// The lifecycle state which the payload in the VM has reported itself to be in.
 ///
@@ -141,7 +185,7 @@ pub enum VmState {
     /// The VM has not yet tried to start.
     NotStarted {
         ///The configuration needed to start the VM, if it has not yet been started.
-        config: CrosvmConfig,
+        config: Box<CrosvmConfig>,
     },
     /// The VM has been started.
     Running {
@@ -168,7 +212,8 @@ pub struct Rss {
 pub struct VmMetric {
     /// Recorded timestamp when the VM is started.
     pub start_timestamp: Option<SystemTime>,
-    /// Update most recent guest_time periodically from /proc/[crosvm pid]/stat while VM is running.
+    /// Update most recent guest_time periodically from /proc/[crosvm pid]/stat while VM is
+    /// running.
     pub cpu_guest_time: Option<i64>,
     /// Update maximum RSS values periodically from /proc/[crosvm pid]/smaps while VM is running.
     pub rss: Option<Rss>,
@@ -181,8 +226,10 @@ impl VmState {
     fn start(&mut self, instance: Arc<VmInstance>) -> Result<(), Error> {
         let state = mem::replace(self, VmState::Failed);
         if let VmState::NotStarted { config } = state {
+            let config = *config;
             let detect_hangup = config.detect_hangup;
             let (failure_pipe_read, failure_pipe_write) = create_pipe()?;
+            let vfio_devices = config.vfio_devices.clone();
 
             // If this fails and returns an error, `self` will be left in the `Failed` state.
             let child =
@@ -197,7 +244,7 @@ impl VmState {
             let child_clone = child.clone();
             let instance_clone = instance.clone();
             let monitor_vm_exit_thread = Some(thread::spawn(move || {
-                instance_clone.monitor_vm_exit(child_clone, failure_pipe_read);
+                instance_clone.monitor_vm_exit(child_clone, failure_pipe_read, vfio_devices);
             }));
 
             if detect_hangup {
@@ -299,7 +346,7 @@ impl VmInstance {
             .flatten()
             .map_or_else(|| format!("{}", requester_uid), |u| u.name);
         let instance = VmInstance {
-            vm_state: Mutex::new(VmState::NotStarted { config }),
+            vm_state: Mutex::new(VmState::NotStarted { config: Box::new(config) }),
             vm_context,
             cid,
             crosvm_control_socket_path: temporary_directory.join("crosvm.sock"),
@@ -334,7 +381,12 @@ impl VmInstance {
     /// Monitors the exit of the VM (i.e. termination of the `child` process). When that happens,
     /// handles the event by updating the state, noityfing the event to clients by calling
     /// callbacks, and removing temporary files for the VM.
-    fn monitor_vm_exit(&self, child: Arc<SharedChild>, mut failure_pipe_read: File) {
+    fn monitor_vm_exit(
+        &self,
+        child: Arc<SharedChild>,
+        mut failure_pipe_read: File,
+        vfio_devices: Vec<VfioDevice>,
+    ) {
         let result = child.wait();
         match &result {
             Err(e) => error!("Error waiting for crosvm({}) instance to die: {}", child.id(), e),
@@ -380,7 +432,7 @@ impl VmInstance {
         self.callbacks.callback_on_died(self.cid, death_reason);
 
         let vm_metric = self.vm_metric.lock().unwrap();
-        write_vm_exited_stats(
+        write_vm_exited_stats_sync(
             self.requester_uid as i32,
             &self.name,
             death_reason,
@@ -392,18 +444,21 @@ impl VmInstance {
         remove_temporary_files(&self.temporary_directory).unwrap_or_else(|e| {
             error!("Error removing temporary files from {:?}: {}", self.temporary_directory, e);
         });
+
+        drop(vfio_devices); // Cleanup devices.
     }
 
     /// Waits until payload is started, or timeout expires. When timeout occurs, kill
     /// the VM to prevent indefinite hangup and update the payload_state accordingly.
     fn monitor_payload_hangup(&self, child: Arc<SharedChild>) {
         debug!("Starting to monitor hangup for Microdroid({})", child.id());
-        let (_, result) = self
+        let (state, result) = self
             .payload_state_updated
             .wait_timeout_while(self.payload_state.lock().unwrap(), *BOOT_HANGUP_TIMEOUT, |s| {
                 *s < PayloadState::Started
             })
             .unwrap();
+        drop(state); // we are not interested in state
         let child_still_running = child.try_wait().ok() == Some(None);
         if result.timed_out() && child_still_running {
             error!(
@@ -432,20 +487,20 @@ impl VmInstance {
                 let mut vm_metric = self.vm_metric.lock().unwrap();
 
                 // Get CPU Information
-                if let Ok(guest_time) = get_guest_time(pid) {
-                    vm_metric.cpu_guest_time = Some(guest_time);
-                } else {
-                    error!("Failed to parse /proc/[pid]/stat");
+                match get_guest_time(pid) {
+                    Ok(guest_time) => vm_metric.cpu_guest_time = Some(guest_time),
+                    Err(e) => error!("Failed to get guest CPU time: {e:?}"),
                 }
 
                 // Get Memory Information
-                if let Ok(rss) = get_rss(pid) {
-                    vm_metric.rss = match &vm_metric.rss {
-                        Some(x) => Some(Rss::extract_max(x, &rss)),
-                        None => Some(rss),
+                match get_rss(pid) {
+                    Ok(rss) => {
+                        vm_metric.rss = match &vm_metric.rss {
+                            Some(x) => Some(Rss::extract_max(x, &rss)),
+                            None => Some(rss),
+                        }
                     }
-                } else {
-                    error!("Failed to parse /proc/[pid]/smaps");
+                    Err(e) => error!("Failed to get guest RSS: {}", e),
                 }
             }
 
@@ -491,6 +546,10 @@ impl VmInstance {
         // first, as monitor_vm_exit() takes it as well.
         monitor_vm_exit_thread.map(JoinHandle::join);
 
+        // Now that the VM has been killed, shut down the VirtualMachineService
+        // server to eagerly free up the server threads.
+        self.vm_context.vm_server.shutdown()?;
+
         Ok(())
     }
 
@@ -510,8 +569,10 @@ impl VmInstance {
                         MemoryTrimLevel::TRIM_MEMORY_RUNNING_MODERATE => 10,
                         _ => bail!("Invalid memory trim level {:?}", level),
                     };
-                    let command =
-                        BalloonControlCommand::Adjust { num_bytes: total_memory * pct / 100 };
+                    let command = BalloonControlCommand::Adjust {
+                        num_bytes: total_memory * pct / 100,
+                        wait_for_success: false,
+                    };
                     if let Err(e) = vm_control::client::handle_request(
                         &VmRequest::BalloonCommand(command),
                         &self.crosvm_control_socket_path,
@@ -521,7 +582,7 @@ impl VmInstance {
                 }
             }
             Ok(VmResponse::Err(e)) => {
-                // ENOTSUP is returned when the balloon protocol is not initialised. This
+                // ENOTSUP is returned when the balloon protocol is not initialized. This
                 // can occur for numerous reasons: Guest is still booting, guest doesn't
                 // support ballooning, host doesn't support ballooning. We don't log or
                 // raise an error in this case: trim is just a hint and we can ignore it.
@@ -572,6 +633,35 @@ impl Rss {
     }
 }
 
+// Get Cpus_allowed mask
+fn check_if_all_cpus_allowed() -> Result<bool> {
+    let file = read_to_string("/proc/self/status")?;
+    let lines: Vec<_> = file.split('\n').collect();
+
+    for line in lines {
+        if line.contains("Cpus_allowed_list") {
+            let prop: Vec<_> = line.split_whitespace().collect();
+            if prop.len() != 2 {
+                return Ok(false);
+            }
+            let cpu_list: Vec<_> = prop[1].split('-').collect();
+            //Only contiguous Cpu list allowed
+            if cpu_list.len() != 2 {
+                return Ok(false);
+            }
+            if let Some(cpus) = get_num_cpus() {
+                let max_cpu = cpu_list[1].parse::<usize>()?;
+                if max_cpu == cpus - 1 {
+                    return Ok(true);
+                } else {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 // Get guest time from /proc/[crosvm pid]/stat
 fn get_guest_time(pid: u32) -> Result<i64> {
     let file = read_to_string(format!("/proc/{}/stat", pid))?;
@@ -586,7 +676,7 @@ fn get_guest_time(pid: u32) -> Result<i64> {
     }
 
     let guest_time_ticks = data_list[42].parse::<i64>()?;
-    // SAFETY : It just returns an integer about CPU tick information.
+    // SAFETY: It just returns an integer about CPU tick information.
     let ticks_per_sec = unsafe { sysconf(_SC_CLK_TCK) };
     Ok(guest_time_ticks * MILLIS_PER_SEC / ticks_per_sec)
 }
@@ -621,10 +711,10 @@ fn get_rss(pid: u32) -> Result<Rss> {
 }
 
 fn death_reason(result: &Result<ExitStatus, io::Error>, mut failure_reason: &str) -> DeathReason {
-    if let Some(position) = failure_reason.find('|') {
+    if let Some((reason, info)) = failure_reason.split_once('|') {
         // Separator indicates extra context information is present after the failure name.
-        error!("Failure info: {}", &failure_reason[(position + 1)..]);
-        failure_reason = &failure_reason[..position];
+        error!("Failure info: {info}");
+        failure_reason = reason;
     }
     if let Ok(status) = result {
         match failure_reason {
@@ -633,10 +723,6 @@ fn death_reason(result: &Result<ExitStatus, io::Error>, mut failure_reason: &str
             }
             "PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED" => {
                 return DeathReason::PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED
-            }
-            "BOOTLOADER_PUBLIC_KEY_MISMATCH" => return DeathReason::BOOTLOADER_PUBLIC_KEY_MISMATCH,
-            "BOOTLOADER_INSTANCE_IMAGE_CHANGED" => {
-                return DeathReason::BOOTLOADER_INSTANCE_IMAGE_CHANGED
             }
             "MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE" => {
                 return DeathReason::MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE
@@ -673,6 +759,49 @@ fn exit_signal(result: &Result<ExitStatus, io::Error>) -> Option<i32> {
         Ok(status) => status.signal(),
         Err(_) => None,
     }
+}
+
+const SYSFS_PLATFORM_DEVICES_PATH: &str = "/sys/devices/platform/";
+const VFIO_PLATFORM_DRIVER_PATH: &str = "/sys/bus/platform/drivers/vfio-platform";
+
+fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Error> {
+    // Check platform device exists
+    let path = Path::new(&device.getSysfsPath()?).canonicalize()?;
+    if !path.starts_with(SYSFS_PLATFORM_DEVICES_PATH) {
+        bail!("{path:?} is not a platform device");
+    }
+
+    // Check platform device is bound to VFIO driver
+    let dev_driver_path = path.join("driver").canonicalize()?;
+    if dev_driver_path != Path::new(VFIO_PLATFORM_DRIVER_PATH) {
+        bail!("{path:?} is not bound to VFIO-platform driver");
+    }
+
+    if let Some(p) = path.to_str() {
+        Ok(format!("--vfio={p},iommu=pkvm-iommu,dt-symbol={0}", device.getDtboLabel()?))
+    } else {
+        bail!("invalid path {path:?}");
+    }
+}
+
+fn append_platform_devices(
+    command: &mut Command,
+    preserved_fds: &mut Vec<RawFd>,
+    config: &CrosvmConfig,
+) -> Result<(), Error> {
+    if config.vfio_devices.is_empty() {
+        return Ok(());
+    }
+
+    let Some(dtbo) = &config.dtbo else {
+        bail!("VFIO devices assigned but no DTBO available");
+    };
+    command.arg(format!("--device-tree-overlay={},filter", add_preserved_fd(preserved_fds, dtbo)));
+
+    for device in &config.vfio_devices {
+        command.arg(vfio_argument_for_platform_device(device)?);
+    }
+    Ok(())
 }
 
 /// Starts an instance of `crosvm` to manage a new VM.
@@ -722,24 +851,20 @@ fn run_vm(
         command.arg("--unmap-guest-memory-on-fork");
 
         if config.ramdump.is_some() {
-            // Protected VM needs to reserve memory for ramdump here. pvmfw will drop This
-            // if ramdump should be disabled (via debug policy). Note that we reserve more
+            // Protected VM needs to reserve memory for ramdump here. Note that we reserve more
             // memory for the restricted dma pool.
             let ramdump_reserve = RAMDUMP_RESERVED_MIB + swiotlb_size_mib;
             command.arg("--params").arg(format!("crashkernel={ramdump_reserve}M"));
         }
-    } else {
-        if config.ramdump.is_some() {
-            command.arg("--params").arg(format!("crashkernel={RAMDUMP_RESERVED_MIB}M"));
-        }
-        if config.debug_level == DebugLevel::NONE
-            && should_prepare_console_output(config.debug_level)
-        {
-            // bootconfig.normal will be used, but we need log.
-            // pvmfw will add following commands by itself, but non-protected VM should do so here.
-            command.arg("--params").arg("printk.devkmsg=on");
-            command.arg("--params").arg("console=hvc0");
-        }
+    } else if config.ramdump.is_some() {
+        command.arg("--params").arg(format!("crashkernel={RAMDUMP_RESERVED_MIB}M"));
+    }
+    if config.debug_config.debug_level == DebugLevel::NONE
+        && config.debug_config.should_prepare_console_output()
+    {
+        // bootconfig.normal will be used, but we need log.
+        command.arg("--params").arg("printk.devkmsg=on");
+        command.arg("--params").arg("console=hvc0");
     }
 
     if let Some(memory_mib) = config.memory_mib {
@@ -751,16 +876,18 @@ fn run_vm(
     }
 
     if config.host_cpu_topology {
-        // TODO(b/266664564): replace with --host-cpu-topology once available
-        if let Some(cpus) = get_num_cpus() {
+        if cfg!(virt_cpufreq) && check_if_all_cpus_allowed()? {
+            command.arg("--host-cpu-topology");
+            cfg_if::cfg_if! {
+                if #[cfg(any(target_arch = "aarch64"))] {
+                    command.arg("--virt-cpufreq");
+                }
+            }
+        } else if let Some(cpus) = get_num_cpus() {
             command.arg("--cpus").arg(cpus.to_string());
         } else {
             bail!("Could not determine the number of CPUs in the system");
         }
-    }
-
-    if !config.task_profiles.is_empty() {
-        command.arg("--task-profiles").arg(config.task_profiles.join(","));
     }
 
     if let Some(gdb_port) = config.gdb_port {
@@ -779,21 +906,29 @@ fn run_vm(
     //
     // When [console|log]_fd is not specified, the devices are attached to sink, which means what's
     // written there is discarded.
-    let console_arg = format_serial_arg(&mut preserved_fds, &config.console_fd);
-    let log_arg = format_serial_arg(&mut preserved_fds, &config.log_fd);
+    let console_out_arg = format_serial_out_arg(&mut preserved_fds, &config.console_out_fd);
+    let console_in_arg = config
+        .console_in_fd
+        .as_ref()
+        .map(|fd| format!(",input={}", add_preserved_fd(&mut preserved_fds, fd)))
+        .unwrap_or_default();
+    let log_arg = format_serial_out_arg(&mut preserved_fds, &config.log_fd);
     let failure_serial_path = add_preserved_fd(&mut preserved_fds, &failure_pipe_write);
-    let ramdump_arg = format_serial_arg(&mut preserved_fds, &config.ramdump);
+    let ramdump_arg = format_serial_out_arg(&mut preserved_fds, &config.ramdump);
 
     // Warning: Adding more serial devices requires you to shift the PCI device ID of the boot
     // disks in bootconfig.x86_64. This is because x86 crosvm puts serial devices and the block
     // devices in the same PCI bus and serial devices comes before the block devices. Arm crosvm
     // doesn't have the issue.
     // /dev/ttyS0
-    command.arg(format!("--serial={},hardware=serial,num=1", &console_arg));
+    command.arg(format!("--serial={},hardware=serial,num=1", &console_out_arg));
     // /dev/ttyS1
     command.arg(format!("--serial=type=file,path={},hardware=serial,num=2", &failure_serial_path));
     // /dev/hvc0
-    command.arg(format!("--serial={},hardware=virtio-console,num=1", &console_arg));
+    command.arg(format!(
+        "--serial={}{},hardware=virtio-console,num=1",
+        &console_out_arg, &console_in_arg
+    ));
     // /dev/hvc1
     command.arg(format!("--serial={},hardware=virtio-console,num=2", &ramdump_arg));
     // /dev/hvc2
@@ -823,7 +958,54 @@ fn run_vm(
 
     let control_server_socket = UnixSeqpacketListener::bind(crosvm_control_socket_path)
         .context("failed to create control server")?;
-    command.arg("--socket").arg(add_preserved_fd(&mut preserved_fds, &control_server_socket));
+    command
+        .arg("--socket")
+        .arg(add_preserved_fd(&mut preserved_fds, &control_server_socket.as_raw_descriptor()));
+
+    if let Some(dt_overlay) = &config.device_tree_overlay {
+        command.arg("--device-tree-overlay").arg(add_preserved_fd(&mut preserved_fds, dt_overlay));
+    }
+
+    if cfg!(paravirtualized_devices) {
+        if let Some(display_config) = &config.display_config {
+            command.arg("--gpu")
+            // TODO(b/331708504): support backend config as well
+            .arg("backend=virglrenderer,context-types=virgl2,egl=true,surfaceless=true,glx=false,gles=true")
+            .arg(format!("--gpu-display=mode=windowed[{},{}],dpi=[{},{}],refresh-rate={}", display_config.width, display_config.height, display_config.horizontal_dpi, display_config.vertical_dpi, display_config.refresh_rate))
+            .arg(format!("--android-display-service={}", config.name));
+        }
+    }
+
+    if cfg!(paravirtualized_devices) {
+        // TODO(b/325929096): Need to set up network from the config
+        if rustutils::system_properties::read_bool("ro.crosvm.network.setup.done", false)
+            .unwrap_or(false)
+        {
+            command.arg("--net").arg("tap-name=crosvm_tap");
+        }
+    }
+
+    if cfg!(paravirtualized_devices) {
+        for input_device_option in config.input_device_options.iter() {
+            command.arg("--input");
+            command.arg(match input_device_option {
+                InputDeviceOption::EvDev(file) => {
+                    format!("evdev[path={}]", add_preserved_fd(&mut preserved_fds, file))
+                }
+                InputDeviceOption::Keyboard(file) => {
+                    format!("keyboard[path={}]", add_preserved_fd(&mut preserved_fds, file))
+                }
+                InputDeviceOption::SingleTouch { file, width, height, name } => format!(
+                    "single-touch[path={},width={},height={}{}]",
+                    add_preserved_fd(&mut preserved_fds, file),
+                    width,
+                    height,
+                    name.as_ref().map_or("".into(), |n| format!(",name={}", n))
+                ),
+            });
+        }
+    }
+    append_platform_devices(&mut command, &mut preserved_fds, &config)?;
 
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);
@@ -891,7 +1073,7 @@ fn add_preserved_fd(preserved_fds: &mut Vec<RawFd>, file: &dyn AsRawFd) -> Strin
 
 /// Adds the file descriptor for `file` (if any) to `preserved_fds`, and returns the appropriate
 /// string for a crosvm `--serial` flag. If `file` is none, creates a dummy sink device.
-fn format_serial_arg(preserved_fds: &mut Vec<RawFd>, file: &Option<File>) -> String {
+fn format_serial_out_arg(preserved_fds: &mut Vec<RawFd>, file: &Option<File>) -> String {
     if let Some(file) = file {
         format!("type=file,path={}", add_preserved_fd(preserved_fds, file))
     } else {
@@ -901,9 +1083,6 @@ fn format_serial_arg(preserved_fds: &mut Vec<RawFd>, file: &Option<File>) -> Str
 
 /// Creates a new pipe with the `O_CLOEXEC` flag set, and returns the read side and write side.
 fn create_pipe() -> Result<(File, File), Error> {
-    let (raw_read, raw_write) = pipe2(OFlag::O_CLOEXEC)?;
-    // SAFETY: We are the sole owners of these fds as they were just created.
-    let read_fd = unsafe { File::from_raw_fd(raw_read) };
-    let write_fd = unsafe { File::from_raw_fd(raw_write) };
-    Ok((read_fd, write_fd))
+    let (read_fd, write_fd) = pipe2(OFlag::O_CLOEXEC)?;
+    Ok((read_fd.into(), write_fd.into()))
 }

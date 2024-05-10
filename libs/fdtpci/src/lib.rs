@@ -119,7 +119,9 @@ impl PciInfo {
     /// method must only be called once, and there must be no other `PciRoot` constructed using the
     /// same CAM.
     pub unsafe fn make_pci_root(&self) -> PciRoot {
-        PciRoot::new(self.cam_range.start as *mut u8, Cam::MmioCam)
+        // SAFETY: We trust that the FDT gave us a valid MMIO base address for the CAM. The caller
+        // guarantees to only call us once, so there are no other references to it.
+        unsafe { PciRoot::new(self.cam_range.start as *mut u8, Cam::MmioCam) }
     }
 }
 
@@ -197,24 +199,32 @@ fn parse_ranges(pci_node: &FdtNode) -> Result<Range<u32>, PciError> {
     Ok(memory_address..memory_address + memory_size)
 }
 
+/// Encodes memory flags of a PCI range
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct PciMemoryFlags(u32);
+pub struct PciMemoryFlags(pub u32);
 
 impl PciMemoryFlags {
+    /// Returns whether this PCI range is prefetchable
     pub fn prefetchable(self) -> bool {
         self.0 & 0x80000000 != 0
     }
 
+    /// Returns the type of this PCI range
     pub fn range_type(self) -> PciRangeType {
         PciRangeType::from((self.0 & 0x3000000) >> 24)
     }
 }
 
+/// Type of a PCI range
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum PciRangeType {
+pub enum PciRangeType {
+    /// Range represents the PCI configuration space
     ConfigurationSpace,
+    /// Range is on IO space
     IoSpace,
+    /// Range is on 32-bit MMIO space
     Memory32,
+    /// Range is on 64-bit MMIO space
     Memory64,
 }
 

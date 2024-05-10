@@ -16,11 +16,8 @@
 
 package com.android.microdroid.test.host;
 
-import static com.android.microdroid.test.host.CommandResultSubject.assertThat;
-import static com.android.microdroid.test.host.CommandResultSubject.command_results;
 import static com.android.tradefed.testtype.DeviceJUnit4ClassRunner.TestLogData;
 
-import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import static org.junit.Assume.assumeTrue;
@@ -34,19 +31,35 @@ import com.android.tradefed.device.ITestDevice;
 import com.android.tradefed.device.TestDevice;
 import com.android.tradefed.testtype.junit4.BaseHostJUnit4Test;
 import com.android.tradefed.util.CommandResult;
+import com.android.tradefed.util.CommandStatus;
+import com.android.tradefed.util.FileUtil;
 import com.android.tradefed.util.RunUtil;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.File;
-import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
     protected static final String TEST_ROOT = "/data/local/tmp/virt/";
+    protected static final String TRADEFED_TEST_ROOT = "/data/local/tmp/virt/tradefed/";
     protected static final String LOG_PATH = TEST_ROOT + "log.txt";
     protected static final String CONSOLE_PATH = TEST_ROOT + "console.txt";
+    protected static final String TRADEFED_CONSOLE_PATH = TRADEFED_TEST_ROOT + "console.txt";
     private static final int TEST_VM_ADB_PORT = 8000;
     private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
     private static final String INSTANCE_IMG = "instance.img";
+    protected static final String VIRT_APEX = "/apex/com.android.virt/";
+    protected static final String SECRETKEEPER_AIDL =
+            "android.hardware.security.secretkeeper.ISecretkeeper/default";
 
     private static final long MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES = 5;
     protected static final long MICRODROID_COMMAND_TIMEOUT_MILLIS = 30000;
@@ -54,6 +67,21 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
     protected static final int MICRODROID_ADB_CONNECT_MAX_ATTEMPTS =
             (int) (MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES * 60 * 1000
                 / MICRODROID_COMMAND_RETRY_INTERVAL_MILLIS);
+
+    protected static final Set<String> SUPPORTED_GKI_VERSIONS =
+            Collections.unmodifiableSet(
+                    new HashSet(Arrays.asList("android14-6.1-pkvm_experimental")));
+
+    /* Keep this sync with AssignableDevice.aidl */
+    public static final class AssignableDevice {
+        public final String node;
+        public final String dtbo_label;
+
+        public AssignableDevice(String node, String dtbo_label) {
+            this.node = node;
+            this.dtbo_label = dtbo_label;
+        }
+    }
 
     public static void prepareVirtualizationTestSetup(ITestDevice androidDevice)
             throws DeviceNotAvailableException {
@@ -67,6 +95,8 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
 
         // remove any leftover files under test root
         android.tryRun("rm", "-rf", TEST_ROOT + "*");
+
+        android.tryRun("mkdir " + TEST_ROOT);
     }
 
     public static void cleanUpVirtualizationTestSetup(ITestDevice androidDevice)
@@ -90,12 +120,16 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         return DeviceProperties.create(getDevice()::getProperty).isCuttlefish();
     }
 
+    protected boolean isHwasan() {
+        return DeviceProperties.create(getDevice()::getProperty).isHwasan();
+    }
+
     protected String getMetricPrefix() {
         return MetricsProcessor.getMetricPrefix(
                 DeviceProperties.create(getDevice()::getProperty).getMetricsTag());
     }
 
-    public static void testIfDeviceIsCapable(ITestDevice androidDevice) throws Exception {
+    public static void assumeDeviceIsCapable(ITestDevice androidDevice) throws Exception {
         assumeTrue("Need an actual TestDevice", androidDevice instanceof TestDevice);
         TestDevice testDevice = (TestDevice) androidDevice;
         assumeTrue(
@@ -109,72 +143,48 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         LogArchiver.archiveLogThenDelete(logs, device, remotePath, localName);
     }
 
-    // Run an arbitrary command in the host side and returns the result
-    public static String runOnHost(String... cmd) {
-        return runOnHostWithTimeout(10000, cmd);
+    public static void setPropertyOrThrow(ITestDevice device, String propertyName, String value)
+            throws DeviceNotAvailableException {
+        if (!device.setProperty(propertyName, value)) {
+            throw new RuntimeException("Failed to set sysprop " + propertyName + " to " + value);
+        }
     }
 
-    // Same as runOnHost, but failure is not an error
+    // Run an arbitrary command in the host side and returns the result.
+    // Note failure is not an error.
     public static String tryRunOnHost(String... cmd) {
         final long timeout = 10000;
         CommandResult result = RunUtil.getDefault().runTimedCmd(timeout, cmd);
         return result.getStdout().trim();
     }
-
-    // Same as runOnHost, but with custom timeout
-    private static String runOnHostWithTimeout(long timeoutMillis, String... cmd) {
-        assertThat(timeoutMillis).isAtLeast(0);
-        CommandResult result = RunUtil.getDefault().runTimedCmd(timeoutMillis, cmd);
-        assertWithMessage("Host command `" + join(cmd) + "` did not succeed")
-                .about(command_results())
-                .that(result)
-                .isSuccess();
-        return result.getStdout().trim();
-    }
-
-    // Run a shell command on Microdroid
-    public static String runOnMicrodroid(String... cmd) {
-        CommandResult result = runOnMicrodroidForResult(cmd);
-        assertWithMessage("Microdroid command `" + join(cmd) + "` did not succeed")
-                .about(command_results())
-                .that(result)
-                .isSuccess();
-        return result.getStdout().trim();
-    }
-
-    // Same as runOnHost, but keeps retrying on error for maximum attempts times
-    // Each attempt with timeoutMs
-    public static String runOnHostRetryingOnFailure(long timeoutMs, int attempts, String... cmd) {
-        CommandResult result = RunUtil.getDefault()
-                .runTimedCmdRetry(timeoutMs,
-                        MICRODROID_COMMAND_RETRY_INTERVAL_MILLIS, attempts, cmd);
-        assertWithMessage("Command `" + Arrays.toString(cmd) + "` has failed")
-                .about(command_results())
-                .that(result)
-                .isSuccess();
-        return result.getStdout().trim();
-    }
-
-    public static CommandResult runOnMicrodroidForResult(String... cmd) {
-        final long timeoutMs = 30000; // 30 sec. Microdroid is extremely slow on GCE-on-CF.
-        return RunUtil.getDefault()
-                .runTimedCmd(timeoutMs, "adb", "-s", MICRODROID_SERIAL, "shell", join(cmd));
-    }
-
     private static String join(String... strs) {
         return String.join(" ", Arrays.asList(strs));
     }
 
     public File findTestFile(String name) {
-        return findTestFile(getBuild(), name);
-    }
+        String moduleName = getInvocationContext().getConfigurationDescriptor().getModuleName();
+        IBuildInfo buildInfo = getBuild();
+        CompatibilityBuildHelper helper = new CompatibilityBuildHelper(buildInfo);
 
-    private static File findTestFile(IBuildInfo buildInfo, String name) {
+        // We're not using helper.getTestFile here because it sometimes picks a file
+        // from a different module, which may be old and/or wrong. See b/328779049.
         try {
-            return (new CompatibilityBuildHelper(buildInfo)).getTestFile(name);
-        } catch (FileNotFoundException e) {
-            throw new AssertionError("Missing test file: " + name, e);
+            File testsDir = helper.getTestsDir().getAbsoluteFile();
+
+            for (File subDir : FileUtil.findDirsUnder(testsDir, testsDir.getParentFile())) {
+                if (!subDir.getName().equals(moduleName)) {
+                    continue;
+                }
+                File testFile = FileUtil.findFile(subDir, name);
+                if (testFile != null) {
+                    return testFile;
+                }
+            }
+        } catch (IOException e) {
+            throw new AssertionError(
+                    "Failed to find test file " + name + " for module " + moduleName, e);
         }
+        throw new AssertionError("Failed to find test file " + name + " for module " + moduleName);
     }
 
     public String getPathForPackage(String packageName)
@@ -194,51 +204,71 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         return pathLine.substring("package:".length());
     }
 
-    // Establish an adb connection to microdroid by letting Android forward the connection to
-    // microdroid. Wait until the connection is established and microdroid is booted.
-    public static void adbConnectToMicrodroid(ITestDevice androidDevice, String cid) {
-        long start = System.currentTimeMillis();
-        long timeoutMillis = MICRODROID_ADB_CONNECT_TIMEOUT_MINUTES * 60 * 1000;
-        long elapsed = 0;
+    public String parseFieldFromVmInfo(String header) throws Exception {
+        CommandRunner android = new CommandRunner(getDevice());
+        String result = android.run("/apex/com.android.virt/bin/vm", "info");
+        for (String line : result.split("\n")) {
+            if (!line.startsWith(header)) continue;
 
-        // In case there is a stale connection...
-        tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
+            return line.substring(header.length());
+        }
+        return "";
+    }
 
-        final String serial = androidDevice.getSerialNumber();
-        final String from = "tcp:" + TEST_VM_ADB_PORT;
-        final String to = "vsock:" + cid + ":5555";
-        runOnHost("adb", "-s", serial, "forward", from, to);
+    public List<String> parseStringArrayFieldsFromVmInfo(String header) throws Exception {
+        String field = parseFieldFromVmInfo(header);
 
-        boolean disconnected = true;
-        while (disconnected) {
-            elapsed = System.currentTimeMillis() - start;
-            timeoutMillis -= elapsed;
-            start = System.currentTimeMillis();
-            String ret = runOnHostWithTimeout(timeoutMillis, "adb", "connect", MICRODROID_SERIAL);
-            disconnected = ret.equals("failed to connect to " + MICRODROID_SERIAL);
-            if (disconnected) {
-                // adb demands us to disconnect if the prior connection was a failure.
-                // b/194375443: this somtimes fails, thus 'try*'.
-                tryRunOnHost("adb", "disconnect", MICRODROID_SERIAL);
+        List<String> ret = new ArrayList<>();
+        if (!field.isEmpty()) {
+            JSONArray jsonArray = new JSONArray(field);
+            for (int i = 0; i < jsonArray.length(); i++) {
+                ret.add(jsonArray.getString(i));
             }
         }
+        return ret;
+    }
 
-        elapsed = System.currentTimeMillis() - start;
-        timeoutMillis -= elapsed;
-        runOnHostWithTimeout(timeoutMillis, "adb", "-s", MICRODROID_SERIAL, "wait-for-device");
+    public boolean isFeatureEnabled(String feature) throws Exception {
+        CommandRunner android = new CommandRunner(getDevice());
+        String result = android.run(VIRT_APEX + "bin/vm", "check-feature-enabled", feature);
+        return result.contains("enabled");
+    }
 
-        boolean dataAvailable = false;
-        while (!dataAvailable && timeoutMillis >= 0) {
-            elapsed = System.currentTimeMillis() - start;
-            timeoutMillis -= elapsed;
-            start = System.currentTimeMillis();
-            final String checkCmd = "if [ -d /data/local/tmp ]; then echo 1; fi";
-            dataAvailable = runOnMicrodroid(checkCmd).equals("1");
+    public List<AssignableDevice> getAssignableDevices() throws Exception {
+        String field = parseFieldFromVmInfo("Assignable devices: ");
+
+        List<AssignableDevice> ret = new ArrayList<>();
+        if (!field.isEmpty()) {
+            JSONArray jsonArray = new JSONArray(field);
+            for (int i = 0; i < jsonArray.length(); i++) {
+                JSONObject jsonObject = jsonArray.getJSONObject(i);
+                ret.add(
+                        new AssignableDevice(
+                                jsonObject.getString("node"), jsonObject.getString("dtbo_label")));
+            }
         }
+        return ret;
+    }
 
-        // Check if it actually booted by reading a sysprop.
-        assertThat(runOnMicrodroidForResult("getprop", "ro.hardware"))
-                .stdoutTrimmed()
-                .isEqualTo("microdroid");
+    public boolean isUpdatableVmSupported() throws DeviceNotAvailableException {
+        // Updatable VMs are possible iff device supports Secretkeeper.
+        CommandRunner android = new CommandRunner(getDevice());
+        CommandResult result = android.runForResult("service check", SECRETKEEPER_AIDL);
+        assertWithMessage("Failed to run service check. Result= " + result)
+                .that(result.getStatus() == CommandStatus.SUCCESS && result.getExitCode() == 0)
+                .isTrue();
+        boolean is_sk_supported = !result.getStdout().trim().contains("not found");
+        return is_sk_supported;
+    }
+
+    public List<String> getSupportedOSList() throws Exception {
+        return parseStringArrayFieldsFromVmInfo("Available OS list: ");
+    }
+
+    public List<String> getSupportedGKIVersions() throws Exception {
+        return getSupportedOSList().stream()
+                .filter(os -> os.startsWith("microdroid_gki-"))
+                .map(os -> os.replaceFirst("^microdroid_gki-", ""))
+                .collect(Collectors.toList());
     }
 }

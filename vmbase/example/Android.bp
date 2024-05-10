@@ -7,10 +7,9 @@ rust_ffi_static {
     defaults: ["vmbase_ffi_defaults"],
     crate_name: "vmbase_example",
     srcs: ["src/main.rs"],
-    edition: "2021",
     rustlibs: [
         "libaarch64_paging",
-        "libbuddy_system_allocator",
+        "libcstr",
         "libdiced_open_dice_nostd",
         "libfdtpci",
         "liblibfdt",
@@ -18,7 +17,6 @@ rust_ffi_static {
         "libvirtio_drivers",
         "libvmbase",
     ],
-    apex_available: ["com.android.virt"],
 }
 
 cc_binary {
@@ -34,7 +32,6 @@ cc_binary {
         "image.ld",
         ":vmbase_sections",
     ],
-    apex_available: ["com.android.virt"],
 }
 
 raw_binary {

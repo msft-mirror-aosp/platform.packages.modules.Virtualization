@@ -22,7 +22,7 @@ import com.android.microdroid.testservice.IAppCallback;
  * {@hide}
  */
 interface ITestService {
-    const long SERVICE_PORT = 5678;
+    const long PORT = 5678;
 
     const long ECHO_REVERSE_PORT = 0x80000001L; // Deliberately chosen to be > 2^31, < 2^32
 
@@ -55,6 +55,9 @@ interface ITestService {
     /** Returns a mask of effective capabilities that the process running the payload binary has. */
     String[] getEffectiveCapabilities();
 
+    /* Return the uid of the process running the binary. */
+    int getUid();
+
     /* write the content into the specified file. */
     void writeToFile(String content, String path);
 
@@ -69,6 +72,9 @@ interface ITestService {
 
     /** Requests the VM to asynchronously call appCallback.setVmCallback() */
     void requestCallback(IAppCallback appCallback);
+
+    /** Read a line from /dev/console */
+    String readLineFromConsole();
 
     /**
      * Request the service to exit, triggering the termination of the VM. This may cause any

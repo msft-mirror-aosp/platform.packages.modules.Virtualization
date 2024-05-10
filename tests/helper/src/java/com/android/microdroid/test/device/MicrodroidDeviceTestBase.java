@@ -20,6 +20,9 @@ import static android.content.pm.PackageManager.FEATURE_VIRTUALIZATION_FRAMEWORK
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
 
+import static org.junit.Assume.assumeTrue;
+import static org.junit.Assume.assumeFalse;
+
 import android.app.Instrumentation;
 import android.app.UiAutomation;
 import android.content.Context;
@@ -40,13 +43,19 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import com.android.microdroid.test.common.DeviceProperties;
 import com.android.microdroid.test.common.MetricsProcessor;
 import com.android.microdroid.testservice.ITestService;
+import com.android.virt.vm_attestation.testservice.IAttestationService;
+import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -56,12 +65,17 @@ public abstract class MicrodroidDeviceTestBase {
     private static final String TAG = "MicrodroidDeviceTestBase";
     private final String MAX_PERFORMANCE_TASK_PROFILE = "CPUSET_SP_TOP_APP";
 
+    protected static final String KERNEL_VERSION = SystemProperties.get("ro.kernel.version");
+    protected static final Set<String> SUPPORTED_GKI_VERSIONS =
+            Collections.unmodifiableSet(
+                    new HashSet(Arrays.asList("android14-6.1-pkvm_experimental")));
+
     public static boolean isCuttlefish() {
         return getDeviceProperties().isCuttlefish();
     }
 
-    public static boolean isGs101() {
-        return getDeviceProperties().isGs101();
+    public static boolean isHwasan() {
+        return getDeviceProperties().isHwasan();
     }
 
     public static boolean isUserBuild() {
@@ -101,17 +115,9 @@ public abstract class MicrodroidDeviceTestBase {
         }
     }
 
-    public final boolean getDebugPolicyBoolean(String debugPolicy) throws IOException {
-        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
-        UiAutomation uiAutomation = instrumentation.getUiAutomation();
-        String debugPolicyFilePath = "/proc/device-tree" + debugPolicy;
-        String cmd = "su root xxd -p " + debugPolicyFilePath;
-        String dp = runInShell(TAG, uiAutomation, cmd).trim();
-        return "00000001".equals(dp);
-    }
-
-    private Context mCtx;
+    private final Context mCtx = ApplicationProvider.getApplicationContext();
     private boolean mProtectedVm;
+    private String mGki;
 
     protected Context getContext() {
         return mCtx;
@@ -121,12 +127,26 @@ public abstract class MicrodroidDeviceTestBase {
         return mCtx.getSystemService(VirtualMachineManager.class);
     }
 
-    public VirtualMachineConfig.Builder newVmConfigBuilder() {
-        return new VirtualMachineConfig.Builder(mCtx).setProtectedVm(mProtectedVm);
+    public VirtualMachineConfig.Builder newVmConfigBuilderWithPayloadConfig(String configPath) {
+        return new VirtualMachineConfig.Builder(mCtx)
+                .setProtectedVm(mProtectedVm)
+                .setOs(os())
+                .setPayloadConfigPath(configPath);
+    }
+
+    public VirtualMachineConfig.Builder newVmConfigBuilderWithPayloadBinary(String binaryPath) {
+        return new VirtualMachineConfig.Builder(mCtx)
+                .setProtectedVm(mProtectedVm)
+                .setOs(os())
+                .setPayloadBinaryName(binaryPath);
     }
 
     protected final boolean isProtectedVm() {
         return mProtectedVm;
+    }
+
+    protected final String os() {
+        return mGki != null ? "microdroid_gki-" + mGki : "microdroid";
     }
 
     /**
@@ -136,20 +156,30 @@ public abstract class MicrodroidDeviceTestBase {
     public VirtualMachine forceCreateNewVirtualMachine(String name, VirtualMachineConfig config)
             throws VirtualMachineException {
         final VirtualMachineManager vmm = getVirtualMachineManager();
-        VirtualMachine existingVm = vmm.get(name);
-        if (existingVm != null) {
-            vmm.delete(name);
-        }
+        deleteVirtualMachineIfExists(name);
         return vmm.create(name, config);
     }
 
-    public void prepareTestSetup(boolean protectedVm) {
-        mCtx = ApplicationProvider.getApplicationContext();
-        assume().withMessage("Device doesn't support AVF")
-                .that(mCtx.getPackageManager().hasSystemFeature(FEATURE_VIRTUALIZATION_FRAMEWORK))
-                .isTrue();
+    protected void deleteVirtualMachineIfExists(String name) throws VirtualMachineException {
+        VirtualMachineManager vmm = getVirtualMachineManager();
+        boolean deleteExisting;
+        try {
+            deleteExisting = vmm.get(name) != null;
+        } catch (VirtualMachineException e) {
+            // VM exists, i.e. there are some files for it, but they could not be successfully
+            // loaded.
+            deleteExisting = true;
+        }
+        if (deleteExisting) {
+            vmm.delete(name);
+        }
+    }
+
+    public void prepareTestSetup(boolean protectedVm, String gki) {
+        assumeFeatureVirtualizationFramework();
 
         mProtectedVm = protectedVm;
+        mGki = gki;
 
         int capabilities = getVirtualMachineManager().getCapabilities();
         if (protectedVm) {
@@ -161,6 +191,33 @@ public abstract class MicrodroidDeviceTestBase {
                     .that(capabilities & VirtualMachineManager.CAPABILITY_NON_PROTECTED_VM)
                     .isNotEqualTo(0);
         }
+
+        try {
+            assume().withMessage("Skip where requested OS \"" + os() + "\" isn't supported")
+                    .that(os())
+                    .isIn(getVirtualMachineManager().getSupportedOSList());
+        } catch (VirtualMachineException e) {
+            Log.e(TAG, "Error getting supported OS list", e);
+            throw new RuntimeException("Failed to get supported OS list.", e);
+        }
+    }
+
+    protected void assumeFeatureVirtualizationFramework() {
+        assume().withMessage("Device doesn't support AVF")
+                .that(mCtx.getPackageManager().hasSystemFeature(FEATURE_VIRTUALIZATION_FRAMEWORK))
+                .isTrue();
+    }
+
+    protected void assumeSupportedDevice() {
+        assume().withMessage("Skip on 5.4 kernel. b/218303240")
+                .that(KERNEL_VERSION)
+                .isNotEqualTo("5.4");
+    }
+
+    protected void assumeNoUpdatableVmSupport() throws VirtualMachineException {
+        assume().withMessage("Secretkeeper not supported")
+                .that(getVirtualMachineManager().isUpdatableVmSupported())
+                .isFalse();
     }
 
     public abstract static class VmEventListener implements VirtualMachineCallback {
@@ -173,7 +230,7 @@ public abstract class MicrodroidDeviceTestBase {
         private StringBuilder mLogOutput = new StringBuilder();
         private boolean mProcessedBootTimeMetrics = false;
 
-        private void processBootTimeMetrics(String log) {
+        private synchronized void processBootTimeMetrics(String log) {
             if (!mVcpuStartedNanoTime.isPresent()) {
                 mVcpuStartedNanoTime = OptionalLong.of(System.nanoTime());
             }
@@ -190,12 +247,8 @@ public abstract class MicrodroidDeviceTestBase {
         }
 
         private void logVmOutputAndMonitorBootTimeMetrics(
-                String tag,
-                InputStream vmOutputStream,
-                String name,
-                StringBuilder result,
-                boolean monitorEvents) {
-            mProcessedBootTimeMetrics |= monitorEvents;
+                String tag, InputStream vmOutputStream, String name, StringBuilder result) {
+            mProcessedBootTimeMetrics = true;
             new Thread(
                             () -> {
                                 try {
@@ -205,7 +258,7 @@ public abstract class MicrodroidDeviceTestBase {
                                     String line;
                                     while ((line = reader.readLine()) != null
                                             && !Thread.interrupted()) {
-                                        if (monitorEvents) processBootTimeMetrics(line);
+                                        processBootTimeMetrics(line);
                                         Log.i(tag, name + ": " + line);
                                         result.append(line + "\n");
                                     }
@@ -216,17 +269,6 @@ public abstract class MicrodroidDeviceTestBase {
                     .start();
         }
 
-        private void logVmOutputAndMonitorBootTimeMetrics(
-                String tag, InputStream vmOutputStream, String name, StringBuilder result) {
-            logVmOutputAndMonitorBootTimeMetrics(tag, vmOutputStream, name, result, true);
-        }
-
-        /** Copy output from the VM to logcat. This is helpful when things go wrong. */
-        protected void logVmOutput(
-                String tag, InputStream vmOutputStream, String name, StringBuilder result) {
-            logVmOutputAndMonitorBootTimeMetrics(tag, vmOutputStream, name, result, false);
-        }
-
         public void runToFinish(String logTag, VirtualMachine vm)
                 throws VirtualMachineException, InterruptedException {
             vm.setCallback(mExecutorService, this);
@@ -234,7 +276,7 @@ public abstract class MicrodroidDeviceTestBase {
             if (vm.getConfig().isVmOutputCaptured()) {
                 logVmOutputAndMonitorBootTimeMetrics(
                         logTag, vm.getConsoleOutput(), "Console", mConsoleOutput);
-                logVmOutput(logTag, vm.getLogOutput(), "Log", mLogOutput);
+                logVmOutputAndMonitorBootTimeMetrics(logTag, vm.getLogOutput(), "Log", mLogOutput);
             }
             mExecutorService.awaitTermination(300, TimeUnit.SECONDS);
         }
@@ -448,7 +490,25 @@ public abstract class MicrodroidDeviceTestBase {
             return stdout;
         } catch (IOException e) {
             Log.e(tag, "Error executing: " + command, e);
-            throw new RuntimeException("Failed to run the command.");
+            throw new RuntimeException("Failed to run the command.", e);
+        }
+    }
+
+    /** Execute a command. Returns the concatenation of stdout and stderr. */
+    protected String runInShellWithStderr(String tag, UiAutomation uiAutomation, String command) {
+        ParcelFileDescriptor[] files = uiAutomation.executeShellCommandRwe(command);
+        try (InputStream stdout = new ParcelFileDescriptor.AutoCloseInputStream(files[0]);
+                InputStream stderr = new ParcelFileDescriptor.AutoCloseInputStream(files[2]);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            files[1].close(); // The command's stdin
+            stdout.transferTo(out);
+            stderr.transferTo(out);
+            String output = out.toString("UTF-8");
+            Log.i(tag, "Got output : " + stdout);
+            return output;
+        } catch (IOException e) {
+            Log.e(tag, "Error executing: " + command, e);
+            throw new RuntimeException("Failed to run the command.", e);
         }
     }
 
@@ -461,11 +521,13 @@ public abstract class MicrodroidDeviceTestBase {
         public String mApkContentsPath;
         public String mEncryptedStoragePath;
         public String[] mEffectiveCapabilities;
+        public int mUid;
         public String mFileContent;
         public byte[] mBcc;
         public long[] mTimings;
         public int mFileMode;
         public int mMountFlags;
+        public String mConsoleInput;
 
         public void assertNoException() {
             if (mException != null) {
@@ -474,6 +536,40 @@ public abstract class MicrodroidDeviceTestBase {
                 throw new RuntimeException(mException);
             }
         }
+    }
+
+    protected SigningResult runVmAttestationService(
+            String logTag, VirtualMachine vm, byte[] challenge, byte[] messageToSign)
+            throws Exception {
+
+        CompletableFuture<Exception> exception = new CompletableFuture<>();
+        CompletableFuture<Boolean> payloadReady = new CompletableFuture<>();
+        CompletableFuture<SigningResult> signingResultFuture = new CompletableFuture<>();
+        VmEventListener listener =
+                new VmEventListener() {
+                    @Override
+                    public void onPayloadReady(VirtualMachine vm) {
+                        payloadReady.complete(true);
+                        try {
+                            IAttestationService service =
+                                    IAttestationService.Stub.asInterface(
+                                            vm.connectToVsockServer(IAttestationService.PORT));
+                            signingResultFuture.complete(
+                                    service.signWithAttestationKey(challenge, messageToSign));
+                        } catch (Exception e) {
+                            exception.complete(e);
+                        } finally {
+                            forceStop(vm);
+                        }
+                    }
+                };
+        listener.runToFinish(TAG, vm);
+
+        assertThat(payloadReady.getNow(false)).isTrue();
+        assertThat(exception.getNow(null)).isNull();
+        SigningResult signingResult = signingResultFuture.getNow(null);
+        assertThat(signingResult).isNotNull();
+        return signingResult;
     }
 
     protected TestResults runVmTestService(
@@ -491,7 +587,7 @@ public abstract class MicrodroidDeviceTestBase {
                         try {
                             mTestService =
                                     ITestService.Stub.asInterface(
-                                            vm.connectToVsockServer(ITestService.SERVICE_PORT));
+                                            vm.connectToVsockServer(ITestService.PORT));
                             // Make sure linkToDeath works, and include it in the log in case it's
                             // helpful.
                             mTestService
@@ -552,5 +648,21 @@ public abstract class MicrodroidDeviceTestBase {
     @FunctionalInterface
     protected interface RunTestsAgainstTestService {
         void runTests(ITestService testService, TestResults testResults) throws Exception;
+    }
+
+    protected void assumeFeatureEnabled(String featureName) throws Exception {
+        assumeTrue(featureName + " not enabled", isFeatureEnabled(featureName));
+    }
+
+    protected boolean isFeatureEnabled(String featureName) throws Exception {
+        return getVirtualMachineManager().isFeatureEnabled(featureName);
+    }
+
+    protected void assumeProtectedVM() {
+        assumeTrue("Skip on non-protected VM", mProtectedVm);
+    }
+
+    protected void assumeNonProtectedVM() {
+        assumeFalse("Skip on protected VM", mProtectedVm);
     }
 }

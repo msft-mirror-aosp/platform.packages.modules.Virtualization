@@ -5,6 +5,7 @@ package {
 rust_library {
     name: "libcompos_verify_native_rust",
     crate_name: "compos_verify_native",
+    defaults: ["avf_build_flags_rust"],
     srcs: ["lib.rs"],
     rustlibs: [
         "libanyhow",
@@ -23,6 +24,7 @@ rust_library {
 
 cc_library_static {
     name: "libcompos_verify_native_cpp",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["verify_native.cpp"],
     static_libs: ["libcompos_key"],
     shared_libs: [

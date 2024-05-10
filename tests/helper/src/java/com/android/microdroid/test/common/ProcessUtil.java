@@ -22,21 +22,35 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.stream.IntStream;
 
 /** This class provides process utility for both device tests and host tests. */
 public final class ProcessUtil {
+    private static final String CROSVM_BIN = "/apex/com.android.virt/bin/crosvm";
+    private static final String VIRTMGR_BIN = "/apex/com.android.virt/bin/virtmgr";
 
     /** A memory map entry from /proc/{pid}/smaps */
     public static class SMapEntry {
         public String name;
         public Map<String, Long> metrics;
+
+        @Override
+        public String toString() {
+            StringBuilder sb = new StringBuilder();
+            sb.append("name: " + name + "\n");
+            metrics.forEach(
+                    (k, v) -> {
+                        sb.append("  " + k + ": " + v + "\n");
+                    });
+            return sb.toString();
+        }
     }
 
     /** Gets metrics key and values mapping of specified process id */
     public static List<SMapEntry> getProcessSmaps(int pid, Function<String, String> shellExecutor)
             throws IOException {
         String path = "/proc/" + pid + "/smaps";
-        return parseMemoryInfo(shellExecutor.apply("cat " + path + " || true"));
+        return parseMemoryInfo(shellExecutor.apply("cat " + path));
     }
 
     /** Gets metrics key and values mapping of specified process id */
@@ -87,6 +101,35 @@ public final class ProcessUtil {
         }
 
         return processMap;
+    }
+
+    private static IntStream getChildProcesses(
+            int pid, String cmdlineFilter, Function<String, String> shellExecutor) {
+        String cmd = "pgrep -P " + pid;
+        if (cmdlineFilter != null) {
+            cmd += " -f " + cmdlineFilter;
+        }
+        return shellExecutor.apply(cmd).trim().lines().mapToInt(Integer::parseInt);
+    }
+
+    private static int getSingleChildProcess(
+            int parentPid, String cmdlineFilter, Function<String, String> shellExecutor) {
+        int[] pids = getChildProcesses(parentPid, cmdlineFilter, shellExecutor).toArray();
+        if (pids.length == 0) {
+            throw new IllegalStateException("No process found for " + cmdlineFilter);
+        } else if (pids.length > 1) {
+            throw new IllegalStateException("More than one process found for " + cmdlineFilter);
+        }
+        return pids[0];
+    }
+
+    public static int getVirtmgrPid(int parentPid, Function<String, String> shellExecutor) {
+        return getSingleChildProcess(parentPid, VIRTMGR_BIN, shellExecutor);
+    }
+
+    public static int getCrosvmPid(int parentPid, Function<String, String> shellExecutor) {
+        int virtmgrPid = getVirtmgrPid(parentPid, shellExecutor);
+        return getSingleChildProcess(virtmgrPid, CROSVM_BIN, shellExecutor);
     }
 
     // To ensures that only one object is created at a time.

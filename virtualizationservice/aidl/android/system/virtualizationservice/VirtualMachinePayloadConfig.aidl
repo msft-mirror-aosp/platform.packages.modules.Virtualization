@@ -23,4 +23,7 @@ parcelable VirtualMachinePayloadConfig {
      * function invoked.
      */
     @utf8InCpp String payloadBinaryName;
+
+    /** Any extra APKs. */
+    List<ParcelFileDescriptor> extraApks;
 }

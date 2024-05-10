@@ -145,11 +145,10 @@ public class VmShareServiceImpl extends Service {
 
         Log.i(
                 TAG,
-                "Payload is ready, connecting to the vsock service at port "
-                        + ITestService.SERVICE_PORT);
+                "Payload is ready, connecting to the vsock service at port " + ITestService.PORT);
         ITestService testService =
                 ITestService.Stub.asInterface(
-                        mVirtualMachine.connectToVsockServer(ITestService.SERVICE_PORT));
+                        mVirtualMachine.connectToVsockServer(ITestService.PORT));
         return new RemoteTestServiceDelegate(testService);
     }
 
@@ -221,6 +220,11 @@ public class VmShareServiceImpl extends Service {
         }
 
         @Override
+        public int getUid() throws RemoteException {
+            throw new UnsupportedOperationException("Not supported");
+        }
+
+        @Override
         public void writeToFile(String content, String path) throws RemoteException {
             throw new UnsupportedOperationException("Not supported");
         }
@@ -242,6 +246,11 @@ public class VmShareServiceImpl extends Service {
 
         @Override
         public void requestCallback(IAppCallback appCallback) {
+            throw new UnsupportedOperationException("Not supported");
+        }
+
+        @Override
+        public String readLineFromConsole() {
             throw new UnsupportedOperationException("Not supported");
         }
 

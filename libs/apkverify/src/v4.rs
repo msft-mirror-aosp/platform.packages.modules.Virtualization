@@ -37,9 +37,10 @@ use crate::v3::extract_signer_and_apk_sections;
 /// [apk_digest]: https://source.android.com/docs/security/apksigning/v4#apk-digest
 pub fn get_apk_digest<R: Read + Seek>(
     apk: R,
+    current_sdk: u32,
     verify: bool,
 ) -> Result<(SignatureAlgorithmID, Box<[u8]>)> {
-    let (signer, mut sections) = extract_signer_and_apk_sections(apk)?;
+    let (signer, mut sections) = extract_signer_and_apk_sections(apk, current_sdk)?;
     let strongest_algorithm_id = signer
         .strongest_signature()?
         .signature_algorithm_id
@@ -104,9 +105,10 @@ pub struct SigningInfo {
 }
 
 /// Version of the idsig file format
-#[derive(Debug, PartialEq, Eq, FromPrimitive, ToPrimitive)]
+#[derive(Debug, PartialEq, Eq, FromPrimitive, ToPrimitive, Default)]
 #[repr(u32)]
 pub enum Version {
+    #[default]
     /// Version 2, the only supported version.
     V2 = 2,
 }
@@ -114,12 +116,6 @@ pub enum Version {
 impl Version {
     fn from(val: u32) -> Result<Version> {
         Self::from_u32(val).ok_or_else(|| anyhow!("{} is an unsupported version", val))
-    }
-}
-
-impl Default for Version {
-    fn default() -> Self {
-        Version::V2
     }
 }
 
@@ -153,6 +149,7 @@ impl<R: Read + Seek> V4Signature<R> {
     /// function OOMing.
     pub fn create(
         mut apk: &mut R,
+        current_sdk: u32,
         block_size: usize,
         salt: &[u8],
         algorithm: HashAlgorithm,
@@ -180,7 +177,8 @@ impl<R: Read + Seek> V4Signature<R> {
         ret.hashing_info.log2_blocksize = log2(block_size);
 
         apk.seek(SeekFrom::Start(start))?;
-        let (signature_algorithm_id, apk_digest) = get_apk_digest(apk, /*verify=*/ false)?;
+        let (signature_algorithm_id, apk_digest) =
+            get_apk_digest(apk, current_sdk, /*verify=*/ false)?;
         ret.signing_info.signature_algorithm_id = signature_algorithm_id;
         ret.signing_info.apk_digest = apk_digest;
         // TODO(jiyong): add a signature to the signing_info struct
@@ -367,8 +365,9 @@ mod tests {
     #[test]
     fn digest_from_apk() {
         let mut input = Cursor::new(include_bytes!("../tests/data/v4-digest-v3-Sha256withEC.apk"));
+        let current_sdk = 31;
         let mut created =
-            V4Signature::create(&mut input, 4096, &[], HashAlgorithm::SHA256).unwrap();
+            V4Signature::create(&mut input, current_sdk, 4096, &[], HashAlgorithm::SHA256).unwrap();
 
         let mut golden = V4Signature::from_idsig_path(format!("{}.idsig", TEST_APK_PATH)).unwrap();
 

@@ -8,8 +8,7 @@ intended to host headless & native workloads only.
 ## Prerequisites
 
 Any 64-bit target (either x86\_64 or arm64) is supported. 32-bit target is not
-supported. Note that we currently don't support user builds; only userdebug
-builds are supported.
+supported.
 
 The only remaining requirement is that `com.android.virt` APEX has to be
 pre-installed. To do this, add the following line in your product makefile.
@@ -18,10 +17,10 @@ pre-installed. To do this, add the following line in your product makefile.
 $(call inherit-product, packages/modules/Virtualization/apex/product_packages.mk)
 ```
 
-Build the target after adding the line, and flash it. This step needs to be done
-only once for the target.
+Build the target product after adding the line, and flash it. This step needs
+to be done only once for the target.
 
-If you are using `aosp_oriole` (Pixel 6) or `aosp_cf_x86_64_phone` (Cuttlefish),
+If you are using Pixel 6 and beyond or Cuttlefish (`aosp_cf_x86_64_phone`)
 adding above line is not necessary as it's already done.
 
 ## Building and installing microdroid
@@ -41,8 +40,11 @@ with `aosp_x86_64`.
 
 ## Building an app
 
-An app in microdroid is a shared library file embedded in an APK. The shared
-library should have an entry point `AVmPayload_main` as shown below:
+A [vm
+payload](https://android.googlesource.com/platform/packages/modules/Virtualization/+/refs/heads/main/vm_payload/)
+is a shared library file that gets executed in microdroid. It is packaged as
+part of an Android application.  The library should have an entry point
+`AVmPayload_main` as shown below:
 
 ```C++
 extern "C" int AVmPayload_main() {
@@ -54,53 +56,22 @@ Then build it as a shared library:
 
 ```
 cc_library_shared {
-  name: "MyMicrodroidApp",
+  name: "MyMicrodroidPayload",
   srcs: ["**/*.cpp"],
   sdk_version: "current",
 }
 ```
 
-Then you need a configuration file in JSON format that defines what to load and
-execute in microdroid. The name of the file can be anything and you may have
-multiple configuration files if needed.
-
-```json
-{
-  "os": { "name": "microdroid" },
-  "task": {
-    "type": "microdroid_launcher",
-    "command": "MyMicrodroidApp.so"
-  }
-}
-```
-
-The value of `task.command` should match with the name of the shared library
-defined above. If your app requires APEXes to be imported, you can declare the
-list in `apexes` key like following.
-
-```json
-{
-  "os": ...,
-  "task": ...,
-  "apexes": [
-    {"name": "com.android.awesome_apex"}
-  ]
-}
-```
-
-Embed the shared library and the VM configuration file in an APK:
+Embed the shared library file in an APK:
 
 ```
 android_app {
   name: "MyApp",
-  srcs: ["**/*.java"], // if there is any java code
-  jni_libs: ["MyMicrodroidApp"],
+  srcs: ["**/*.java"],
+  jni_libs: ["MyMicrodroidPayload"],
   use_embedded_native_libs: true,
   sdk_version: "current",
 }
-
-// The VM configuration file can be embedded by simply placing it at `./assets`
-// directory.
 ```
 
 Finally, you build the APK.
@@ -109,7 +80,7 @@ Finally, you build the APK.
 TARGET_BUILD_APPS=MyApp m apps_only dist
 ```
 
-## Running the app on microdroid
+## Running the VM payload on microdroid
 
 First of all, install the APK to the target device.
 
@@ -117,11 +88,32 @@ First of all, install the APK to the target device.
 adb install out/dist/MyApp.apk
 ```
 
+There are two ways start a VM and run the payload in it.
+
+* By manually invoking the `vm` tool via `adb shell`.
+* Calling APIs programmatically in the Java app.
+
+### Using `vm` tool
+
+Execute the following commands to launch a VM. The VM will boot to microdroid
+and then automatically execute your payload (the shared library
+`MyMicrodroidPayload.so`).
+
+```sh
+TEST_ROOT=/data/local/tmp/virt
+adb shell /apex/com.android.virt/bin/vm run-app \
+--log $TEST_ROOT/log.txt \
+--console $TEST_ROOT/console.txt \
+PATH_TO_YOUR_APP \
+$TEST_ROOT/MyApp.apk.idsig \
+$TEST_ROOT/instance.img \
+--instance-id-file $TEST_ROOT/instance_id \
+--payload-binary-name MyMicrodroidPayload.so
+```
+
 `ALL_CAP`s below are placeholders. They need to be replaced with correct
 values:
 
-* `VM_CONFIG_FILE`: the name of the VM config file that you embedded in the APK.
-  (e.g. `vm_config.json`)
 * `PACKAGE_NAME_OF_YOUR_APP`: package name of your app (e.g. `com.acme.app`).
 * `PATH_TO_YOUR_APP`: path to the installed APK on the device. Can be obtained
   via the following command.
@@ -130,58 +122,70 @@ values:
   ```
   It shall report a cryptic path similar to `/data/app/~~OgZq==/com.acme.app-HudMahQ==/base.apk`.
 
-Execute the following commands to launch a VM. The VM will boot to microdroid
-and then automatically execute your app (the shared library
-`MyMicrodroidApp.so`).
+The console output from the VM is stored to `$TEST_ROOT/console.txt` and logcat
+is stored to `$TEST_ROOT/log.txt` file for debugging purpose. If you omit
+`--log` or `--console` option, the console output will be emitted to the
+current console and the logcat logs are sent to the main logcat in Android.
+
+Stopping the VM can be done by pressing `Ctrl+C`.
+
+### Using the APIs
+
+Use the [Android Virtualization Framework Java
+APIs](https://android.googlesource.com/platform/packages/modules/Virtualization/+/refs/heads/main/java/framework/README.md)
+in your app to create a microdroid VM and run payload in it. The APIs are currently
+@SystemApi, and only available to preinstalled apps.
+
+If you are looking for an example usage of the APIs, you may refer to the [demo
+app](https://android.googlesource.com/platform/packages/modules/Virtualization/+/refs/heads/main/demo/).
+
+
+## Running Microdroid with vendor image
+
+With using `vm` tool, execute the following commands to launch a VM with vendor
+partition.
 
 ```sh
-TEST_ROOT=/data/local/tmp/virt
-adb shell /apex/com.android.virt/bin/vm run-app \
---log $TEST_ROOT/log.txt \
-PATH_TO_YOUR_APP \
-$TEST_ROOT/MyApp.apk.idsig \
-$TEST_ROOT/instance.img \
---config-path assets/VM_CONFIG_FILE
+adb shell /apex/com.android.virt/bin/vm run-microdroid \
+--vendor $VENDOR_IMAGE
 ```
 
-The last command lets you know the CID assigned to the VM. The console output
-from the VM is stored to `$TEST_ROOT/log.txt` file for debugging purpose. If you
-omit the `--log $TEST_ROOT/log.txt` option, it will be emitted to the current
-console.
+### Verification of vendor image
 
-Stopping the VM can be done as follows:
+Since vendor image of Microdroid is not part of `com.android.virt` APEX, the
+verification process of vendor partition is different from others.
+
+Vendor image uses its hashtree digest for the verifying its data, generated
+by `add_hashtree_footer` in `avbtool`. The value could be seen with following
+command:
 
 ```sh
-adb shell /apex/com.android.virt/bin/vm stop $CID
+avbtool info_image --image $VENDOR_IMAGE
 ```
 
-, where `$CID` is the reported CID value. This works only when the `vm` was
-invoked with the `--daemonize` flag. If the flag was not used, press Ctrl+C on
-the console where the `vm run-app` command was invoked.
+Fixed path in VM for vendor hashtree digest is written in [fstab.microdroid].
+During first stage init of VM, [dm-verity] is set up based on vendor hashtree
+digest by reading [fstab.microdroid].
 
-## ADB
+For non-pVM, virtualizationmanager creates [DTBO] containing vendor hashtree
+digest, and passes to the VM via crosvm option. The vendor hashtree digest is
+obtained by virtualizationmanager from the host Android DT under
+`/avf/reference/`, which may be populated by the [bootloader].
 
-On userdebug builds, you can have an adb connection to microdroid. To do so,
-first, delete `$TEST_ROOT/instance.img`; this is because changing debug settings
-requires a new instance. Then add the `--debug=full` flag to the
-`/apex/com.android.virt/bin/vm run-app` command, and then
+For pVM, VM reference DT included in [pvmfw config data] is additionally used
+for validating vendor hashtree digest. [Bootloader][bootloader] should append
+vendor hashtree digest into VM reference DT based on [fstab.microdroid]. Vendor
+hashtree digest could be appended as property into descriptors in host Android's
+vendor image by [Makefile] when Microdroid vendor image module is defined, so
+that a [bootloader] can extract the value and populate into VM reference DT.
 
-```sh
-vm_shell
-```
+[fstab.microdroid]: fstab.microdroid
+[dm-verity]: https://source.android.com/docs/security/features/verifiedboot/dm-verity
+[DTBO]: https://android.googlesource.com/platform/external/dtc/+/refs/heads/main/Documentation/dt-object-internal.txt
+[pvmfw config data]: ../pvmfw/README.md#configuration-data-format
+[bootloader]: https://source.android.com/docs/core/architecture/bootloader
+[Makefile]: https://cs.android.com/android/platform/superproject/main/+/main:build/make/core/Makefile
 
-Done. Now you are logged into Microdroid. Have fun!
+## Debugging Microdroid
 
-Once you have an adb connection with `vm_shell`, `localhost:8000` will be the
-serial of microdroid.
-
-## Debugging the payload on microdroid
-
-Like a normal adb device, you can debug native processes using `lldbclient.py`
-script, either by running a new process, or attaching to an existing process.
-Use `vm_shell` tool above, and then run `lldbclient.py`.
-
-```sh
-development/scripts/lldbclient.py -s localhost:8000 --chroot . --user '' \
-    (-p PID | -n NAME | -r ...)
-```
+Refer to [Debugging protected VMs](../docs/debug/README.md).

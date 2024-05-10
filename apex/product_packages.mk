@@ -19,6 +19,9 @@
 # To include the APEX in your build, insert this in your device.mk:
 #   $(call inherit-product, packages/modules/Virtualization/apex/product_packages.mk)
 
+# If devices supports AVF it implies that it uses non-flattened APEXes.
+$(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)
+
 PRODUCT_PACKAGES += \
     com.android.compos \
 
@@ -34,3 +37,22 @@ PRODUCT_SYSTEM_EXT_PROPERTIES := ro.config.isolated_compilation_enabled=true
 PRODUCT_FSVERITY_GENERATE_METADATA := true
 
 PRODUCT_AVF_ENABLED := true
+
+# The cheap build flags dependency management system until there is a proper one.
+ifdef RELEASE_AVF_ENABLE_DEVICE_ASSIGNMENT
+  ifndef RELEASE_AVF_ENABLE_VENDOR_MODULES
+    $(error RELEASE_AVF_ENABLE_VENDOR_MODULES must also be enabled)
+  endif
+endif
+
+ifdef RELEASE_AVF_ENABLE_LLPVM_CHANGES
+  ifndef RELEASE_AVF_ENABLE_DICE_CHANGES
+    $(error RELEASE_AVF_ENABLE_DICE_CHANGES must also be enabled)
+  endif
+endif
+
+ifdef RELEASE_AVF_ENABLE_REMOTE_ATTESTATION
+  ifndef RELEASE_AVF_ENABLE_DICE_CHANGES
+    $(error RELEASE_AVF_ENABLE_DICE_CHANGES must also be enabled)
+  endif
+endif

@@ -39,12 +39,10 @@ SECTIONS
 	 * Collect together the code. This is page aligned so it can be mapped
 	 * as executable-only.
 	 */
-	.init : ALIGN(4096) {
+	.text : ALIGN(4096) {
 		text_begin = .;
 		*(.init.entry)
 		*(.init.*)
-	} >image
-	.text : {
 		*(.text.*)
 	} >image
 	text_end = .;
@@ -61,6 +59,17 @@ SECTIONS
 		*(.got)
 	} >image
 	rodata_end = .;
+
+	.eh_stack (NOLOAD) : ALIGN(4096) {
+		/*
+		 * Get stack overflow guard from the previous page being from
+		 * .rodata and mapped read-only or left unmapped.
+		 */
+		eh_stack_limit = .;
+		. += 4096;
+		. = ALIGN(4096);
+		init_eh_stack_pointer = .;
+	} >writable_data
 
 	/*
 	 * Collect together the read-write data including .bss at the end which
@@ -91,12 +100,15 @@ SECTIONS
 		bss_end = .;
 	} >writable_data
 
+	init_stack_pointer = ORIGIN(writable_data) + LENGTH(writable_data);
 	.stack (NOLOAD) : ALIGN(4096) {
-		boot_stack_begin = .;
-		. += 40 * 4096;
-		. = ALIGN(4096);
-		boot_stack_end = .;
+		. += 4096; /* Ensure we have one guard page for overflow. */
+		stack_limit = .;
+		. = init_stack_pointer;
 	} >writable_data
+
+	/* Make our Bionic stack protector compatible with mainline LLVM */
+	__stack_chk_guard = __bionic_tls + 40;
 
 	/*
 	 * Remove unused sections from the image.

@@ -17,10 +17,12 @@
 use serde::{Deserialize, Serialize};
 
 /// VM payload config
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VmPayloadConfig {
-    /// OS config. Default: "microdroid"
+    /// OS config.
+    /// Deprecated: don't use. Error if not "" or "microdroid".
     #[serde(default)]
+    #[deprecated]
     pub os: OsConfig,
 
     /// Task to run in a VM
@@ -58,16 +60,17 @@ pub struct OsConfig {
 
 impl Default for OsConfig {
     fn default() -> Self {
-        Self { name: "microdroid".to_owned() }
+        Self { name: "".to_owned() }
     }
 }
 
 /// Payload's task can be one of plain executable
 /// or an .so library which can be started via /system/bin/microdroid_launcher
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Default)]
 pub enum TaskType {
     /// Task's command indicates the path to the executable binary.
     #[serde(rename = "executable")]
+    #[default]
     Executable,
     /// Task's command indicates the .so library in /mnt/apk/lib/{arch}
     #[serde(rename = "microdroid_launcher")]
@@ -85,12 +88,6 @@ pub struct Task {
     /// - For executable task, this is the path to the executable.
     /// - For microdroid_launcher task, this is the name of .so
     pub command: String,
-}
-
-impl Default for TaskType {
-    fn default() -> TaskType {
-        TaskType::Executable
-    }
 }
 
 /// APEX config

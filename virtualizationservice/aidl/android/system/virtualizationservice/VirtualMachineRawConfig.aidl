@@ -17,11 +17,16 @@ package android.system.virtualizationservice;
 
 import android.system.virtualizationservice.CpuTopology;
 import android.system.virtualizationservice.DiskImage;
+import android.system.virtualizationservice.DisplayConfig;
+import android.system.virtualizationservice.InputDevice;
 
 /** Raw configuration for running a VM. */
 parcelable VirtualMachineRawConfig {
     /** Name of VM */
     String name;
+
+    /** Id of the VM instance */
+    byte[64] instanceId;
 
     /** The kernel image, if any. */
     @nullable ParcelFileDescriptor kernel;
@@ -60,13 +65,16 @@ parcelable VirtualMachineRawConfig {
     @utf8InCpp String platformVersion;
 
     /**
-     * List of task profile names to apply for the VM
-     */
-    String[] taskProfiles;
-
-    /**
      * Port at which crosvm will start a gdb server to debug guest kernel.
      * If set to zero, then gdb server won't be started.
      */
     int gdbPort = 0;
+
+    /** List of SysFS nodes of devices to be assigned */
+    String[] devices;
+
+    @nullable DisplayConfig displayConfig;
+
+    /** List of input devices to the VM */
+    InputDevice[] inputDevices;
 }

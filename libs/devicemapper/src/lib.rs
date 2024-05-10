@@ -29,14 +29,16 @@
 //! A library to create device mapper spec & issue ioctls.
 
 #![allow(missing_docs)]
+#![cfg_attr(test, allow(unused))]
 
 use anyhow::{Context, Result};
-use data_model::DataInit;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::mem::size_of;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use zerocopy::AsBytes;
+use zerocopy::FromZeroes;
 
 /// Exposes DmCryptTarget & related builder
 pub mod crypt;
@@ -86,7 +88,7 @@ fn dm_dev_remove(dm: &DeviceMapper, ioctl: *mut DmIoctl) -> Result<i32> {
 // `DmTargetSpec` is the header of the data structure for a device-mapper target. When doing the
 // ioctl, one of more `DmTargetSpec` (and its body) are appened to the `DmIoctl` struct.
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, AsBytes, FromZeroes)]
 struct DmTargetSpec {
     sector_start: u64,
     length: u64, // number of 512 sectors
@@ -95,13 +97,9 @@ struct DmTargetSpec {
     target_type: [u8; DM_MAX_TYPE_NAME],
 }
 
-// SAFETY: C struct is safe to be initialized from raw data
-unsafe impl DataInit for DmTargetSpec {}
-
 impl DmTargetSpec {
     fn new(target_type: &str) -> Result<Self> {
-        // safe because the size of the array is the same as the size of the struct
-        let mut spec: Self = *DataInit::from_mut_slice(&mut [0; size_of::<Self>()]).unwrap();
+        let mut spec = Self::new_zeroed();
         spec.target_type.as_mut().write_all(target_type.as_bytes())?;
         Ok(spec)
     }
@@ -109,8 +107,7 @@ impl DmTargetSpec {
 
 impl DmIoctl {
     fn new(name: &str) -> Result<DmIoctl> {
-        // safe because the size of the array is the same as the size of the struct
-        let mut data: Self = *DataInit::from_mut_slice(&mut [0; size_of::<Self>()]).unwrap();
+        let mut data: Self = Self::new_zeroed();
         data.version[0] = DM_VERSION_MAJOR;
         data.version[1] = DM_VERSION_MINOR;
         data.version[2] = DM_VERSION_PATCHLEVEL;
@@ -201,7 +198,7 @@ impl DeviceMapper {
         }
 
         let mut payload = Vec::with_capacity(payload_size);
-        payload.extend_from_slice(data.as_slice());
+        payload.extend_from_slice(data.as_bytes());
         payload.extend_from_slice(target);
         dm_table_load(self, payload.as_mut_ptr() as *mut DmIoctl)
             .context("failed to load table")?;
@@ -227,14 +224,18 @@ fn uuid(node_id: &[u8]) -> Result<String> {
     let context = Context::new(0);
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
     let ts = Timestamp::from_unix(context, now.as_secs(), now.subsec_nanos());
-    let uuid = Uuid::new_v1(ts, node_id)?;
-    Ok(String::from(uuid.to_hyphenated().encode_lower(&mut Uuid::encode_buffer())))
+    let uuid = Uuid::new_v1(ts, node_id.try_into()?);
+    Ok(String::from(uuid.hyphenated().encode_lower(&mut Uuid::encode_buffer())))
 }
+
+#[cfg(test)]
+rdroidtest::test_main!();
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crypt::{CipherType, DmCryptTargetBuilder};
+    use rdroidtest::{ignore_if, rdroidtest};
     use rustutils::system_properties;
     use std::fs::{read, File, OpenOptions};
     use std::io::Write;
@@ -279,7 +280,6 @@ mod tests {
         Ok(())
     }
 
-    // TODO(b/260692911): Find a better way to skip a test instead of silently passing it.
     fn is_hctr2_supported() -> bool {
         // hctr2 is NOT enabled in kernel 5.10 or lower. We run Microdroid tests on kernel versions
         // 5.10 or above & therefore,  we don't really care to skip test on other versions.
@@ -292,28 +292,25 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rdroidtest]
     fn mapping_again_keeps_data_xts() {
         mapping_again_keeps_data(&KEY_SET_XTS, "name1");
     }
 
-    #[test]
+    #[rdroidtest]
+    #[ignore_if(!is_hctr2_supported())]
     fn mapping_again_keeps_data_hctr2() {
-        if !is_hctr2_supported() {
-            return;
-        }
         mapping_again_keeps_data(&KEY_SET_HCTR2, "name2");
     }
-    #[test]
+
+    #[rdroidtest]
     fn data_inaccessible_with_diff_key_xts() {
         data_inaccessible_with_diff_key(&KEY_SET_XTS, "name3");
     }
 
-    #[test]
+    #[rdroidtest]
+    #[ignore_if(!is_hctr2_supported())]
     fn data_inaccessible_with_diff_key_hctr2() {
-        if !is_hctr2_supported() {
-            return;
-        }
         data_inaccessible_with_diff_key(&KEY_SET_HCTR2, "name4");
     }
 
@@ -330,16 +327,16 @@ mod tests {
             backing_file,
             0,
             sz,
-            /*direct_io*/ true,
-            /*writable*/ true,
+            /* direct_io */ true,
+            /* writable */ true,
         )
         .unwrap();
         let device_diff = device.to_owned() + "_diff";
 
         scopeguard::defer! {
             loopdevice::detach(&data_device).unwrap();
-            _ = delete_device(&dm, device);
-            _ = delete_device(&dm, &device_diff);
+            let _ignored1 = delete_device(&dm, device);
+            let _ignored2 = delete_device(&dm, &device_diff);
         }
 
         let target = DmCryptTargetBuilder::default()
@@ -362,7 +359,8 @@ mod tests {
 
     fn data_inaccessible_with_diff_key(keyset: &KeySet, device: &str) {
         // This test creates 2 different crypt devices using different keys backed
-        // by same data_device -> Write data on dev1 -> Check the data is visible but not the same on dev2
+        // by same data_device -> Write data on dev1 -> Check the data is visible but not the same
+        // on dev2
         let dm = DeviceMapper::new().unwrap();
         let inputimg = include_bytes!("../testdata/rand8k");
         let sz = inputimg.len() as u64;
@@ -373,15 +371,15 @@ mod tests {
             backing_file,
             0,
             sz,
-            /*direct_io*/ true,
-            /*writable*/ true,
+            /* direct_io */ true,
+            /* writable */ true,
         )
         .unwrap();
         let device_diff = device.to_owned() + "_diff";
         scopeguard::defer! {
             loopdevice::detach(&data_device).unwrap();
-            _ = delete_device(&dm, device);
-            _ = delete_device(&dm, &device_diff);
+            let _ignored1 = delete_device(&dm, device);
+            let _ignored2 = delete_device(&dm, &device_diff);
         }
 
         let target = DmCryptTargetBuilder::default()

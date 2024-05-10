@@ -20,15 +20,15 @@ pub enum ErrorCode {
     /// Error code for all other errors not listed below.
     Unknown,
 
-    /// Error code indicating that the payload can't be verified due to various reasons (e.g invalid
-    /// merkle tree, invalid formats, etc).
+    /// Error code indicating that the payload can't be verified due to various reasons (e.g
+    /// invalid merkle tree, invalid formats, etc).
     PayloadVerificationFailed,
 
     /// Error code indicating that the payload is verified, but has changed since the last boot.
     PayloadChanged,
 
     /// Error code indicating that the payload config is invalid.
-    PayloadConfigInvalid,
+    PayloadInvalidConfig,
 
     /// Payload sent a death reason which was not recognised by the client library.
     Unrecognised(AidlErrorCode),
@@ -40,7 +40,7 @@ impl From<AidlErrorCode> for ErrorCode {
             AidlErrorCode::UNKNOWN => Self::Unknown,
             AidlErrorCode::PAYLOAD_VERIFICATION_FAILED => Self::PayloadVerificationFailed,
             AidlErrorCode::PAYLOAD_CHANGED => Self::PayloadChanged,
-            AidlErrorCode::PAYLOAD_CONFIG_INVALID => Self::PayloadConfigInvalid,
+            AidlErrorCode::PAYLOAD_INVALID_CONFIG => Self::PayloadInvalidConfig,
             _ => Self::Unrecognised(error_code),
         }
     }

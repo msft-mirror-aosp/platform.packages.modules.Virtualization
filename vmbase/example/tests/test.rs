@@ -24,9 +24,9 @@ use android_system_virtualizationservice::{
 use anyhow::{Context, Error};
 use log::info;
 use std::{
+    collections::{HashSet, VecDeque},
     fs::File,
-    io::{self, BufRead, BufReader, Write},
-    os::unix::io::FromRawFd,
+    io::{self, BufRead, BufReader, Read, Write},
     panic, thread,
 };
 use vmclient::{DeathReason, VmInstance};
@@ -34,12 +34,16 @@ use vmclient::{DeathReason, VmInstance};
 const VMBASE_EXAMPLE_PATH: &str =
     "/data/local/tmp/vmbase_example.integration_test/arm64/vmbase_example.bin";
 const TEST_DISK_IMAGE_PATH: &str = "/data/local/tmp/vmbase_example.integration_test/test_disk.img";
+const EMPTY_DISK_IMAGE_PATH: &str =
+    "/data/local/tmp/vmbase_example.integration_test/empty_disk.img";
 
 /// Runs the vmbase_example VM as an unprotected VM via VirtualizationService.
 #[test]
 fn test_run_example_vm() -> Result<(), Error> {
     android_logger::init_once(
-        android_logger::Config::default().with_tag("vmbase").with_min_level(log::Level::Debug),
+        android_logger::Config::default()
+            .with_tag("vmbase")
+            .with_max_level(log::LevelFilter::Debug),
     );
 
     // Redirect panic messages to logcat.
@@ -75,45 +79,115 @@ fn test_run_example_vm() -> Result<(), Error> {
     let test_image = ParcelFileDescriptor::new(test_image);
     let disk_image = DiskImage { image: Some(test_image), writable: false, partitions: vec![] };
 
+    // Make file for empty test disk image.
+    let empty_image = File::options()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(EMPTY_DISK_IMAGE_PATH)
+        .with_context(|| format!("Failed to open empty disk image {}", EMPTY_DISK_IMAGE_PATH))?;
+    let empty_image = ParcelFileDescriptor::new(empty_image);
+    let empty_disk_image =
+        DiskImage { image: Some(empty_image), writable: false, partitions: vec![] };
+
     let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
         name: String::from("VmBaseTest"),
         kernel: None,
         initrd: None,
         params: None,
         bootloader: Some(bootloader),
-        disks: vec![disk_image],
+        disks: vec![disk_image, empty_disk_image],
         protectedVm: false,
         memoryMib: 300,
         cpuTopology: CpuTopology::ONE_CPU,
         platformVersion: "~1.0".to_string(),
-        taskProfiles: vec![],
         gdbPort: 0, // no gdb
+        ..Default::default()
     });
-    let console = android_log_fd()?;
-    let log = android_log_fd()?;
-    let vm = VmInstance::create(service.as_ref(), &config, Some(console), Some(log), None)
-        .context("Failed to create VM")?;
+    let (handle, console) = android_log_fd()?;
+    let (mut log_reader, log_writer) = pipe()?;
+    let vm = VmInstance::create(
+        service.as_ref(),
+        &config,
+        Some(console),
+        /* consoleIn */ None,
+        Some(log_writer),
+        None,
+    )
+    .context("Failed to create VM")?;
     vm.start().context("Failed to start VM")?;
     info!("Started example VM.");
 
     // Wait for VM to finish, and check that it shut down cleanly.
     let death_reason = vm.wait_for_death();
     assert_eq!(death_reason, DeathReason::Shutdown);
+    handle.join().unwrap();
+
+    // Check that the expected string was written to the log VirtIO console device.
+    let expected = "Hello VirtIO console\n";
+    let mut log_output = String::new();
+    assert_eq!(log_reader.read_to_string(&mut log_output)?, expected.len());
+    assert_eq!(log_output, expected);
 
     Ok(())
 }
 
-fn android_log_fd() -> io::Result<File> {
+fn android_log_fd() -> Result<(thread::JoinHandle<()>, File), io::Error> {
+    let (reader, writer) = pipe()?;
+    let handle = thread::spawn(|| VmLogProcessor::new(reader).run().unwrap());
+    Ok((handle, writer))
+}
+
+fn pipe() -> io::Result<(File, File)> {
     let (reader_fd, writer_fd) = nix::unistd::pipe()?;
+    Ok((reader_fd.into(), writer_fd.into()))
+}
 
-    // SAFETY: These are new FDs with no previous owner.
-    let reader = unsafe { File::from_raw_fd(reader_fd) };
-    let writer = unsafe { File::from_raw_fd(writer_fd) };
+struct VmLogProcessor {
+    reader: Option<File>,
+    expected: VecDeque<String>,
+    unexpected: HashSet<String>,
+    had_unexpected: bool,
+}
 
-    thread::spawn(|| {
-        for line in BufReader::new(reader).lines() {
-            info!("{}", line.unwrap());
+impl VmLogProcessor {
+    fn messages() -> (VecDeque<String>, HashSet<String>) {
+        let mut expected = VecDeque::new();
+        let mut unexpected = HashSet::new();
+        for log_lvl in ["[ERROR]", "[WARN]", "[INFO]", "[DEBUG]"] {
+            expected.push_back(format!("{log_lvl} Unsuppressed message"));
+            unexpected.insert(format!("{log_lvl} Suppressed message"));
         }
-    });
-    Ok(writer)
+        (expected, unexpected)
+    }
+
+    fn new(reader: File) -> Self {
+        let (expected, unexpected) = Self::messages();
+        Self { reader: Some(reader), expected, unexpected, had_unexpected: false }
+    }
+
+    fn verify(&mut self, msg: &str) {
+        if self.expected.front() == Some(&msg.to_owned()) {
+            self.expected.pop_front();
+        }
+        if !self.had_unexpected && self.unexpected.contains(msg) {
+            self.had_unexpected = true;
+        }
+    }
+
+    fn run(mut self) -> Result<(), &'static str> {
+        for line in BufReader::new(self.reader.take().unwrap()).lines() {
+            let msg = line.unwrap();
+            info!("{msg}");
+            self.verify(&msg);
+        }
+        if !self.expected.is_empty() {
+            Err("missing expected log message")
+        } else if self.had_unexpected {
+            Err("unexpected log message")
+        } else {
+            Ok(())
+        }
+    }
 }

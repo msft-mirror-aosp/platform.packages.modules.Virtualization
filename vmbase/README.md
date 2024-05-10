@@ -6,7 +6,7 @@ firmware, a VM bootloader or kernel.
 
 In particular it provides:
 
-- An [entry point](entry.S) that initialises the MMU with a hard-coded identity mapping, enables the
+- An [entry point](entry.S) that initializes the MMU with a hard-coded identity mapping, enables the
   cache, prepares the image and allocates a stack.
 - An [exception vector](exceptions.S) to call your exception handlers.
 - A UART driver and `println!` macro for early console logging.
@@ -25,28 +25,18 @@ Start by creating a `rust_ffi_static` rule containing your main module:
 ```soong
 rust_ffi_static {
     name: "libvmbase_example",
+    defaults: ["vmbase_ffi_defaults"],
     crate_name: "vmbase_example",
     srcs: ["src/main.rs"],
-    edition: "2021",
-    no_stdlibs: true,
-    stdlibs: [
-        "libcompiler_builtins.rust_sysroot",
-        "libcore.rust_sysroot",
-    ],
     rustlibs: [
         "libvmbase",
     ],
-    enabled: false,
-    target: {
-        android_arm64: {
-            enabled: true,
-        },
-    },
 }
 ```
 
-Note that stdlibs must be explicitly specified, as we don't want the normal set of libraries used
-for a C++ binary intended to run in Android userspace.
+`vmbase_ffi_defaults`, among other things, specifies the stdlibs including the `compiler_builtins`
+and `core` crate. These must be explicitly specified as we don't want the normal set of libraries
+used for a C++ binary intended to run in Android userspace.
 
 ### Entry point
 
@@ -61,16 +51,18 @@ This tells rustc that it doesn't depend on `std`, and won't have the usual `main
 entry point. Instead, `vmbase` provides a macro to specify your main function:
 
 ```rust
-use vmbase::{main, println};
+use vmbase::{logger, main};
+use log::{info, LevelFilter};
 
 main!(main);
 
 pub fn main(arg0: u64, arg1: u64, arg2: u64, arg3: u64) {
-    println!("Hello world");
+    logger::init(LevelFilter::Info).unwrap();
+    info!("Hello world");
 }
 ```
 
-vmbase adds a wrapper around your main function to initialise the console driver first (with the
+vmbase adds a wrapper around your main function to initialize the console driver first (with the
 UART at base address `0x3f8`, the first UART allocated by crosvm), and make a PSCI `SYSTEM_OFF` call
 to shutdown the VM if your main function ever returns.
 
@@ -101,7 +93,7 @@ extern "C" fn sync_exception_current() {
 
 The `println!` macro shouldn't be used in exception handlers, because it relies on a global instance
 of the UART driver which might be locked when the exception happens, which would result in deadlock.
-Instead you can use `emergency_write_str` and `eprintln!`, which will re-initialise the UART every
+Instead you can use `emergency_write_str` and `eprintln!`, which will re-initialize the UART every
 time to ensure that it can be used. This should still be used with care, as it may interfere with
 whatever the rest of the program is doing with the UART.
 
@@ -139,30 +131,18 @@ to use a `cc_binary` rule:
 
 ```soong
 cc_binary {
-    name: "vmbase_example_elf",
-    stem: "vmbase_example",
+    name: "vmbase_example",
+    defaults: ["vmbase_elf_defaults"],
     srcs: [
         "idmap.S",
     ],
     static_libs: [
-        "libvmbase_entry",
         "libvmbase_example",
     ],
-    static_executable: true,
-    nocrt: true,
-    system_shared_libs: ["libc"],
-    stl: "none",
     linker_scripts: [
         "image.ld",
         ":vmbase_sections",
     ],
-    installable: false,
-    enabled: false,
-    target: {
-        android_arm64: {
-            enabled: true,
-        },
-    },
 }
 ```
 
@@ -174,9 +154,9 @@ which you can do with a `raw_binary` rule:
 
 ```soong
 raw_binary {
-    name: "vmbase_example",
-    src: ":vmbase_example_elf",
+    name: "vmbase_example_bin",
     stem: "vmbase_example.bin",
+    src: ":vmbase_example",
     enabled: false,
     target: {
         android_arm64: {

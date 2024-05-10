@@ -23,6 +23,9 @@ parcelable VirtualMachineAppConfig {
     /** Name of VM */
     String name;
 
+    /** Id of the VM instance */
+    byte[64] instanceId;
+
     /** Main APK */
     ParcelFileDescriptor apk;
 
@@ -45,6 +48,8 @@ parcelable VirtualMachineAppConfig {
     union Payload {
         /**
          * Path to a JSON file in an APK containing the configuration.
+         *
+         * <p>Setting this field requires android.permission.USE_CUSTOM_VIRTUAL_MACHINE
          */
         @utf8InCpp String configPath;
 
@@ -56,6 +61,15 @@ parcelable VirtualMachineAppConfig {
 
     /** Detailed configuration for the VM, specifying how the payload will be run. */
     Payload payload;
+
+    /**
+     * Name of the OS to run the payload. Currently "microdroid" and
+     * "microdroid_gki-android14-6.1" is supported.
+     *
+     * <p>Setting this field to a value other than "microdroid" requires
+     * android.permission.USE_CUSTOM_VIRTUAL_MACHINE
+     */
+    @utf8InCpp String osName = "microdroid";
 
     enum DebugLevel {
         /** Not debuggable at all */
@@ -70,12 +84,6 @@ parcelable VirtualMachineAppConfig {
     /** Debug level of the VM */
     DebugLevel debugLevel = DebugLevel.NONE;
 
-    /**
-     * Port at which crosvm will start a gdb server to debug guest kernel.
-     * If set to zero, then gdb server won't be started.
-     */
-    int gdbPort = 0;
-
     /** Whether the VM should be a protected VM. */
     boolean protectedVm;
 
@@ -89,9 +97,35 @@ parcelable VirtualMachineAppConfig {
     CpuTopology cpuTopology = CpuTopology.ONE_CPU;
 
     /**
-     * List of task profile names to apply for the VM
-     *
-     * Note: Specifying a value here requires android.permission.USE_CUSTOM_VIRTUAL_MACHINE.
+     * Encapsulates parameters that require android.permission.USE_CUSTOM_VIRTUAL_MACHINE.
      */
-    String[] taskProfiles;
+    parcelable CustomConfig {
+        /**
+         * If specified, boot Microdroid VM with the given kernel.
+         *
+         */
+        @nullable ParcelFileDescriptor customKernelImage;
+
+        /**
+         * Port at which crosvm will start a gdb server to debug guest kernel.
+         * If set to zero, then gdb server won't be started.
+         *
+         */
+        int gdbPort = 0;
+
+        /** A disk image containing vendor specific modules. */
+        @nullable ParcelFileDescriptor vendorImage;
+
+        /** List of SysFS nodes of devices to be assigned */
+        String[] devices;
+
+        /**
+         * Whether the VM should be able to keep its secret when updated, if possible. This
+         * should rarely need to be set false.
+         */
+        boolean wantUpdatable = true;
+    }
+
+    /** Configuration parameters guarded by android.permission.USE_CUSTOM_VIRTUAL_MACHINE */
+    @nullable CustomConfig customConfig;
 }

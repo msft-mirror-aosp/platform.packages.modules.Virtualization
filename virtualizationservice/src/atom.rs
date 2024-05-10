@@ -22,7 +22,7 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
 };
 use anyhow::Result;
 use log::{trace, warn};
-use rustutils::system_properties;
+use rustutils::system_properties::PropertyWatcher;
 use statslog_virtualization_rust::{vm_booted, vm_creation_requested, vm_exited};
 
 pub fn forward_vm_creation_atom(atom: &AtomVmCreationRequested) {
@@ -47,7 +47,6 @@ pub fn forward_vm_creation_atom(atom: &AtomVmCreationRequested) {
         cpu_affinity: "", // deprecated
         memory_mib: atom.memoryMib,
         apexes: &atom.apexes,
-        // TODO(seungjaeyoo) Fill information about task_profile
         // TODO(seungjaeyoo) Fill information about disk_image for raw config
     };
 
@@ -87,12 +86,6 @@ pub fn forward_vm_exited_atom(atom: &AtomVmExited) {
         DeathReason::PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED => {
             vm_exited::DeathReason::PvmFirmwareInstanceImageChanged
         }
-        DeathReason::BOOTLOADER_PUBLIC_KEY_MISMATCH => {
-            vm_exited::DeathReason::BootloaderPublicKeyMismatch
-        }
-        DeathReason::BOOTLOADER_INSTANCE_IMAGE_CHANGED => {
-            vm_exited::DeathReason::BootloaderInstanceImageChanged
-        }
         DeathReason::MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE => {
             vm_exited::DeathReason::MicrodroidFailedToConnectToVirtualizationService
         }
@@ -131,21 +124,6 @@ pub fn forward_vm_exited_atom(atom: &AtomVmExited) {
 }
 
 fn wait_for_statsd() -> Result<()> {
-    let mut prop = system_properties::PropertyWatcher::new("init.svc.statsd")?;
-    loop {
-        prop.wait()?;
-        match system_properties::read("init.svc.statsd")? {
-            Some(s) => {
-                if s == "running" {
-                    break;
-                }
-            }
-            None => {
-                // This case never really happens because
-                // prop.wait() waits for property to be non-null.
-                break;
-            }
-        }
-    }
+    PropertyWatcher::new("init.svc.statsd")?.wait_for_value("running", None)?;
     Ok(())
 }

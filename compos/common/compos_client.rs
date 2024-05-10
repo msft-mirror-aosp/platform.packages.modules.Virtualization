@@ -19,12 +19,15 @@
 use crate::timeouts::TIMEOUTS;
 use crate::{
     get_vm_config_path, BUILD_MANIFEST_APK_PATH, BUILD_MANIFEST_SYSTEM_EXT_APK_PATH,
-    COMPOS_APEX_ROOT, COMPOS_DATA_ROOT, COMPOS_VSOCK_PORT,
+    COMPOS_APEX_ROOT, COMPOS_VSOCK_PORT,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     CpuTopology::CpuTopology,
     IVirtualizationService::IVirtualizationService,
-    VirtualMachineAppConfig::{DebugLevel::DebugLevel, Payload::Payload, VirtualMachineAppConfig},
+    VirtualMachineAppConfig::{
+        CustomConfig::CustomConfig, DebugLevel::DebugLevel, Payload::Payload,
+        VirtualMachineAppConfig,
+    },
     VirtualMachineConfig::VirtualMachineConfig,
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -32,6 +35,7 @@ use binder::{ParcelFileDescriptor, Strong};
 use compos_aidl_interface::aidl::com::android::compos::ICompOsService::ICompOsService;
 use glob::glob;
 use log::{info, warn};
+use platformproperties::hypervisorproperties;
 use rustutils::system_properties;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -53,12 +57,12 @@ pub enum VmCpuTopology {
 /// Parameters to be used when creating a virtual machine instance.
 #[derive(Default, Debug, Clone)]
 pub struct VmParameters {
+    /// The name of VM for identifying.
+    pub name: String,
     /// Whether the VM should be debuggable.
     pub debug_mode: bool,
     /// CPU topology of the VM. Defaults to 1 vCPU.
     pub cpu_topology: VmCpuTopology,
-    /// List of task profiles to apply to the VM
-    pub task_profiles: Vec<String>,
     /// If present, overrides the amount of RAM to give the VM
     pub memory_mib: Option<i32>,
     /// Whether the VM prefers staged APEXes or activated ones (false; default)
@@ -69,6 +73,7 @@ impl ComposClient {
     /// Start a new CompOS VM instance using the specified instance image file and parameters.
     pub fn start(
         service: &dyn IVirtualizationService,
+        instance_id: [u8; 64],
         instance_image: File,
         idsig: &Path,
         idsig_manifest_apk: &Path,
@@ -80,7 +85,6 @@ impl ComposClient {
         let instance_fd = ParcelFileDescriptor::new(instance_image);
 
         let apex_dir = Path::new(COMPOS_APEX_ROOT);
-        let data_dir = Path::new(COMPOS_DATA_ROOT);
 
         let config_apk = locate_config_apk(apex_dir)?;
         let apk_fd = File::open(config_apk).context("Failed to open config APK file")?;
@@ -110,42 +114,44 @@ impl ComposClient {
 
         let debug_level = if parameters.debug_mode { DebugLevel::FULL } else { DebugLevel::NONE };
 
-        let (console_fd, log_fd) = if debug_level == DebugLevel::NONE {
-            (None, None)
-        } else {
-            // Console output and the system log output from the VM are redirected to file.
-            let console_fd = File::create(data_dir.join("vm_console.log"))
-                .context("Failed to create console log file")?;
-            let log_fd = File::create(data_dir.join("vm.log"))
-                .context("Failed to create system log file")?;
-            info!("Running in debug level {:?}", debug_level);
-            (Some(console_fd), Some(log_fd))
-        };
-
         let cpu_topology = match parameters.cpu_topology {
             VmCpuTopology::OneCpu => CpuTopology::ONE_CPU,
             VmCpuTopology::MatchHost => CpuTopology::MATCH_HOST,
         };
 
+        // The CompOS VM doesn't need to be updatable (by design it should run exactly twice,
+        // with the same APKs and APEXes each time). And having it so causes some interesting
+        // circular dependencies when run at boot time by odsign: b/331417880.
+        let custom_config = Some(CustomConfig { wantUpdatable: false, ..Default::default() });
+
         let config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
-            name: String::from("Compos"),
+            name: parameters.name.clone(),
             apk: Some(apk_fd),
             idsig: Some(idsig_fd),
+            instanceId: instance_id,
             instanceImage: Some(instance_fd),
-            encryptedStorageImage: None,
             payload: Payload::ConfigPath(config_path),
             debugLevel: debug_level,
             extraIdsigs: extra_idsigs,
             protectedVm: protected_vm,
             memoryMib: parameters.memory_mib.unwrap_or(0), // 0 means use the default
             cpuTopology: cpu_topology,
-            taskProfiles: parameters.task_profiles.clone(),
-            gdbPort: 0, // Don't start gdb-server
+            customConfig: custom_config,
+            ..Default::default()
         });
 
+        // Let logs go to logcat.
+        let (console_fd, log_fd) = (None, None);
         let callback = Box::new(Callback {});
-        let instance = VmInstance::create(service, &config, console_fd, log_fd, Some(callback))
-            .context("Failed to create VM")?;
+        let instance = VmInstance::create(
+            service,
+            &config,
+            console_fd,
+            /* console_in_fd */ None,
+            log_fd,
+            Some(callback),
+        )
+        .context("Failed to create VM")?;
 
         instance.start()?;
 
@@ -173,7 +179,7 @@ impl ComposClient {
     /// relevant logs to be written.
     pub fn shutdown(self, service: Strong<dyn ICompOsService>) {
         info!("Requesting CompOS VM to shutdown");
-        let _ = service.quit(); // If this fails, the VM is probably dying anyway
+        let _ignored = service.quit(); // If this fails, the VM is probably dying anyway
         self.wait_for_shutdown();
     }
 
@@ -232,7 +238,7 @@ fn prepare_idsig(
 
 fn want_protected_vm() -> Result<bool> {
     let have_protected_vm =
-        system_properties::read_bool("ro.boot.hypervisor.protected_vm.supported", false)?;
+        hypervisorproperties::hypervisor_protected_vm_supported()?.unwrap_or(false);
     if have_protected_vm {
         info!("Starting protected VM");
         return Ok(true);
@@ -243,8 +249,7 @@ fn want_protected_vm() -> Result<bool> {
         bail!("Protected VM not supported, unable to start VM");
     }
 
-    let have_non_protected_vm =
-        system_properties::read_bool("ro.boot.hypervisor.vm.supported", false)?;
+    let have_non_protected_vm = hypervisorproperties::hypervisor_vm_supported()?.unwrap_or(false);
     if have_non_protected_vm {
         warn!("Protected VM not supported, falling back to non-protected on debuggable build");
         return Ok(false);

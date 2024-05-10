@@ -15,23 +15,29 @@
 //! Low-level entry and exit points of pvmfw.
 
 use crate::config;
-use crate::debug_policy::{handle_debug_policy, DebugPolicyError};
 use crate::fdt;
-use crate::heap;
-use crate::helpers;
-use crate::memory::MemoryTracker;
-use crate::mmio_guard;
-use crate::mmu;
-use crate::rand;
+use crate::memory;
+use bssl_sys::CRYPTO_library_init;
 use core::arch::asm;
+use core::mem::{drop, size_of};
 use core::num::NonZeroUsize;
+use core::ops::Range;
 use core::slice;
+use hyp::{get_mem_sharer, get_mmio_guard};
 use log::debug;
 use log::error;
 use log::info;
 use log::warn;
 use log::LevelFilter;
-use vmbase::{console, layout, logger, main, power::reboot};
+use vmbase::util::RangeExt as _;
+use vmbase::{
+    configure_heap, console,
+    layout::{self, crosvm},
+    main,
+    memory::{min_dcache_line_size, MemoryTracker, MEMORY, SIZE_128KB, SIZE_4KB},
+    power::reboot,
+};
+use zeroize::Zeroize;
 
 #[derive(Debug, Clone)]
 pub enum RebootReason {
@@ -53,17 +59,8 @@ pub enum RebootReason {
     SecretDerivationError,
 }
 
-impl From<DebugPolicyError> for RebootReason {
-    fn from(error: DebugPolicyError) -> Self {
-        match error {
-            DebugPolicyError::Fdt(_, _) => RebootReason::InvalidFdt,
-            DebugPolicyError::DebugPolicyFdt(_, _) => RebootReason::InvalidConfig,
-            DebugPolicyError::OverlaidFdt(_, _) => RebootReason::InternalError,
-        }
-    }
-}
-
 main!(start);
+configure_heap!(SIZE_128KB);
 
 /// Entry point for pVM firmware.
 pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64) {
@@ -72,7 +69,7 @@ pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64
     // - can't access MMIO (therefore, no logging)
 
     match main_wrapper(fdt_address as usize, payload_start as usize, payload_size as usize) {
-        Ok(entry) => jump_to_payload(fdt_address, entry.try_into().unwrap()),
+        Ok((entry, bcc)) => jump_to_payload(fdt_address, entry.try_into().unwrap(), bcc),
         Err(_) => reboot(), // TODO(b/220071963) propagate the reason back to the host.
     }
 
@@ -90,57 +87,58 @@ impl<'a> MemorySlices<'a> {
         fdt: usize,
         kernel: usize,
         kernel_size: usize,
-        memory: &mut MemoryTracker,
+        vm_dtbo: Option<&mut [u8]>,
+        vm_ref_dt: Option<&[u8]>,
     ) -> Result<Self, RebootReason> {
-        // SAFETY - SIZE_2MB is non-zero.
-        const FDT_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(helpers::SIZE_2MB) };
+        let fdt_size = NonZeroUsize::new(crosvm::FDT_MAX_SIZE).unwrap();
         // TODO - Only map the FDT as read-only, until we modify it right before jump_to_payload()
         // e.g. by generating a DTBO for a template DT in main() and, on return, re-map DT as RW,
         // overwrite with the template DT and apply the DTBO.
-        let range = memory.alloc_mut(fdt, FDT_SIZE).map_err(|e| {
+        let range = MEMORY.lock().as_mut().unwrap().alloc_mut(fdt, fdt_size).map_err(|e| {
             error!("Failed to allocate the FDT range: {e}");
             RebootReason::InternalError
         })?;
 
-        // SAFETY - The tracker validated the range to be in main memory, mapped, and not overlap.
+        // SAFETY: The tracker validated the range to be in main memory, mapped, and not overlap.
         let fdt = unsafe { slice::from_raw_parts_mut(range.start as *mut u8, range.len()) };
+
+        let info = fdt::sanitize_device_tree(fdt, vm_dtbo, vm_ref_dt)?;
         let fdt = libfdt::Fdt::from_mut_slice(fdt).map_err(|e| {
-            error!("Failed to spawn the FDT wrapper: {e}");
+            error!("Failed to load sanitized FDT: {e}");
             RebootReason::InvalidFdt
         })?;
-
         debug!("Fdt passed validation!");
 
-        let memory_range = fdt
-            .memory()
-            .map_err(|e| {
-                error!("Failed to get /memory from the DT: {e}");
-                RebootReason::InvalidFdt
-            })?
-            .ok_or_else(|| {
-                error!("Node /memory was found empty");
-                RebootReason::InvalidFdt
-            })?
-            .next()
-            .ok_or_else(|| {
-                error!("Failed to read the memory size from the FDT");
+        let memory_range = info.memory_range;
+        debug!("Resizing MemoryTracker to range {memory_range:#x?}");
+        MEMORY.lock().as_mut().unwrap().shrink(&memory_range).map_err(|e| {
+            error!("Failed to use memory range value from DT: {memory_range:#x?}: {e}");
+            RebootReason::InvalidFdt
+        })?;
+
+        if let Some(mem_sharer) = get_mem_sharer() {
+            let granule = mem_sharer.granule().map_err(|e| {
+                error!("Failed to get memory protection granule: {e}");
                 RebootReason::InternalError
             })?;
+            MEMORY.lock().as_mut().unwrap().init_dynamic_shared_pool(granule).map_err(|e| {
+                error!("Failed to initialize dynamically shared pool: {e}");
+                RebootReason::InternalError
+            })?;
+        } else {
+            let range = info.swiotlb_info.fixed_range().ok_or_else(|| {
+                error!("Pre-shared pool range not specified in swiotlb node");
+                RebootReason::InvalidFdt
+            })?;
 
-        debug!("Resizing MemoryTracker to range {memory_range:#x?}");
+            MEMORY.lock().as_mut().unwrap().init_static_shared_pool(range).map_err(|e| {
+                error!("Failed to initialize pre-shared pool {e}");
+                RebootReason::InvalidFdt
+            })?;
+        }
 
-        memory.shrink(&memory_range).map_err(|_| {
-            error!("Failed to use memory range value from DT: {memory_range:#x?}");
-            RebootReason::InvalidFdt
-        })?;
-
-        let kernel_range = fdt::kernel_range(fdt).map_err(|e| {
-            error!("Error while attempting to read the kernel range from the DT: {e}");
-            RebootReason::InvalidFdt
-        })?;
-
-        let kernel_range = if let Some(r) = kernel_range {
-            memory.alloc_range(&r).map_err(|e| {
+        let kernel_range = if let Some(r) = info.kernel_range {
+            MEMORY.lock().as_mut().unwrap().alloc_range(&r).map_err(|e| {
                 error!("Failed to obtain the kernel range with DT range: {e}");
                 RebootReason::InternalError
             })?
@@ -152,7 +150,7 @@ impl<'a> MemorySlices<'a> {
                 RebootReason::InvalidPayload
             })?;
 
-            memory.alloc(kernel, kernel_size).map_err(|e| {
+            MEMORY.lock().as_mut().unwrap().alloc(kernel, kernel_size).map_err(|e| {
                 error!("Failed to obtain the kernel range with legacy range: {e}");
                 RebootReason::InternalError
             })?
@@ -161,23 +159,18 @@ impl<'a> MemorySlices<'a> {
             return Err(RebootReason::InvalidPayload);
         };
 
-        // SAFETY - The tracker validated the range to be in main memory, mapped, and not overlap.
-        let kernel =
-            unsafe { slice::from_raw_parts(kernel_range.start as *const u8, kernel_range.len()) };
+        let kernel = kernel_range.start as *const u8;
+        // SAFETY: The tracker validated the range to be in main memory, mapped, and not overlap.
+        let kernel = unsafe { slice::from_raw_parts(kernel, kernel_range.len()) };
 
-        let ramdisk_range = fdt::initrd_range(fdt).map_err(|e| {
-            error!("An error occurred while locating the ramdisk in the device tree: {e}");
-            RebootReason::InternalError
-        })?;
-
-        let ramdisk = if let Some(r) = ramdisk_range {
+        let ramdisk = if let Some(r) = info.initrd_range {
             debug!("Located ramdisk at {r:?}");
-            let r = memory.alloc_range(&r).map_err(|e| {
+            let r = MEMORY.lock().as_mut().unwrap().alloc_range(&r).map_err(|e| {
                 error!("Failed to obtain the initrd range: {e}");
                 RebootReason::InvalidRamdisk
             })?;
 
-            // SAFETY - The region was validated by memory to be in main memory, mapped, and
+            // SAFETY: The region was validated by memory to be in main memory, mapped, and
             // not overlap.
             Some(unsafe { slice::from_raw_parts(r.start as *const u8, r.len()) })
         } else {
@@ -193,99 +186,90 @@ impl<'a> MemorySlices<'a> {
 ///
 /// Provide the abstractions necessary for start() to abort the pVM boot and for main() to run with
 /// the assumption that its environment has been properly configured.
-fn main_wrapper(fdt: usize, payload: usize, payload_size: usize) -> Result<usize, RebootReason> {
+fn main_wrapper(
+    fdt: usize,
+    payload: usize,
+    payload_size: usize,
+) -> Result<(usize, Range<usize>), RebootReason> {
     // Limitations in this function:
     // - only access MMIO once (and while) it has been mapped and configured
     // - only perform logging once the logger has been initialized
     // - only access non-pvmfw memory once (and while) it has been mapped
 
-    // SAFETY - This function should and will only be called once, here.
-    unsafe { heap::init() };
+    log::set_max_level(LevelFilter::Info);
+    // TODO(https://crbug.com/boringssl/35): Remove this init when BoringSSL can handle this
+    // internally.
+    // SAFETY: Configures the internal state of the library - may be called multiple times.
+    unsafe {
+        CRYPTO_library_init();
+    }
 
-    logger::init(LevelFilter::Info).map_err(|_| RebootReason::InternalError)?;
-
-    // Use debug!() to avoid printing to the UART if we failed to configure it as only local
-    // builds that have tweaked the logger::init() call will actually attempt to log the message.
-
-    mmio_guard::init().map_err(|e| {
-        debug!("{e}");
-        RebootReason::InternalError
-    })?;
-
-    mmio_guard::map(console::BASE_ADDRESS).map_err(|e| {
-        debug!("Failed to configure the UART: {e}");
-        RebootReason::InternalError
-    })?;
-
-    // SAFETY - We only get the appended payload from here, once. It is mapped and the linker
-    // script prevents it from overlapping with other objects.
-    let appended_data = unsafe { get_appended_data_slice() };
-
-    // Up to this point, we were using the built-in static (from .rodata) page tables.
-
-    let mut page_table = mmu::PageTable::from_static_layout().map_err(|e| {
+    let page_table = memory::init_page_table().map_err(|e| {
         error!("Failed to set up the dynamic page tables: {e}");
         RebootReason::InternalError
     })?;
 
-    const CONSOLE_LEN: usize = 1; // vmbase::uart::Uart only uses one u8 register.
-    let uart_range = console::BASE_ADDRESS..(console::BASE_ADDRESS + CONSOLE_LEN);
-    page_table.map_device(&uart_range).map_err(|e| {
-        error!("Failed to remap the UART as a dynamic page table entry: {e}");
-        RebootReason::InternalError
-    })?;
+    // SAFETY: We only get the appended payload from here, once. The region was statically mapped,
+    // then remapped by `init_page_table()`.
+    let appended_data = unsafe { get_appended_data_slice() };
 
-    // SAFETY - We only get the appended payload from here, once. It is statically mapped and the
-    // linker script prevents it from overlapping with other objects.
-    let mut appended = unsafe { AppendedPayload::new(appended_data) }.ok_or_else(|| {
+    let appended = AppendedPayload::new(appended_data).ok_or_else(|| {
         error!("No valid configuration found");
         RebootReason::InvalidConfig
     })?;
 
-    let (bcc_slice, debug_policy) = appended.get_entries();
+    let config_entries = appended.get_entries();
 
-    debug!("Activating dynamic page table...");
-    // SAFETY - page_table duplicates the static mappings for everything that the Rust code is
-    // aware of so activating it shouldn't have any visible effect.
-    unsafe { page_table.activate() };
-    debug!("... Success!");
+    // Up to this point, we were using the built-in static (from .rodata) page tables.
+    MEMORY.lock().replace(MemoryTracker::new(
+        page_table,
+        crosvm::MEM_START..layout::MAX_VIRT_ADDR,
+        crosvm::MMIO_RANGE,
+        Some(memory::appended_payload_range()),
+    ));
 
-    let mut memory = MemoryTracker::new(page_table);
-    let slices = MemorySlices::new(fdt, payload, payload_size, &mut memory)?;
-
-    rand::init().map_err(|e| {
-        error!("Failed to initialize rand: {e}");
-        RebootReason::InternalError
-    })?;
+    let slices = MemorySlices::new(
+        fdt,
+        payload,
+        payload_size,
+        config_entries.vm_dtbo,
+        config_entries.vm_ref_dt,
+    )?;
 
     // This wrapper allows main() to be blissfully ignorant of platform details.
-    crate::main(slices.fdt, slices.kernel, slices.ramdisk, bcc_slice, &mut memory)?;
+    let next_bcc = crate::main(
+        slices.fdt,
+        slices.kernel,
+        slices.ramdisk,
+        config_entries.bcc,
+        config_entries.debug_policy,
+    )?;
 
-    helpers::flushed_zeroize(bcc_slice);
-    helpers::flush(slices.fdt.as_slice());
-
-    // SAFETY - As we `?` the result, there is no risk of using a bad `slices.fdt`.
-    unsafe {
-        handle_debug_policy(slices.fdt, debug_policy).map_err(|e| {
-            error!("Unexpected error when handling debug policy: {e:?}");
-            RebootReason::from(e)
-        })?;
-    }
+    // Writable-dirty regions will be flushed when MemoryTracker is dropped.
+    config_entries.bcc.zeroize();
 
     info!("Expecting a bug making MMIO_GUARD_UNMAP return NOT_SUPPORTED on success");
-    memory.mmio_unmap_all().map_err(|e| {
+    MEMORY.lock().as_mut().unwrap().mmio_unmap_all().map_err(|e| {
         error!("Failed to unshare MMIO ranges: {e}");
         RebootReason::InternalError
     })?;
-    mmio_guard::unmap(console::BASE_ADDRESS).map_err(|e| {
-        error!("Failed to unshare the UART: {e}");
-        RebootReason::InternalError
-    })?;
+    // Call unshare_all_memory here (instead of relying on the dtor) while UART is still mapped.
+    MEMORY.lock().as_mut().unwrap().unshare_all_memory();
+    if let Some(mmio_guard) = get_mmio_guard() {
+        mmio_guard.unmap(console::BASE_ADDRESS).map_err(|e| {
+            error!("Failed to unshare the UART: {e}");
+            RebootReason::InternalError
+        })?;
+    }
 
-    Ok(slices.kernel.as_ptr() as usize)
+    // Drop MemoryTracker and deactivate page table.
+    drop(MEMORY.lock().take());
+
+    Ok((slices.kernel.as_ptr() as usize, next_bcc))
 }
 
-fn jump_to_payload(fdt_address: u64, payload_start: u64) -> ! {
+fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> ! {
+    const ASM_STP_ALIGN: usize = size_of::<u64>() * 2;
     const SCTLR_EL1_RES1: u64 = (0b11 << 28) | (0b101 << 20) | (0b1 << 11);
     // Stage 1 instruction access cacheability is unaffected.
     const SCTLR_EL1_I: u64 = 0b1 << 12;
@@ -296,12 +280,67 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64) -> ! {
 
     const SCTLR_EL1_VAL: u64 = SCTLR_EL1_RES1 | SCTLR_EL1_ITD | SCTLR_EL1_SED | SCTLR_EL1_I;
 
+    let scratch = layout::scratch_range();
+
+    assert_ne!(scratch.end - scratch.start, 0, "scratch memory is empty.");
+    assert_eq!(scratch.start.0 % ASM_STP_ALIGN, 0, "scratch memory is misaligned.");
+    assert_eq!(scratch.end.0 % ASM_STP_ALIGN, 0, "scratch memory is misaligned.");
+
+    assert!(bcc.is_within(&(scratch.start.0..scratch.end.0)));
+    assert_eq!(bcc.start % ASM_STP_ALIGN, 0, "Misaligned guest BCC.");
+    assert_eq!(bcc.end % ASM_STP_ALIGN, 0, "Misaligned guest BCC.");
+
+    let stack = memory::stack_range();
+
+    assert_ne!(stack.end - stack.start, 0, "stack region is empty.");
+    assert_eq!(stack.start.0 % ASM_STP_ALIGN, 0, "Misaligned stack region.");
+    assert_eq!(stack.end.0 % ASM_STP_ALIGN, 0, "Misaligned stack region.");
+
+    // Zero all memory that could hold secrets and that can't be safely written to from Rust.
     // Disable the exception vector, caches and page table and then jump to the payload at the
     // given address, passing it the given FDT pointer.
     //
-    // SAFETY - We're exiting pvmfw by passing the register values we need to a noreturn asm!().
+    // SAFETY: We're exiting pvmfw by passing the register values we need to a noreturn asm!().
     unsafe {
         asm!(
+            "cmp {scratch}, {bcc}",
+            "b.hs 1f",
+
+            // Zero .data & .bss until BCC.
+            "0: stp xzr, xzr, [{scratch}], 16",
+            "cmp {scratch}, {bcc}",
+            "b.lo 0b",
+
+            "1:",
+            // Skip BCC.
+            "mov {scratch}, {bcc_end}",
+            "cmp {scratch}, {scratch_end}",
+            "b.hs 1f",
+
+            // Keep zeroing .data & .bss.
+            "0: stp xzr, xzr, [{scratch}], 16",
+            "cmp {scratch}, {scratch_end}",
+            "b.lo 0b",
+
+            "1:",
+            // Flush d-cache over .data & .bss (including BCC).
+            "0: dc cvau, {cache_line}",
+            "add {cache_line}, {cache_line}, {dcache_line_size}",
+            "cmp {cache_line}, {scratch_end}",
+            "b.lo 0b",
+
+            "mov {cache_line}, {stack}",
+            // Zero stack region.
+            "0: stp xzr, xzr, [{stack}], 16",
+            "cmp {stack}, {stack_end}",
+            "b.lo 0b",
+
+            // Flush d-cache over stack region.
+            "0: dc cvau, {cache_line}",
+            "add {cache_line}, {cache_line}, {dcache_line_size}",
+            "cmp {cache_line}, {stack_end}",
+            "b.lo 0b",
+
             "msr sctlr_el1, {sctlr_el1_val}",
             "isb",
             "mov x1, xzr",
@@ -334,29 +373,34 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64) -> ! {
             "mov x28, xzr",
             "mov x29, xzr",
             "msr ttbr0_el1, xzr",
-            "isb",
+            // Ensure that CMOs have completed before entering payload.
             "dsb nsh",
             "br x30",
             sctlr_el1_val = in(reg) SCTLR_EL1_VAL,
+            bcc = in(reg) u64::try_from(bcc.start).unwrap(),
+            bcc_end = in(reg) u64::try_from(bcc.end).unwrap(),
+            cache_line = in(reg) u64::try_from(scratch.start.0).unwrap(),
+            scratch = in(reg) u64::try_from(scratch.start.0).unwrap(),
+            scratch_end = in(reg) u64::try_from(scratch.end.0).unwrap(),
+            stack = in(reg) u64::try_from(stack.start.0).unwrap(),
+            stack_end = in(reg) u64::try_from(stack.end.0).unwrap(),
+            dcache_line_size = in(reg) u64::try_from(min_dcache_line_size()).unwrap(),
             in("x0") fdt_address,
             in("x30") payload_start,
-            options(nomem, noreturn, nostack),
+            options(noreturn),
         );
     };
 }
 
+/// # Safety
+///
+/// This must only be called once, since we are returning a mutable reference.
+/// The appended data region must be mapped.
 unsafe fn get_appended_data_slice() -> &'static mut [u8] {
-    let base = helpers::align_up(layout::binary_end(), helpers::SIZE_4KB).unwrap();
-    // pvmfw is contained in a 2MiB region so the payload can't be larger than the 2MiB alignment.
-    let size = helpers::align_up(base, helpers::SIZE_2MB).unwrap() - base;
-
-    slice::from_raw_parts_mut(base as *mut u8, size)
-}
-
-enum AppendedConfigType {
-    Valid,
-    Invalid,
-    NotFound,
+    let range = memory::appended_payload_range();
+    // SAFETY: This region is mapped and the linker script prevents it from overlapping with other
+    // objects.
+    unsafe { slice::from_raw_parts_mut(range.start.0 as *mut u8, range.end - range.start) }
 }
 
 enum AppendedPayload<'a> {
@@ -367,40 +411,37 @@ enum AppendedPayload<'a> {
 }
 
 impl<'a> AppendedPayload<'a> {
-    /// SAFETY - 'data' should respect the alignment of config::Header.
-    unsafe fn new(data: &'a mut [u8]) -> Option<Self> {
-        match Self::guess_config_type(data) {
-            AppendedConfigType::Valid => Some(Self::Config(config::Config::new(data).unwrap())),
-            AppendedConfigType::NotFound if cfg!(feature = "legacy") => {
-                const BCC_SIZE: usize = helpers::SIZE_4KB;
+    fn new(data: &'a mut [u8]) -> Option<Self> {
+        // The borrow checker gets confused about the ownership of data (see inline comments) so we
+        // intentionally obfuscate it using a raw pointer; see a similar issue (still not addressed
+        // in v1.77) in https://users.rust-lang.org/t/78467.
+        let data_ptr = data as *mut [u8];
+
+        // Config::new() borrows data as mutable ...
+        match config::Config::new(data) {
+            // ... so this branch has a mutable reference to data, from the Ok(Config<'a>). But ...
+            Ok(valid) => Some(Self::Config(valid)),
+            // ... if Config::new(data).is_err(), the Err holds no ref to data. However ...
+            Err(config::Error::InvalidMagic) if cfg!(feature = "legacy") => {
+                // ... the borrow checker still complains about a second mutable ref without this.
+                // SAFETY: Pointer to a valid mut (not accessed elsewhere), 'a lifetime re-used.
+                let data: &'a mut _ = unsafe { &mut *data_ptr };
+
+                const BCC_SIZE: usize = SIZE_4KB;
                 warn!("Assuming the appended data at {:?} to be a raw BCC", data.as_ptr());
                 Some(Self::LegacyBcc(&mut data[..BCC_SIZE]))
             }
-            _ => None,
-        }
-    }
-
-    unsafe fn guess_config_type(data: &mut [u8]) -> AppendedConfigType {
-        // This function is necessary to prevent the borrow checker from getting confused
-        // about the ownership of data in new(); see https://users.rust-lang.org/t/78467.
-        let addr = data.as_ptr();
-        match config::Config::new(data) {
-            Err(config::Error::InvalidMagic) => {
-                warn!("No configuration data found at {addr:?}");
-                AppendedConfigType::NotFound
-            }
             Err(e) => {
-                error!("Invalid configuration data at {addr:?}: {e}");
-                AppendedConfigType::Invalid
+                error!("Invalid configuration data at {data_ptr:?}: {e}");
+                None
             }
-            Ok(_) => AppendedConfigType::Valid,
         }
     }
 
-    fn get_entries(&mut self) -> (&mut [u8], Option<&mut [u8]>) {
+    fn get_entries(self) -> config::Entries<'a> {
         match self {
-            Self::Config(ref mut cfg) => cfg.get_entries(),
-            Self::LegacyBcc(ref mut bcc) => (bcc, None),
+            Self::Config(cfg) => cfg.get_entries(),
+            Self::LegacyBcc(bcc) => config::Entries { bcc, ..Default::default() },
         }
     }
 }
