@@ -46,6 +46,7 @@ soong_config_module_type {
     bool_variables: [
         "release_avf_enable_device_assignment",
         "release_avf_enable_llpvm_changes",
+        "release_avf_enable_network",
         "release_avf_enable_remote_attestation",
         "release_avf_enable_vendor_modules",
         "release_avf_enable_virt_cpufreq",
@@ -190,6 +191,19 @@ avf_flag_aware_apex_defaults {
         release_avf_enable_llpvm_changes: {
             androidManifest: "AndroidManifest.xml",
         },
+        release_avf_enable_network: {
+            prebuilts: [
+                "com.android.virt.vmnic.rc",
+            ],
+            arch: {
+                arm64: {
+                    binaries: ["vmnic"],
+                },
+                x86_64: {
+                    binaries: ["vmnic"],
+                },
+            },
+        },
         release_avf_enable_remote_attestation: {
             vintf_fragments: [
                 "virtualizationservice.xml",
@@ -245,14 +259,21 @@ prebuilt_etc {
     name: "com.android.virt.init.rc",
     src: ":virtualizationservice_rc_combined",
     filename: "virtualizationservice.rc",
-    installable: false,
+    no_full_install: true,
 }
 
 prebuilt_etc {
     name: "com.android.virt.vfio_handler.rc",
     src: "vfio_handler.rc",
     filename: "vfio_handler.rc",
-    installable: false,
+    no_full_install: true,
+}
+
+prebuilt_etc {
+    name: "com.android.virt.vmnic.rc",
+    src: "vmnic.rc",
+    filename: "vmnic.rc",
+    no_full_install: true,
 }
 
 // Virt apex needs a custom signer for its payload

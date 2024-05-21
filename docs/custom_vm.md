@@ -25,6 +25,35 @@ adb shell "/apex/com.android.virt/bin/vm run /data/local/tmp/vm_config.json"
 The `vm` command also has other subcommands for debugging; run
 `/apex/com.android.virt/bin/vm help` for details.
 
+### Running Debian with u-boot
+1. Prepare u-boot binary from `u-boot_crosvm_aarch64` in https://ci.android.com/builds/branches/aosp_u-boot-mainline/grid
+or build it by https://source.android.com/docs/devices/cuttlefish/bootloader-dev#develop-bootloader
+2. Prepare Debian image from https://cloud.debian.org/images/cloud/ (We tested nocloud image)
+3. Copy `u-boot.bin`, Debian image file(like `debian-12-nocloud-arm64.raw`) and `vm_config.json` to `/data/local/tmp`
+```shell
+cat > vm_config.json <<EOF
+{
+    "name": "debian",
+    "bootloader": "/data/local/tmp/u-boot.bin",
+    "disks": [
+        {
+            "image": "/data/local/tmp/debian-12-nocloud-arm64.raw",
+            "partitions": [],
+            "writable": true
+        }
+    ],
+    "protected": false,
+    "cpu_topology": "match_host",
+    "platform_version": "~1.0",
+    "memory_mib" : 8096
+}
+EOF
+adb push `u-boot.bin` /data/local/tmp
+adb push `debian-12-nocloud-arm64.raw` /data/local/tmp
+adb push vm_config.json /data/local/tmp/vm_config.json
+```
+4. Launch VmLauncherApp(the detail will be explain below)
+
 ## Graphical VMs
 
 To run OSes with graphics support, follow the instruction below.
@@ -33,6 +62,21 @@ To run OSes with graphics support, follow the instruction below.
 
 As of today (April 2024), ChromiumOS is the only officially supported guest
 payload. We will be adding more OSes in the future.
+
+#### Download from build server
+
+  - Step 1) Go to the link https://ci.chromium.org/ui/p/chromeos/builders/chromiumos/ferrochrome-public-main/
+    - Note: I 'searched' the ferrochrome target with builder search.
+  - Step 2) Click a build number
+  - Step 3) Expand steps and find `48. upload artifacts`.
+  - Step 4) Click `gs upload dir`. You'll see Cloud storage with comprehensive artifacts (e.g. [Here](https://pantheon.corp.google.com/storage/browser/chromiumos-image-archive/ferrochrome-public/R126-15883.0.0) is the initial build of ferrochrome)
+  - Step 5) Download `image.zip`, which contains working vmlinuz.
+    - Note: DO NOT DOWNLOAD `vmlinuz.tar.xz` from the CI.
+  - Step 6) Uncompress `image.zip`, and boot with `chromiumos_test_image.bin` and `boot_images/vmlinuz`.
+    - Note: DO NOT USE `vmlinuz.bin`.
+
+IMPORTANT: DO NOT USE `vmlinuz.bin` for passing to crosvm. It doesn't pick-up the correct `init` process (picks `/init` instead of `/sbin/init`, and `cfg80211` keeps crashing (i.e. no network)
+
 
 #### Build ChromiumOS for VM
 
@@ -89,7 +133,6 @@ local checkout and also with your local modifications instead of prebuilts.
 (cr) cros workon -b ferrochrome start \
 chromeos-base/chromeos-chrome \
 chromeos-base/chrome-icu
-(cr) cros_workon_make --board ferrochrome chromeos-chrome
 ```
 
 Optionally, if you have touched the kernel source code (which is under
@@ -122,7 +165,7 @@ Don’t forget to call `build-image` afterwards.
 You need two outputs:
 
 * ChromiumOS disk image: ~/chromiumos/src/build/images/ferrochrome/latest/chromiumos_test_image.bin
-* The kernel: ~/chromiumos/out/build/ferrochrome/boot/vmlinuz
+* The kernel: ~/chromiumos/src/build/images/ferrochrome/latest/boot_images/vmlinuz
 
 ### Create a guest VM configuration
 
