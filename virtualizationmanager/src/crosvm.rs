@@ -121,6 +121,7 @@ pub struct CrosvmConfig {
     pub device_tree_overlay: Option<File>,
     pub display_config: Option<DisplayConfig>,
     pub input_device_options: Vec<InputDeviceOption>,
+    pub hugepages: bool,
 }
 
 #[derive(Debug)]
@@ -162,6 +163,7 @@ pub enum InputDeviceOption {
     EvDev(File),
     SingleTouch { file: File, width: u32, height: u32, name: Option<String> },
     Keyboard(File),
+    Mouse(File),
 }
 
 type VfioDevice = Strong<dyn IBoundDevice>;
@@ -995,6 +997,9 @@ fn run_vm(
                 InputDeviceOption::Keyboard(file) => {
                     format!("keyboard[path={}]", add_preserved_fd(&mut preserved_fds, file))
                 }
+                InputDeviceOption::Mouse(file) => {
+                    format!("mouse[path={}]", add_preserved_fd(&mut preserved_fds, file))
+                }
                 InputDeviceOption::SingleTouch { file, width, height, name } => format!(
                     "single-touch[path={},width={},height={}{}]",
                     add_preserved_fd(&mut preserved_fds, file),
@@ -1005,6 +1010,11 @@ fn run_vm(
             });
         }
     }
+
+    if config.hugepages {
+        command.arg("--hugepages");
+    }
+
     append_platform_devices(&mut command, &mut preserved_fds, &config)?;
 
     debug!("Preserving FDs {:?}", preserved_fds);

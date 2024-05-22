@@ -53,6 +53,30 @@ pub struct CommonConfig {
     /// Run VM in protected mode.
     #[arg(short, long)]
     protected: bool,
+
+    /// Ask the kernel for transparent huge-pages (THP). This is only a hint and
+    /// the kernel will allocate THP-backed memory only if globally enabled by
+    /// the system and if any can be found. See
+    /// https://docs.kernel.org/admin-guide/mm/transhuge.html
+    #[arg(short, long)]
+    hugepages: bool,
+
+    /// Run VM with network feature.
+    #[cfg(network)]
+    #[arg(short, long)]
+    network_supported: bool,
+}
+
+impl CommonConfig {
+    #[cfg(network)]
+    fn network_supported(&self) -> bool {
+        self.network_supported
+    }
+
+    #[cfg(not(network))]
+    fn network_supported(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Args, Default)]

@@ -14,7 +14,7 @@
 
 //! Implementation of the AIDL interface of the VirtualizationService.
 
-use crate::{get_calling_pid, get_calling_uid};
+use crate::{get_calling_pid, get_calling_uid, get_this_pid};
 use crate::atom::{write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
 use crate::crosvm::{CrosvmConfig, DiskFile, DisplayConfig, InputDeviceOption, PayloadState, VmContext, VmInstance, VmState};
@@ -67,7 +67,6 @@ use binder::{
     IntoBinderResult,
 };
 use cstr::cstr;
-use disk::QcowFile;
 use glob::glob;
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
@@ -256,15 +255,17 @@ impl IVirtualizationService for VirtualizationService {
             .context("failed to move cursor to start")
             .or_service_specific_exception(-1)?;
         image.set_len(0).context("Failed to reset a file").or_service_specific_exception(-1)?;
-
-        let mut part = QcowFile::new(image, size_bytes)
-            .context("Failed to create QCOW2 image")
+        // Set the file length. In most filesystems, this will not allocate any physical disk
+        // space, it will only change the logical size.
+        image
+            .set_len(size_bytes)
+            .context("Failed to extend file")
             .or_service_specific_exception(-1)?;
 
         match partition_type {
             PartitionType::RAW => Ok(()),
-            PartitionType::ANDROID_VM_INSTANCE => format_as_android_vm_instance(&mut part),
-            PartitionType::ENCRYPTEDSTORE => format_as_encryptedstore(&mut part),
+            PartitionType::ANDROID_VM_INSTANCE => format_as_android_vm_instance(&mut image),
+            PartitionType::ENCRYPTEDSTORE => format_as_encryptedstore(&mut image),
             _ => Err(Error::new(
                 ErrorKind::Unsupported,
                 format!("Unsupported partition type {:?}", partition_type),
@@ -434,7 +435,8 @@ impl VirtualizationService {
         if cfg!(llpvm_changes) {
             instance_id = extract_instance_id(config);
             untrusted_props.push((cstr!("instance-id"), &instance_id[..]));
-            if is_secretkeeper_supported() {
+            let want_updatable = extract_want_updatable(config);
+            if want_updatable && is_secretkeeper_supported() {
                 // Let guest know that it can defer rollback protection to Secretkeeper by setting
                 // an empty property in untrusted node in DT. This enables Updatable VMs.
                 untrusted_props.push((cstr!("defer-rollback-protection"), &[]))
@@ -604,6 +606,18 @@ impl VirtualizationService {
             vec![]
         };
 
+        // Create TAP network interface if the VM supports network.
+        let _tap_fd = if cfg!(network) && config.networkSupported {
+            if *is_protected {
+                return Err(anyhow!("Network feature is not supported for pVM yet"))
+                    .with_log()
+                    .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION)?;
+            }
+            Some(GLOBAL_SERVICE.createTapInterface(&get_this_pid().to_string())?)
+        } else {
+            None
+        };
+
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -631,6 +645,7 @@ impl VirtualizationService {
             device_tree_overlay,
             display_config,
             input_device_options,
+            hugepages: config.hugePages,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -753,6 +768,9 @@ fn to_input_device_option_from(input_device: &InputDevice) -> Result<InputDevice
         )?),
         InputDevice::Keyboard(keyboard) => InputDeviceOption::Keyboard(clone_file(
             keyboard.pfd.as_ref().ok_or(anyhow!("pfd should have value"))?,
+        )?),
+        InputDevice::Mouse(mouse) => InputDeviceOption::Mouse(clone_file(
+            mouse.pfd.as_ref().ok_or(anyhow!("pfd should have value"))?,
         )?),
     })
 }
@@ -906,16 +924,18 @@ fn load_app_config(
             append_kernel_param("androidboot.microdroid.mount_vendor=1", &mut vm_config)
         }
 
-        vm_config.devices = custom_config.devices.clone();
+        vm_config.devices.clone_from(&custom_config.devices);
+        vm_config.networkSupported = custom_config.networkSupported;
     }
 
     if config.memoryMib > 0 {
         vm_config.memoryMib = config.memoryMib;
     }
 
-    vm_config.name = config.name.clone();
+    vm_config.name.clone_from(&config.name);
     vm_config.protectedVm = config.protectedVm;
     vm_config.cpuTopology = config.cpuTopology;
+    vm_config.hugePages = config.hugePages || vm_payload_config.hugepages;
 
     // Microdroid takes additional init ramdisk & (optionally) storage image
     add_microdroid_system_images(config, instance_file, storage_image, os_name, &mut vm_config)?;
@@ -1029,7 +1049,7 @@ fn check_permission(perm: &str) -> binder::Result<()> {
         return Ok(());
     }
     let perm_svc: Strong<dyn IPermissionController::IPermissionController> =
-        binder::get_interface("permission")?;
+        binder::wait_for_interface("permission")?;
     if perm_svc.checkPermission(perm, calling_pid, calling_uid as i32)? {
         Ok(())
     } else {
@@ -1371,6 +1391,16 @@ fn extract_instance_id(config: &VirtualMachineConfig) -> [u8; 64] {
     match config {
         VirtualMachineConfig::RawConfig(config) => config.instanceId,
         VirtualMachineConfig::AppConfig(config) => config.instanceId,
+    }
+}
+
+fn extract_want_updatable(config: &VirtualMachineConfig) -> bool {
+    match config {
+        VirtualMachineConfig::RawConfig(_) => true,
+        VirtualMachineConfig::AppConfig(config) => {
+            let Some(custom) = &config.customConfig else { return true };
+            custom.wantUpdatable
+        }
     }
 }
 
