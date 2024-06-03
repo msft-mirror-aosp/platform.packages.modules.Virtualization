@@ -42,8 +42,8 @@ import static android.system.virtualmachine.VirtualMachineCallback.STOP_REASON_V
 
 import static java.util.Objects.requireNonNull;
 
-import android.annotation.FlaggedApi;
 import android.annotation.CallbackExecutor;
+import android.annotation.FlaggedApi;
 import android.annotation.IntDef;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
@@ -63,22 +63,32 @@ import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
+import android.system.ErrnoException;
+import android.system.OsConstants;
 import android.system.virtualizationcommon.DeathReason;
 import android.system.virtualizationcommon.ErrorCode;
 import android.system.virtualizationservice.IVirtualMachine;
 import android.system.virtualizationservice.IVirtualMachineCallback;
 import android.system.virtualizationservice.IVirtualizationService;
+import android.system.virtualizationservice.InputDevice;
 import android.system.virtualizationservice.MemoryTrimLevel;
 import android.system.virtualizationservice.PartitionType;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
+import android.system.virtualizationservice.VirtualMachineRawConfig;
 import android.system.virtualizationservice.VirtualMachineState;
 import android.util.JsonReader;
 import android.util.Log;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.system.virtualmachine.flags.Flags;
 
+import libcore.io.IoBridge;
+import libcore.io.IoUtils;
+
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -88,7 +98,10 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -96,9 +109,12 @@ import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.zip.ZipFile;
@@ -152,6 +168,10 @@ public class VirtualMachine implements AutoCloseable {
      */
     @SuppressLint("MinMaxConstant") // Won't change: see man 7 vsock.
     public static final long MAX_VSOCK_PORT = (1L << 32) - 1;
+
+    private ParcelFileDescriptor mTouchSock;
+    private ParcelFileDescriptor mKeySock;
+    private ParcelFileDescriptor mMouseSock;
 
     /**
      * Status of a virtual machine
@@ -307,6 +327,10 @@ public class VirtualMachine implements AutoCloseable {
 
     private final boolean mVmConsoleInputSupported;
 
+    private final boolean mConnectVmConsole;
+
+    private final Executor mConsoleExecutor = Executors.newSingleThreadExecutor();
+
     /** The configuration that is currently associated with this VM. */
     @GuardedBy("mLock")
     @NonNull
@@ -332,6 +356,26 @@ public class VirtualMachine implements AutoCloseable {
     @GuardedBy("mLock")
     @Nullable
     private ParcelFileDescriptor mConsoleInWriter;
+
+    @GuardedBy("mLock")
+    @Nullable
+    private ParcelFileDescriptor mTeeConsoleOutReader;
+
+    @GuardedBy("mLock")
+    @Nullable
+    private ParcelFileDescriptor mTeeConsoleOutWriter;
+
+    @GuardedBy("mLock")
+    @Nullable
+    private ParcelFileDescriptor mPtyFd;
+
+    @GuardedBy("mLock")
+    @Nullable
+    private ParcelFileDescriptor mPtsFd;
+
+    @GuardedBy("mLock")
+    @Nullable
+    private String mPtsName;
 
     @GuardedBy("mLock")
     @Nullable
@@ -404,6 +448,7 @@ public class VirtualMachine implements AutoCloseable {
 
         mVmOutputCaptured = config.isVmOutputCaptured();
         mVmConsoleInputSupported = config.isVmConsoleInputSupported();
+        mConnectVmConsole = config.isConnectVmConsole();
     }
 
     /**
@@ -430,10 +475,6 @@ public class VirtualMachine implements AutoCloseable {
                 VirtualMachineConfig config = VirtualMachineConfig.from(vmDescriptor.getConfigFd());
                 vm = new VirtualMachine(context, name, config, VirtualizationService.getInstance());
                 config.serialize(vm.mConfigFilePath);
-                if (vm.mInstanceIdPath != null) {
-                    vm.importInstanceIdFrom(vmDescriptor.getInstanceIdFd());
-                }
-
                 try {
                     vm.mInstanceFilePath.createNewFile();
                 } catch (IOException e) {
@@ -450,13 +491,17 @@ public class VirtualMachine implements AutoCloseable {
                     }
                     vm.importEncryptedStoreFrom(vmDescriptor.getEncryptedStoreFd());
                 }
+                if (vm.mInstanceIdPath != null) {
+                    vm.importInstanceIdFrom(vmDescriptor.getInstanceIdFd());
+                    vm.claimInstance();
+                }
             }
             return vm;
         } catch (VirtualMachineException | RuntimeException e) {
             // If anything goes wrong, delete any files created so far and the VM's directory
             try {
                 deleteRecursively(vmDir);
-            } catch (IOException innerException) {
+            } catch (Exception innerException) {
                 e.addSuppressed(innerException);
             }
             throw e;
@@ -542,8 +587,8 @@ public class VirtualMachine implements AutoCloseable {
         } catch (VirtualMachineException | RuntimeException e) {
             // If anything goes wrong, delete any files created so far and the VM's directory
             try {
-                deleteRecursively(vmDir);
-            } catch (IOException innerException) {
+                vmInstanceCleanup(context, name);
+            } catch (Exception innerException) {
                 e.addSuppressed(innerException);
             }
             throw e;
@@ -585,15 +630,49 @@ public class VirtualMachine implements AutoCloseable {
             // if a new VM is created with the same name (and files) that's unrelated.
             mWasDeleted = true;
         }
-        // TODO(b/294177871): Request deletion of VM secrets.
-        deleteVmDirectory(context, name);
+        vmInstanceCleanup(context, name);
     }
 
-    static void deleteVmDirectory(Context context, String name) throws VirtualMachineException {
+    // Delete the full VM directory and notify VirtualizationService to remove this
+    // VM instance for housekeeping.
+    @GuardedBy("VirtualMachineManager.sCreateLock")
+    static void vmInstanceCleanup(Context context, String name) throws VirtualMachineException {
+        File vmDir = getVmDir(context, name);
+        notifyInstanceRemoval(vmDir, VirtualizationService.getInstance());
         try {
-            deleteRecursively(getVmDir(context, name));
+            deleteRecursively(vmDir);
         } catch (IOException e) {
             throw new VirtualMachineException(e);
+        }
+    }
+
+    private static void notifyInstanceRemoval(
+            File vmDirectory, @NonNull VirtualizationService service) {
+        File instanceIdFile = new File(vmDirectory, INSTANCE_ID_FILE);
+        try {
+            byte[] instanceId = Files.readAllBytes(instanceIdFile.toPath());
+            service.getBinder().removeVmInstance(instanceId);
+        } catch (Exception e) {
+            // Deliberately ignoring error in removing VM instance. This potentially leads to
+            // unaccounted instances in the VS' database. But, nothing much can be done by caller.
+            Log.w(TAG, "Failed to notify VS to remove the VM instance", e);
+        }
+    }
+
+    // Claim the instance. This notifies the global VS about the ownership of this
+    // instance_id for housekeeping purpose.
+    void claimInstance() throws VirtualMachineException {
+        if (mInstanceIdPath != null) {
+            IVirtualizationService service = mVirtualizationService.getBinder();
+            try {
+                byte[] instanceId = Files.readAllBytes(mInstanceIdPath.toPath());
+                service.claimVmInstance(instanceId);
+            }
+            catch (IOException e) {
+                throw new VirtualMachineException("failed to read instance_id", e);
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            }
         }
     }
 
@@ -810,6 +889,246 @@ public class VirtualMachine implements AutoCloseable {
         }
     }
 
+    private android.system.virtualizationservice.VirtualMachineConfig
+            createVirtualMachineConfigForRawFrom(VirtualMachineConfig vmConfig)
+                    throws IllegalStateException, IOException {
+        VirtualMachineRawConfig rawConfig = vmConfig.toVsRawConfig();
+
+        // Handle input devices here
+        List<InputDevice> inputDevices = new ArrayList<>();
+        if (vmConfig.getCustomImageConfig() != null
+                && rawConfig.displayConfig != null) {
+            if (vmConfig.getCustomImageConfig().useTouch()) {
+                ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
+                mTouchSock = pfds[0];
+                InputDevice.SingleTouch t = new InputDevice.SingleTouch();
+                t.width = rawConfig.displayConfig.width;
+                t.height = rawConfig.displayConfig.height;
+                t.pfd = pfds[1];
+                inputDevices.add(InputDevice.singleTouch(t));
+            }
+            if (vmConfig.getCustomImageConfig().useKeyboard()) {
+                ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
+                mKeySock = pfds[0];
+                InputDevice.Keyboard k = new InputDevice.Keyboard();
+                k.pfd = pfds[1];
+                inputDevices.add(InputDevice.keyboard(k));
+            }
+            if (vmConfig.getCustomImageConfig().useMouse()) {
+                ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
+                mMouseSock = pfds[0];
+                InputDevice.Mouse m = new InputDevice.Mouse();
+                m.pfd = pfds[1];
+                inputDevices.add(InputDevice.mouse(m));
+            }
+        }
+        rawConfig.inputDevices = inputDevices.toArray(new InputDevice[0]);
+
+        return android.system.virtualizationservice.VirtualMachineConfig.rawConfig(rawConfig);
+    }
+
+    private static record InputEvent(short type, short code, int value) {}
+
+    /** @hide */
+    public boolean sendKeyEvent(KeyEvent event) {
+        if (mKeySock == null) {
+            Log.d(TAG, "mKeySock == null");
+            return false;
+        }
+        // from include/uapi/linux/input-event-codes.h in the kernel.
+        short EV_SYN = 0x00;
+        short EV_KEY = 0x01;
+        short SYN_REPORT = 0x00;
+        boolean down = event.getAction() != MotionEvent.ACTION_UP;
+
+        return writeEventsToSock(
+                mKeySock,
+                Arrays.asList(
+                        new InputEvent(EV_KEY, (short) event.getScanCode(), down ? 1 : 0),
+                        new InputEvent(EV_SYN, SYN_REPORT, 0)));
+    }
+
+    /** @hide */
+    public boolean sendMouseEvent(MotionEvent event) {
+        if (mMouseSock == null) {
+            Log.d(TAG, "mMouseSock == null");
+            return false;
+        }
+        // from include/uapi/linux/input-event-codes.h in the kernel.
+        short EV_SYN = 0x00;
+        short EV_REL = 0x02;
+        short EV_KEY = 0x01;
+        short REL_X = 0x00;
+        short REL_Y = 0x01;
+        short SYN_REPORT = 0x00;
+        switch (event.getAction()) {
+            case MotionEvent.ACTION_MOVE:
+                int x = (int) event.getX();
+                int y = (int) event.getY();
+                return writeEventsToSock(
+                        mMouseSock,
+                        Arrays.asList(
+                                new InputEvent(EV_REL, REL_X, x),
+                                new InputEvent(EV_REL, REL_Y, y),
+                                new InputEvent(EV_SYN, SYN_REPORT, 0)));
+            case MotionEvent.ACTION_BUTTON_PRESS:
+            case MotionEvent.ACTION_BUTTON_RELEASE:
+                short BTN_LEFT = 0x110;
+                short BTN_RIGHT = 0x111;
+                short BTN_MIDDLE = 0x112;
+                short keyCode;
+                switch (event.getActionButton()) {
+                    case MotionEvent.BUTTON_PRIMARY:
+                        keyCode = BTN_LEFT;
+                        break;
+                    case MotionEvent.BUTTON_SECONDARY:
+                        keyCode = BTN_RIGHT;
+                        break;
+                    case MotionEvent.BUTTON_TERTIARY:
+                        keyCode = BTN_MIDDLE;
+                        break;
+                    default:
+                        Log.d(TAG, event.toString());
+                        return false;
+                }
+                return writeEventsToSock(
+                        mMouseSock,
+                        Arrays.asList(
+                                new InputEvent(
+                                        EV_KEY,
+                                        keyCode,
+                                        event.getAction() == MotionEvent.ACTION_BUTTON_PRESS
+                                                ? 1
+                                                : 0),
+                                new InputEvent(EV_SYN, SYN_REPORT, 0)));
+            case MotionEvent.ACTION_SCROLL:
+                short REL_HWHEEL = 0x06;
+                short REL_WHEEL = 0x08;
+                int scrollX = (int) event.getAxisValue(MotionEvent.AXIS_HSCROLL);
+                int scrollY = (int) event.getAxisValue(MotionEvent.AXIS_VSCROLL);
+                boolean status = true;
+                if (scrollX != 0) {
+                    status &=
+                            writeEventsToSock(
+                                    mMouseSock,
+                                    Arrays.asList(
+                                            new InputEvent(EV_REL, REL_HWHEEL, scrollX),
+                                            new InputEvent(EV_SYN, SYN_REPORT, 0)));
+                } else if (scrollY != 0) {
+                    status &=
+                            writeEventsToSock(
+                                    mMouseSock,
+                                    Arrays.asList(
+                                            new InputEvent(EV_REL, REL_WHEEL, scrollY),
+                                            new InputEvent(EV_SYN, SYN_REPORT, 0)));
+                } else {
+                    Log.d(TAG, event.toString());
+                    return false;
+                }
+                return status;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_DOWN:
+                // Ignored because it's handled by ACTION_BUTTON_PRESS and ACTION_BUTTON_RELEASE
+                return true;
+            default:
+                Log.d(TAG, event.toString());
+                return false;
+        }
+    }
+
+    /** @hide */
+    public boolean sendSingleTouchEvent(MotionEvent event) {
+        if (mTouchSock == null) {
+            Log.d(TAG, "mTouchSock == null");
+            return false;
+        }
+        // from include/uapi/linux/input-event-codes.h in the kernel.
+        short EV_SYN = 0x00;
+        short EV_ABS = 0x03;
+        short EV_KEY = 0x01;
+        short BTN_TOUCH = 0x14a;
+        short ABS_X = 0x00;
+        short ABS_Y = 0x01;
+        short SYN_REPORT = 0x00;
+
+        int x = (int) event.getX();
+        int y = (int) event.getY();
+        boolean down = event.getAction() != MotionEvent.ACTION_UP;
+
+        return writeEventsToSock(
+                mTouchSock,
+                Arrays.asList(
+                        new InputEvent(EV_ABS, ABS_X, x),
+                        new InputEvent(EV_ABS, ABS_Y, y),
+                        new InputEvent(EV_KEY, BTN_TOUCH, down ? 1 : 0),
+                        new InputEvent(EV_SYN, SYN_REPORT, 0)));
+    }
+
+    private boolean writeEventsToSock(ParcelFileDescriptor sock, List<InputEvent> evtList) {
+        ByteBuffer byteBuffer =
+                ByteBuffer.allocate(8 /* (type: u16 + code: u16 + value: i32) */ * evtList.size());
+        byteBuffer.clear();
+        byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
+        for (InputEvent e : evtList) {
+            byteBuffer.putShort(e.type);
+            byteBuffer.putShort(e.code);
+            byteBuffer.putInt(e.value);
+        }
+        try {
+            IoBridge.write(
+                    sock.getFileDescriptor(), byteBuffer.array(), 0, byteBuffer.array().length);
+        } catch (IOException e) {
+            Log.d(TAG, "cannot send event", e);
+            return false;
+        }
+        return true;
+    }
+
+    private android.system.virtualizationservice.VirtualMachineConfig
+            createVirtualMachineConfigForAppFrom(
+                    VirtualMachineConfig vmConfig, IVirtualizationService service)
+                    throws RemoteException, IOException, VirtualMachineException {
+        VirtualMachineAppConfig appConfig = vmConfig.toVsConfig(mContext.getPackageManager());
+        appConfig.instanceImage = ParcelFileDescriptor.open(mInstanceFilePath, MODE_READ_WRITE);
+        appConfig.name = mName;
+        if (mInstanceIdPath != null) {
+            appConfig.instanceId = Files.readAllBytes(mInstanceIdPath.toPath());
+        } else {
+            // FEATURE_LLPVM_CHANGES is disabled, instance_id is not used.
+            appConfig.instanceId = new byte[64];
+        }
+        if (mEncryptedStoreFilePath != null) {
+            appConfig.encryptedStorageImage =
+                    ParcelFileDescriptor.open(mEncryptedStoreFilePath, MODE_READ_WRITE);
+        }
+
+        if (!vmConfig.getExtraApks().isEmpty()) {
+            // Extra APKs were specified directly, rather than via config file.
+            // We've already populated the file names for the extra APKs and IDSigs
+            // (via setupExtraApks). But we also need to open the APK files and add
+            // fds for them to the payload config.
+            // This isn't needed when the extra APKs are specified in a config file -
+            // then
+            // Virtualization Manager opens them itself.
+            List<ParcelFileDescriptor> extraApkFiles = new ArrayList<>(mExtraApks.size());
+            for (ExtraApkSpec extraApk : mExtraApks) {
+                try {
+                    extraApkFiles.add(ParcelFileDescriptor.open(extraApk.apk, MODE_READ_ONLY));
+                } catch (FileNotFoundException e) {
+                    throw new VirtualMachineException("Failed to open extra APK", e);
+                }
+            }
+            appConfig.payload.getPayloadConfig().extraApks = extraApkFiles;
+        }
+
+        try {
+            createIdSigsAndUpdateConfig(service, appConfig);
+        } catch (FileNotFoundException e) {
+            throw new VirtualMachineException("Failed to generate APK signature", e);
+        }
+        return android.system.virtualizationservice.VirtualMachineConfig.appConfig(appConfig);
+    }
+
     /**
      * Runs this virtual machine. The returning of this method however doesn't mean that the VM has
      * actually started running or the OS has booted there. Such events can be notified by
@@ -841,6 +1160,10 @@ public class VirtualMachine implements AutoCloseable {
             IVirtualizationService service = mVirtualizationService.getBinder();
 
             try {
+                if (mConnectVmConsole) {
+                    createPtyConsole();
+                }
+
                 if (mVmOutputCaptured) {
                     createVmOutputPipes();
                 }
@@ -849,55 +1172,46 @@ public class VirtualMachine implements AutoCloseable {
                     createVmInputPipes();
                 }
 
+                ParcelFileDescriptor consoleOutFd = null;
+                if (mConnectVmConsole && mVmOutputCaptured) {
+                    // If we are enabling output pipes AND the host console, then we tee the console
+                    // output to both.
+                    ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
+                    mTeeConsoleOutReader = pipe[0];
+                    mTeeConsoleOutWriter = pipe[1];
+                    consoleOutFd = mTeeConsoleOutWriter;
+                    TeeWorker tee =
+                            new TeeWorker(
+                                    mName + " console",
+                                    new FileInputStream(mTeeConsoleOutReader.getFileDescriptor()),
+                                    List.of(
+                                            new FileOutputStream(mPtyFd.getFileDescriptor()),
+                                            new FileOutputStream(
+                                                    mConsoleOutWriter.getFileDescriptor())));
+                    // If the VM is stopped then the tee worker thread would get an EOF or read()
+                    // error which would tear down itself.
+                    mConsoleExecutor.execute(tee);
+                } else if (mConnectVmConsole) {
+                    consoleOutFd = mPtyFd;
+                } else if (mVmOutputCaptured) {
+                    consoleOutFd = mConsoleOutWriter;
+                }
+
+                ParcelFileDescriptor consoleInFd = null;
+                if (mConnectVmConsole) {
+                    consoleInFd = mPtyFd;
+                } else if (mVmConsoleInputSupported) {
+                    consoleInFd = mConsoleInReader;
+                }
+
                 VirtualMachineConfig vmConfig = getConfig();
-                VirtualMachineAppConfig appConfig =
-                        vmConfig.toVsConfig(mContext.getPackageManager());
-                appConfig.instanceImage =
-                        ParcelFileDescriptor.open(mInstanceFilePath, MODE_READ_WRITE);
-                appConfig.name = mName;
-                if (mInstanceIdPath != null) {
-                    appConfig.instanceId = Files.readAllBytes(mInstanceIdPath.toPath());
-                } else {
-                    // FEATURE_LLPVM_CHANGES is disabled, instance_id is not used.
-                    appConfig.instanceId = new byte[64];
-                }
-                if (mEncryptedStoreFilePath != null) {
-                    appConfig.encryptedStorageImage =
-                            ParcelFileDescriptor.open(mEncryptedStoreFilePath, MODE_READ_WRITE);
-                }
-
-                if (!vmConfig.getExtraApks().isEmpty()) {
-                    // Extra APKs were specified directly, rather than via config file.
-                    // We've already populated the file names for the extra APKs and IDSigs
-                    // (via setupExtraApks). But we also need to open the APK files and add
-                    // fds for them to the payload config.
-                    // This isn't needed when the extra APKs are specified in a config file - then
-                    // Virtualization Manager opens them itself.
-                    List<ParcelFileDescriptor> extraApkFiles = new ArrayList<>(mExtraApks.size());
-                    for (ExtraApkSpec extraApk : mExtraApks) {
-                        try {
-                            extraApkFiles.add(
-                                    ParcelFileDescriptor.open(extraApk.apk, MODE_READ_ONLY));
-                        } catch (FileNotFoundException e) {
-                            throw new VirtualMachineException("Failed to open extra APK", e);
-                        }
-                    }
-                    appConfig.payload.getPayloadConfig().extraApks = extraApkFiles;
-                }
-
-                try {
-                    createIdSigsAndUpdateConfig(service, appConfig);
-                } catch (FileNotFoundException e) {
-                    throw new VirtualMachineException("Failed to generate APK signature", e);
-                }
-
                 android.system.virtualizationservice.VirtualMachineConfig vmConfigParcel =
-                        android.system.virtualizationservice.VirtualMachineConfig.appConfig(
-                                appConfig);
+                        vmConfig.getCustomImageConfig() != null
+                                ? createVirtualMachineConfigForRawFrom(vmConfig)
+                                : createVirtualMachineConfigForAppFrom(vmConfig, service);
 
                 mVirtualMachine =
-                        service.createVm(
-                                vmConfigParcel, mConsoleOutWriter, mConsoleInReader, mLogWriter);
+                        service.createVm(vmConfigParcel, consoleOutFd, consoleInFd, mLogWriter);
                 mVirtualMachine.registerCallback(new CallbackTranslator(service));
                 mContext.registerComponentCallbacks(mMemoryManagementCallbacks);
                 mVirtualMachine.start();
@@ -956,12 +1270,78 @@ public class VirtualMachine implements AutoCloseable {
     private void createVmInputPipes() throws VirtualMachineException {
         try {
             if (mConsoleInReader == null || mConsoleInWriter == null) {
-                ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
-                mConsoleInReader = pipe[0];
-                mConsoleInWriter = pipe[1];
+                if (mConnectVmConsole) {
+                    // If we are enabling input pipes AND the host console, then we should just use
+                    // the host pty peer end as the console write end.
+                    createPtyConsole();
+                    mConsoleInReader = mPtyFd.dup();
+                    mConsoleInWriter = mPtsFd.dup();
+                } else {
+                    ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
+                    mConsoleInReader = pipe[0];
+                    mConsoleInWriter = pipe[1];
+                }
             }
         } catch (IOException e) {
             throw new VirtualMachineException("Failed to create input stream for VM", e);
+        }
+    }
+
+    @FunctionalInterface
+    private static interface OpenPtyCallback {
+        public void apply(FileDescriptor mfd, FileDescriptor sfd, byte[] name);
+    }
+
+    // Opens a pty and set the master end to raw mode and O_NONBLOCK.
+    private static native void nativeOpenPtyRawNonblock(OpenPtyCallback resultCallback)
+            throws IOException;
+
+    @GuardedBy("mLock")
+    private void createPtyConsole() throws VirtualMachineException {
+        if (mPtyFd != null && mPtsFd != null) {
+            return;
+        }
+        List<FileDescriptor> fd = new ArrayList<>(2);
+        StringBuilder nameBuilder = new StringBuilder();
+        try {
+            try {
+                nativeOpenPtyRawNonblock(
+                        (FileDescriptor mfd, FileDescriptor sfd, byte[] ptsName) -> {
+                            fd.add(mfd);
+                            fd.add(sfd);
+                            nameBuilder.append(new String(ptsName, StandardCharsets.UTF_8));
+                        });
+            } catch (Exception e) {
+                fd.forEach(IoUtils::closeQuietly);
+                throw e;
+            }
+        } catch (IOException e) {
+            throw new VirtualMachineException(
+                    "Failed to create host console to connect to the VM console", e);
+        }
+        mPtyFd = new ParcelFileDescriptor(fd.get(0));
+        mPtsFd = new ParcelFileDescriptor(fd.get(1));
+        mPtsName = nameBuilder.toString();
+        Log.d(TAG, "Serial console device: " + mPtsName);
+    }
+
+    /**
+     * Returns the name of the peer end (ptsname) of the host console. The host console is only
+     * available if the {@link VirtualMachineConfig} specifies that a host console should
+     * {@linkplain VirtualMachineConfig#isConnectVmConsole connect} to the VM console.
+     *
+     * @throws VirtualMachineException if the host pseudoterminal could not be created, or
+     *     connecting to the VM console is not enabled.
+     * @hide
+     */
+    @NonNull
+    public String getHostConsoleName() throws VirtualMachineException {
+        if (!mConnectVmConsole) {
+            throw new VirtualMachineException("Host console is not enabled");
+        }
+        synchronized (mLock) {
+            createPtyConsole();
+            return mPtsName;
         }
     }
 
@@ -1562,6 +1942,63 @@ public class VirtualMachine implements AutoCloseable {
                 default:
                     return STOP_REASON_UNKNOWN;
             }
+        }
+    }
+
+    /**
+     * Duplicates {@code InputStream} data to multiple {@code OutputStream}. Like the "tee" command.
+     *
+     * <p>Supports non-blocking writes to the output streams by ignoring EAGAIN error.
+     */
+    private static class TeeWorker implements Runnable {
+        private final String mName;
+        private final InputStream mIn;
+        private final List<OutputStream> mOuts;
+
+        TeeWorker(String name, InputStream in, Collection<OutputStream> outs) {
+            mName = name;
+            mIn = in;
+            mOuts = new ArrayList<>(outs);
+        }
+
+        @Override
+        public void run() {
+            byte[] buffer = new byte[2048];
+            try {
+                while (!Thread.interrupted()) {
+                    int len = mIn.read(buffer);
+                    if (len < 0) {
+                        break;
+                    }
+                    for (OutputStream out : mOuts) {
+                        try {
+                            out.write(buffer, 0, len);
+                        } catch (IOException e) {
+                            // EAGAIN is expected because the file description has O_NONBLOCK flag.
+                            if (!isErrnoError(e, OsConstants.EAGAIN)) {
+                                throw e;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Tee " + mName, e);
+            }
+        }
+
+        private static ErrnoException asErrnoException(Throwable e) {
+            if (e instanceof ErrnoException) {
+                return (ErrnoException) e;
+            } else if (e instanceof IOException) {
+                // Try to unwrap ErrnoException#rethrowAsIOException()
+                return asErrnoException(e.getCause());
+            }
+            return null;
+        }
+
+        private static boolean isErrnoError(Exception e, int expectedValue) {
+            ErrnoException errno = asErrnoException(e);
+            return errno != null && errno.errno == expectedValue;
         }
     }
 }

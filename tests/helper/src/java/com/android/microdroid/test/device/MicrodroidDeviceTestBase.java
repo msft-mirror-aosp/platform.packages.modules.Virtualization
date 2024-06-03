@@ -43,9 +43,12 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import com.android.microdroid.test.common.DeviceProperties;
 import com.android.microdroid.test.common.MetricsProcessor;
 import com.android.microdroid.testservice.ITestService;
+import com.android.virt.vm_attestation.testservice.IAttestationService;
+import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -65,10 +68,15 @@ public abstract class MicrodroidDeviceTestBase {
 
     protected static final String KERNEL_VERSION = SystemProperties.get("ro.kernel.version");
     protected static final Set<String> SUPPORTED_GKI_VERSIONS =
-            Collections.unmodifiableSet(new HashSet(Arrays.asList("android14-6.1")));
+            Collections.unmodifiableSet(
+                    new HashSet(Arrays.asList("android14-6.1-pkvm_experimental")));
 
     public static boolean isCuttlefish() {
         return getDeviceProperties().isCuttlefish();
+    }
+
+    private static boolean isCuttlefishArm64() {
+        return getDeviceProperties().isCuttlefishArm64();
     }
 
     public static boolean isHwasan() {
@@ -127,6 +135,7 @@ public abstract class MicrodroidDeviceTestBase {
     public VirtualMachineConfig.Builder newVmConfigBuilderWithPayloadConfig(String configPath) {
         return new VirtualMachineConfig.Builder(mCtx)
                 .setProtectedVm(mProtectedVm)
+                .setOs(os())
                 .setPayloadConfigPath(configPath);
     }
 
@@ -152,6 +161,12 @@ public abstract class MicrodroidDeviceTestBase {
     public VirtualMachine forceCreateNewVirtualMachine(String name, VirtualMachineConfig config)
             throws VirtualMachineException {
         final VirtualMachineManager vmm = getVirtualMachineManager();
+        deleteVirtualMachineIfExists(name);
+        return vmm.create(name, config);
+    }
+
+    protected void deleteVirtualMachineIfExists(String name) throws VirtualMachineException {
+        VirtualMachineManager vmm = getVirtualMachineManager();
         boolean deleteExisting;
         try {
             deleteExisting = vmm.get(name) != null;
@@ -163,7 +178,6 @@ public abstract class MicrodroidDeviceTestBase {
         if (deleteExisting) {
             vmm.delete(name);
         }
-        return vmm.create(name, config);
     }
 
     public void prepareTestSetup(boolean protectedVm, String gki) {
@@ -197,12 +211,33 @@ public abstract class MicrodroidDeviceTestBase {
         assume().withMessage("Device doesn't support AVF")
                 .that(mCtx.getPackageManager().hasSystemFeature(FEATURE_VIRTUALIZATION_FRAMEWORK))
                 .isTrue();
+        int vendorApiLevel = getVendorApiLevel();
+        boolean isGsi = new File("/system/system_ext/etc/init/init.gsi.rc").exists();
+        assume().withMessage("GSI with vendor API level < 202404 may not support AVF")
+                .that(isGsi && vendorApiLevel < 202404)
+                .isFalse();
+    }
+
+    protected static int getVendorApiLevel() {
+        return SystemProperties.getInt("ro.vendor.api_level", 0);
     }
 
     protected void assumeSupportedDevice() {
         assume().withMessage("Skip on 5.4 kernel. b/218303240")
                 .that(KERNEL_VERSION)
                 .isNotEqualTo("5.4");
+
+        // Cuttlefish on Arm 64 doesn't and cannot support any form of virtualization, so there's
+        // no point running any of these tests.
+        assume().withMessage("Virtualization not supported on Arm64 Cuttlefish. b/341889915")
+                .that(isCuttlefishArm64())
+                .isFalse();
+    }
+
+    protected void assumeNoUpdatableVmSupport() throws VirtualMachineException {
+        assume().withMessage("Secretkeeper not supported")
+                .that(getVirtualMachineManager().isUpdatableVmSupported())
+                .isFalse();
     }
 
     public abstract static class VmEventListener implements VirtualMachineCallback {
@@ -521,6 +556,40 @@ public abstract class MicrodroidDeviceTestBase {
                 throw new RuntimeException(mException);
             }
         }
+    }
+
+    protected SigningResult runVmAttestationService(
+            String logTag, VirtualMachine vm, byte[] challenge, byte[] messageToSign)
+            throws Exception {
+
+        CompletableFuture<Exception> exception = new CompletableFuture<>();
+        CompletableFuture<Boolean> payloadReady = new CompletableFuture<>();
+        CompletableFuture<SigningResult> signingResultFuture = new CompletableFuture<>();
+        VmEventListener listener =
+                new VmEventListener() {
+                    @Override
+                    public void onPayloadReady(VirtualMachine vm) {
+                        payloadReady.complete(true);
+                        try {
+                            IAttestationService service =
+                                    IAttestationService.Stub.asInterface(
+                                            vm.connectToVsockServer(IAttestationService.PORT));
+                            signingResultFuture.complete(
+                                    service.signWithAttestationKey(challenge, messageToSign));
+                        } catch (Exception e) {
+                            exception.complete(e);
+                        } finally {
+                            forceStop(vm);
+                        }
+                    }
+                };
+        listener.runToFinish(TAG, vm);
+
+        assertThat(payloadReady.getNow(false)).isTrue();
+        assertThat(exception.getNow(null)).isNull();
+        SigningResult signingResult = signingResultFuture.getNow(null);
+        assertThat(signingResult).isNotNull();
+        return signingResult;
     }
 
     protected TestResults runVmTestService(

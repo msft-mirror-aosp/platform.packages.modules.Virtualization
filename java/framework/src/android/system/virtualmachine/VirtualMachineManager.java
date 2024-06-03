@@ -38,9 +38,11 @@ import android.util.ArrayMap;
 import com.android.internal.annotations.GuardedBy;
 import com.android.system.virtualmachine.flags.Flags;
 
+import java.io.File;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.ref.WeakReference;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -284,11 +286,12 @@ public class VirtualMachineManager {
     public VirtualMachine importFromDescriptor(
             @NonNull String name, @NonNull VirtualMachineDescriptor vmDescriptor)
             throws VirtualMachineException {
+        VirtualMachine vm;
         synchronized (sCreateLock) {
-            VirtualMachine vm = VirtualMachine.fromDescriptor(mContext, name, vmDescriptor);
+            vm = VirtualMachine.fromDescriptor(mContext, name, vmDescriptor);
             mVmsByName.put(name, new WeakReference<>(vm));
-            return vm;
         }
+        return vm;
     }
 
     /**
@@ -334,7 +337,7 @@ public class VirtualMachineManager {
         synchronized (sCreateLock) {
             VirtualMachine vm = getVmByName(name);
             if (vm == null) {
-                VirtualMachine.deleteVmDirectory(mContext, name);
+                VirtualMachine.vmInstanceCleanup(mContext, name);
             } else {
                 vm.delete(mContext, name);
             }
@@ -356,6 +359,30 @@ public class VirtualMachineManager {
         return null;
     }
 
+    private static final String JSON_SUFFIX = ".json";
+    private static final List<String> SUPPORTED_OS_LIST_FROM_CFG =
+            extractSupportedOSListFromConfig();
+
+    private boolean isVendorModuleEnabled() {
+        return VirtualizationService.nativeIsVendorModulesFlagEnabled();
+    }
+
+    private static List<String> extractSupportedOSListFromConfig() {
+        List<String> supportedOsList = new ArrayList<>();
+        File directory = new File("/apex/com.android.virt/etc");
+        File[] files = directory.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                String fileName = file.getName();
+                if (fileName.endsWith(JSON_SUFFIX)) {
+                    supportedOsList.add(
+                            fileName.substring(0, fileName.length() - JSON_SUFFIX.length()));
+                }
+            }
+        }
+        return supportedOsList;
+    }
+
     /**
      * Returns a list of supported OS names.
      *
@@ -365,13 +392,10 @@ public class VirtualMachineManager {
     @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
     @NonNull
     public List<String> getSupportedOSList() throws VirtualMachineException {
-        synchronized (sCreateLock) {
-            VirtualizationService service = VirtualizationService.getInstance();
-            try {
-                return Arrays.asList(service.getBinder().getSupportedOSList());
-            } catch (RemoteException e) {
-                throw e.rethrowAsRuntimeException();
-            }
+        if (isVendorModuleEnabled()) {
+            return SUPPORTED_OS_LIST_FROM_CFG;
+        } else {
+            return Arrays.asList("microdroid");
         }
     }
 
@@ -388,6 +412,47 @@ public class VirtualMachineManager {
             VirtualizationService service = VirtualizationService.getInstance();
             try {
                 return service.getBinder().isFeatureEnabled(featureName);
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            }
+        }
+    }
+
+    /**
+     * Returns {@code true} if the pVM remote attestation feature is supported. Remote attestation
+     * allows a protected VM to attest its authenticity to a remote server.
+     *
+     * @hide
+     */
+    @TestApi
+    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
+    @RequiresPermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION)
+    public boolean isRemoteAttestationSupported() throws VirtualMachineException {
+        synchronized (sCreateLock) {
+            VirtualizationService service = VirtualizationService.getInstance();
+            try {
+                return service.getBinder().isRemoteAttestationSupported();
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            }
+        }
+    }
+
+    /**
+     * Returns {@code true} if Updatable VM feature is supported by AVF. Updatable VM allow secrets
+     * and data to be accessible even after updates of boot images and apks. For more info see
+     * packages/modules/Virtualization/docs/updatable_vm.md
+     *
+     * @hide
+     */
+    @TestApi
+    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
+    @RequiresPermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION)
+    public boolean isUpdatableVmSupported() throws VirtualMachineException {
+        synchronized (sCreateLock) {
+            VirtualizationService service = VirtualizationService.getInstance();
+            try {
+                return service.getBinder().isUpdatableVmSupported();
             } catch (RemoteException e) {
                 throw e.rethrowAsRuntimeException();
             }

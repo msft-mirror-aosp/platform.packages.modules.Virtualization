@@ -17,6 +17,8 @@ package android.system.virtualizationservice;
 
 import android.system.virtualizationservice.CpuTopology;
 import android.system.virtualizationservice.DiskImage;
+import android.system.virtualizationservice.DisplayConfig;
+import android.system.virtualizationservice.InputDevice;
 
 /** Raw configuration for running a VM. */
 parcelable VirtualMachineRawConfig {
@@ -68,6 +70,22 @@ parcelable VirtualMachineRawConfig {
      */
     int gdbPort = 0;
 
+    /**
+     *  Ask the kernel for transparent huge-pages (THP). This is only a hint and
+     *  the kernel will allocate THP-backed memory only if globally enabled by
+     *  the system and if any can be found. See
+     *  https://docs.kernel.org/admin-guide/mm/transhuge.html
+     */
+    boolean hugePages;
+
     /** List of SysFS nodes of devices to be assigned */
     String[] devices;
+
+    @nullable DisplayConfig displayConfig;
+
+    /** List of input devices to the VM */
+    InputDevice[] inputDevices;
+
+    /** Whether the VM should have network feature. */
+    boolean networkSupported;
 }

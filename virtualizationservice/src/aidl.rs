@@ -51,7 +51,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::raw::{pid_t, uid_t};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use tombstoned_client::{DebuggerdDumpType, TombstonedConnection};
 use virtualizationcommon::Certificate::Certificate;
 use virtualizationmaintenance::{
@@ -70,6 +70,7 @@ use virtualizationservice_internal::{
     IVfioHandler::VfioDev::VfioDev,
     IVfioHandler::{BpVfioHandler, IVfioHandler},
     IVirtualizationServiceInternal::IVirtualizationServiceInternal,
+    IVmnic::{BpVmnic, IVmnic},
 };
 use virtualmachineservice::IVirtualMachineService::VM_TOMBSTONES_SERVICE_PORT;
 use vsock::{VsockListener, VsockStream};
@@ -159,6 +160,9 @@ lazy_static! {
     static ref VFIO_SERVICE: Strong<dyn IVfioHandler> =
         wait_for_interface(<BpVfioHandler as IVfioHandler>::get_descriptor())
             .expect("Could not connect to VfioHandler");
+    static ref NETWORK_SERVICE: Strong<dyn IVmnic> =
+        wait_for_interface(<BpVmnic as IVmnic>::get_descriptor())
+            .expect("Could not connect to Vmnic");
 }
 
 fn is_valid_guest_cid(cid: Cid) -> bool {
@@ -170,12 +174,15 @@ fn is_valid_guest_cid(cid: Cid) -> bool {
 #[derive(Clone)]
 pub struct VirtualizationServiceInternal {
     state: Arc<Mutex<GlobalState>>,
+    display_service_set: Arc<Condvar>,
 }
 
 impl VirtualizationServiceInternal {
     pub fn init() -> VirtualizationServiceInternal {
-        let service =
-            VirtualizationServiceInternal { state: Arc::new(Mutex::new(GlobalState::new())) };
+        let service = VirtualizationServiceInternal {
+            state: Arc::new(Mutex::new(GlobalState::new())),
+            display_service_set: Arc::new(Condvar::new()),
+        };
 
         std::thread::spawn(|| {
             if let Err(e) = handle_stream_connection_tombstoned() {
@@ -190,6 +197,39 @@ impl VirtualizationServiceInternal {
 impl Interface for VirtualizationServiceInternal {}
 
 impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
+    fn setDisplayService(
+        &self,
+        ibinder: &binder::SpIBinder,
+    ) -> std::result::Result<(), binder::Status> {
+        check_manage_access()?;
+        check_use_custom_virtual_machine()?;
+        let state = &mut *self.state.lock().unwrap();
+        state.display_service = Some(ibinder.clone());
+        self.display_service_set.notify_all();
+        Ok(())
+    }
+
+    fn clearDisplayService(&self) -> std::result::Result<(), binder::Status> {
+        check_manage_access()?;
+        check_use_custom_virtual_machine()?;
+        let state = &mut *self.state.lock().unwrap();
+        state.display_service = None;
+        self.display_service_set.notify_all();
+        Ok(())
+    }
+
+    fn waitDisplayService(&self) -> std::result::Result<binder::SpIBinder, binder::Status> {
+        check_manage_access()?;
+        check_use_custom_virtual_machine()?;
+        let state = self
+            .display_service_set
+            .wait_while(self.state.lock().unwrap(), |state| state.display_service.is_none())
+            .unwrap();
+        Ok((state.display_service)
+            .as_ref()
+            .cloned()
+            .expect("Display service cannot be None in this context"))
+    }
     fn removeMemlockRlimit(&self) -> binder::Result<()> {
         let pid = get_calling_pid();
         let lim = libc::rlimit { rlim_cur: libc::RLIM_INFINITY, rlim_max: libc::RLIM_INFINITY };
@@ -269,6 +309,13 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             .context("Failed to generate ECDSA P-256 key pair for testing")
             .with_log()
             .or_service_specific_exception(-1)?;
+        // Wait until the service VM shuts down, so that the Service VM will be restarted when
+        // the key generated in the current session will be used for attestation.
+        // This ensures that different Service VM sessions have the same KEK for the key blob.
+        service_vm_manager::wait_until_service_vm_shuts_down()
+            .context("Failed to wait until the service VM shuts down")
+            .with_log()
+            .or_service_specific_exception(-1)?;
         match res {
             Response::GenerateEcdsaP256KeyPair(key_pair) => {
                 FAKE_PROVISIONED_KEY_BLOB_FOR_TESTING
@@ -296,6 +343,13 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
                     "requestAttestation is not supported with the remote_attestation feature \
                      disabled",
                 ),
+            ))
+            .with_log();
+        }
+        if !is_remote_provisioning_hal_declared()? {
+            return Err(Status::new_exception_str(
+                ExceptionCode::UNSUPPORTED_OPERATION,
+                Some("AVF remotely provisioned component service is not declared"),
             ))
             .with_log();
         }
@@ -348,13 +402,17 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         Ok(certificate_chain)
     }
 
+    fn isRemoteAttestationSupported(&self) -> binder::Result<bool> {
+        is_remote_provisioning_hal_declared()
+    }
+
     fn getAssignableDevices(&self) -> binder::Result<Vec<AssignableDevice>> {
         check_use_custom_virtual_machine()?;
 
         Ok(get_assignable_devices()?
             .device
             .into_iter()
-            .map(|x| AssignableDevice { node: x.sysfs_path, kind: x.kind })
+            .map(|x| AssignableDevice { node: x.sysfs_path, dtbo_label: x.dtbo_label })
             .collect::<Vec<_>>())
     }
 
@@ -399,7 +457,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         if let Some(sk_state) = &mut state.sk_state {
             let user_id = multiuser_get_user_id(uid);
             let app_id = multiuser_get_app_id(uid);
-            info!("Recording potential existence of state for (user_id={user_id}, app_id={app_id}");
+            info!("Recording possible existence of state for (user_id={user_id}, app_id={app_id})");
             if let Err(e) = sk_state.add_id(&id, user_id, app_id) {
                 error!("Failed to record the instance_id: {e:?}");
             }
@@ -417,6 +475,40 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             info!("ignoring removeVmInstance() as no ISecretkeeper");
         }
         Ok(())
+    }
+
+    fn claimVmInstance(&self, instance_id: &[u8; 64]) -> binder::Result<()> {
+        let state = &mut *self.state.lock().unwrap();
+        if let Some(sk_state) = &mut state.sk_state {
+            let uid = get_calling_uid();
+            info!(
+                "Claiming a VM's instance_id: {:?}, for uid: {:?}",
+                hex::encode(instance_id),
+                uid
+            );
+
+            let user_id = multiuser_get_user_id(uid);
+            let app_id = multiuser_get_app_id(uid);
+            info!("Recording possible new owner of state for (user_id={user_id}, app_id={app_id})");
+            if let Err(e) = sk_state.add_id(instance_id, user_id, app_id) {
+                error!("Failed to update the instance_id owner: {e:?}");
+            }
+        } else {
+            info!("ignoring claimVmInstance() as no ISecretkeeper");
+        }
+        Ok(())
+    }
+
+    fn createTapInterface(&self, iface_name_suffix: &str) -> binder::Result<ParcelFileDescriptor> {
+        check_use_custom_virtual_machine()?;
+        if !cfg!(network) {
+            return Err(Status::new_exception_str(
+                ExceptionCode::UNSUPPORTED_OPERATION,
+                Some("createTapInterface is not supported with the network feature disabled"),
+            ))
+            .with_log();
+        }
+        NETWORK_SERVICE.createTapInterface(iface_name_suffix)
     }
 }
 
@@ -445,17 +537,21 @@ impl IVirtualizationMaintenance for VirtualizationServiceInternal {
 
     fn performReconciliation(
         &self,
-        _callback: &Strong<dyn IVirtualizationReconciliationCallback>,
+        callback: &Strong<dyn IVirtualizationReconciliationCallback>,
     ) -> binder::Result<()> {
-        Err(anyhow!("performReconciliation not supported"))
-            .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION)
+        let state = &mut *self.state.lock().unwrap();
+        if let Some(sk_state) = &mut state.sk_state {
+            info!("performReconciliation()");
+            sk_state.reconcile(callback).or_service_specific_exception(-1)?;
+        } else {
+            info!("ignoring performReconciliation()");
+        }
+        Ok(())
     }
 }
 
-// KEEP IN SYNC WITH assignable_devices.xsd
 #[derive(Debug, Deserialize)]
 struct Device {
-    kind: String,
     dtbo_label: String,
     sysfs_path: String,
 }
@@ -544,6 +640,8 @@ struct GlobalState {
 
     /// State relating to secrets held by (optional) Secretkeeper instance on behalf of VMs.
     sk_state: Option<maintenance::State>,
+
+    display_service: Option<binder::SpIBinder>,
 }
 
 impl GlobalState {
@@ -552,6 +650,7 @@ impl GlobalState {
             held_contexts: HashMap::new(),
             dtbo_file: Mutex::new(None),
             sk_state: maintenance::State::new(),
+            display_service: None,
         }
     }
 
@@ -763,6 +862,12 @@ fn handle_tombstone(stream: &mut VsockStream) -> Result<()> {
     Ok(())
 }
 
+/// Returns true if the AVF remotely provisioned component service is declared in the
+/// VINTF manifest.
+pub(crate) fn is_remote_provisioning_hal_declared() -> binder::Result<bool> {
+    Ok(binder::is_declared(REMOTELY_PROVISIONED_COMPONENT_SERVICE_NAME)?)
+}
+
 /// Checks whether the caller has a specific permission
 fn check_permission(perm: &str) -> binder::Result<()> {
     let calling_pid = get_calling_pid();
@@ -772,7 +877,7 @@ fn check_permission(perm: &str) -> binder::Result<()> {
         return Ok(());
     }
     let perm_svc: Strong<dyn IPermissionController::IPermissionController> =
-        binder::get_interface("permission")?;
+        binder::wait_for_interface("permission")?;
     if perm_svc.checkPermission(perm, calling_pid, calling_uid as i32)? {
         Ok(())
     } else {

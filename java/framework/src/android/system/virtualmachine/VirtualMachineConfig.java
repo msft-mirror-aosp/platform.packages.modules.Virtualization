@@ -18,6 +18,7 @@ package android.system.virtualmachine;
 
 import static android.os.ParcelFileDescriptor.AutoCloseInputStream;
 import static android.os.ParcelFileDescriptor.MODE_READ_ONLY;
+import static android.os.ParcelFileDescriptor.MODE_READ_WRITE;
 
 import static java.util.Objects.requireNonNull;
 
@@ -27,6 +28,7 @@ import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.RequiresPermission;
+import android.annotation.StringDef;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
 import android.content.Context;
@@ -36,8 +38,12 @@ import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.PersistableBundle;
 import android.sysprop.HypervisorProperties;
+import android.system.virtualizationservice.DiskImage;
+import android.system.virtualizationservice.Partition;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
 import android.system.virtualizationservice.VirtualMachinePayloadConfig;
+import android.system.virtualizationservice.VirtualMachineRawConfig;
+import android.text.TextUtils;
 import android.util.Log;
 
 import com.android.system.virtualmachine.flags.Flags;
@@ -56,6 +62,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.zip.ZipFile;
 
 /**
@@ -77,6 +84,7 @@ public final class VirtualMachineConfig {
     private static final String KEY_PACKAGENAME = "packageName";
     private static final String KEY_APKPATH = "apkPath";
     private static final String KEY_PAYLOADCONFIGPATH = "payloadConfigPath";
+    private static final String KEY_CUSTOMIMAGECONFIG = "customImageConfig";
     private static final String KEY_PAYLOADBINARYNAME = "payloadBinaryPath";
     private static final String KEY_DEBUGLEVEL = "debugLevel";
     private static final String KEY_PROTECTED_VM = "protectedVm";
@@ -85,6 +93,7 @@ public final class VirtualMachineConfig {
     private static final String KEY_ENCRYPTED_STORAGE_BYTES = "encryptedStorageBytes";
     private static final String KEY_VM_OUTPUT_CAPTURED = "vmOutputCaptured";
     private static final String KEY_VM_CONSOLE_INPUT_SUPPORTED = "vmConsoleInputSupported";
+    private static final String KEY_CONNECT_VM_CONSOLE = "connectVmConsole";
     private static final String KEY_VENDOR_DISK_IMAGE_PATH = "vendorDiskImagePath";
     private static final String KEY_OS = "os";
     private static final String KEY_EXTRA_APKS = "extraApks";
@@ -172,6 +181,9 @@ public final class VirtualMachineConfig {
     /** Name of the payload binary file within the APK that will be executed within the VM. */
     @Nullable private final String mPayloadBinaryName;
 
+    /** The custom image config file to launch the custom VM. */
+    @Nullable private final VirtualMachineCustomImageConfig mCustomImageConfig;
+
     /** The size of storage in bytes. 0 indicates that encryptedStorage is not required */
     private final long mEncryptedStorageBytes;
 
@@ -181,10 +193,30 @@ public final class VirtualMachineConfig {
     /** Whether the app can write console input to the VM */
     private final boolean mVmConsoleInputSupported;
 
+    /** Whether to connect the VM console to a host console. */
+    private final boolean mConnectVmConsole;
+
     @Nullable private final File mVendorDiskImage;
 
-    /** OS name of the VM using payload binaries. null if the VM uses a payload config file. */
-    @Nullable private final String mOs;
+    /** OS name of the VM using payload binaries. */
+    @NonNull @OsName private final String mOs;
+
+    @Retention(RetentionPolicy.SOURCE)
+    @StringDef(
+            prefix = "MICRODROID",
+            value = {MICRODROID})
+    private @interface OsName {}
+
+    /**
+     * OS name of microdroid using microdroid kernel.
+     *
+     * @see Builder#setOs
+     * @hide
+     */
+    @TestApi
+    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
+    @OsName
+    public static final String MICRODROID = "microdroid";
 
     private VirtualMachineConfig(
             @Nullable String packageName,
@@ -192,6 +224,7 @@ public final class VirtualMachineConfig {
             List<String> extraApks,
             @Nullable String payloadConfigPath,
             @Nullable String payloadBinaryName,
+            @Nullable VirtualMachineCustomImageConfig customImageConfig,
             @DebugLevel int debugLevel,
             boolean protectedVm,
             long memoryBytes,
@@ -199,8 +232,9 @@ public final class VirtualMachineConfig {
             long encryptedStorageBytes,
             boolean vmOutputCaptured,
             boolean vmConsoleInputSupported,
+            boolean connectVmConsole,
             @Nullable File vendorDiskImage,
-            @Nullable String os) {
+            @NonNull @OsName String os) {
         // This is only called from Builder.build(); the builder handles parameter validation.
         mPackageName = packageName;
         mApkPath = apkPath;
@@ -211,6 +245,7 @@ public final class VirtualMachineConfig {
                                 Arrays.asList(extraApks.toArray(new String[0])));
         mPayloadConfigPath = payloadConfigPath;
         mPayloadBinaryName = payloadBinaryName;
+        mCustomImageConfig = customImageConfig;
         mDebugLevel = debugLevel;
         mProtectedVm = protectedVm;
         mMemoryBytes = memoryBytes;
@@ -218,6 +253,7 @@ public final class VirtualMachineConfig {
         mEncryptedStorageBytes = encryptedStorageBytes;
         mVmOutputCaptured = vmOutputCaptured;
         mVmConsoleInputSupported = vmConsoleInputSupported;
+        mConnectVmConsole = connectVmConsole;
         mVendorDiskImage = vendorDiskImage;
         mOs = os;
     }
@@ -272,10 +308,15 @@ public final class VirtualMachineConfig {
         }
 
         String payloadConfigPath = b.getString(KEY_PAYLOADCONFIGPATH);
-        if (payloadConfigPath == null) {
-            builder.setPayloadBinaryName(b.getString(KEY_PAYLOADBINARYNAME));
-        } else {
+        String payloadBinaryName = b.getString(KEY_PAYLOADBINARYNAME);
+        PersistableBundle customImageConfigBundle = b.getPersistableBundle(KEY_CUSTOMIMAGECONFIG);
+        if (customImageConfigBundle != null) {
+            builder.setCustomImageConfig(
+                    VirtualMachineCustomImageConfig.from(customImageConfigBundle));
+        } else if (payloadConfigPath != null) {
             builder.setPayloadConfigPath(payloadConfigPath);
+        } else {
+            builder.setPayloadBinaryName(payloadBinaryName);
         }
 
         @DebugLevel int debugLevel = b.getInt(KEY_DEBUGLEVEL);
@@ -295,16 +336,14 @@ public final class VirtualMachineConfig {
         }
         builder.setVmOutputCaptured(b.getBoolean(KEY_VM_OUTPUT_CAPTURED));
         builder.setVmConsoleInputSupported(b.getBoolean(KEY_VM_CONSOLE_INPUT_SUPPORTED));
+        builder.setConnectVmConsole(b.getBoolean(KEY_CONNECT_VM_CONSOLE));
 
         String vendorDiskImagePath = b.getString(KEY_VENDOR_DISK_IMAGE_PATH);
         if (vendorDiskImagePath != null) {
             builder.setVendorDiskImage(new File(vendorDiskImagePath));
         }
 
-        String os = b.getString(KEY_OS);
-        if (os != null) {
-            builder.setOs(os);
-        }
+        builder.setOs(b.getString(KEY_OS));
 
         String[] extraApks = b.getStringArray(KEY_EXTRA_APKS);
         if (extraApks != null) {
@@ -337,6 +376,9 @@ public final class VirtualMachineConfig {
         }
         b.putString(KEY_PAYLOADCONFIGPATH, mPayloadConfigPath);
         b.putString(KEY_PAYLOADBINARYNAME, mPayloadBinaryName);
+        if (mCustomImageConfig != null) {
+            b.putPersistableBundle(KEY_CUSTOMIMAGECONFIG, mCustomImageConfig.toPersistableBundle());
+        }
         b.putInt(KEY_DEBUGLEVEL, mDebugLevel);
         b.putBoolean(KEY_PROTECTED_VM, mProtectedVm);
         b.putInt(KEY_CPU_TOPOLOGY, mCpuTopology);
@@ -348,6 +390,7 @@ public final class VirtualMachineConfig {
         }
         b.putBoolean(KEY_VM_OUTPUT_CAPTURED, mVmOutputCaptured);
         b.putBoolean(KEY_VM_CONSOLE_INPUT_SUPPORTED, mVmConsoleInputSupported);
+        b.putBoolean(KEY_CONNECT_VM_CONSOLE, mConnectVmConsole);
         if (mVendorDiskImage != null) {
             b.putString(KEY_VENDOR_DISK_IMAGE_PATH, mVendorDiskImage.getAbsolutePath());
         }
@@ -394,6 +437,16 @@ public final class VirtualMachineConfig {
     @Nullable
     public String getPayloadConfigPath() {
         return mPayloadConfigPath;
+    }
+
+    /**
+     * Returns the custom image config to launch the custom VM.
+     *
+     * @hide
+     */
+    @Nullable
+    public VirtualMachineCustomImageConfig getCustomImageConfig() {
+        return mCustomImageConfig;
     }
 
     /**
@@ -498,14 +551,25 @@ public final class VirtualMachineConfig {
     }
 
     /**
-     * Returns the OS of the VM using a payload binary. Returns null if the VM uses payload config.
+     * Returns whether to connect the VM console to a host console.
+     *
+     * @see Builder#setConnectVmConsole
+     * @hide
+     */
+    public boolean isConnectVmConsole() {
+        return mConnectVmConsole;
+    }
+
+    /**
+     * Returns the OS of the VM.
      *
      * @see Builder#setOs
      * @hide
      */
     @TestApi
     @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
-    @Nullable
+    @NonNull
+    @OsName
     public String getOs() {
         return mOs;
     }
@@ -530,12 +594,81 @@ public final class VirtualMachineConfig {
                 && this.mEncryptedStorageBytes == other.mEncryptedStorageBytes
                 && this.mVmOutputCaptured == other.mVmOutputCaptured
                 && this.mVmConsoleInputSupported == other.mVmConsoleInputSupported
+                && this.mConnectVmConsole == other.mConnectVmConsole
                 && (this.mVendorDiskImage == null) == (other.mVendorDiskImage == null)
                 && Objects.equals(this.mPayloadConfigPath, other.mPayloadConfigPath)
                 && Objects.equals(this.mPayloadBinaryName, other.mPayloadBinaryName)
                 && Objects.equals(this.mPackageName, other.mPackageName)
                 && Objects.equals(this.mOs, other.mOs)
                 && Objects.equals(this.mExtraApks, other.mExtraApks);
+    }
+
+    private ParcelFileDescriptor openOrNull(File file, int mode) {
+        try {
+            return ParcelFileDescriptor.open(file, mode);
+        } catch (FileNotFoundException e) {
+            Log.d(TAG, "cannot open", e);
+            return null;
+        }
+    }
+
+    VirtualMachineRawConfig toVsRawConfig() throws IllegalStateException, IOException {
+        VirtualMachineRawConfig config = new VirtualMachineRawConfig();
+        VirtualMachineCustomImageConfig customImageConfig = getCustomImageConfig();
+        requireNonNull(customImageConfig);
+        config.name = Optional.ofNullable(customImageConfig.getName()).orElse("");
+        config.instanceId = new byte[64];
+        config.kernel =
+                Optional.ofNullable(customImageConfig.getKernelPath())
+                        .map(
+                                (path) -> {
+                                    try {
+                                        return ParcelFileDescriptor.open(
+                                                new File(path), MODE_READ_ONLY);
+                                    } catch (FileNotFoundException e) {
+                                        throw new RuntimeException(e);
+                                    }
+                                })
+                        .orElse(null);
+
+        config.initrd =
+                Optional.ofNullable(customImageConfig.getInitrdPath())
+                        .map((path) -> openOrNull(new File(path), MODE_READ_ONLY))
+                        .orElse(null);
+        config.bootloader =
+                Optional.ofNullable(customImageConfig.getBootloaderPath())
+                        .map((path) -> openOrNull(new File(path), MODE_READ_ONLY))
+                        .orElse(null);
+        config.params =
+                Optional.ofNullable(customImageConfig.getParams())
+                        .map((params) -> TextUtils.join(" ", params))
+                        .orElse("");
+        config.disks =
+                new DiskImage
+                        [Optional.ofNullable(customImageConfig.getDisks())
+                                .map(arr -> arr.length)
+                                .orElse(0)];
+        for (int i = 0; i < config.disks.length; i++) {
+            config.disks[i] = new DiskImage();
+            config.disks[i].writable = customImageConfig.getDisks()[i].isWritable();
+
+            config.disks[i].image =
+                    ParcelFileDescriptor.open(
+                            new File(customImageConfig.getDisks()[i].getImagePath()),
+                            config.disks[i].writable ? MODE_READ_WRITE : MODE_READ_ONLY);
+            config.disks[i].partitions = new Partition[0];
+        }
+
+        config.displayConfig =
+                Optional.ofNullable(customImageConfig.getDisplayConfig())
+                        .map(dc -> dc.toParcelable())
+                        .orElse(null);
+        config.protectedVm = this.mProtectedVm;
+        config.memoryMib = bytesToMebiBytes(mMemoryBytes);
+        config.cpuTopology = (byte) this.mCpuTopology;
+        config.devices = EMPTY_STRING_ARRAY;
+        config.platformVersion = "~1.0";
+        return config;
     }
 
     /**
@@ -559,7 +692,6 @@ public final class VirtualMachineConfig {
         if (mPayloadBinaryName != null) {
             VirtualMachinePayloadConfig payloadConfig = new VirtualMachinePayloadConfig();
             payloadConfig.payloadBinaryName = mPayloadBinaryName;
-            payloadConfig.osName = mOs;
             payloadConfig.extraApks = Collections.emptyList();
             vsConfig.payload =
                     VirtualMachineAppConfig.Payload.payloadConfig(payloadConfig);
@@ -567,6 +699,7 @@ public final class VirtualMachineConfig {
             vsConfig.payload =
                     VirtualMachineAppConfig.Payload.configPath(mPayloadConfigPath);
         }
+        vsConfig.osName = mOs;
         switch (mDebugLevel) {
             case DEBUG_LEVEL_FULL:
                 vsConfig.debugLevel = VirtualMachineAppConfig.DebugLevel.FULL;
@@ -658,12 +791,13 @@ public final class VirtualMachineConfig {
      */
     @SystemApi
     public static final class Builder {
-        private final String DEFAULT_OS = "microdroid";
+        @OsName private final String DEFAULT_OS = MICRODROID;
 
         @Nullable private final String mPackageName;
         @Nullable private String mApkPath;
         private final List<String> mExtraApks = new ArrayList<>();
         @Nullable private String mPayloadConfigPath;
+        @Nullable private VirtualMachineCustomImageConfig mCustomImageConfig;
         @Nullable private String mPayloadBinaryName;
         @DebugLevel private int mDebugLevel = DEBUG_LEVEL_NONE;
         private boolean mProtectedVm;
@@ -673,8 +807,9 @@ public final class VirtualMachineConfig {
         private long mEncryptedStorageBytes;
         private boolean mVmOutputCaptured = false;
         private boolean mVmConsoleInputSupported = false;
+        private boolean mConnectVmConsole = false;
         @Nullable private File mVendorDiskImage;
-        @Nullable private String mOs;
+        @NonNull @OsName private String mOs = DEFAULT_OS;
 
         /**
          * Creates a builder for the given context.
@@ -713,15 +848,15 @@ public final class VirtualMachineConfig {
                 // This should never happen, unless we're deserializing a bad config
                 throw new IllegalStateException("apkPath or packageName must be specified");
             }
-
-            String os = null;
-            if (mPayloadBinaryName == null) {
+            if (mCustomImageConfig != null) {
+                if (mPayloadBinaryName != null || mPayloadConfigPath != null) {
+                    throw new IllegalStateException(
+                            "setCustomImageConfig and (setPayloadBinaryName or"
+                                    + " setPayloadConfigPath) may not both be called");
+                }
+            } else if (mPayloadBinaryName == null) {
                 if (mPayloadConfigPath == null) {
                     throw new IllegalStateException("setPayloadBinaryName must be called");
-                }
-                if (mOs != null) {
-                    throw new IllegalStateException(
-                            "setPayloadConfigPath and setOs may not both be called");
                 }
                 if (!mExtraApks.isEmpty()) {
                     throw new IllegalStateException(
@@ -731,11 +866,6 @@ public final class VirtualMachineConfig {
                 if (mPayloadConfigPath != null) {
                     throw new IllegalStateException(
                             "setPayloadBinaryName and setPayloadConfigPath may not both be called");
-                }
-                if (mOs != null) {
-                    os = mOs;
-                } else {
-                    os = DEFAULT_OS;
                 }
             }
 
@@ -751,12 +881,18 @@ public final class VirtualMachineConfig {
                 throw new IllegalStateException("debug level must be FULL to use console input");
             }
 
+            if (mConnectVmConsole && mDebugLevel != DEBUG_LEVEL_FULL) {
+                throw new IllegalStateException(
+                        "debug level must be FULL to connect to the console");
+            }
+
             return new VirtualMachineConfig(
                     packageName,
                     apkPath,
                     mExtraApks,
                     mPayloadConfigPath,
                     mPayloadBinaryName,
+                    mCustomImageConfig,
                     mDebugLevel,
                     mProtectedVm,
                     mMemoryBytes,
@@ -764,8 +900,9 @@ public final class VirtualMachineConfig {
                     mEncryptedStorageBytes,
                     mVmOutputCaptured,
                     mVmConsoleInputSupported,
+                    mConnectVmConsole,
                     mVendorDiskImage,
-                    os);
+                    mOs);
         }
 
         /**
@@ -814,6 +951,19 @@ public final class VirtualMachineConfig {
         public Builder setPayloadConfigPath(@NonNull String payloadConfigPath) {
             mPayloadConfigPath =
                     requireNonNull(payloadConfigPath, "payloadConfigPath must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the custom config file to launch the custom VM.
+         *
+         * @hide
+         */
+        @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
+        @NonNull
+        public Builder setCustomImageConfig(
+                @NonNull VirtualMachineCustomImageConfig customImageConfig) {
+            this.mCustomImageConfig = customImageConfig;
             return this;
         }
 
@@ -1000,6 +1150,23 @@ public final class VirtualMachineConfig {
         }
 
         /**
+         * Sets whether to connect the VM console to a host console. Default is {@code false}.
+         *
+         * <p>Setting this as {@code true} will allow the shell to directly communicate with the VM
+         * console through the connected host console.
+         *
+         * <p>The {@linkplain #setDebugLevel debug level} must be {@link #DEBUG_LEVEL_FULL} to be
+         * set as true.
+         *
+         * @hide
+         */
+        @NonNull
+        public Builder setConnectVmConsole(boolean supported) {
+            mConnectVmConsole = supported;
+            return this;
+        }
+
+        /**
          * Sets the path to the disk image with vendor-specific modules.
          *
          * @hide
@@ -1025,7 +1192,7 @@ public final class VirtualMachineConfig {
         @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
         @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
         @NonNull
-        public Builder setOs(@NonNull String os) {
+        public Builder setOs(@NonNull @OsName String os) {
             mOs = requireNonNull(os, "os must not be null");
             return this;
         }

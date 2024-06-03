@@ -55,6 +55,7 @@ soong_config_module_type {
     properties: [
         "deps",
         "dirs",
+        "multilib",
     ],
 }
 
@@ -157,9 +158,11 @@ flag_aware_microdroid_system_image {
     // Below are dependencies that are conditionally enabled depending on value of build flags.
     soong_config_variables: {
         release_avf_enable_dice_changes: {
-            deps: [
-                "derive_microdroid_vendor_dice_node",
-            ],
+            multilib: {
+                lib64: {
+                    deps: ["derive_microdroid_vendor_dice_node"],
+                },
+            },
             dirs: [
                 "microdroid_resources",
             ],
@@ -178,28 +181,28 @@ prebuilt_etc {
     filename: "init.rc",
     src: "init.rc",
     relative_install_path: "init/hw",
-    installable: false, // avoid collision with system partition's init.rc
+    no_full_install: true, // avoid collision with system partition's init.rc
 }
 
 prebuilt_etc {
     name: "microdroid_ueventd_rc",
     filename: "ueventd.rc",
     src: "ueventd.rc",
-    installable: false, // avoid collision with system partition's ueventd.rc
+    no_full_install: true, // avoid collision with system partition's ueventd.rc
 }
 
 prebuilt_etc {
     name: "microdroid_etc_passwd",
     src: "microdroid_passwd",
     filename: "passwd",
-    installable: false,
+    no_full_install: true,
 }
 
 prebuilt_etc {
     name: "microdroid_etc_group",
     src: "microdroid_group",
     filename: "group",
-    installable: false,
+    no_full_install: true,
 }
 
 prebuilt_root {
@@ -214,7 +217,7 @@ prebuilt_root {
             src: ":microdroid_build_prop_gen_arm64",
         },
     },
-    installable: false,
+    no_full_install: true,
 }
 
 genrule {
@@ -343,9 +346,8 @@ flag_aware_microdroid_filesystem {
     },
 }
 
-// TODO(ioffe): rename to microdroid_first_stage_ramdisk
 android_filesystem {
-    name: "microdroid_fstab_ramdisk",
+    name: "microdroid_first_stage_ramdisk",
     deps: [
         "microdroid_fstab",
     ],
@@ -387,7 +389,7 @@ prebuilt_etc {
     name: "microdroid_fstab",
     src: "fstab.microdroid",
     filename: "fstab.microdroid",
-    installable: false,
+    no_full_install: true,
 }
 
 // python -c "import hashlib; print(hashlib.sha256(b'bootloader').hexdigest())"
@@ -439,14 +441,14 @@ prebuilt_etc {
     src: "microdroid_manifest.xml",
     filename: "manifest.xml",
     relative_install_path: "vintf",
-    installable: false,
+    no_full_install: true,
 }
 
 prebuilt_etc {
     name: "microdroid_event-log-tags",
     src: "microdroid_event-log-tags",
     filename: "event-log-tags",
-    installable: false,
+    no_full_install: true,
 }
 
 filegroup {
@@ -580,39 +582,39 @@ prebuilt_etc {
 }
 
 ///////////////////////////////////////
-// GKI-android14-6.1 modules
+// GKI-android14-6.1-pkvm_experimental modules
 ///////////////////////////////////////
 prebuilt_etc {
-    name: "microdroid_gki-android14-6.1.json",
-    src: "microdroid_gki-android14-6.1.json",
+    name: "microdroid_gki-android14-6.1-pkvm_experimental.json",
+    src: "microdroid_gki-android14-6.1-pkvm_experimental.json",
 }
 
 avb_add_hash_footer {
-    name: "microdroid_gki-android14-6.1_kernel_signed",
+    name: "microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed",
     defaults: ["microdroid_kernel_signed_defaults"],
-    filename: "microdroid_gki-android14-6.1_kernel_signed",
+    filename: "microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed",
     arch: {
         arm64: {
-            src: ":microdroid_gki_kernel_prebuilts-6.1-arm64",
+            src: ":microdroid_gki_kernel_prebuilts-6.1-pkvm_experimental-arm64",
         },
         x86_64: {
-            src: ":microdroid_gki_kernel_prebuilts-6.1-x86_64",
+            src: ":microdroid_gki_kernel_prebuilts-6.1-pkvm_experimental-x86_64",
         },
     },
     include_descriptors_from_images: [
-        ":microdroid_gki-android14-6.1_initrd_normal_hashdesc",
-        ":microdroid_gki-android14-6.1_initrd_debug_hashdesc",
+        ":microdroid_gki-android14-6.1-pkvm_experimental_initrd_normal_hashdesc",
+        ":microdroid_gki-android14-6.1-pkvm_experimental_initrd_debug_hashdesc",
     ],
 }
 
 // HACK: use cc_genrule for arch-specific properties
 cc_genrule {
-    name: "microdroid_gki-android14-6.1_kernel_signed-lz4",
-    out: ["microdroid_gki-android14-6.1_kernel_signed-lz4"],
+    name: "microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed-lz4",
+    out: ["microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed-lz4"],
     srcs: [":empty_file"],
     arch: {
         arm64: {
-            srcs: [":microdroid_gki-android14-6.1_kernel_signed"],
+            srcs: [":microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed"],
             exclude_srcs: [":empty_file"],
         },
     },
@@ -621,30 +623,30 @@ cc_genrule {
 }
 
 prebuilt_etc {
-    name: "microdroid_gki-android14-6.1_kernel",
-    filename: "microdroid_gki-android14-6.1_kernel",
+    name: "microdroid_gki-android14-6.1-pkvm_experimental_kernel",
+    filename: "microdroid_gki-android14-6.1-pkvm_experimental_kernel",
     src: ":empty_file",
     relative_install_path: "fs",
     arch: {
         arm64: {
-            src: ":microdroid_gki-android14-6.1_kernel_signed-lz4",
+            src: ":microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed-lz4",
         },
         x86_64: {
-            src: ":microdroid_gki-android14-6.1_kernel_signed",
+            src: ":microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed",
         },
     },
 }
 
 avb_gen_vbmeta_image {
-    name: "microdroid_gki-android14-6.1_initrd_normal_hashdesc",
+    name: "microdroid_gki-android14-6.1-pkvm_experimental_initrd_normal_hashdesc",
     defaults: ["microdroid_initrd_normal_defaults"],
-    src: ":microdroid_gki-android14-6.1_initrd_normal",
+    src: ":microdroid_gki-android14-6.1-pkvm_experimental_initrd_normal",
 }
 
 avb_gen_vbmeta_image {
-    name: "microdroid_gki-android14-6.1_initrd_debug_hashdesc",
+    name: "microdroid_gki-android14-6.1-pkvm_experimental_initrd_debug_hashdesc",
     defaults: ["microdroid_initrd_debug_defaults"],
-    src: ":microdroid_gki-android14-6.1_initrd_debuggable",
+    src: ":microdroid_gki-android14-6.1-pkvm_experimental_initrd_debuggable",
 }
 
 python_binary_host {
@@ -658,10 +660,10 @@ cc_genrule {
     srcs: [":microdroid_kernel"],
     arch: {
         arm64: {
-            srcs: [":microdroid_gki-android14-6.1_kernel_signed"],
+            srcs: [":microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed"],
         },
         x86_64: {
-            srcs: [":microdroid_gki-android14-6.1_kernel_signed"],
+            srcs: [":microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed"],
         },
     },
     out: ["lib.rs"],

@@ -26,9 +26,11 @@ use ciborium::{
     value::{CanonicalValue, Value},
 };
 use core::result;
-use coset::{iana, AsCborValue, CoseSign1, CoseSign1Builder, HeaderBuilder};
-use diced_open_dice::{derive_cdi_leaf_priv, kdf, sign, DiceArtifacts, PrivateKey};
-use log::error;
+use coset::{AsCborValue, CoseSign1, CoseSign1Builder, HeaderBuilder};
+use diced_open_dice::{
+    derive_cdi_leaf_priv, kdf, sign, DiceArtifacts, PrivateKey, DICE_COSE_KEY_ALG_VALUE,
+};
+use log::{debug, error};
 use service_vm_comm::{EcdsaP256KeyPair, GenerateCertificateRequestParams, RequestProcessingError};
 use zeroize::Zeroizing;
 
@@ -78,6 +80,8 @@ pub(super) fn generate_certificate_request(
         let public_key = validate_public_key(&key_to_sign, hmac_key.as_ref())?;
         public_keys.push(public_key.to_cbor_value()?);
     }
+    debug!("Successfully validated all '{}' public keys.", public_keys.len());
+
     // Builds `CsrPayload`.
     let csr_payload = cbor!([
         Value::Integer(CSR_PAYLOAD_SCHEMA_V3.into()),
@@ -91,6 +95,7 @@ pub(super) fn generate_certificate_request(
     let signed_data_payload =
         cbor!([Value::Bytes(params.challenge.to_vec()), Value::Bytes(csr_payload)])?;
     let signed_data = build_signed_data(&signed_data_payload, dice_artifacts)?.to_cbor_value()?;
+    debug!("Successfully signed the CSR payload.");
 
     // Builds `AuthenticatedRequest<CsrPayload>`.
     // Currently `UdsCerts` is left empty because it is only needed for Samsung devices.
@@ -104,6 +109,7 @@ pub(super) fn generate_certificate_request(
         dice_cert_chain,
         signed_data,
     ])?;
+    debug!("Successfully built the CBOR authenticated request.");
     Ok(cbor_util::serialize(&auth_req)?)
 }
 
@@ -119,9 +125,12 @@ fn device_info() -> CanonicalValue {
         "model" => "avf",
         "device" => "avf",
         "product" => "avf",
+        "vb_state" => "avf",
         "manufacturer" => "aosp-avf",
-        "vbmeta_digest" => Value::Bytes(vec![0u8; 0]),
+        "vbmeta_digest" => Value::Bytes(vec![1u8; 1]),
+        "security_level" => "avf",
         "boot_patch_level" => 20240202,
+        "bootloader_state" => "avf",
         "system_patch_level" => 202402,
         "vendor_patch_level" => 20240202,
     })
@@ -144,8 +153,8 @@ fn build_signed_data(payload: &Value, dice_artifacts: &dyn DiceArtifacts) -> Res
         error!("Failed to derive the CDI_Leaf_Priv: {e}");
         RequestProcessingError::InternalError
     })?;
-    let signing_algorithm = iana::Algorithm::EdDSA;
-    let protected = HeaderBuilder::new().algorithm(signing_algorithm).build();
+    let dice_key_alg = cbor_util::dice_cose_key_alg(DICE_COSE_KEY_ALG_VALUE)?;
+    let protected = HeaderBuilder::new().algorithm(dice_key_alg).build();
     let signed_data = CoseSign1Builder::new()
         .protected(protected)
         .payload(cbor_util::serialize(payload)?)

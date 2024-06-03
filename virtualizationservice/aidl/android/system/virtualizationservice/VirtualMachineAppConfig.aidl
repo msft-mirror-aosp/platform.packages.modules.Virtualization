@@ -62,6 +62,15 @@ parcelable VirtualMachineAppConfig {
     /** Detailed configuration for the VM, specifying how the payload will be run. */
     Payload payload;
 
+    /**
+     * Name of the OS to run the payload. Currently "microdroid" and
+     * "microdroid_gki-android14-6.1" is supported.
+     *
+     * <p>Setting this field to a value other than "microdroid" requires
+     * android.permission.USE_CUSTOM_VIRTUAL_MACHINE
+     */
+    @utf8InCpp String osName = "microdroid";
+
     enum DebugLevel {
         /** Not debuggable at all */
         NONE,
@@ -109,8 +118,25 @@ parcelable VirtualMachineAppConfig {
 
         /** List of SysFS nodes of devices to be assigned */
         String[] devices;
+
+        /**
+         * Whether the VM should be able to keep its secret when updated, if possible. This
+         * should rarely need to be set false.
+         */
+        boolean wantUpdatable = true;
+
+        /** Whether the VM should have network feature. */
+        boolean networkSupported;
     }
 
     /** Configuration parameters guarded by android.permission.USE_CUSTOM_VIRTUAL_MACHINE */
     @nullable CustomConfig customConfig;
+
+    /**
+     *  Ask the kernel for transparent huge-pages (THP). This is only a hint and
+     *  the kernel will allocate THP-backed memory only if globally enabled by
+     *  the system and if any can be found. See
+     *  https://docs.kernel.org/admin-guide/mm/transhuge.html
+     */
+    boolean hugePages;
 }

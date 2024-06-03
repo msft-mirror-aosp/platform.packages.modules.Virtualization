@@ -46,6 +46,7 @@ use log::warn;
 use static_assertions::const_assert;
 use tinyvec::ArrayVec;
 use vmbase::fdt::SwiotlbInfo;
+use vmbase::hyp;
 use vmbase::layout::{crosvm::MEM_START, MAX_VIRT_ADDR};
 use vmbase::memory::SIZE_4KB;
 use vmbase::util::flatten;
@@ -199,9 +200,14 @@ fn read_opp_info_from(
     opp_node: FdtNode,
 ) -> libfdt::Result<ArrayVec<[u64; CpuInfo::MAX_OPPTABLES]>> {
     let mut table = ArrayVec::new();
-    for subnode in opp_node.subnodes()? {
+    let mut opp_nodes = opp_node.subnodes()?;
+    for subnode in opp_nodes.by_ref().take(table.capacity()) {
         let prop = subnode.getprop_u64(cstr!("opp-hz"))?.ok_or(FdtError::NotFound)?;
         table.push(prop);
+    }
+
+    if opp_nodes.next().is_some() {
+        warn!("OPP table has more than {} entries: discarding extra nodes.", table.capacity());
     }
 
     Ok(table)
@@ -214,7 +220,7 @@ struct ClusterTopology {
 }
 
 impl ClusterTopology {
-    const MAX_CORES_PER_CLUSTER: usize = 6;
+    const MAX_CORES_PER_CLUSTER: usize = 10;
 }
 
 #[derive(Debug, Default)]
@@ -262,7 +268,7 @@ fn read_cpu_info_from(
     let cpu_map = read_cpu_map_from(fdt)?;
     let mut topology: CpuTopology = Default::default();
 
-    let mut cpu_nodes = fdt.compatible_nodes(cstr!("arm,arm-v8"))?;
+    let mut cpu_nodes = fdt.compatible_nodes(cstr!("arm,armv8"))?;
     for (idx, cpu) in cpu_nodes.by_ref().take(cpus.capacity()).enumerate() {
         let cpu_capacity = cpu.getprop_u32(cstr!("capacity-dmips-mhz"))?;
         let opp_phandle = cpu.getprop_u32(cstr!("operating-points-v2"))?;
@@ -380,7 +386,7 @@ fn patch_cpus(
     cpus: &[CpuInfo],
     topology: &Option<CpuTopology>,
 ) -> libfdt::Result<()> {
-    const COMPAT: &CStr = cstr!("arm,arm-v8");
+    const COMPAT: &CStr = cstr!("arm,armv8");
     let mut cpu_phandles = Vec::new();
     for (idx, cpu) in cpus.iter().enumerate() {
         let mut cur = get_nth_compatible(fdt, idx, COMPAT)?.ok_or(FdtError::NoSpace)?;

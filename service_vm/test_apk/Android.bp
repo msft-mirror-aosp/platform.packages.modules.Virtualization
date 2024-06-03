@@ -6,6 +6,7 @@ java_defaults {
     name: "vm_attestation_testapp_defaults",
     test_suites: [
         "general-tests",
+        "pts",
     ],
     static_libs: [
         "MicrodroidDeviceTestHelper",
@@ -45,7 +46,10 @@ rust_defaults {
 rust_ffi {
     name: "libvm_attestation_test_payload",
     defaults: ["vm_attestation_test_payload_defaults"],
-    visibility: [":__subpackages__"],
+    visibility: [
+        ":__subpackages__",
+        "//packages/modules/Virtualization/tests/testapk",
+    ],
 }
 
 android_test {
@@ -55,12 +59,15 @@ android_test {
     manifest: "AndroidManifest.rkpd.xml",
     test_config: "AndroidTest.rkpd.xml",
     static_libs: [
-        "RkpdAppTestUtil",
-        "androidx.work_work-testing",
-        "bouncycastle-unbundled",
+        "VmAttestationTestUtil",
     ],
-    instrumentation_for: "rkpdapp",
-    // This app is a variation of rkpdapp, with additional permissions to run
-    // a VM. It is defined in packages/modules/RemoteKeyProvisioning.
-    data: [":avf-rkpdapp"],
+}
+
+java_library {
+    name: "VmAttestationTestUtil",
+    srcs: ["src/java/com/android/virt/vm_attestation/util/*.java"],
+    static_libs: [
+        "bouncycastle-unbundled",
+        "truth",
+    ],
 }

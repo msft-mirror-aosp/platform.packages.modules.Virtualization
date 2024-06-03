@@ -30,17 +30,23 @@ use binder::{BinderFeatures, ProcessState};
 use lazy_static::lazy_static;
 use log::{info, LevelFilter};
 use rpcbinder::{FileDescriptorTransportMode, RpcServer};
-use std::os::unix::io::{FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, FromRawFd, OwnedFd, RawFd};
 use clap::Parser;
 use nix::fcntl::{fcntl, F_GETFD, F_SETFD, FdFlag};
-use nix::unistd::{Pid, Uid};
+use nix::unistd::{write, Pid, Uid};
 use std::os::unix::raw::{pid_t, uid_t};
 
 const LOG_TAG: &str = "virtmgr";
 
 lazy_static! {
+    static ref PID_CURRENT: Pid = Pid::this();
     static ref PID_PARENT: Pid = Pid::parent();
     static ref UID_CURRENT: Uid = Uid::current();
+}
+
+fn get_this_pid() -> pid_t {
+    // Return the process ID of this process.
+    PID_CURRENT.as_raw()
 }
 
 fn get_calling_pid() -> pid_t {
@@ -138,6 +144,8 @@ fn main() {
     info!("Started VirtualizationService RpcServer. Ready to accept connections");
 
     // Signal readiness to the caller by closing our end of the pipe.
+    write(ready_fd.as_fd(), "o".as_bytes())
+        .expect("Failed to write a single character through ready_fd");
     drop(ready_fd);
 
     server.join();

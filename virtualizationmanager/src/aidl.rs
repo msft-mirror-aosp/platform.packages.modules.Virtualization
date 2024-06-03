@@ -14,10 +14,10 @@
 
 //! Implementation of the AIDL interface of the VirtualizationService.
 
-use crate::{get_calling_pid, get_calling_uid};
+use crate::{get_calling_pid, get_calling_uid, get_this_pid};
 use crate::atom::{write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
-use crate::crosvm::{CrosvmConfig, DiskFile, PayloadState, VmContext, VmInstance, VmState};
+use crate::crosvm::{CrosvmConfig, DiskFile, DisplayConfig, InputDeviceOption, PayloadState, VmContext, VmInstance, VmState};
 use crate::debug_config::DebugConfig;
 use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
@@ -32,6 +32,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     AssignableDevice::AssignableDevice,
     CpuTopology::CpuTopology,
     DiskImage::DiskImage,
+    InputDevice::InputDevice,
     IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService,
@@ -66,11 +67,10 @@ use binder::{
     IntoBinderResult,
 };
 use cstr::cstr;
-use disk::QcowFile;
 use glob::glob;
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
-use microdroid_payload_config::{ApkConfig, OsConfig, Task, TaskType, VmPayloadConfig};
+use microdroid_payload_config::{ApkConfig, Task, TaskType, VmPayloadConfig};
 use nix::unistd::pipe;
 use rpcbinder::RpcServer;
 use rustutils::system_properties;
@@ -88,7 +88,7 @@ use std::os::unix::raw::pid_t;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use vbmeta::VbMetaImage;
-use vmconfig::VmConfig;
+use vmconfig::{VmConfig, get_debug_level};
 use vsock::VsockStream;
 use zip::ZipArchive;
 
@@ -231,6 +231,7 @@ impl IVirtualizationService for VirtualizationService {
 
     /// Allocate a new instance_id to the VM
     fn allocateInstanceId(&self) -> binder::Result<[u8; 64]> {
+        check_manage_access()?;
         GLOBAL_SERVICE.allocateInstanceId()
     }
 
@@ -254,15 +255,17 @@ impl IVirtualizationService for VirtualizationService {
             .context("failed to move cursor to start")
             .or_service_specific_exception(-1)?;
         image.set_len(0).context("Failed to reset a file").or_service_specific_exception(-1)?;
-
-        let mut part = QcowFile::new(image, size_bytes)
-            .context("Failed to create QCOW2 image")
+        // Set the file length. In most filesystems, this will not allocate any physical disk
+        // space, it will only change the logical size.
+        image
+            .set_len(size_bytes)
+            .context("Failed to extend file")
             .or_service_specific_exception(-1)?;
 
         match partition_type {
             PartitionType::RAW => Ok(()),
-            PartitionType::ANDROID_VM_INSTANCE => format_as_android_vm_instance(&mut part),
-            PartitionType::ENCRYPTEDSTORE => format_as_encryptedstore(&mut part),
+            PartitionType::ANDROID_VM_INSTANCE => format_as_android_vm_instance(&mut image),
+            PartitionType::ENCRYPTEDSTORE => format_as_encryptedstore(&mut image),
             _ => Err(Error::new(
                 ErrorKind::Unsupported,
                 format!("Unsupported partition type {:?}", partition_type),
@@ -312,6 +315,29 @@ impl IVirtualizationService for VirtualizationService {
 
     fn enableTestAttestation(&self) -> binder::Result<()> {
         GLOBAL_SERVICE.enableTestAttestation()
+    }
+
+    fn isRemoteAttestationSupported(&self) -> binder::Result<bool> {
+        check_manage_access()?;
+        GLOBAL_SERVICE.isRemoteAttestationSupported()
+    }
+
+    fn isUpdatableVmSupported(&self) -> binder::Result<bool> {
+        // The response is specific to Microdroid. Updatable VMs are only possible if device
+        // supports Secretkeeper. Guest OS needs to use Secretkeeper based secrets. Microdroid does
+        // this, however other guest OSes may do things differently.
+        check_manage_access()?;
+        Ok(is_secretkeeper_supported())
+    }
+
+    fn removeVmInstance(&self, instance_id: &[u8; 64]) -> binder::Result<()> {
+        check_manage_access()?;
+        GLOBAL_SERVICE.removeVmInstance(instance_id)
+    }
+
+    fn claimVmInstance(&self, instance_id: &[u8; 64]) -> binder::Result<()> {
+        check_manage_access()?;
+        GLOBAL_SERVICE.claimVmInstance(instance_id)
     }
 }
 
@@ -409,7 +435,8 @@ impl VirtualizationService {
         if cfg!(llpvm_changes) {
             instance_id = extract_instance_id(config);
             untrusted_props.push((cstr!("instance-id"), &instance_id[..]));
-            if is_secretkeeper_supported() {
+            let want_updatable = extract_want_updatable(config);
+            if want_updatable && is_secretkeeper_supported() {
                 // Let guest know that it can defer rollback protection to Secretkeeper by setting
                 // an empty property in untrusted node in DT. This enables Updatable VMs.
                 untrusted_props.push((cstr!("defer-rollback-protection"), &[]))
@@ -557,6 +584,48 @@ impl VirtualizationService {
         } else {
             (vec![], None)
         };
+        let display_config = if cfg!(paravirtualized_devices) {
+            config
+                .displayConfig
+                .as_ref()
+                .map(DisplayConfig::new)
+                .transpose()
+                .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?
+        } else {
+            None
+        };
+
+        let input_device_options = if cfg!(paravirtualized_devices) {
+            config
+                .inputDevices
+                .iter()
+                .map(to_input_device_option_from)
+                .collect::<Result<Vec<InputDeviceOption>, _>>()
+                .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?
+        } else {
+            vec![]
+        };
+
+        // Create TAP network interface if the VM supports network.
+        let tap = if cfg!(network) && config.networkSupported {
+            if *is_protected {
+                return Err(anyhow!("Network feature is not supported for pVM yet"))
+                    .with_log()
+                    .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION)?;
+            }
+            Some(File::from(
+                GLOBAL_SERVICE
+                    .createTapInterface(&get_this_pid().to_string())?
+                    .as_ref()
+                    .try_clone()
+                    .context("Failed to get TAP interface from ParcelFileDescriptor")
+                    .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?,
+            ))
+        } else {
+            None
+        };
+        let virtio_snd_backend =
+            if cfg!(paravirtualized_devices) { Some(String::from("aaudio")) } else { None };
 
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
@@ -583,6 +652,11 @@ impl VirtualizationService {
             vfio_devices,
             dtbo,
             device_tree_overlay,
+            display_config,
+            input_device_options,
+            hugepages: config.hugePages,
+            tap,
+            virtio_snd_backend,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -622,13 +696,10 @@ fn is_custom_config(config: &VirtualMachineConfig) -> bool {
                 // - specifying a config file;
                 // - specifying extra APKs;
                 // - specifying an OS other than Microdroid.
-                match &config.payload {
+                (match &config.payload {
                     Payload::ConfigPath(_) => true,
-                    Payload::PayloadConfig(payload_config) => {
-                        !payload_config.extraApks.is_empty()
-                            || payload_config.osName != MICRODROID_OS_NAME
-                    }
-                }
+                    Payload::PayloadConfig(payload_config) => !payload_config.extraApks.is_empty(),
+                }) || config.osName != MICRODROID_OS_NAME
             }
         }
     }
@@ -691,6 +762,29 @@ fn round_up(input: u64, granularity: u64) -> u64 {
     (result / granularity) * granularity
 }
 
+fn to_input_device_option_from(input_device: &InputDevice) -> Result<InputDeviceOption> {
+    Ok(match input_device {
+        InputDevice::SingleTouch(single_touch) => InputDeviceOption::SingleTouch {
+            file: clone_file(single_touch.pfd.as_ref().ok_or(anyhow!("pfd should have value"))?)?,
+            height: u32::try_from(single_touch.height)?,
+            width: u32::try_from(single_touch.width)?,
+            name: if !single_touch.name.is_empty() {
+                Some(single_touch.name.clone())
+            } else {
+                None
+            },
+        },
+        InputDevice::EvDev(evdev) => InputDeviceOption::EvDev(clone_file(
+            evdev.pfd.as_ref().ok_or(anyhow!("pfd should have value"))?,
+        )?),
+        InputDevice::Keyboard(keyboard) => InputDeviceOption::Keyboard(clone_file(
+            keyboard.pfd.as_ref().ok_or(anyhow!("pfd should have value"))?,
+        )?),
+        InputDevice::Mouse(mouse) => InputDeviceOption::Mouse(clone_file(
+            mouse.pfd.as_ref().ok_or(anyhow!("pfd should have value"))?,
+        )?),
+    })
+}
 /// Given the configuration for a disk image, assembles the `DiskFile` to pass to crosvm.
 ///
 /// This may involve assembling a composite disk from a set of partition images.
@@ -813,8 +907,13 @@ fn load_app_config(
         }
     };
 
+    let payload_config_os = vm_payload_config.os.name.as_str();
+    if !payload_config_os.is_empty() && payload_config_os != "microdroid" {
+        bail!("'os' in payload config is deprecated");
+    }
+
     // For now, the only supported OS is Microdroid and Microdroid GKI
-    let os_name = vm_payload_config.os.name.as_str();
+    let os_name = config.osName.as_str();
     if !is_valid_os(os_name) {
         bail!("Unknown OS \"{}\"", os_name);
     }
@@ -836,16 +935,18 @@ fn load_app_config(
             append_kernel_param("androidboot.microdroid.mount_vendor=1", &mut vm_config)
         }
 
-        vm_config.devices = custom_config.devices.clone();
+        vm_config.devices.clone_from(&custom_config.devices);
+        vm_config.networkSupported = custom_config.networkSupported;
     }
 
     if config.memoryMib > 0 {
         vm_config.memoryMib = config.memoryMib;
     }
 
-    vm_config.name = config.name.clone();
+    vm_config.name.clone_from(&config.name);
     vm_config.protectedVm = config.protectedVm;
     vm_config.cpuTopology = config.cpuTopology;
+    vm_config.hugePages = config.hugePages || vm_payload_config.hugepages;
 
     // Microdroid takes additional init ramdisk & (optionally) storage image
     add_microdroid_system_images(config, instance_file, storage_image, os_name, &mut vm_config)?;
@@ -916,22 +1017,13 @@ fn create_vm_payload_config(
     }
 
     let task = Task { type_: TaskType::MicrodroidLauncher, command: payload_binary_name.clone() };
-    let name = payload_config.osName.clone();
 
     // The VM only cares about how many there are, these names are actually ignored.
     let extra_apk_count = payload_config.extraApks.len();
     let extra_apks =
         (0..extra_apk_count).map(|i| ApkConfig { path: format!("extra-apk-{i}") }).collect();
 
-    Ok(VmPayloadConfig {
-        os: OsConfig { name },
-        task: Some(task),
-        apexes: vec![],
-        extra_apks,
-        prefer_staged: false,
-        export_tombstones: None,
-        enable_authfs: false,
-    })
+    Ok(VmPayloadConfig { task: Some(task), extra_apks, ..Default::default() })
 }
 
 /// Generates a unique filename to use for a composite disk image.
@@ -968,7 +1060,7 @@ fn check_permission(perm: &str) -> binder::Result<()> {
         return Ok(());
     }
     let perm_svc: Strong<dyn IPermissionController::IPermissionController> =
-        binder::get_interface("permission")?;
+        binder::wait_for_interface("permission")?;
     if perm_svc.checkPermission(perm, calling_pid, calling_uid as i32)? {
         Ok(())
     } else {
@@ -1298,23 +1390,28 @@ fn check_gdb_allowed(config: &VirtualMachineConfig) -> binder::Result<()> {
             .or_binder_exception(ExceptionCode::SECURITY);
     }
 
-    match config {
-        VirtualMachineConfig::RawConfig(_) => Ok(()),
-        VirtualMachineConfig::AppConfig(config) => {
-            if config.debugLevel != DebugLevel::FULL {
-                Err(anyhow!("Can't use gdb with non-debuggable VMs"))
-                    .or_binder_exception(ExceptionCode::SECURITY)
-            } else {
-                Ok(())
-            }
-        }
+    if get_debug_level(config) == Some(DebugLevel::NONE) {
+        return Err(anyhow!("Can't use gdb with non-debuggable VMs"))
+            .or_binder_exception(ExceptionCode::SECURITY);
     }
+
+    Ok(())
 }
 
 fn extract_instance_id(config: &VirtualMachineConfig) -> [u8; 64] {
     match config {
         VirtualMachineConfig::RawConfig(config) => config.instanceId,
         VirtualMachineConfig::AppConfig(config) => config.instanceId,
+    }
+}
+
+fn extract_want_updatable(config: &VirtualMachineConfig) -> bool {
+    match config {
+        VirtualMachineConfig::RawConfig(_) => true,
+        VirtualMachineConfig::AppConfig(config) => {
+            let Some(custom) = &config.customConfig else { return true };
+            custom.wantUpdatable
+        }
     }
 }
 
@@ -1385,13 +1482,11 @@ fn clone_or_prepare_logger_fd(
         return Ok(None);
     };
 
-    let (raw_read_fd, raw_write_fd) =
+    let (read_fd, write_fd) =
         pipe().context("Failed to create pipe").or_service_specific_exception(-1)?;
 
-    // SAFETY: We are the sole owner of this FD as we just created it, and it is valid and open.
-    let mut reader = BufReader::new(unsafe { File::from_raw_fd(raw_read_fd) });
-    // SAFETY: We are the sole owner of this FD as we just created it, and it is valid and open.
-    let write_fd = unsafe { File::from_raw_fd(raw_write_fd) };
+    let mut reader = BufReader::new(File::from(read_fd));
+    let write_fd = File::from(write_fd);
 
     std::thread::spawn(move || loop {
         let mut buf = vec![];
@@ -1515,11 +1610,8 @@ impl IVirtualMachineService for VirtualMachineService {
 }
 
 fn is_secretkeeper_supported() -> bool {
-    // TODO(b/327526008): Session establishment wth secretkeeper is failing.
-    // Re-enable this when fixed.
-    let _sk_supported = binder::is_declared(SECRETKEEPER_IDENTIFIER)
-        .expect("Could not check for declared Secretkeeper interface");
-    false
+    binder::is_declared(SECRETKEEPER_IDENTIFIER)
+        .expect("Could not check for declared Secretkeeper interface")
 }
 
 impl VirtualMachineService {

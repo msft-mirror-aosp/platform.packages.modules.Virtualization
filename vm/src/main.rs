@@ -30,11 +30,9 @@ use clap::{Args, Parser};
 use create_idsig::command_create_idsig;
 use create_partition::command_create_partition;
 use run::{command_run, command_run_app, command_run_microdroid};
+use serde::Serialize;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug)]
-struct Idsigs(Vec<PathBuf>);
 
 #[derive(Args, Default)]
 /// Collection of flags that are at VM level and therefore applicable to all subcommands
@@ -55,6 +53,30 @@ pub struct CommonConfig {
     /// Run VM in protected mode.
     #[arg(short, long)]
     protected: bool,
+
+    /// Ask the kernel for transparent huge-pages (THP). This is only a hint and
+    /// the kernel will allocate THP-backed memory only if globally enabled by
+    /// the system and if any can be found. See
+    /// https://docs.kernel.org/admin-guide/mm/transhuge.html
+    #[arg(short, long)]
+    hugepages: bool,
+
+    /// Run VM with network feature.
+    #[cfg(network)]
+    #[arg(short, long)]
+    network_supported: bool,
+}
+
+impl CommonConfig {
+    #[cfg(network)]
+    fn network_supported(&self) -> bool {
+        self.network_supported
+    }
+
+    #[cfg(not(network))]
+    fn network_supported(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Args, Default)]
@@ -405,8 +427,17 @@ fn command_info() -> Result<(), Error> {
         println!("VFIO-platform is not supported.");
     }
 
+    #[derive(Serialize)]
+    struct AssignableDevice {
+        node: String,
+        dtbo_label: String,
+    }
+
     let devices = get_service()?.getAssignableDevices()?;
-    let devices = devices.into_iter().map(|x| x.node).collect::<Vec<_>>();
+    let devices: Vec<_> = devices
+        .into_iter()
+        .map(|device| AssignableDevice { node: device.node, dtbo_label: device.dtbo_label })
+        .collect();
     println!("Assignable devices: {}", serde_json::to_string(&devices)?);
 
     let os_list = get_service()?.getSupportedOSList()?;

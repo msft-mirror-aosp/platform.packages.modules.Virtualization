@@ -77,6 +77,11 @@ interface IVirtualizationServiceInternal {
     void enableTestAttestation();
 
     /**
+     * Returns {@code true} if the pVM remote attestation feature is supported
+     */
+    boolean isRemoteAttestationSupported();
+
+    /**
      * Get a list of assignable devices.
      */
     AssignableDevice[] getAssignableDevices();
@@ -103,4 +108,24 @@ interface IVirtualizationServiceInternal {
      * @param instanceId The ID for the VM.
      */
     void removeVmInstance(in byte[64] instanceId);
+
+    /**
+     * Notification that ownership of a VM has been claimed by the caller.  Note that no permission
+     * checks (with respect to the previous owner) are performed.
+     *
+     * @param instanceId The ID for the VM.
+     */
+    void claimVmInstance(in byte[64] instanceId);
+
+    // TODO(b/330257000): Remove these functions when a display service is running with binder RPC.
+    void setDisplayService(IBinder ibinder);
+    void clearDisplayService();
+    IBinder waitDisplayService();
+
+    /**
+     * Create TAP network interface for a VM.
+     * @param suffix of network interface name.
+     * @return file descriptor of the TAP network interface.
+     */
+    ParcelFileDescriptor createTapInterface(String ifaceNameSuffix);
 }

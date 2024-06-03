@@ -28,6 +28,8 @@ import static android.system.virtualmachine.VirtualMachineManager.CAPABILITY_PRO
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
+import com.android.virt.vm_attestation.testservice.IAttestationService.AttestationStatus;
+import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -35,6 +37,7 @@ import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
 
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
+import static java.util.stream.Collectors.toList;
 
 import android.app.Instrumentation;
 import android.app.UiAutomation;
@@ -67,6 +70,7 @@ import com.android.microdroid.test.vmshare.IVmShareTestService;
 import com.android.microdroid.testservice.IAppCallback;
 import com.android.microdroid.testservice.ITestService;
 import com.android.microdroid.testservice.IVmCallback;
+import com.android.virt.vm_attestation.util.X509Utils;
 
 import com.google.common.base.Strings;
 import com.google.common.truth.BooleanSubject;
@@ -94,6 +98,7 @@ import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.cert.X509Certificate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -106,6 +111,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import co.nstant.in.cbor.CborDecoder;
 import co.nstant.in.cbor.model.Array;
@@ -115,6 +121,9 @@ import co.nstant.in.cbor.model.MajorType;
 @RunWith(Parameterized.class)
 public class MicrodroidTests extends MicrodroidDeviceTestBase {
     private static final String TAG = "MicrodroidTests";
+    private static final String TEST_APP_PACKAGE_NAME = "com.android.microdroid.test";
+    private static final String VM_ATTESTATION_PAYLOAD_PATH = "libvm_attestation_test_payload.so";
+    private static final String VM_ATTESTATION_MESSAGE = "Hello RKP from AVF!";
 
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
 
@@ -206,6 +215,100 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
     public void createAndConnectToVm_HostCpuTopology() throws Exception {
         createAndConnectToVmHelper(CPU_TOPOLOGY_MATCH_HOST);
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    public void vmAttestationWhenRemoteAttestationIsNotSupported() throws Exception {
+        // pVM remote attestation is only supported on protected VMs.
+        assumeProtectedVM();
+        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
+        assume().withMessage(
+                        "This test does not apply to a device that supports Remote Attestation")
+                .that(getVirtualMachineManager().isRemoteAttestationSupported())
+                .isFalse();
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary(VM_ATTESTATION_PAYLOAD_PATH)
+                        .setProtectedVm(mProtectedVm)
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+        VirtualMachine vm =
+                forceCreateNewVirtualMachine("cts_attestation_with_rkpd_unsupported", config);
+        byte[] challenge = new byte[32];
+        Arrays.fill(challenge, (byte) 0xcc);
+
+        // Act.
+        SigningResult signingResult =
+                runVmAttestationService(TAG, vm, challenge, VM_ATTESTATION_MESSAGE.getBytes());
+
+        // Assert.
+        assertThat(signingResult.status).isEqualTo(AttestationStatus.ERROR_UNSUPPORTED);
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    public void vmAttestationWithVendorPartitionWhenSupported() throws Exception {
+        // pVM remote attestation is only supported on protected VMs.
+        assumeProtectedVM();
+        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
+        assume().withMessage("Test needs Remote Attestation support")
+                .that(getVirtualMachineManager().isRemoteAttestationSupported())
+                .isTrue();
+        File vendorDiskImage = new File("/vendor/etc/avf/microdroid/microdroid_vendor.img");
+        assumeTrue("Microdroid vendor image doesn't exist, skip", vendorDiskImage.exists());
+        VirtualMachineConfig config =
+                buildVmConfigWithVendor(vendorDiskImage, VM_ATTESTATION_PAYLOAD_PATH);
+        VirtualMachine vm =
+                forceCreateNewVirtualMachine("cts_attestation_with_vendor_module", config);
+        checkVmAttestationWithValidChallenge(vm);
+    }
+
+    @Test
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    public void vmAttestationWhenRemoteAttestationIsSupported() throws Exception {
+        // pVM remote attestation is only supported on protected VMs.
+        assumeProtectedVM();
+        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
+        assume().withMessage("Test needs Remote Attestation support")
+                .that(getVirtualMachineManager().isRemoteAttestationSupported())
+                .isTrue();
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary(VM_ATTESTATION_PAYLOAD_PATH)
+                        .setProtectedVm(mProtectedVm)
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+        VirtualMachine vm =
+                forceCreateNewVirtualMachine("cts_attestation_with_rkpd_supported", config);
+
+        // Check with an invalid challenge.
+        byte[] invalidChallenge = new byte[65];
+        Arrays.fill(invalidChallenge, (byte) 0xbb);
+        SigningResult signingResultInvalidChallenge =
+                runVmAttestationService(
+                        TAG, vm, invalidChallenge, VM_ATTESTATION_MESSAGE.getBytes());
+        assertThat(signingResultInvalidChallenge.status)
+                .isEqualTo(AttestationStatus.ERROR_INVALID_CHALLENGE);
+
+        // Check with a valid challenge.
+        checkVmAttestationWithValidChallenge(vm);
+    }
+
+    private void checkVmAttestationWithValidChallenge(VirtualMachine vm) throws Exception {
+        byte[] challenge = new byte[32];
+        Arrays.fill(challenge, (byte) 0xac);
+        SigningResult signingResult =
+                runVmAttestationService(TAG, vm, challenge, VM_ATTESTATION_MESSAGE.getBytes());
+        assertWithMessage(
+                        "VM attestation should either succeed or fail when the network is unstable")
+                .that(signingResult.status)
+                .isAnyOf(AttestationStatus.OK, AttestationStatus.ERROR_ATTESTATION_FAILED);
+        if (signingResult.status == AttestationStatus.OK) {
+            X509Certificate[] certs =
+                    X509Utils.validateAndParseX509CertChain(signingResult.certificateChain);
+            X509Utils.verifyAvfRelatedCerts(certs, challenge, TEST_APP_PACKAGE_NAME);
+            X509Utils.verifySignature(
+                    certs[0], VM_ATTESTATION_MESSAGE.getBytes(), signingResult.signature);
+        }
     }
 
     @Test
@@ -469,7 +572,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(minimal.isEncryptedStorageEnabled()).isFalse();
         assertThat(minimal.getEncryptedStorageBytes()).isEqualTo(0);
         assertThat(minimal.isVmOutputCaptured()).isEqualTo(false);
-        assertThat(minimal.getOs()).isNull();
+        assertThat(minimal.getOs()).isEqualTo("microdroid");
 
         // Maximal has everything that can be set to some non-default value. (And has different
         // values than minimal for the required fields.)
@@ -484,7 +587,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setMemoryBytes(42)
                         .setCpuTopology(CPU_TOPOLOGY_MATCH_HOST)
                         .setEncryptedStorageBytes(1_000_000)
-                        .setVmOutputCaptured(true);
+                        .setVmOutputCaptured(true)
+                        .setOs("microdroid_gki-android14-6.1");
         VirtualMachineConfig maximal = maximalBuilder.build();
 
         assertThat(maximal.getApkPath()).isEqualTo("/apk/path");
@@ -500,16 +604,11 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(maximal.isEncryptedStorageEnabled()).isTrue();
         assertThat(maximal.getEncryptedStorageBytes()).isEqualTo(1_000_000);
         assertThat(maximal.isVmOutputCaptured()).isEqualTo(true);
-        assertThat(maximal.getOs()).isEqualTo("microdroid");
+        assertThat(maximal.getOs()).isEqualTo("microdroid_gki-android14-6.1");
 
         assertThat(minimal.isCompatibleWith(maximal)).isFalse();
         assertThat(minimal.isCompatibleWith(minimal)).isTrue();
         assertThat(maximal.isCompatibleWith(maximal)).isTrue();
-
-        VirtualMachineConfig os = maximalBuilder.setOs("microdroid_gki-android14-6.1").build();
-        assertThat(os.getPayloadBinaryName()).isEqualTo("binary.so");
-        assertThat(os.getOs()).isEqualTo("microdroid_gki-android14-6.1");
-        assertThat(os.isCompatibleWith(maximal)).isFalse();
     }
 
     @Test
@@ -560,16 +659,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setVmConsoleInputSupported(true);
         e = assertThrows(IllegalStateException.class, () -> captureInputOnNonDebuggable.build());
         assertThat(e).hasMessageThat().contains("debug level must be FULL to use console input");
-
-        VirtualMachineConfig.Builder specifyBothOsAndConfig =
-                new VirtualMachineConfig.Builder(getContext())
-                        .setPayloadConfigPath("config/path")
-                        .setProtectedVm(mProtectedVm)
-                        .setOs("microdroid");
-        e = assertThrows(IllegalStateException.class, () -> specifyBothOsAndConfig.build());
-        assertThat(e)
-                .hasMessageThat()
-                .contains("setPayloadConfigPath and setOs may not both be called");
     }
 
     @Test
@@ -787,7 +876,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
 
         VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config.json")
+                newVmConfigBuilderWithPayloadConfig("assets/vm_config.json")
                         .setMemoryBytes(minMemoryRequired())
                         .build();
 
@@ -905,7 +994,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config_extra_apk.json")
+                newVmConfigBuilderWithPayloadConfig("assets/vm_config_extra_apk.json")
                         .setMemoryBytes(minMemoryRequired())
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
@@ -990,6 +1079,51 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         changeDebugLevel(DEBUG_LEVEL_NONE, DEBUG_LEVEL_FULL);
     }
 
+    // Copy the Vm directory, creating the target Vm directory if it does not already exist.
+    private void copyVmDirectory(String sourceVmName, String targetVmName) throws IOException {
+        Path sourceVm = getVmDirectory(sourceVmName);
+        Path targetVm = getVmDirectory(targetVmName);
+        if (!Files.exists(targetVm)) {
+            Files.createDirectories(targetVm);
+        }
+
+        try (Stream<Path> stream = Files.list(sourceVm)) {
+            for (Path f : stream.collect(toList())) {
+                Files.copy(f, targetVm.resolve(f.getFileName()), REPLACE_EXISTING);
+            }
+        }
+    }
+
+    private Path getVmDirectory(String vmName) {
+        Context context = getContext();
+        Path filePath = Paths.get(context.getDataDir().getPath(), "vm", vmName);
+        return filePath;
+    }
+
+    // Create a fresh VM with the given `vmName`, instance_id & instance.img. This function creates
+    // a Vm with a different temporary name & copies it to target VM directory. This ensures this
+    // VM is not in cache of `VirtualMachineManager` which makes it possible to modify underlying
+    // files.
+    private void createUncachedVmWithName(
+            String vmName, VirtualMachineConfig config, File vmIdBackup, File vmInstanceBackup)
+            throws Exception {
+        deleteVirtualMachineIfExists(vmName);
+        forceCreateNewVirtualMachine("test_vm_tmp", config);
+        copyVmDirectory("test_vm_tmp", vmName);
+        if (vmInstanceBackup != null) {
+            Files.copy(
+                    vmInstanceBackup.toPath(),
+                    getVmFile(vmName, "instance.img").toPath(),
+                    REPLACE_EXISTING);
+        }
+        if (vmIdBackup != null) {
+            Files.copy(
+                    vmIdBackup.toPath(),
+                    getVmFile(vmName, "instance_id").toPath(),
+                    REPLACE_EXISTING);
+        }
+    }
+
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7"})
     public void changingDebuggableVmNonDebuggableInvalidatesVmIdentity() throws Exception {
@@ -1009,24 +1143,32 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig normalConfig = builder.build();
         assertThat(tryBootVmWithConfig(normalConfig, "test_vm").payloadStarted).isTrue();
 
-        // Try to run the VM again with the previous instance.img
+        // Try to run the VM again with the previous instance
         // We need to make sure that no changes on config don't invalidate the identity, to compare
         // the result with the below "different debug level" test.
+        File vmInstanceBackup = null, vmIdBackup = null;
         File vmInstance = getVmFile("test_vm", "instance.img");
-        File vmInstanceBackup = File.createTempFile("instance", ".img");
-        Files.copy(vmInstance.toPath(), vmInstanceBackup.toPath(), REPLACE_EXISTING);
-        forceCreateNewVirtualMachine("test_vm", normalConfig);
-        Files.copy(vmInstanceBackup.toPath(), vmInstance.toPath(), REPLACE_EXISTING);
-        assertThat(tryBootVm(TAG, "test_vm").payloadStarted).isTrue();
+        File vmId = getVmFile("test_vm", "instance_id");
+        if (vmInstance.exists()) {
+            vmInstanceBackup = File.createTempFile("instance", ".img");
+            Files.copy(vmInstance.toPath(), vmInstanceBackup.toPath(), REPLACE_EXISTING);
+        }
+        if (vmId.exists()) {
+            vmIdBackup = File.createTempFile("instance_id", "backup");
+            Files.copy(vmId.toPath(), vmIdBackup.toPath(), REPLACE_EXISTING);
+        }
+
+        createUncachedVmWithName("test_vm_rerun", normalConfig, vmIdBackup, vmInstanceBackup);
+        assertThat(tryBootVm(TAG, "test_vm_rerun").payloadStarted).isTrue();
 
         // Launch the same VM with a different debug level. The Java API prohibits this
         // (thankfully).
-        // For testing, we do that by creating a new VM with debug level, and copy the old instance
-        // image to the new VM instance image.
+        // For testing, we do that by creating a new VM with debug level, and overwriting the old
+        // instance data to the new VM instance data.
         VirtualMachineConfig debugConfig = builder.setDebugLevel(toLevel).build();
-        forceCreateNewVirtualMachine("test_vm", debugConfig);
-        Files.copy(vmInstanceBackup.toPath(), vmInstance.toPath(), REPLACE_EXISTING);
-        assertThat(tryBootVm(TAG, "test_vm").payloadStarted).isFalse();
+        createUncachedVmWithName(
+                "test_vm_changed_debug_level", debugConfig, vmIdBackup, vmInstanceBackup);
+        assertThat(tryBootVm(TAG, "test_vm_changed_debug_level").payloadStarted).isFalse();
     }
 
     private static class VmCdis {
@@ -1077,7 +1219,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig normalConfig =
-                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config.json")
+                newVmConfigBuilderWithPayloadConfig("assets/vm_config.json")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
         forceCreateNewVirtualMachine("test_vm_a", normalConfig);
@@ -1103,7 +1245,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig normalConfig =
-                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config.json")
+                newVmConfigBuilderWithPayloadConfig("assets/vm_config.json")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
         forceCreateNewVirtualMachine("test_vm", normalConfig);
@@ -1123,7 +1265,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig normalConfig =
-                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config.json")
+                newVmConfigBuilderWithPayloadConfig("assets/vm_config.json")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("bcc_vm", normalConfig);
@@ -1143,17 +1285,20 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(dataItems.size()).isEqualTo(1);
         assertThat(dataItems.get(0).getMajorType()).isEqualTo(MajorType.ARRAY);
         List<DataItem> rootArrayItems = ((Array) dataItems.get(0)).getDataItems();
-        assertThat(rootArrayItems.size()).isAtLeast(2); // Root public key and one certificate
+        int diceChainSize = rootArrayItems.size();
+        assertThat(diceChainSize).isAtLeast(2); // Root public key and one certificate
         if (mProtectedVm) {
             if (isFeatureEnabled(VirtualMachineManager.FEATURE_DICE_CHANGES)) {
-                // When a true DICE chain is created, we expect the root public key, at least one
-                // entry for the boot before pvmfw, then pvmfw, vm_entry (Microdroid kernel) and
-                // Microdroid payload entries.
-                assertThat(rootArrayItems.size()).isAtLeast(5);
+                // We expect the root public key, at least one entry for the boot before pvmfw,
+                // then pvmfw, vm_entry (Microdroid kernel) and Microdroid payload entries.
+                // Before Android V we did not require that vendor code contain any DICE entries
+                // preceding pvmfw, so the minimum is one less.
+                int minDiceChainSize = getVendorApiLevel() >= 202404 ? 5 : 4;
+                assertThat(diceChainSize).isAtLeast(minDiceChainSize);
             } else {
                 // pvmfw truncates the DICE chain it gets, so we expect exactly entries for
                 // public key, vm_entry (Microdroid kernel) and Microdroid payload.
-                assertThat(rootArrayItems.size()).isEqualTo(3);
+                assertThat(diceChainSize).isEqualTo(3);
             }
         }
     }
@@ -1245,6 +1390,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-2-7"
     })
     public void bootFailsWhenMicrodroidDataIsCompromised() throws Exception {
+        // If Updatable VM is supported => No instance.img required
+        assumeNoUpdatableVmSupport();
         assertThatBootFailsAfterCompromisingPartition(MICRODROID_PARTITION_UUID);
     }
 
@@ -1254,6 +1401,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             "9.17/C-2-7"
     })
     public void bootFailsWhenPvmFwDataIsCompromised() throws Exception {
+        // If Updatable VM is supported => No instance.img required
+        assumeNoUpdatableVmSupport();
         if (mProtectedVm) {
             assertThatBootFailsAfterCompromisingPartition(PVM_FW_PARTITION_UUID);
         } else {
@@ -1266,7 +1415,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     public void bootFailsWhenConfigIsInvalid() throws Exception {
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config_no_task.json")
+                newVmConfigBuilderWithPayloadConfig("assets/vm_config_no_task.json")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
 
@@ -1391,7 +1540,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         // Arrange
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadConfig("assets/" + os() + "/vm_config.json")
+                newVmConfigBuilderWithPayloadConfig("assets/vm_config.json")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
         String vmNameOrig = "test_vm_orig";
@@ -1466,7 +1615,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             assertFileContentsAreEqualInTwoVms("storage.img", vmNameOrig, vmNameImport);
         }
         assertThat(vmImport).isNotEqualTo(vmOrig);
-        vmm.delete(vmNameOrig);
         assertThat(vmImport).isEqualTo(vmm.get(vmNameImport));
         TestResults testResults =
                 runVmTestService(
@@ -1680,9 +1828,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assumeSupportedDevice();
 
         final VirtualMachineConfig vmConfig =
-                new VirtualMachineConfig.Builder(getContext())
-                        .setProtectedVm(mProtectedVm)
-                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .setVmConsoleInputSupported(true) // even if console input is supported
                         .build();
@@ -1704,9 +1850,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assumeSupportedDevice();
 
         final VirtualMachineConfig vmConfig =
-                new VirtualMachineConfig.Builder(getContext())
-                        .setProtectedVm(mProtectedVm)
-                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .setVmOutputCaptured(true) // even if output is captured
                         .build();
@@ -1730,6 +1874,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setPayloadBinaryName("MicrodroidTestNativeLib.so")
                         .setDebugLevel(debuggable ? DEBUG_LEVEL_FULL : DEBUG_LEVEL_NONE)
                         .setVmOutputCaptured(false)
+                        .setOs(os())
                         .build();
         final VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_logcat", vmConfig);
 
@@ -1824,6 +1969,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .setProtectedVm(isProtectedVm())
                         .setPayloadBinaryName("MicrodroidPayloadInOtherAppNativeLib.so")
+                        .setOs(os())
                         .build();
 
         try (VirtualMachine vm = forceCreateNewVirtualMachine("vm_from_another_app", config)) {
@@ -1938,6 +2084,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .setProtectedVm(isProtectedVm())
                         .setPayloadBinaryName("MicrodroidPayloadInOtherAppNativeLib.so")
+                        .setOs(os())
                         .build();
 
         VirtualMachine vm = forceCreateNewVirtualMachine("vm_to_share", config);
@@ -1987,6 +2134,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setProtectedVm(isProtectedVm())
                         .setEncryptedStorageBytes(3_000_000)
                         .setPayloadBinaryName("MicrodroidPayloadInOtherAppNativeLib.so")
+                        .setOs(os())
                         .build();
 
         VirtualMachine vm = forceCreateNewVirtualMachine("vm_to_share", config);
@@ -2142,6 +2290,11 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     private VirtualMachineConfig buildVmConfigWithVendor(File vendorDiskImage) throws Exception {
+        return buildVmConfigWithVendor(vendorDiskImage, "MicrodroidTestNativeLib.so");
+    }
+
+    private VirtualMachineConfig buildVmConfigWithVendor(File vendorDiskImage, String binaryPath)
+            throws Exception {
         assumeSupportedDevice();
         // TODO(b/325094712): Boot fails with vendor partition in Cuttlefish.
         assumeFalse(
@@ -2152,7 +2305,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 "boot with vendor partition is failing in HWASAN enabled Microdroid.", isHwasan());
         assumeFeatureEnabled(VirtualMachineManager.FEATURE_VENDOR_MODULES);
         VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                newVmConfigBuilderWithPayloadBinary(binaryPath)
                         .setVendorDiskImage(vendorDiskImage)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
@@ -2322,16 +2475,16 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     private long minMemoryRequired() {
-        if (Build.SUPPORTED_ABIS.length > 0) {
-            String primaryAbi = Build.SUPPORTED_ABIS[0];
-            switch (primaryAbi) {
-                case "x86_64":
-                    return MIN_MEM_X86_64;
-                case "arm64-v8a":
-                    return MIN_MEM_ARM64;
-            }
-        }
-        return 0;
+      assertThat(Build.SUPPORTED_ABIS).isNotEmpty();
+      String primaryAbi = Build.SUPPORTED_ABIS[0];
+      switch (primaryAbi) {
+        case "x86_64":
+          return MIN_MEM_X86_64;
+        case "arm64-v8a":
+        case "arm64-v8a-hwasan":
+          return MIN_MEM_ARM64;
+      }
+      throw new AssertionError("Unsupported ABI: " + primaryAbi);
     }
 
 }

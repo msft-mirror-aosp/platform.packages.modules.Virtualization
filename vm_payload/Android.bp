@@ -72,13 +72,14 @@ cc_library_shared {
     ],
     whole_static_libs: ["libvm_payload_impl"],
     export_static_lib_headers: ["libvm_payload_impl"],
-    installable: false,
+    no_full_install: true,
     version_script: "libvm_payload.map.txt",
     stubs: {
         symbol_file: "libvm_payload.map.txt",
         // Implementation is available inside a Microdroid VM.
         implementation_installable: false,
     },
+    visibility: ["//visibility:public"],
 }
 
 // Just the headers. Mostly useful for clients that only want the
@@ -88,6 +89,7 @@ cc_library_headers {
     defaults: ["avf_build_flags_cc"],
     apex_available: ["com.android.compos"],
     export_include_dirs: ["include"],
+    visibility: ["//visibility:public"],
 }
 
 // Restricted headers for use by internal clients & associated tests.

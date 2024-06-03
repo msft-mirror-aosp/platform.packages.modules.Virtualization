@@ -18,52 +18,30 @@ package com.android.virt.rkpd.vm_attestation.testapp;
 
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_FULL;
 
-import static com.google.common.truth.Truth.assertThat;
-import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
+import android.net.Network;
 import android.content.Context;
-import android.hardware.security.keymint.IRemotelyProvisionedComponent;
-import android.os.SystemProperties;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
 
-import androidx.work.ListenableWorker;
-import androidx.work.testing.TestWorkerBuilder;
-
 import com.android.microdroid.test.device.MicrodroidDeviceTestBase;
-import com.android.rkpdapp.database.ProvisionedKeyDao;
-import com.android.rkpdapp.database.RkpdDatabase;
-import com.android.rkpdapp.interfaces.ServerInterface;
-import com.android.rkpdapp.interfaces.ServiceManagerInterface;
-import com.android.rkpdapp.interfaces.SystemInterface;
-import com.android.rkpdapp.provisioner.PeriodicProvisioner;
-import com.android.rkpdapp.testutil.SystemInterfaceSelector;
-import com.android.rkpdapp.utils.Settings;
-import com.android.rkpdapp.utils.X509Utils;
-import com.android.virt.vm_attestation.testservice.IAttestationService;
 import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
+import com.android.virt.vm_attestation.util.X509Utils;
+import android.system.virtualmachine.VirtualMachineManager;
 
-import org.bouncycastle.asn1.ASN1Boolean;
-import org.bouncycastle.asn1.ASN1Encodable;
-import org.bouncycastle.asn1.ASN1OctetString;
-import org.bouncycastle.asn1.ASN1Sequence;
-import org.bouncycastle.asn1.DEROctetString;
-import org.bouncycastle.asn1.DERUTF8String;
-import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
-import java.security.Signature;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
 
 /**
  * End-to-end test for the pVM remote attestation.
@@ -81,22 +59,15 @@ import java.util.concurrent.Executors;
  * <p>- Have an arm64 device supporting protected VMs.
  *
  * <p>- Have a stable network connection on the device.
- *
- * <p>- Have the RKP server hostname configured in the device. If not, you can set it using: $ adb
- * shell setprop remote_provisioning.hostname remoteprovisioning.googleapis.com
  */
 @RunWith(Parameterized.class)
 public class RkpdVmAttestationTest extends MicrodroidDeviceTestBase {
     private static final String TAG = "RkpdVmAttestationTest";
-    private static final String AVF_ATTESTATION_EXTENSION_OID = "1.3.6.1.4.1.11129.2.1.29.1";
-    private static final String SERVICE_NAME = IRemotelyProvisionedComponent.DESCRIPTOR + "/avf";
+
     private static final String VM_PAYLOAD_PATH = "libvm_attestation_test_payload.so";
     private static final String MESSAGE = "Hello RKP from AVF!";
     private static final String TEST_APP_PACKAGE_NAME =
             "com.android.virt.rkpd.vm_attestation.testapp";
-
-    private ProvisionedKeyDao mKeyDao;
-    private PeriodicProvisioner mProvisioner;
 
     @Parameterized.Parameter(0)
     public String mGki;
@@ -113,57 +84,33 @@ public class RkpdVmAttestationTest extends MicrodroidDeviceTestBase {
 
     @Before
     public void setUp() throws Exception {
-        assume().withMessage("The RKP server hostname is not configured -- assume RKP disabled.")
-                .that(SystemProperties.get("remote_provisioning.hostname"))
-                .isNotEmpty();
         assume().withMessage("RKP Integration tests rely on network availability.")
-                .that(ServerInterface.isNetworkConnected(getContext()))
+                .that(isNetworkConnected(getContext()))
                 .isTrue();
-        // TODO(b/329652894): Assume that pVM remote attestation feature is supported.
+        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
+        assume().withMessage("Test needs Remote Attestation support")
+                .that(getVirtualMachineManager().isRemoteAttestationSupported())
+                .isTrue();
 
-        prepareTestSetup(true /* protectedVm */, mGki);
-
-        Settings.clearPreferences(getContext());
-        mKeyDao = RkpdDatabase.getDatabase(getContext()).provisionedKeyDao();
-        mKeyDao.deleteAllKeys();
-
-        mProvisioner =
-                TestWorkerBuilder.from(
-                                getContext(),
-                                PeriodicProvisioner.class,
-                                Executors.newSingleThreadExecutor())
-                        .build();
-
-        SystemInterface systemInterface =
-                SystemInterfaceSelector.getSystemInterfaceForServiceName(SERVICE_NAME);
-        ServiceManagerInterface.setInstances(new SystemInterface[] {systemInterface});
-
-        setMaxPerformanceTaskProfile();
-    }
-
-    @After
-    public void tearDown() throws Exception {
-        ServiceManagerInterface.setInstances(null);
-        if (mKeyDao != null) {
-            mKeyDao.deleteAllKeys();
+        if (mGki == null) {
+            // We don't need this permission to use the microdroid kernel.
+            revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        } else {
+            // The permission is needed to use the GKI kernel.
+            // Granting the permission is needed as the microdroid kernel test setup
+            // can revoke the permission before the GKI kernel test.
+            grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         }
-        Settings.clearPreferences(getContext());
+        prepareTestSetup(true /* protectedVm */, mGki);
+        setMaxPerformanceTaskProfile();
     }
 
     @Test
     public void usingProvisionedKeyForVmAttestationSucceeds() throws Exception {
-        // Provision keys.
-        assertThat(mProvisioner.doWork()).isEqualTo(ListenableWorker.Result.success());
-        assertThat(mKeyDao.getTotalUnassignedKeysForIrpc(SERVICE_NAME)).isGreaterThan(0);
-
         // Arrange.
-        Context ctx = getContext();
-        Context otherAppCtx = ctx.createPackageContext(TEST_APP_PACKAGE_NAME, 0);
         VirtualMachineConfig config =
-                new VirtualMachineConfig.Builder(otherAppCtx)
-                        .setProtectedVm(true)
+                newVmConfigBuilderWithPayloadBinary(VM_PAYLOAD_PATH)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
-                        .setPayloadBinaryName(VM_PAYLOAD_PATH)
                         .setVmOutputCaptured(true)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("attestation_with_rkpd_client", config);
@@ -171,96 +118,22 @@ public class RkpdVmAttestationTest extends MicrodroidDeviceTestBase {
         Arrays.fill(challenge, (byte) 0xab);
 
         // Act.
-        CompletableFuture<Exception> exception = new CompletableFuture<>();
-        CompletableFuture<Boolean> payloadReady = new CompletableFuture<>();
-        CompletableFuture<SigningResult> signingResultFuture = new CompletableFuture<>();
-        VmEventListener listener =
-                new VmEventListener() {
-                    @Override
-                    public void onPayloadReady(VirtualMachine vm) {
-                        payloadReady.complete(true);
-                        try {
-                            IAttestationService service =
-                                    IAttestationService.Stub.asInterface(
-                                            vm.connectToVsockServer(IAttestationService.PORT));
-                            signingResultFuture.complete(
-                                    service.signWithAttestationKey(challenge, MESSAGE.getBytes()));
-                        } catch (Exception e) {
-                            exception.complete(e);
-                        } finally {
-                            forceStop(vm);
-                        }
-                    }
-                };
-        listener.runToFinish(TAG, vm);
+        SigningResult signingResult =
+                runVmAttestationService(TAG, vm, challenge, MESSAGE.getBytes());
 
         // Assert.
-        assertThat(payloadReady.getNow(false)).isTrue();
-        assertThat(exception.getNow(null)).isNull();
-        SigningResult signingResult = signingResultFuture.getNow(null);
-        assertThat(signingResult).isNotNull();
-
-        // Parsing the certificate chain successfully indicates that the certificate
-        // chain is valid, that each certificate is signed by the next one and the last
-        // one is self-signed.
-        X509Certificate[] certs = X509Utils.formatX509Certs(signingResult.certificateChain);
-        assertThat(certs.length).isGreaterThan(2);
-        assertWithMessage("The first certificate should be generated in the RKP VM")
-                .that(certs[0].getSubjectX500Principal().getName())
-                .isEqualTo("CN=Android Protected Virtual Machine Key");
-        checkAvfAttestationExtension(certs[0], challenge);
-        assertWithMessage("The second certificate should contain AVF in the subject")
-                .that(certs[1].getSubjectX500Principal().getName())
-                .contains("O=AVF");
-
-        // Verify the signature using the public key from the leaf certificate generated
-        // in the RKP VM.
-        Signature sig = Signature.getInstance("SHA256withECDSA");
-        sig.initVerify(certs[0].getPublicKey());
-        sig.update(MESSAGE.getBytes());
-        assertThat(sig.verify(signingResult.signature)).isTrue();
+        X509Certificate[] certs =
+                X509Utils.validateAndParseX509CertChain(signingResult.certificateChain);
+        X509Utils.verifyAvfRelatedCerts(certs, challenge, TEST_APP_PACKAGE_NAME);
+        X509Utils.verifySignature(certs[0], MESSAGE.getBytes(), signingResult.signature);
     }
 
-    private void checkAvfAttestationExtension(X509Certificate cert, byte[] challenge)
-            throws Exception {
-        byte[] extensionValue = cert.getExtensionValue(AVF_ATTESTATION_EXTENSION_OID);
-        ASN1OctetString extString = ASN1OctetString.getInstance(extensionValue);
-        ASN1Sequence seq = ASN1Sequence.getInstance(extString.getOctets());
-        // AVF attestation extension should contain 3 elements in the following format:
-        //
-        //  AttestationExtension ::= SEQUENCE {
-        //     attestationChallenge       OCTET_STRING,
-        //     isVmSecure                 BOOLEAN,
-        //     vmComponents               SEQUENCE OF VmComponent,
-        //  }
-        //   VmComponent ::= SEQUENCE {
-        //     name               UTF8String,
-        //     securityVersion    INTEGER,
-        //     codeHash           OCTET STRING,
-        //     authorityHash      OCTET STRING,
-        //  }
-        assertThat(seq).hasSize(3);
-
-        ASN1OctetString expectedChallenge = new DEROctetString(challenge);
-        assertThat(seq.getObjectAt(0)).isEqualTo(expectedChallenge);
-        assertWithMessage("The VM should be unsecure as it is debuggable.")
-                .that(seq.getObjectAt(1))
-                .isEqualTo(ASN1Boolean.FALSE);
-        ASN1Sequence vmComponents = ASN1Sequence.getInstance(seq.getObjectAt(2));
-        assertExtensionContainsPayloadApk(vmComponents);
-    }
-
-    private void assertExtensionContainsPayloadApk(ASN1Sequence vmComponents) throws Exception {
-        DERUTF8String payloadApkName = new DERUTF8String("apk:" + TEST_APP_PACKAGE_NAME);
-        boolean found = false;
-        for (ASN1Encodable encodable : vmComponents) {
-            ASN1Sequence vmComponent = ASN1Sequence.getInstance(encodable);
-            assertThat(vmComponent).hasSize(4);
-            if (payloadApkName.equals(vmComponent.getObjectAt(0))) {
-                assertWithMessage("Payload APK should not be found twice.").that(found).isFalse();
-                found = true;
-            }
-        }
-        assertWithMessage("vmComponents should contain the payload APK.").that(found).isTrue();
+    private static boolean isNetworkConnected(Context context) {
+        ConnectivityManager cm = context.getSystemService(ConnectivityManager.class);
+        Network network = cm.getActiveNetwork();
+        NetworkCapabilities capabilities = cm.getNetworkCapabilities(network);
+        return capabilities != null
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
     }
 }

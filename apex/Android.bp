@@ -32,6 +32,13 @@ virt_apex {
     },
 }
 
+soong_config_string_variable {
+    name: "avf_microdroid_guest_gki_version",
+    values: [
+        "android14_61_pkvm_experimental",
+    ],
+}
+
 soong_config_module_type {
     name: "avf_flag_aware_apex_defaults",
     module_type: "apex_defaults",
@@ -39,9 +46,14 @@ soong_config_module_type {
     bool_variables: [
         "release_avf_enable_device_assignment",
         "release_avf_enable_llpvm_changes",
-        "release_avf_enable_remote_attestation",
+        "release_avf_enable_network",
+        "avf_remote_attestation_enabled",
         "release_avf_enable_vendor_modules",
         "release_avf_enable_virt_cpufreq",
+        "release_avf_support_custom_vm_with_paravirtualized_devices",
+    ],
+    variables: [
+        "avf_microdroid_guest_gki_version",
     ],
     properties: [
         "androidManifest",
@@ -50,6 +62,7 @@ soong_config_module_type {
         "prebuilts",
         "systemserverclasspath_fragments",
         "vintf_fragments",
+        "apps",
     ],
 }
 
@@ -95,6 +108,11 @@ avf_flag_aware_apex_defaults {
             conditions_default: {
                 canned_fs_config: "canned_fs_config",
             },
+        },
+        release_avf_support_custom_vm_with_paravirtualized_devices: {
+            apps: [
+                "VmLauncherApp",
+            ],
         },
     },
 }
@@ -147,6 +165,16 @@ avf_flag_aware_apex_defaults {
         "EmptyPayloadApp",
     ],
     soong_config_variables: {
+        avf_microdroid_guest_gki_version: {
+            android14_61_pkvm_experimental: {
+                prebuilts: [
+                    "microdroid_gki-android14-6.1-pkvm_experimental_initrd_debuggable",
+                    "microdroid_gki-android14-6.1-pkvm_experimental_initrd_normal",
+                    "microdroid_gki-android14-6.1-pkvm_experimental_kernel",
+                    "microdroid_gki-android14-6.1-pkvm_experimental.json",
+                ],
+            },
+        },
         release_avf_enable_device_assignment: {
             prebuilts: [
                 "com.android.virt.vfio_handler.rc",
@@ -163,15 +191,20 @@ avf_flag_aware_apex_defaults {
         release_avf_enable_llpvm_changes: {
             androidManifest: "AndroidManifest.xml",
         },
-        release_avf_enable_vendor_modules: {
+        release_avf_enable_network: {
             prebuilts: [
-                "microdroid_gki-android14-6.1_initrd_debuggable",
-                "microdroid_gki-android14-6.1_initrd_normal",
-                "microdroid_gki-android14-6.1_kernel",
-                "microdroid_gki-android14-6.1.json",
+                "com.android.virt.vmnic.rc",
             ],
+            arch: {
+                arm64: {
+                    binaries: ["vmnic"],
+                },
+                x86_64: {
+                    binaries: ["vmnic"],
+                },
+            },
         },
-        release_avf_enable_remote_attestation: {
+        avf_remote_attestation_enabled: {
             vintf_fragments: [
                 "virtualizationservice.xml",
             ],
@@ -202,7 +235,7 @@ soong_config_module_type {
     config_namespace: "ANDROID",
     bool_variables: [
         "release_avf_enable_llpvm_changes",
-        "release_avf_enable_remote_attestation",
+        "avf_remote_attestation_enabled",
     ],
     properties: ["srcs"],
 }
@@ -214,7 +247,7 @@ avf_flag_aware_genrule {
         release_avf_enable_llpvm_changes: {
             srcs: ["virtualizationservice.rc.llpvm"],
         },
-        release_avf_enable_remote_attestation: {
+        avf_remote_attestation_enabled: {
             srcs: ["virtualizationservice.rc.ra"],
         },
     },
@@ -226,14 +259,21 @@ prebuilt_etc {
     name: "com.android.virt.init.rc",
     src: ":virtualizationservice_rc_combined",
     filename: "virtualizationservice.rc",
-    installable: false,
+    no_full_install: true,
 }
 
 prebuilt_etc {
     name: "com.android.virt.vfio_handler.rc",
     src: "vfio_handler.rc",
     filename: "vfio_handler.rc",
-    installable: false,
+    no_full_install: true,
+}
+
+prebuilt_etc {
+    name: "com.android.virt.vmnic.rc",
+    src: "vmnic.rc",
+    filename: "vmnic.rc",
+    no_full_install: true,
 }
 
 // Virt apex needs a custom signer for its payload

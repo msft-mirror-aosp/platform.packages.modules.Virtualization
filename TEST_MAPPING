@@ -3,6 +3,12 @@
 {
   "avf-presubmit": [
     {
+      "name": "AvfRkpdAppIntegrationTests"
+    },
+    {
+      "name": "AvfRkpdVmAttestationTestApp"
+    },
+    {
       "name": "MicrodroidHostTestCases"
     },
     {
@@ -36,13 +42,10 @@
       "name": "initrd_bootconfig.test"
     },
     {
-      "name": "libdice_policy.test"
-    },
-    {
       "name": "libapkzip.test"
     },
     {
-      "name": "libsecretkeeper_comm.test"
+      "name": "libdice_driver_test"
     }
   ],
   "avf-postsubmit": [
@@ -59,12 +62,8 @@
       "name": "AVFHostTestCases"
     },
     {
-      // TODO(b/325610326): Add this target to presubmit once there is enough
-      // SLO data for it.
-      "name": "AvfRkpdAppIntegrationTests"
-    },
-    {
-      "name": "AvfRkpdVmAttestationTestApp"
+      "name": "AvfRkpdAppGoogleIntegrationTests",
+      "keywords": ["internal"]
     }
   ],
   "postsubmit": [

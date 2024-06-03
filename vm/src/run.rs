@@ -39,7 +39,7 @@ use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use vmclient::{ErrorCode, VmInstance};
-use vmconfig::{open_parcel_file, VmConfig};
+use vmconfig::{get_debug_level, open_parcel_file, VmConfig};
 use zip::ZipArchive;
 
 /// Run a VM from the given APK, idsig, and config.
@@ -127,33 +127,28 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         if config.payload_binary_name.is_some() {
             bail!("Only one of --config-path or --payload-binary-name can be defined")
         }
-        if config.microdroid.gki().is_some() {
-            bail!("--gki cannot be defined with --config-path. Use 'os' field in the config file")
-        }
         Payload::ConfigPath(config_path)
     } else if let Some(payload_binary_name) = config.payload_binary_name {
-        let os_name = if let Some(ver) = config.microdroid.gki() {
-            format!("microdroid_gki-{ver}")
-        } else {
-            "microdroid".to_owned()
-        };
-
         let extra_apk_files: Result<Vec<_>, _> = extra_apks.iter().map(File::open).collect();
         let extra_apk_fds = extra_apk_files?.into_iter().map(ParcelFileDescriptor::new).collect();
 
         Payload::PayloadConfig(VirtualMachinePayloadConfig {
             payloadBinaryName: payload_binary_name,
-            osName: os_name,
             extraApks: extra_apk_fds,
         })
     } else {
         bail!("Either --config-path or --payload-binary-name must be defined")
     };
 
+    let os_name = if let Some(ver) = config.microdroid.gki() {
+        format!("microdroid_gki-{ver}")
+    } else {
+        "microdroid".to_owned()
+    };
+
     let payload_config_str = format!("{:?}!{:?}", config.apk, payload);
 
     let custom_config = CustomConfig {
-        customKernelImage: None,
         gdbPort: config.debug.gdb.map(u16::from).unwrap_or(0) as i32, // 0 means no gdb
         vendorImage: vendor,
         devices: config
@@ -164,6 +159,8 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
                 x.to_str().map(String::from).ok_or(anyhow!("Failed to convert {x:?} to String"))
             })
             .collect::<Result<_, _>>()?,
+        networkSupported: config.common.network_supported(),
+        ..Default::default()
     };
 
     let vm_config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
@@ -180,6 +177,8 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         memoryMib: config.common.mem.unwrap_or(0) as i32, // 0 means use the VM default
         cpuTopology: config.common.cpu_topology,
         customConfig: Some(custom_config),
+        osName: os_name,
+        hugePages: config.common.hugepages,
     });
     run(
         service.as_ref(),
@@ -260,6 +259,7 @@ pub fn command_run(config: RunCustomVmConfig) -> Result<(), Error> {
         vm_config.gdbPort = gdb.get() as i32;
     }
     vm_config.cpuTopology = config.common.cpu_topology;
+    vm_config.hugePages = config.common.hugepages;
     run(
         get_service()?.as_ref(),
         &VirtualMachineConfig::RawConfig(vm_config),
@@ -318,10 +318,8 @@ fn run(
         .context("Failed to create VM")?;
     vm.start().context("Failed to start VM")?;
 
-    let debug_level = match config {
-        VirtualMachineConfig::AppConfig(config) => config.debugLevel,
-        _ => DebugLevel::NONE,
-    };
+    let debug_level = get_debug_level(config).unwrap_or(DebugLevel::NONE);
+
     println!(
         "Created {} from {} with CID {}, state is {}.",
         if debug_level == DebugLevel::FULL { "debuggable VM" } else { "VM" },

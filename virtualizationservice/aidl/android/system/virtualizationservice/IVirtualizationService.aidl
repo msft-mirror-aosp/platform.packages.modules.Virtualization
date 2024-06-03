@@ -86,4 +86,31 @@ interface IVirtualizationService {
      * associated to the fake key pair when the VM requests attestation in testing mode.
      */
     void enableTestAttestation();
+
+    /**
+     * Returns {@code true} if the pVM remote attestation feature is supported
+     */
+    boolean isRemoteAttestationSupported();
+
+    /**
+     * Check if Updatable VM feature is supported by AVF. Updatable VM allows secrets and data of
+     * a VM instance to be accessible even after updates of boot images and apks.
+     * For more info see packages/modules/Virtualization/docs/updatable_vm.md
+     */
+    boolean isUpdatableVmSupported();
+
+    /**
+     * Notification that state associated with a VM should be removed.
+     *
+     * @param instanceId The ID for the VM.
+     */
+    void removeVmInstance(in byte[64] instanceId);
+
+    /**
+     * Notification that ownership of a VM has been claimed by the caller.  Note that no permission
+     * checks (with respect to the previous owner) are performed.
+     *
+     * @param instanceId The ID for the VM.
+     */
+    void claimVmInstance(in byte[64] instanceId);
 }
