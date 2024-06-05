@@ -346,7 +346,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             ))
             .with_log();
         }
-        if !remotely_provisioned_component_service_exists()? {
+        if !is_remote_provisioning_hal_declared()? {
             return Err(Status::new_exception_str(
                 ExceptionCode::UNSUPPORTED_OPERATION,
                 Some("AVF remotely provisioned component service is not declared"),
@@ -403,7 +403,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
     }
 
     fn isRemoteAttestationSupported(&self) -> binder::Result<bool> {
-        remotely_provisioned_component_service_exists()
+        is_remote_provisioning_hal_declared()
     }
 
     fn getAssignableDevices(&self) -> binder::Result<Vec<AssignableDevice>> {
@@ -469,8 +469,16 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
     fn removeVmInstance(&self, instance_id: &[u8; 64]) -> binder::Result<()> {
         let state = &mut *self.state.lock().unwrap();
         if let Some(sk_state) = &mut state.sk_state {
-            info!("removeVmInstance(): delete secret");
-            sk_state.delete_ids(&[*instance_id]);
+            let uid = get_calling_uid();
+            info!(
+                "Removing a VM's instance_id: {:?}, for uid: {:?}",
+                hex::encode(instance_id),
+                uid
+            );
+
+            let user_id = multiuser_get_user_id(uid);
+            let app_id = multiuser_get_app_id(uid);
+            sk_state.delete_id(instance_id, user_id, app_id);
         } else {
             info!("ignoring removeVmInstance() as no ISecretkeeper");
         }
@@ -862,7 +870,9 @@ fn handle_tombstone(stream: &mut VsockStream) -> Result<()> {
     Ok(())
 }
 
-fn remotely_provisioned_component_service_exists() -> binder::Result<bool> {
+/// Returns true if the AVF remotely provisioned component service is declared in the
+/// VINTF manifest.
+pub(crate) fn is_remote_provisioning_hal_declared() -> binder::Result<bool> {
     Ok(binder::is_declared(REMOTELY_PROVISIONED_COMPONENT_SERVICE_NAME)?)
 }
 
