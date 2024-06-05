@@ -14,9 +14,43 @@
 
 //! Iterators over cells, and various layers on top of them.
 
+use crate::Fdt;
+use crate::FdtError;
+use crate::FdtNode;
+use crate::FdtProperty;
 use crate::{AddrCells, SizeCells};
+use core::ffi::CStr;
 use core::marker::PhantomData;
 use core::{mem::size_of, ops::Range, slice::ChunksExact};
+
+use zerocopy::transmute;
+
+/// Iterator over nodes sharing a same compatible string.
+pub struct CompatibleIterator<'a> {
+    node: FdtNode<'a>,
+    compatible: &'a CStr,
+}
+
+impl<'a> CompatibleIterator<'a> {
+    pub(crate) fn new(fdt: &'a Fdt, compatible: &'a CStr) -> Result<Self, FdtError> {
+        let node = fdt.root();
+        Ok(Self { node, compatible })
+    }
+}
+
+impl<'a> Iterator for CompatibleIterator<'a> {
+    type Item = FdtNode<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.node.next_compatible(self.compatible).ok()?;
+
+        if let Some(node) = next {
+            self.node = node;
+        }
+
+        next
+    }
+}
 
 /// Iterator over cells of a DT property.
 #[derive(Debug)]
@@ -59,6 +93,21 @@ pub struct Reg<T> {
     pub size: Option<T>,
 }
 
+impl<T: TryInto<usize>> TryFrom<Reg<T>> for Range<usize> {
+    type Error = FdtError;
+
+    fn try_from(reg: Reg<T>) -> Result<Self, Self::Error> {
+        let addr = to_usize(reg.addr)?;
+        let size = to_usize(reg.size.ok_or(FdtError::NotFound)?)?;
+        let end = addr.checked_add(size).ok_or(FdtError::BadValue)?;
+        Ok(addr..end)
+    }
+}
+
+fn to_usize<T: TryInto<usize>>(num: T) -> Result<usize, FdtError> {
+    num.try_into().map_err(|_| FdtError::BadValue)
+}
+
 impl<'a> RegIterator<'a> {
     pub(crate) fn new(
         cells: CellIterator<'a>,
@@ -85,12 +134,6 @@ impl<'a> Iterator for RegIterator<'a> {
     }
 }
 
-// Converts two cells into bytes of the same size
-fn two_cells_to_bytes(cells: [u32; 2]) -> [u8; 2 * size_of::<u32>()] {
-    // SAFETY: the size of the two arrays are the same
-    unsafe { core::mem::transmute::<[u32; 2], [u8; 2 * size_of::<u32>()]>(cells) }
-}
-
 impl Reg<u64> {
     const NUM_CELLS: usize = 2;
     /// Converts addr and (optional) size to the format that is consumable by libfdt.
@@ -98,14 +141,10 @@ impl Reg<u64> {
         &self,
     ) -> ([u8; Self::NUM_CELLS * size_of::<u32>()], Option<[u8; Self::NUM_CELLS * size_of::<u32>()]>)
     {
-        let addr =
-            two_cells_to_bytes([((self.addr >> 32) as u32).to_be(), (self.addr as u32).to_be()]);
-        let size = if self.size.is_some() {
-            let size = self.size.unwrap();
-            Some(two_cells_to_bytes([((size >> 32) as u32).to_be(), (size as u32).to_be()]))
-        } else {
-            None
-        };
+        let addr = transmute!([((self.addr >> 32) as u32).to_be(), (self.addr as u32).to_be()]);
+        let size =
+            self.size.map(|sz| transmute!([((sz >> 32) as u32).to_be(), (sz as u32).to_be()]));
+
         (addr, size)
     }
 }
@@ -241,11 +280,82 @@ impl AddressRange<(u32, u64), u64, u64> {
             ((self.size >> 32) as u32).to_be(),
             (self.size as u32).to_be(),
         ];
-        // SAFETY: the size of the two arrays are the same
-        unsafe {
-            core::mem::transmute::<[u32; Self::SIZE_CELLS], [u8; Self::SIZE_CELLS * size_of::<u32>()]>(
-                buf,
-            )
-        }
+
+        transmute!(buf)
+    }
+}
+
+/// Iterator over subnodes
+#[derive(Debug)]
+pub struct SubnodeIterator<'a> {
+    subnode: Option<FdtNode<'a>>,
+}
+
+impl<'a> SubnodeIterator<'a> {
+    pub(crate) fn new(node: &FdtNode<'a>) -> Result<Self, FdtError> {
+        let subnode = node.first_subnode()?;
+
+        Ok(Self { subnode })
+    }
+}
+
+impl<'a> Iterator for SubnodeIterator<'a> {
+    type Item = FdtNode<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let res = self.subnode;
+
+        self.subnode = self.subnode.and_then(|node| node.next_subnode().ok()?);
+
+        res
+    }
+}
+
+/// Iterator over descendants
+#[derive(Debug)]
+pub struct DescendantsIterator<'a> {
+    node: Option<(FdtNode<'a>, usize)>,
+}
+
+impl<'a> DescendantsIterator<'a> {
+    pub(crate) fn new(node: &FdtNode<'a>) -> Self {
+        Self { node: Some((*node, 0)) }
+    }
+}
+
+impl<'a> Iterator for DescendantsIterator<'a> {
+    type Item = (FdtNode<'a>, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (node, depth) = self.node?;
+        self.node = node.next_node(depth).ok().flatten().filter(|(_, depth)| *depth > 0);
+
+        self.node
+    }
+}
+
+/// Iterator over properties
+#[derive(Debug)]
+pub struct PropertyIterator<'a> {
+    prop: Option<FdtProperty<'a>>,
+}
+
+impl<'a> PropertyIterator<'a> {
+    pub(crate) fn new(node: &'a FdtNode) -> Result<Self, FdtError> {
+        let prop = node.first_property()?;
+
+        Ok(Self { prop })
+    }
+}
+
+impl<'a> Iterator for PropertyIterator<'a> {
+    type Item = FdtProperty<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let res = self.prop;
+
+        self.prop = res?.next_property().ok()?;
+
+        res
     }
 }

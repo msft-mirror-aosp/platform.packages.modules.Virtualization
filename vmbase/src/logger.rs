@@ -18,23 +18,22 @@
 //! Note: may not work if the VM is in an inconsistent state. Exception handlers
 //! should avoid using this logger and instead print with eprintln!.
 
-extern crate log;
-
 use crate::console::println;
 use core::sync::atomic::{AtomicBool, Ordering};
-use log::{LevelFilter, Log, Metadata, Record, SetLoggerError};
+use log::{Log, Metadata, Record, SetLoggerError};
 
 struct Logger {
     is_enabled: AtomicBool,
 }
-static mut LOGGER: Logger = Logger::new();
+
+static LOGGER: Logger = Logger::new();
 
 impl Logger {
     const fn new() -> Self {
         Self { is_enabled: AtomicBool::new(true) }
     }
 
-    fn swap_enabled(&mut self, enabled: bool) -> bool {
+    fn swap_enabled(&self, enabled: bool) -> bool {
         self.is_enabled.swap(enabled, Ordering::Relaxed)
     }
 }
@@ -60,27 +59,19 @@ pub struct SuppressGuard {
 
 impl SuppressGuard {
     fn new() -> Self {
-        // Safe because it modifies an atomic.
-        unsafe { Self { old_enabled: LOGGER.swap_enabled(false) } }
+        Self { old_enabled: LOGGER.swap_enabled(false) }
     }
 }
 
 impl Drop for SuppressGuard {
     fn drop(&mut self) {
-        // Safe because it modifies an atomic.
-        unsafe {
-            LOGGER.swap_enabled(self.old_enabled);
-        }
+        LOGGER.swap_enabled(self.old_enabled);
     }
 }
 
 /// Initialize vmbase logger with a given max logging level.
-pub fn init(max_level: LevelFilter) -> Result<(), SetLoggerError> {
-    // Safe because it only sets the global logger.
-    unsafe {
-        log::set_logger(&LOGGER)?;
-    }
-    log::set_max_level(max_level);
+pub(crate) fn init() -> Result<(), SetLoggerError> {
+    log::set_logger(&LOGGER)?;
     Ok(())
 }
 

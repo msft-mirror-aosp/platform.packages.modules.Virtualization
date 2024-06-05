@@ -19,10 +19,10 @@
 // which is then given to `DeviceMapper` to create a mapper device.
 
 use anyhow::{bail, Context, Result};
-use data_model::DataInit;
 use std::io::Write;
 use std::mem::size_of;
 use std::path::Path;
+use zerocopy::AsBytes;
 
 use crate::util::*;
 use crate::DmTargetSpec;
@@ -151,7 +151,7 @@ impl<'a> DmVerityTargetBuilder<'a> {
         };
 
         let root_digest = if let Some(root_digest) = self.root_digest {
-            hexstring_from(root_digest)
+            hex::encode(root_digest)
         } else {
             bail!("root digest is not set")
         };
@@ -159,7 +159,7 @@ impl<'a> DmVerityTargetBuilder<'a> {
         let salt = if self.salt.is_none() || self.salt.unwrap().is_empty() {
             "-".to_string() // Note. It's not an empty string!
         } else {
-            hexstring_from(self.salt.unwrap())
+            hex::encode(self.salt.unwrap())
         };
 
         // Step2: serialize the information according to the spec, which is ...
@@ -195,7 +195,7 @@ impl<'a> DmVerityTargetBuilder<'a> {
         header.next = aligned_size as u32;
 
         let mut buf = Vec::with_capacity(aligned_size);
-        buf.write_all(header.as_slice())?;
+        buf.write_all(header.as_bytes())?;
         buf.write_all(body.as_bytes())?;
         buf.write_all(vec![0; padding].as_slice())?;
         Ok(DmVerityTarget(buf.into_boxed_slice()))

@@ -19,6 +19,7 @@ mod atom;
 mod composite;
 mod crosvm;
 mod debug_config;
+mod dt_overlay;
 mod payload;
 mod selinux;
 
@@ -27,19 +28,25 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
 use anyhow::{bail, Context, Result};
 use binder::{BinderFeatures, ProcessState};
 use lazy_static::lazy_static;
-use log::{info, Level};
+use log::{info, LevelFilter};
 use rpcbinder::{FileDescriptorTransportMode, RpcServer};
-use std::os::unix::io::{FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, FromRawFd, OwnedFd, RawFd};
 use clap::Parser;
 use nix::fcntl::{fcntl, F_GETFD, F_SETFD, FdFlag};
-use nix::unistd::{Pid, Uid};
+use nix::unistd::{write, Pid, Uid};
 use std::os::unix::raw::{pid_t, uid_t};
 
 const LOG_TAG: &str = "virtmgr";
 
 lazy_static! {
+    static ref PID_CURRENT: Pid = Pid::this();
     static ref PID_PARENT: Pid = Pid::parent();
     static ref UID_CURRENT: Uid = Uid::current();
+}
+
+fn get_this_pid() -> pid_t {
+    // Return the process ID of this process.
+    PID_CURRENT.as_raw()
 }
 
 fn get_calling_pid() -> pid_t {
@@ -86,7 +93,7 @@ fn take_fd_ownership(raw_fd: RawFd, owned_fds: &mut Vec<RawFd>) -> Result<OwnedF
     }
     owned_fds.push(raw_fd);
 
-    // SAFETY - Initializing OwnedFd for a RawFd provided in cmdline arguments.
+    // SAFETY: Initializing OwnedFd for a RawFd provided in cmdline arguments.
     // We checked that the integer value corresponds to a valid FD and that this
     // is the first argument to claim its ownership.
     Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
@@ -107,8 +114,8 @@ fn main() {
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag(LOG_TAG)
-            .with_min_level(Level::Info)
-            .with_log_id(android_logger::LogId::System),
+            .with_max_level(LevelFilter::Info)
+            .with_log_buffer(android_logger::LogId::System),
     );
 
     check_vm_support().unwrap();
@@ -137,6 +144,8 @@ fn main() {
     info!("Started VirtualizationService RpcServer. Ready to accept connections");
 
     // Signal readiness to the caller by closing our end of the pipe.
+    write(ready_fd.as_fd(), "o".as_bytes())
+        .expect("Failed to write a single character through ready_fd");
     drop(ready_fd);
 
     server.join();

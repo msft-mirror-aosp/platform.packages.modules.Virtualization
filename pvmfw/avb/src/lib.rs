@@ -16,13 +16,12 @@
 
 #![cfg_attr(not(test), no_std)]
 
-mod descriptor;
+extern crate alloc;
+
 mod error;
 mod ops;
 mod partition;
-mod utils;
 mod verify;
 
-pub use descriptor::Digest;
-pub use error::AvbSlotVerifyError;
-pub use verify::{verify_payload, DebugLevel, VerifiedBootData};
+pub use error::PvmfwVerifyError;
+pub use verify::{verify_payload, Capability, DebugLevel, Digest, VerifiedBootData};

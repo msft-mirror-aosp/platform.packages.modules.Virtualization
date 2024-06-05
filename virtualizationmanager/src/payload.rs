@@ -41,11 +41,6 @@ use std::process::Command;
 use std::time::SystemTime;
 use vmconfig::open_parcel_file;
 
-/// The list of APEXes which microdroid requires.
-// TODO(b/192200378) move this to microdroid.json?
-const MICRODROID_REQUIRED_APEXES: [&str; 1] = ["com.android.os.statsd"];
-const MICRODROID_REQUIRED_APEXES_DEBUG: [&str; 1] = ["com.android.adbd"];
-
 const APEX_INFO_LIST_PATH: &str = "/apex/apex-info-list.xml";
 
 const PACKAGE_MANAGER_NATIVE_SERVICE: &str = "package_native";
@@ -81,6 +76,9 @@ struct ApexInfo {
 
     #[serde(rename = "provideSharedApexLibs")]
     provide_shared_apex_libs: bool,
+
+    #[serde(rename = "preinstalledModulePath")]
+    preinstalled_path: PathBuf,
 }
 
 impl ApexInfoList {
@@ -194,12 +192,13 @@ fn make_metadata_file(
     temporary_directory: &Path,
 ) -> Result<ParcelFileDescriptor> {
     let payload_metadata = match &app_config.payload {
-        Payload::PayloadConfig(payload_config) => PayloadMetadata::config(PayloadConfig {
+        Payload::PayloadConfig(payload_config) => PayloadMetadata::Config(PayloadConfig {
             payload_binary_name: payload_config.payloadBinaryName.clone(),
-            ..Default::default()
+            extra_apk_count: payload_config.extraApks.len().try_into()?,
+            special_fields: Default::default(),
         }),
         Payload::ConfigPath(config_path) => {
-            PayloadMetadata::config_path(format!("/mnt/apk/{}", config_path))
+            PayloadMetadata::ConfigPath(format!("/mnt/apk/{}", config_path))
         }
     };
 
@@ -260,10 +259,11 @@ fn make_payload_disk(
     debug_config: &DebugConfig,
     apk_file: File,
     idsig_file: File,
+    extra_apk_files: Vec<File>,
     vm_payload_config: &VmPayloadConfig,
     temporary_directory: &Path,
 ) -> Result<DiskImage> {
-    if vm_payload_config.extra_apks.len() != app_config.extraIdsigs.len() {
+    if extra_apk_files.len() != app_config.extraIdsigs.len() {
         bail!(
             "payload config has {} apks, but app config has {} idsigs",
             vm_payload_config.extra_apks.len(),
@@ -275,7 +275,7 @@ fn make_payload_disk(
     let apex_list = pm.get_apex_list(vm_payload_config.prefer_staged)?;
 
     // collect APEXes from config
-    let mut apex_infos = collect_apex_infos(&apex_list, &vm_payload_config.apexes, debug_config);
+    let mut apex_infos = collect_apex_infos(&apex_list, &vm_payload_config.apexes, debug_config)?;
 
     // Pass sorted list of apexes. Sorting key shouldn't use `path` because it will change after
     // reboot with prefer_staged. `last_update_seconds` is added to distinguish "samegrade"
@@ -311,26 +311,23 @@ fn make_payload_disk(
     });
 
     // we've already checked that extra_apks and extraIdsigs are in the same size.
-    let extra_apks = &vm_payload_config.extra_apks;
     let extra_idsigs = &app_config.extraIdsigs;
-    for (i, (extra_apk, extra_idsig)) in extra_apks.iter().zip(extra_idsigs.iter()).enumerate() {
+    for (i, (extra_apk_file, extra_idsig)) in
+        extra_apk_files.into_iter().zip(extra_idsigs.iter()).enumerate()
+    {
         partitions.push(Partition {
-            label: format!("extra-apk-{}", i),
-            image: Some(ParcelFileDescriptor::new(
-                File::open(PathBuf::from(&extra_apk.path)).with_context(|| {
-                    format!("Failed to open the extra apk #{} {}", i, extra_apk.path)
-                })?,
-            )),
+            label: format!("extra-apk-{i}"),
+            image: Some(ParcelFileDescriptor::new(extra_apk_file)),
             writable: false,
         });
 
         partitions.push(Partition {
-            label: format!("extra-idsig-{}", i),
+            label: format!("extra-idsig-{i}"),
             image: Some(ParcelFileDescriptor::new(
                 extra_idsig
                     .as_ref()
                     .try_clone()
-                    .with_context(|| format!("Failed to clone the extra idsig #{}", i))?,
+                    .with_context(|| format!("Failed to clone the extra idsig #{i}"))?,
             )),
             writable: false,
         });
@@ -376,32 +373,58 @@ fn find_apex_names_in_classpath(classpath_vars: &str) -> Result<HashSet<String>>
     Ok(apexes)
 }
 
+fn check_apexes_are_from_allowed_partitions(requested_apexes: &Vec<&ApexInfo>) -> Result<()> {
+    const ALLOWED_PARTITIONS: [&str; 2] = ["/system", "/system_ext"];
+    for apex in requested_apexes {
+        if !ALLOWED_PARTITIONS.iter().any(|p| apex.preinstalled_path.starts_with(p)) {
+            bail!("Non-system APEX {} is not supported in Microdroid", apex.name);
+        }
+    }
+    Ok(())
+}
+
 // Collect ApexInfos from VM config
 fn collect_apex_infos<'a>(
     apex_list: &'a ApexInfoList,
     apex_configs: &[ApexConfig],
     debug_config: &DebugConfig,
-) -> Vec<&'a ApexInfo> {
-    let mut additional_apexes: Vec<&str> = MICRODROID_REQUIRED_APEXES.to_vec();
-    if debug_config.should_include_debug_apexes() {
-        additional_apexes.extend(MICRODROID_REQUIRED_APEXES_DEBUG.to_vec());
-    }
+) -> Result<Vec<&'a ApexInfo>> {
+    // APEXes which any Microdroid VM needs.
+    // TODO(b/192200378) move this to microdroid.json?
+    let required_apexes: &[_] =
+        if debug_config.should_include_debug_apexes() { &["com.android.adbd"] } else { &[] };
 
-    apex_list
+    let apex_infos = apex_list
         .list
         .iter()
         .filter(|ai| {
             apex_configs.iter().any(|cfg| ai.matches(cfg) && ai.is_active)
-                || additional_apexes.iter().any(|name| name == &ai.name && ai.is_active)
+                || required_apexes.iter().any(|name| name == &ai.name && ai.is_active)
                 || ai.provide_shared_apex_libs
         })
-        .collect()
+        .collect();
+
+    check_apexes_are_from_allowed_partitions(&apex_infos)?;
+    Ok(apex_infos)
+}
+
+pub fn add_microdroid_vendor_image(vendor_image: File, vm_config: &mut VirtualMachineRawConfig) {
+    vm_config.disks.push(DiskImage {
+        image: None,
+        writable: false,
+        partitions: vec![Partition {
+            label: "microdroid-vendor".to_owned(),
+            image: Some(ParcelFileDescriptor::new(vendor_image)),
+            writable: false,
+        }],
+    })
 }
 
 pub fn add_microdroid_system_images(
     config: &VirtualMachineAppConfig,
     instance_file: File,
     storage_image: Option<File>,
+    os_name: &str,
     vm_config: &mut VirtualMachineRawConfig,
 ) -> Result<()> {
     let debug_suffix = match config.debugLevel {
@@ -409,7 +432,7 @@ pub fn add_microdroid_system_images(
         DebugLevel::FULL => "debuggable",
         _ => return Err(anyhow!("unsupported debug level: {:?}", config.debugLevel)),
     };
-    let initrd = format!("/apex/com.android.virt/etc/microdroid_initrd_{}.img", debug_suffix);
+    let initrd = format!("/apex/com.android.virt/etc/{os_name}_initrd_{debug_suffix}.img");
     vm_config.initrd = Some(open_parcel_file(Path::new(&initrd), false)?);
 
     let mut writable_partitions = vec![Partition {
@@ -435,12 +458,14 @@ pub fn add_microdroid_system_images(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // TODO: Fewer arguments
 pub fn add_microdroid_payload_images(
     config: &VirtualMachineAppConfig,
     debug_config: &DebugConfig,
     temporary_directory: &Path,
     apk_file: File,
     idsig_file: File,
+    extra_apk_files: Vec<File>,
     vm_payload_config: &VmPayloadConfig,
     vm_config: &mut VirtualMachineRawConfig,
 ) -> Result<()> {
@@ -449,6 +474,7 @@ pub fn add_microdroid_payload_images(
         debug_config,
         apk_file,
         idsig_file,
+        extra_apk_files,
         vm_payload_config,
         temporary_directory,
     )?);
@@ -459,6 +485,7 @@ pub fn add_microdroid_payload_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -476,41 +503,37 @@ export OTHER /foo/bar:/baz:/apex/second.valid.apex/:gibberish:"#;
     }
 
     #[test]
-    fn test_collect_apexes() {
-        let apex_info_list = ApexInfoList {
-            list: vec![
+    fn test_collect_apexes() -> Result<()> {
+        let apex_infos_for_test = [
+            (
+                "adbd",
                 ApexInfo {
-                    // 0
                     name: "com.android.adbd".to_string(),
                     path: PathBuf::from("adbd"),
-                    has_classpath_jar: false,
-                    last_update_seconds: 12345678,
-                    is_factory: true,
-                    is_active: true,
-                    ..Default::default()
-                },
-                ApexInfo {
-                    // 1
-                    name: "com.android.os.statsd".to_string(),
-                    path: PathBuf::from("statsd"),
+                    preinstalled_path: PathBuf::from("/system/adbd"),
                     has_classpath_jar: false,
                     last_update_seconds: 12345678,
                     is_factory: true,
                     is_active: false,
                     ..Default::default()
                 },
+            ),
+            (
+                "adbd_updated",
                 ApexInfo {
-                    // 2
-                    name: "com.android.os.statsd".to_string(),
-                    path: PathBuf::from("statsd/updated"),
+                    name: "com.android.adbd".to_string(),
+                    path: PathBuf::from("adbd"),
+                    preinstalled_path: PathBuf::from("/system/adbd"),
                     has_classpath_jar: false,
                     last_update_seconds: 12345678 + 1,
                     is_factory: false,
                     is_active: true,
                     ..Default::default()
                 },
+            ),
+            (
+                "no_classpath",
                 ApexInfo {
-                    // 3
                     name: "no_classpath".to_string(),
                     path: PathBuf::from("no_classpath"),
                     has_classpath_jar: false,
@@ -519,8 +542,10 @@ export OTHER /foo/bar:/baz:/apex/second.valid.apex/:gibberish:"#;
                     is_active: true,
                     ..Default::default()
                 },
+            ),
+            (
+                "has_classpath",
                 ApexInfo {
-                    // 4
                     name: "has_classpath".to_string(),
                     path: PathBuf::from("has_classpath"),
                     has_classpath_jar: true,
@@ -529,74 +554,148 @@ export OTHER /foo/bar:/baz:/apex/second.valid.apex/:gibberish:"#;
                     is_active: false,
                     ..Default::default()
                 },
+            ),
+            (
+                "has_classpath_updated",
                 ApexInfo {
-                    // 5
                     name: "has_classpath".to_string(),
                     path: PathBuf::from("has_classpath/updated"),
+                    preinstalled_path: PathBuf::from("/system/has_classpath"),
                     has_classpath_jar: true,
                     last_update_seconds: 87654321 + 1,
                     is_factory: false,
                     is_active: true,
                     ..Default::default()
                 },
+            ),
+            (
+                "apex-foo",
                 ApexInfo {
-                    // 6
                     name: "apex-foo".to_string(),
                     path: PathBuf::from("apex-foo"),
+                    preinstalled_path: PathBuf::from("/system/apex-foo"),
                     has_classpath_jar: false,
                     last_update_seconds: 87654321,
                     is_factory: true,
                     is_active: false,
                     ..Default::default()
                 },
+            ),
+            (
+                "apex-foo-updated",
                 ApexInfo {
-                    // 7
                     name: "apex-foo".to_string(),
                     path: PathBuf::from("apex-foo/updated"),
+                    preinstalled_path: PathBuf::from("/system/apex-foo"),
                     has_classpath_jar: false,
                     last_update_seconds: 87654321 + 1,
                     is_factory: false,
                     is_active: true,
                     ..Default::default()
                 },
+            ),
+            (
+                "sharedlibs",
                 ApexInfo {
-                    // 8
                     name: "sharedlibs".to_string(),
                     path: PathBuf::from("apex-foo"),
+                    preinstalled_path: PathBuf::from("/system/apex-foo"),
                     last_update_seconds: 87654321,
                     is_factory: true,
                     provide_shared_apex_libs: true,
                     ..Default::default()
                 },
+            ),
+            (
+                "sharedlibs-updated",
                 ApexInfo {
-                    // 9
                     name: "sharedlibs".to_string(),
                     path: PathBuf::from("apex-foo/updated"),
+                    preinstalled_path: PathBuf::from("/system/apex-foo"),
                     last_update_seconds: 87654321 + 1,
                     is_active: true,
                     provide_shared_apex_libs: true,
                     ..Default::default()
                 },
-            ],
+            ),
+        ];
+        let apex_info_list = ApexInfoList {
+            list: apex_infos_for_test.iter().map(|(_, info)| info).cloned().collect(),
         };
+        let apex_info_map = HashMap::from(apex_infos_for_test);
         let apex_configs = vec![
             ApexConfig { name: "apex-foo".to_string() },
             ApexConfig { name: "{CLASSPATH}".to_string() },
         ];
         assert_eq!(
-            collect_apex_infos(&apex_info_list, &apex_configs, &DebugConfig::new(DebugLevel::FULL)),
+            collect_apex_infos(
+                &apex_info_list,
+                &apex_configs,
+                &DebugConfig::new_with_debug_level(DebugLevel::FULL)
+            )?,
             vec![
                 // Pass active/required APEXes
-                &apex_info_list.list[0],
-                &apex_info_list.list[2],
+                &apex_info_map["adbd_updated"],
                 // Pass active APEXes specified in the config
-                &apex_info_list.list[5],
-                &apex_info_list.list[7],
+                &apex_info_map["has_classpath_updated"],
+                &apex_info_map["apex-foo-updated"],
                 // Pass both preinstalled(inactive) and updated(active) for "sharedlibs" APEXes
-                &apex_info_list.list[8],
-                &apex_info_list.list[9],
+                &apex_info_map["sharedlibs"],
+                &apex_info_map["sharedlibs-updated"],
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_check_allowed_partitions_vendor_not_allowed() -> Result<()> {
+        let apex_info_list = ApexInfoList {
+            list: vec![ApexInfo {
+                name: "apex-vendor".to_string(),
+                path: PathBuf::from("apex-vendor"),
+                preinstalled_path: PathBuf::from("/vendor/apex-vendor"),
+                is_active: true,
+                ..Default::default()
+            }],
+        };
+        let apex_configs = vec![ApexConfig { name: "apex-vendor".to_string() }];
+
+        let ret = collect_apex_infos(
+            &apex_info_list,
+            &apex_configs,
+            &DebugConfig::new_with_debug_level(DebugLevel::NONE),
+        );
+        assert!(ret
+            .is_err_and(|ret| ret.to_string()
+                == "Non-system APEX apex-vendor is not supported in Microdroid"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_check_allowed_partitions_system_ext_allowed() -> Result<()> {
+        let apex_info_list = ApexInfoList {
+            list: vec![ApexInfo {
+                name: "apex-system_ext".to_string(),
+                path: PathBuf::from("apex-system_ext"),
+                preinstalled_path: PathBuf::from("/system_ext/apex-system_ext"),
+                is_active: true,
+                ..Default::default()
+            }],
+        };
+
+        let apex_configs = vec![ApexConfig { name: "apex-system_ext".to_string() }];
+
+        assert_eq!(
+            collect_apex_infos(
+                &apex_info_list,
+                &apex_configs,
+                &DebugConfig::new_with_debug_level(DebugLevel::NONE)
+            )?,
+            vec![&apex_info_list.list[0]]
+        );
+
+        Ok(())
     }
 
     #[test]

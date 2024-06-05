@@ -11,5 +11,8 @@ aidl_interface {
         java: {
             gen_rpc: true,
         },
+        rust: {
+            enabled: true,
+        },
     },
 }

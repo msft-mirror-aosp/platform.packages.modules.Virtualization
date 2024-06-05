@@ -14,91 +14,34 @@
 
 //! Exception handlers.
 
-use crate::{helpers::page_4kb_of, read_sysreg};
-use core::fmt;
-use vmbase::console;
-use vmbase::logger;
-use vmbase::{eprintln, power::reboot};
+use vmbase::{
+    eprintln,
+    exceptions::{ArmException, Esr, HandleExceptionError},
+    logger,
+    memory::{handle_permission_fault, handle_translation_fault},
+    power::reboot,
+    read_sysreg,
+};
 
-const UART_PAGE: usize = page_4kb_of(console::BASE_ADDRESS);
-
-#[derive(Debug)]
-enum HandleExceptionError {
-    UnknownException,
-}
-
-impl fmt::Display for HandleExceptionError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::UnknownException => write!(f, "An unknown exception occurred, not handled."),
-        }
+fn handle_exception(exception: &ArmException) -> Result<(), HandleExceptionError> {
+    // Handle all translation faults on both read and write, and MMIO guard map
+    // flagged invalid pages or blocks that caused the exception.
+    // Handle permission faults for DBM flagged entries, and flag them as dirty on write.
+    match exception.esr {
+        Esr::DataAbortTranslationFault => handle_translation_fault(exception.far),
+        Esr::DataAbortPermissionFault => handle_permission_fault(exception.far),
+        _ => Err(HandleExceptionError::UnknownException),
     }
-}
-
-#[derive(Debug, PartialEq, Copy, Clone)]
-enum Esr {
-    DataAbortTranslationFault,
-    DataAbortPermissionFault,
-    DataAbortSyncExternalAbort,
-    Unknown(usize),
-}
-
-impl Esr {
-    const EXT_DABT_32BIT: usize = 0x96000010;
-    const TRANSL_FAULT_BASE_32BIT: usize = 0x96000004;
-    const TRANSL_FAULT_ISS_MASK_32BIT: usize = !0x143;
-    const PERM_FAULT_BASE_32BIT: usize = 0x9600004C;
-    const PERM_FAULT_ISS_MASK_32BIT: usize = !0x103;
-}
-
-impl From<usize> for Esr {
-    fn from(esr: usize) -> Self {
-        if esr == Self::EXT_DABT_32BIT {
-            Self::DataAbortSyncExternalAbort
-        } else if esr & Self::TRANSL_FAULT_ISS_MASK_32BIT == Self::TRANSL_FAULT_BASE_32BIT {
-            Self::DataAbortTranslationFault
-        } else if esr & Self::PERM_FAULT_ISS_MASK_32BIT == Self::PERM_FAULT_BASE_32BIT {
-            Self::DataAbortPermissionFault
-        } else {
-            Self::Unknown(esr)
-        }
-    }
-}
-
-impl fmt::Display for Esr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::DataAbortSyncExternalAbort => write!(f, "Synchronous external abort"),
-            Self::DataAbortTranslationFault => write!(f, "Translation fault"),
-            Self::DataAbortPermissionFault => write!(f, "Permission fault"),
-            Self::Unknown(v) => write!(f, "Unknown exception esr={v:#08x}"),
-        }
-    }
-}
-
-fn handle_exception(_esr: Esr, _far: usize) -> Result<(), HandleExceptionError> {
-    Err(HandleExceptionError::UnknownException)
-}
-
-#[inline]
-fn handling_uart_exception(esr: Esr, far: usize) -> bool {
-    esr == Esr::DataAbortSyncExternalAbort && page_4kb_of(far) == UART_PAGE
 }
 
 #[no_mangle]
-extern "C" fn sync_exception_current(_elr: u64, _spsr: u64) {
+extern "C" fn sync_exception_current(elr: u64, _spsr: u64) {
     // Disable logging in exception handler to prevent unsafe writes to UART.
     let _guard = logger::suppress();
-    let esr: Esr = read_sysreg!("esr_el1").into();
-    let far = read_sysreg!("far_el1");
 
-    if let Err(e) = handle_exception(esr, far) {
-        // Don't print to the UART if we are handling an exception it could raise.
-        if !handling_uart_exception(esr, far) {
-            eprintln!("sync_exception_current");
-            eprintln!("{e}");
-            eprintln!("{esr}, far={far:#08x}");
-        }
+    let exception = ArmException::from_el1_regs();
+    if let Err(e) = handle_exception(&exception) {
+        exception.print("sync_exception_current", e, elr);
         reboot()
     }
 }

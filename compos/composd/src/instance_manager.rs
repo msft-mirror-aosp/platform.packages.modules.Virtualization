@@ -82,15 +82,14 @@ fn new_vm_parameters() -> Result<VmParameters> {
     // a system property. Start the VM with all CPUs and assume the guest will start a suitable
     // number of dex2oat threads.
     let cpu_topology = VmCpuTopology::MatchHost;
-    let task_profiles = vec!["SCHED_SP_COMPUTE".to_string()];
     let memory_mib = Some(compos_memory_mib()?);
-    Ok(VmParameters { cpu_topology, task_profiles, memory_mib, ..Default::default() })
+    Ok(VmParameters { cpu_topology, memory_mib, ..Default::default() })
 }
 
 fn compos_memory_mib() -> Result<i32> {
     // Enough memory to complete odrefresh in the VM, for older versions of ART that don't set the
     // property explicitly.
-    const DEFAULT_MEMORY_MIB: u32 = 400;
+    const DEFAULT_MEMORY_MIB: u32 = 600;
 
     let art_requested_mib =
         read_property("composd.vm.art.memory_mib.config")?.unwrap_or(DEFAULT_MEMORY_MIB);

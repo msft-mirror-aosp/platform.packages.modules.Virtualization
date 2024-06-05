@@ -93,16 +93,19 @@ public class VmShareServiceImpl extends Service {
         }
     }
 
-    public ITestService startVm(VirtualMachineDescriptor vmDesc) throws Exception {
+    public void importVm(VirtualMachineDescriptor vmDesc) throws Exception {
         // Cleanup VM left from the previous test.
         deleteVm();
-
-        VirtualMachineManager vmm = getSystemService(VirtualMachineManager.class);
 
         // Add random uuid to make sure that different tests that bind to this service don't trip
         // over each other.
         String vmName = "imported_vm" + UUID.randomUUID();
 
+        VirtualMachineManager vmm = getSystemService(VirtualMachineManager.class);
+        mVirtualMachine = vmm.importFromDescriptor(vmName, vmDesc);
+    }
+
+    public ITestService startVm() throws Exception {
         final CountDownLatch latch = new CountDownLatch(1);
         VirtualMachineCallback callback =
                 new VirtualMachineCallback() {
@@ -134,10 +137,9 @@ public class VmShareServiceImpl extends Service {
                     }
                 };
 
-        mVirtualMachine = vmm.importFromDescriptor(vmName, vmDesc);
         mVirtualMachine.setCallback(getMainExecutor(), callback);
 
-        Log.i(TAG, "Starting VM " + vmName);
+        Log.i(TAG, "Starting VM " + mVirtualMachine.getName());
         mVirtualMachine.run();
         if (!latch.await(1, TimeUnit.MINUTES)) {
             throw new TimeoutException("Timed out starting VM");
@@ -145,21 +147,31 @@ public class VmShareServiceImpl extends Service {
 
         Log.i(
                 TAG,
-                "Payload is ready, connecting to the vsock service at port "
-                        + ITestService.SERVICE_PORT);
+                "Payload is ready, connecting to the vsock service at port " + ITestService.PORT);
         ITestService testService =
                 ITestService.Stub.asInterface(
-                        mVirtualMachine.connectToVsockServer(ITestService.SERVICE_PORT));
+                        mVirtualMachine.connectToVsockServer(ITestService.PORT));
         return new RemoteTestServiceDelegate(testService);
     }
 
     final class ServiceImpl extends IVmShareTestService.Stub {
 
         @Override
-        public ITestService startVm(VirtualMachineDescriptor vmDesc) {
+        public void importVm(VirtualMachineDescriptor vmDesc) {
+            Log.i(TAG, "importVm binder call received");
+            try {
+                VmShareServiceImpl.this.importVm(vmDesc);
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to importVm", e);
+                throw new IllegalStateException("Failed to importVm", e);
+            }
+        }
+
+        @Override
+        public ITestService startVm() {
             Log.i(TAG, "startVm binder call received");
             try {
-                return VmShareServiceImpl.this.startVm(vmDesc);
+                return VmShareServiceImpl.this.startVm();
             } catch (Exception e) {
                 Log.e(TAG, "Failed to startVm", e);
                 throw new IllegalStateException("Failed to startVm", e);
@@ -221,6 +233,11 @@ public class VmShareServiceImpl extends Service {
         }
 
         @Override
+        public int getUid() throws RemoteException {
+            throw new UnsupportedOperationException("Not supported");
+        }
+
+        @Override
         public void writeToFile(String content, String path) throws RemoteException {
             throw new UnsupportedOperationException("Not supported");
         }
@@ -242,6 +259,11 @@ public class VmShareServiceImpl extends Service {
 
         @Override
         public void requestCallback(IAppCallback appCallback) {
+            throw new UnsupportedOperationException("Not supported");
+        }
+
+        @Override
+        public String readLineFromConsole() {
             throw new UnsupportedOperationException("Not supported");
         }
 

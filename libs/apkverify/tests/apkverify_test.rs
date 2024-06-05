@@ -14,10 +14,16 @@
  * limitations under the License.
  */
 
+use anyhow::Result;
 use apkverify::{
-    get_apk_digest, get_public_key_der, testing::assert_contains, verify, SignatureAlgorithmID,
+    extract_signed_data, get_apk_digest, testing::assert_contains, verify, SignatureAlgorithmID,
 };
+use apkzip::zip_sections;
+use byteorder::{LittleEndian, ReadBytesExt};
 use log::info;
+use openssl::x509::X509;
+use std::fmt::Write;
+use std::io::{Seek, SeekFrom};
 use std::{fs, matches, path::Path};
 
 const KEY_NAMES_DSA: &[&str] = &["1024", "2048", "3072"];
@@ -31,9 +37,31 @@ fn setup() {
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag("apkverify_test")
-            .with_min_level(log::Level::Info),
+            .with_max_level(log::LevelFilter::Info),
     );
     info!("Test starting");
+}
+
+#[test]
+fn test_zip_sections_with_apk() {
+    let mut reader = fs::File::open("tests/data/v3-only-with-stamp.apk").unwrap();
+    let sections = zip_sections(&mut reader).unwrap();
+
+    // Checks Central directory.
+    assert_eq!(
+        sections.central_directory_offset + sections.central_directory_size,
+        sections.eocd_offset
+    );
+
+    // Checks EOCD.
+    const EOCD_SIGNATURE: u32 = 0x06054b50;
+
+    reader.seek(SeekFrom::Start(sections.eocd_offset as u64)).unwrap();
+    assert_eq!(reader.read_u32::<LittleEndian>().unwrap(), EOCD_SIGNATURE);
+    assert_eq!(
+        reader.metadata().unwrap().len(),
+        (sections.eocd_offset + sections.eocd_size) as u64
+    );
 }
 
 #[test]
@@ -260,20 +288,28 @@ fn validate_apk<P: AsRef<Path>>(apk_path: P, expected_algorithm_id: SignatureAlg
 /// * public key extracted from apk without verification
 /// * expected public key from the corresponding .der file
 fn validate_apk_public_key<P: AsRef<Path>>(apk_path: P) {
-    let public_key_from_verification = verify(&apk_path, SDK_INT);
-    let public_key_from_verification =
-        public_key_from_verification.expect("Error in verification result");
+    let signed_data_from_verification =
+        verify(&apk_path, SDK_INT).expect("Error in verification result");
+    let cert_from_verification = signed_data_from_verification.first_certificate_der().unwrap();
+    let public_key_from_verification = public_key_der_from_cert(cert_from_verification).unwrap();
 
     let expected_public_key_path = format!("{}.der", apk_path.as_ref().to_str().unwrap());
     assert_bytes_eq_to_data_in_file(&public_key_from_verification, expected_public_key_path);
 
-    let public_key_from_apk = get_public_key_der(&apk_path, SDK_INT);
-    let public_key_from_apk =
-        public_key_from_apk.expect("Error when extracting public key from apk");
+    let signed_data_from_apk = extract_signed_data(&apk_path, SDK_INT)
+        .expect("Error when extracting signed data from apk");
+    let cert_from_apk = signed_data_from_apk.first_certificate_der().unwrap();
+    // If the two certficiates are byte for byte identical (which they should be), then so are
+    // the public keys embedded in them.
     assert_eq!(
-        public_key_from_verification, public_key_from_apk,
-        "Public key extracted directly from apk does not match the public key from verification."
+        cert_from_verification, cert_from_apk,
+        "Certificate extracted directly from apk does not match the certificate from verification."
     );
+}
+
+fn public_key_der_from_cert(cert_der: &[u8]) -> Result<Vec<u8>> {
+    let cert = X509::from_der(cert_der)?;
+    Ok(cert.public_key()?.public_key_to_der()?)
 }
 
 /// Validates that the following apk_digest are equal:
@@ -284,7 +320,7 @@ fn validate_apk_digest<P: AsRef<Path>>(apk_path: P, expected_algorithm_id: Signa
     let apk = fs::File::open(&apk_path).expect("Unabled to open apk file");
 
     let (verified_algorithm_id, verified_digest) =
-        get_apk_digest(&apk, SDK_INT, /*verify=*/ true)
+        get_apk_digest(&apk, SDK_INT, /* verify= */ true)
             .expect("Error when extracting apk digest with verification.");
 
     assert_eq!(expected_algorithm_id, verified_algorithm_id);
@@ -292,7 +328,7 @@ fn validate_apk_digest<P: AsRef<Path>>(apk_path: P, expected_algorithm_id: Signa
     assert_bytes_eq_to_data_in_file(&verified_digest, expected_digest_path);
 
     let (unverified_algorithm_id, unverified_digest) =
-        get_apk_digest(&apk, SDK_INT, /*verify=*/ false)
+        get_apk_digest(&apk, SDK_INT, /* verify= */ false)
             .expect("Error when extracting apk digest without verification.");
     assert_eq!(expected_algorithm_id, unverified_algorithm_id);
     assert_eq!(verified_digest, unverified_digest);
@@ -305,7 +341,10 @@ fn assert_bytes_eq_to_data_in_file<P: AsRef<Path> + std::fmt::Display>(
     assert!(
         fs::metadata(&expected_data_path).is_ok(),
         "File does not exist. You can re-create it with:\n$ echo -en {} > {}\n",
-        bytes_data.iter().map(|b| format!("\\\\x{:02x}", b)).collect::<String>(),
+        bytes_data.iter().fold(String::new(), |mut output, b| {
+            let _ = write!(output, "\\\\x{:02x}", b);
+            output
+        }),
         expected_data_path
     );
     let expected_data = fs::read(&expected_data_path).unwrap();

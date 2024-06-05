@@ -17,16 +17,23 @@
 mod utils;
 
 use anyhow::{anyhow, Result};
+use avb::{DescriptorError, SlotVerifyError};
 use avb_bindgen::{AvbFooter, AvbVBMetaImageHeader};
-use pvmfw_avb::{verify_payload, AvbSlotVerifyError, DebugLevel, VerifiedBootData};
+use pvmfw_avb::{verify_payload, Capability, DebugLevel, PvmfwVerifyError, VerifiedBootData};
 use std::{fs, mem::size_of, ptr};
 use utils::*;
 
 const TEST_IMG_WITH_ONE_HASHDESC_PATH: &str = "test_image_with_one_hashdesc.img";
+const TEST_IMG_WITH_ROLLBACK_INDEX_5: &str = "test_image_with_rollback_index_5.img";
 const TEST_IMG_WITH_PROP_DESC_PATH: &str = "test_image_with_prop_desc.img";
+const TEST_IMG_WITH_SERVICE_VM_PROP_PATH: &str = "test_image_with_service_vm_prop.img";
+const TEST_IMG_WITH_UNKNOWN_VM_TYPE_PROP_PATH: &str = "test_image_with_unknown_vm_type_prop.img";
+const TEST_IMG_WITH_MULTIPLE_PROPS_PATH: &str = "test_image_with_multiple_props.img";
+const TEST_IMG_WITH_DUPLICATED_CAP_PATH: &str = "test_image_with_duplicated_capability.img";
 const TEST_IMG_WITH_NON_INITRD_HASHDESC_PATH: &str = "test_image_with_non_initrd_hashdesc.img";
 const TEST_IMG_WITH_INITRD_AND_NON_INITRD_DESC_PATH: &str =
     "test_image_with_initrd_and_non_initrd_desc.img";
+const TEST_IMG_WITH_MULTIPLE_CAPABILITIES: &str = "test_image_with_multiple_capabilities.img";
 const UNSIGNED_TEST_IMG_PATH: &str = "unsigned_test.img";
 
 const RANDOM_FOOTER_POS: usize = 30;
@@ -56,7 +63,7 @@ fn payload_expecting_no_initrd_passes_verification_with_no_initrd() -> Result<()
     let public_key = load_trusted_public_key()?;
     let verified_boot_data = verify_payload(
         &fs::read(TEST_IMG_WITH_ONE_HASHDESC_PATH)?,
-        /*initrd=*/ None,
+        /* initrd= */ None,
         &public_key,
     )
     .map_err(|e| anyhow!("Verification failed. Error: {}", e))?;
@@ -67,6 +74,8 @@ fn payload_expecting_no_initrd_passes_verification_with_no_initrd() -> Result<()
         kernel_digest,
         initrd_digest: None,
         public_key: &public_key,
+        capabilities: vec![],
+        rollback_index: 0,
     };
     assert_eq!(expected_boot_data, verified_boot_data);
 
@@ -77,9 +86,9 @@ fn payload_expecting_no_initrd_passes_verification_with_no_initrd() -> Result<()
 fn payload_with_non_initrd_descriptor_fails_verification_with_no_initrd() -> Result<()> {
     assert_payload_verification_fails(
         &fs::read(TEST_IMG_WITH_NON_INITRD_HASHDESC_PATH)?,
-        /*initrd=*/ None,
+        /* initrd= */ None,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::InvalidMetadata,
+        PvmfwVerifyError::InvalidDescriptors(DescriptorError::InvalidContents),
     )
 }
 
@@ -89,7 +98,61 @@ fn payload_with_non_initrd_descriptor_fails_verification_with_initrd() -> Result
         &fs::read(TEST_IMG_WITH_INITRD_AND_NON_INITRD_DESC_PATH)?,
         &load_latest_initrd_normal()?,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::InvalidMetadata,
+        PvmfwVerifyError::InvalidDescriptors(DescriptorError::InvalidContents),
+    )
+}
+
+#[test]
+fn payload_expecting_no_initrd_passes_verification_with_service_vm_prop() -> Result<()> {
+    let public_key = load_trusted_public_key()?;
+    let verified_boot_data = verify_payload(
+        &fs::read(TEST_IMG_WITH_SERVICE_VM_PROP_PATH)?,
+        /* initrd= */ None,
+        &public_key,
+    )
+    .map_err(|e| anyhow!("Verification failed. Error: {}", e))?;
+
+    let kernel_digest = hash(&[&hex::decode("2131")?, &fs::read(UNSIGNED_TEST_IMG_PATH)?]);
+    let expected_boot_data = VerifiedBootData {
+        debug_level: DebugLevel::None,
+        kernel_digest,
+        initrd_digest: None,
+        public_key: &public_key,
+        capabilities: vec![Capability::RemoteAttest],
+        rollback_index: 0,
+    };
+    assert_eq!(expected_boot_data, verified_boot_data);
+
+    Ok(())
+}
+
+#[test]
+fn payload_with_unknown_vm_type_fails_verification_with_no_initrd() -> Result<()> {
+    assert_payload_verification_fails(
+        &fs::read(TEST_IMG_WITH_UNKNOWN_VM_TYPE_PROP_PATH)?,
+        /* initrd= */ None,
+        &load_trusted_public_key()?,
+        PvmfwVerifyError::UnknownVbmetaProperty,
+    )
+}
+
+#[test]
+fn payload_with_multiple_props_fails_verification_with_no_initrd() -> Result<()> {
+    assert_payload_verification_fails(
+        &fs::read(TEST_IMG_WITH_MULTIPLE_PROPS_PATH)?,
+        /* initrd= */ None,
+        &load_trusted_public_key()?,
+        PvmfwVerifyError::InvalidDescriptors(DescriptorError::InvalidContents),
+    )
+}
+
+#[test]
+fn payload_with_duplicated_capability_fails_verification_with_no_initrd() -> Result<()> {
+    assert_payload_verification_fails(
+        &fs::read(TEST_IMG_WITH_DUPLICATED_CAP_PATH)?,
+        /* initrd= */ None,
+        &load_trusted_public_key()?,
+        SlotVerifyError::InvalidMetadata.into(),
     )
 }
 
@@ -97,9 +160,9 @@ fn payload_with_non_initrd_descriptor_fails_verification_with_initrd() -> Result
 fn payload_with_prop_descriptor_fails_verification_with_no_initrd() -> Result<()> {
     assert_payload_verification_fails(
         &fs::read(TEST_IMG_WITH_PROP_DESC_PATH)?,
-        /*initrd=*/ None,
+        /* initrd= */ None,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::InvalidMetadata,
+        PvmfwVerifyError::UnknownVbmetaProperty,
     )
 }
 
@@ -107,9 +170,9 @@ fn payload_with_prop_descriptor_fails_verification_with_no_initrd() -> Result<()
 fn payload_expecting_initrd_fails_verification_with_no_initrd() -> Result<()> {
     assert_payload_verification_fails(
         &load_latest_signed_kernel()?,
-        /*initrd=*/ None,
+        /* initrd= */ None,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::InvalidMetadata,
+        SlotVerifyError::InvalidMetadata.into(),
     )
 }
 
@@ -118,8 +181,8 @@ fn payload_with_empty_public_key_fails_verification() -> Result<()> {
     assert_payload_verification_with_initrd_fails(
         &load_latest_signed_kernel()?,
         &load_latest_initrd_normal()?,
-        /*trusted_public_key=*/ &[0u8; 0],
-        AvbSlotVerifyError::PublicKeyRejected,
+        /* trusted_public_key= */ &[0u8; 0],
+        SlotVerifyError::PublicKeyRejected.into(),
     )
 }
 
@@ -128,8 +191,8 @@ fn payload_with_an_invalid_public_key_fails_verification() -> Result<()> {
     assert_payload_verification_with_initrd_fails(
         &load_latest_signed_kernel()?,
         &load_latest_initrd_normal()?,
-        /*trusted_public_key=*/ &[0u8; 512],
-        AvbSlotVerifyError::PublicKeyRejected,
+        /* trusted_public_key= */ &[0u8; 512],
+        SlotVerifyError::PublicKeyRejected.into(),
     )
 }
 
@@ -139,7 +202,7 @@ fn payload_with_a_different_valid_public_key_fails_verification() -> Result<()> 
         &load_latest_signed_kernel()?,
         &load_latest_initrd_normal()?,
         &fs::read(PUBLIC_KEY_RSA2048_PATH)?,
-        AvbSlotVerifyError::PublicKeyRejected,
+        SlotVerifyError::PublicKeyRejected.into(),
     )
 }
 
@@ -147,9 +210,9 @@ fn payload_with_a_different_valid_public_key_fails_verification() -> Result<()> 
 fn payload_with_an_invalid_initrd_fails_verification() -> Result<()> {
     assert_payload_verification_with_initrd_fails(
         &load_latest_signed_kernel()?,
-        /*initrd=*/ &fs::read(UNSIGNED_TEST_IMG_PATH)?,
+        /* initrd= */ &fs::read(UNSIGNED_TEST_IMG_PATH)?,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::Verification,
+        SlotVerifyError::Verification(None).into(),
     )
 }
 
@@ -159,7 +222,7 @@ fn unsigned_kernel_fails_verification() -> Result<()> {
         &fs::read(UNSIGNED_TEST_IMG_PATH)?,
         &load_latest_initrd_normal()?,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::Io,
+        SlotVerifyError::Io.into(),
     )
 }
 
@@ -172,7 +235,7 @@ fn tampered_kernel_fails_verification() -> Result<()> {
         &kernel,
         &load_latest_initrd_normal()?,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::Verification,
+        SlotVerifyError::Verification(None).into(),
     )
 }
 
@@ -183,10 +246,15 @@ fn kernel_footer_with_vbmeta_offset_overwritten_fails_verification() -> Result<(
     let total_len = kernel.len() as u64;
     let footer = extract_avb_footer(&kernel)?;
     assert!(footer.vbmeta_offset < total_len);
+    // TODO: use core::mem::offset_of once stable.
+    let footer_addr = ptr::addr_of!(footer) as *const u8;
     let vbmeta_offset_addr = ptr::addr_of!(footer.vbmeta_offset) as *const u8;
-    // SAFETY: It is safe as both raw pointers `vbmeta_offset_addr` and `footer` are not null.
     let vbmeta_offset_start =
-        unsafe { vbmeta_offset_addr.offset_from(ptr::addr_of!(footer) as *const u8) };
+        // SAFETY:
+        // - both raw pointers `vbmeta_offset_addr` and `footer_addr` are not null;
+        // - they are both derived from the `footer` object;
+        // - the offset is known from the struct definition to be a small positive number of bytes.
+        unsafe { vbmeta_offset_addr.offset_from(footer_addr) };
     let footer_start = kernel.len() - size_of::<AvbFooter>();
     let vbmeta_offset_start = footer_start + usize::try_from(vbmeta_offset_start)?;
 
@@ -205,7 +273,7 @@ fn kernel_footer_with_vbmeta_offset_overwritten_fails_verification() -> Result<(
             &kernel,
             &load_latest_initrd_normal()?,
             &load_trusted_public_key()?,
-            AvbSlotVerifyError::Io,
+            SlotVerifyError::Io.into(),
         )?;
     }
     Ok(())
@@ -221,7 +289,7 @@ fn tampered_kernel_footer_fails_verification() -> Result<()> {
         &kernel,
         &load_latest_initrd_normal()?,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::InvalidMetadata,
+        SlotVerifyError::InvalidMetadata.into(),
     )
 }
 
@@ -234,7 +302,7 @@ fn extended_initrd_fails_verification() -> Result<()> {
         &load_latest_signed_kernel()?,
         &initrd,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::Verification,
+        SlotVerifyError::Verification(None).into(),
     )
 }
 
@@ -250,7 +318,7 @@ fn tampered_vbmeta_fails_verification() -> Result<()> {
         &kernel,
         &load_latest_initrd_normal()?,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::InvalidMetadata,
+        SlotVerifyError::InvalidMetadata.into(),
     )
 }
 
@@ -273,13 +341,13 @@ fn vbmeta_with_public_key_overwritten_fails_verification() -> Result<()> {
         &kernel,
         &load_latest_initrd_normal()?,
         &empty_public_key,
-        AvbSlotVerifyError::Verification,
+        SlotVerifyError::Verification(None).into(),
     )?;
     assert_payload_verification_with_initrd_fails(
         &kernel,
         &load_latest_initrd_normal()?,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::Verification,
+        SlotVerifyError::Verification(None).into(),
     )
 }
 
@@ -317,6 +385,44 @@ fn vbmeta_with_verification_flag_disabled_fails_verification() -> Result<()> {
         &kernel,
         &load_latest_initrd_normal()?,
         &load_trusted_public_key()?,
-        AvbSlotVerifyError::Verification,
+        SlotVerifyError::Verification(None).into(),
     )
+}
+
+#[test]
+fn payload_with_rollback_index() -> Result<()> {
+    let public_key = load_trusted_public_key()?;
+    let verified_boot_data = verify_payload(
+        &fs::read(TEST_IMG_WITH_ROLLBACK_INDEX_5)?,
+        /* initrd= */ None,
+        &public_key,
+    )
+    .map_err(|e| anyhow!("Verification failed. Error: {}", e))?;
+
+    let kernel_digest = hash(&[&hex::decode("1211")?, &fs::read(UNSIGNED_TEST_IMG_PATH)?]);
+    let expected_boot_data = VerifiedBootData {
+        debug_level: DebugLevel::None,
+        kernel_digest,
+        initrd_digest: None,
+        public_key: &public_key,
+        capabilities: vec![],
+        rollback_index: 5,
+    };
+    assert_eq!(expected_boot_data, verified_boot_data);
+    Ok(())
+}
+
+#[test]
+fn payload_with_multiple_capabilities() -> Result<()> {
+    let public_key = load_trusted_public_key()?;
+    let verified_boot_data = verify_payload(
+        &fs::read(TEST_IMG_WITH_MULTIPLE_CAPABILITIES)?,
+        /* initrd= */ None,
+        &public_key,
+    )
+    .map_err(|e| anyhow!("Verification failed. Error: {}", e))?;
+
+    assert!(verified_boot_data.has_capability(Capability::RemoteAttest));
+    assert!(verified_boot_data.has_capability(Capability::SecretkeeperProtection));
+    Ok(())
 }

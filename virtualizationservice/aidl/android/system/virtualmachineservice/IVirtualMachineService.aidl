@@ -15,6 +15,8 @@
  */
 package android.system.virtualmachineservice;
 
+import android.hardware.security.secretkeeper.ISecretkeeper;
+import android.system.virtualizationcommon.Certificate;
 import android.system.virtualizationcommon.ErrorCode;
 
 /** {@hide} */
@@ -44,4 +46,21 @@ interface IVirtualMachineService {
      * Notifies that an error has occurred inside the VM.
      */
     void notifyError(ErrorCode errorCode, in String message);
+
+    /**
+     * Requests a certificate chain for the provided certificate signing request (CSR).
+     *
+     * @param csr The certificate signing request.
+     * @param testMode Whether the request is for test purposes.
+     * @return A sequence of DER-encoded X.509 certificates that make up the attestation
+     *         key's certificate chain. The attestation key is provided in the CSR.
+     */
+    Certificate[] requestAttestation(in byte[] csr, in boolean testMode);
+
+    /**
+     * Request connection to Secretkeeper. This is used by pVM to store rollback protected secrets.
+     * Note that this returns error if Secretkeeper is not supported on device. Guest should check
+     * that Secretkeeper is supported from Linux device tree before calling this.
+     */
+    ISecretkeeper getSecretkeeper();
 }

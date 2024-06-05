@@ -35,8 +35,8 @@ use android_system_virtualizationservice::{
         VirtualMachineState::VirtualMachineState,
     },
     binder::{
-        wait_for_interface, BinderFeatures, DeathRecipient, FromIBinder, IBinder, Interface,
-        ParcelFileDescriptor, Result as BinderResult, StatusCode, Strong,
+        BinderFeatures, DeathRecipient, FromIBinder, IBinder, Interface, ParcelFileDescriptor,
+        Result as BinderResult, StatusCode, Strong,
     },
 };
 use command_fds::CommandFdExt;
@@ -48,13 +48,10 @@ use std::process::Command;
 use std::{
     fmt::{self, Debug, Formatter},
     fs::File,
-    os::unix::io::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
+    os::unix::io::{AsFd, AsRawFd, IntoRawFd, OwnedFd},
     sync::Arc,
     time::Duration,
 };
-
-const VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER: &str =
-    "android.system.virtualizationservice";
 
 const VIRTMGR_PATH: &str = "/apex/com.android.virt/bin/virtmgr";
 const VIRTMGR_THREADS: usize = 2;
@@ -65,10 +62,7 @@ fn posix_pipe() -> Result<(OwnedFd, OwnedFd), io::Error> {
 
     // Create new POSIX pipe. Make it O_CLOEXEC to align with how Rust creates
     // file descriptors (expected by SharedChild).
-    let (raw1, raw2) = pipe2(OFlag::O_CLOEXEC)?;
-
-    // SAFETY - Taking ownership of brand new FDs.
-    unsafe { Ok((OwnedFd::from_raw_fd(raw1), OwnedFd::from_raw_fd(raw2))) }
+    Ok(pipe2(OFlag::O_CLOEXEC)?)
 }
 
 fn posix_socketpair() -> Result<(OwnedFd, OwnedFd), io::Error> {
@@ -77,11 +71,7 @@ fn posix_socketpair() -> Result<(OwnedFd, OwnedFd), io::Error> {
     // Create new POSIX socketpair, suitable for use with RpcBinder UDS bootstrap
     // transport. Make it O_CLOEXEC to align with how Rust creates file
     // descriptors (expected by SharedChild).
-    let (raw1, raw2) =
-        socketpair(AddressFamily::Unix, SockType::Stream, None, SockFlag::SOCK_CLOEXEC)?;
-
-    // SAFETY - Taking ownership of brand new FDs.
-    unsafe { Ok((OwnedFd::from_raw_fd(raw1), OwnedFd::from_raw_fd(raw2))) }
+    Ok(socketpair(AddressFamily::Unix, SockType::Stream, None, SockFlag::SOCK_CLOEXEC)?)
 }
 
 /// A running instance of virtmgr which is hosting a VirtualizationService
@@ -112,7 +102,7 @@ impl VirtualizationService {
 
         // Wait for the child to signal that the RpcBinder server is ready
         // by closing its end of the pipe.
-        let _ = File::from(wait_fd).read(&mut [0]);
+        let _ignored = File::from(wait_fd).read(&mut [0]);
 
         Ok(VirtualizationService { client_fd })
     }
@@ -126,11 +116,6 @@ impl VirtualizationService {
             .setup_unix_domain_bootstrap_client(self.client_fd.as_fd())
             .map_err(|_| io::Error::from(io::ErrorKind::ConnectionRefused))
     }
-}
-
-/// Connects to the VirtualizationService AIDL service.
-pub fn connect() -> Result<Strong<dyn IVirtualizationService>, StatusCode> {
-    wait_for_interface(VIRTUALIZATION_SERVICE_BINDER_SERVICE_IDENTIFIER)
 }
 
 /// A virtual machine which has been started by the VirtualizationService.
@@ -175,14 +160,17 @@ impl VmInstance {
     pub fn create(
         service: &dyn IVirtualizationService,
         config: &VirtualMachineConfig,
-        console: Option<File>,
+        console_out: Option<File>,
+        console_in: Option<File>,
         log: Option<File>,
         callback: Option<Box<dyn VmCallback + Send + Sync>>,
     ) -> BinderResult<Self> {
-        let console = console.map(ParcelFileDescriptor::new);
+        let console_out = console_out.map(ParcelFileDescriptor::new);
+        let console_in = console_in.map(ParcelFileDescriptor::new);
         let log = log.map(ParcelFileDescriptor::new);
 
-        let vm = service.createVm(config, console.as_ref(), log.as_ref())?;
+        let vm =
+            service.createVm(config, console_out.as_ref(), console_in.as_ref(), log.as_ref())?;
 
         let cid = vm.getCid()?;
 

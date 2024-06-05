@@ -30,6 +30,7 @@ import android.platform.test.annotations.RootPermissionTest;
 
 import com.android.microdroid.test.common.MetricsProcessor;
 import com.android.microdroid.test.host.CommandRunner;
+import com.android.microdroid.test.host.KvmHypTracer;
 import com.android.microdroid.test.host.MicrodroidHostTestCaseBase;
 import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.device.ITestDevice;
@@ -37,6 +38,7 @@ import com.android.tradefed.device.TestDevice;
 import com.android.tradefed.log.LogUtil.CLog;
 import com.android.tradefed.testtype.DeviceJUnit4ClassRunner;
 import com.android.tradefed.util.CommandResult;
+import com.android.tradefed.util.SimpleStats;
 
 import org.junit.After;
 import org.junit.Before;
@@ -45,7 +47,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -60,9 +61,6 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     // Files that define the "test" instance of CompOS
     private static final String COMPOS_TEST_ROOT = "/data/misc/apexdata/com.android.compos/test/";
 
-    private static final String SYSTEM_SERVER_COMPILER_FILTER_PROP_NAME =
-            "dalvik.vm.systemservercompilerfilter";
-
     private static final String BOOTLOADER_TIME_PROP_NAME = "ro.boot.boottime";
     private static final String BOOTLOADER_PREFIX = "bootloader-";
     private static final String BOOTLOADER_TIME = "bootloader_time";
@@ -74,7 +72,6 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     private static final int COMPILE_STAGED_APEX_RETRY_INTERVAL_MS = 10 * 1000;
     private static final int COMPILE_STAGED_APEX_TIMEOUT_SEC = 540;
     private static final int BOOT_COMPLETE_TIMEOUT_MS = 10 * 60 * 1000;
-    private static final double NANOS_IN_SEC = 1_000_000_000.0;
     private static final int ROUND_COUNT = 5;
     private static final int ROUND_IGNORE_STARTUP_TIME = 3;
     private static final String APK_NAME = "MicrodroidTestApp.apk";
@@ -85,12 +82,9 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
 
     private boolean mNeedTearDown = false;
 
-    private boolean mNeedToRestartPkvmStatus = false;
-
     @Before
     public void setUp() throws Exception {
         mNeedTearDown = false;
-        mNeedToRestartPkvmStatus = false;
 
         assumeDeviceIsCapable(getDevice());
         mNeedTearDown = true;
@@ -108,26 +102,11 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
             // sees, so we can't rely on that - b/268688303.)
             return;
         }
-        // Restore PKVM status and reboot to prevent previous staged session, if switched.
-        if (mNeedToRestartPkvmStatus) {
-            setPKVMStatusWithRebootToBootloader(true);
-            rebootFromBootloaderAndWaitBootCompleted();
-        }
 
         CommandRunner android = new CommandRunner(getDevice());
 
         // Clear up any CompOS instance files we created.
         android.tryRun("rm", "-rf", COMPOS_TEST_ROOT);
-    }
-
-    @Test
-    public void testBootEnablePKVM() throws Exception {
-        enableDisablePKVMTestHelper(true);
-    }
-
-    @Test
-    public void testBootDisablePKVM() throws Exception {
-        enableDisablePKVMTestHelper(false);
     }
 
     @Test
@@ -138,6 +117,20 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     @Test
     public void testBootWithoutCompOS() throws Exception {
         composTestHelper(false);
+    }
+
+    @Test
+    public void testNoLongHypSections() throws Exception {
+        assumeTrue("Skip without hypervisor tracing", KvmHypTracer.isSupported(getDevice()));
+
+        KvmHypTracer tracer = new KvmHypTracer(getDevice());
+        String result = tracer.run(COMPOSD_CMD_BIN + " test-compile");
+        assertWithMessage("Failed to test compilation VM.")
+                .that(result).ignoringCase().contains("all ok");
+
+        SimpleStats stats = tracer.getDurationStats();
+        reportMetric(stats.getData(), "hyp_sections", "s");
+        CLog.i("Hypervisor traces parsed successfully.");
     }
 
     @Test
@@ -262,32 +255,34 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
                         .memoryMib(vm_mem_mb)
                         .cpuTopology("match_host")
                         .build(device);
-        microdroidDevice.waitForBootComplete(30000);
-        microdroidDevice.enableAdbRoot();
-
-        CommandRunner microdroid = new CommandRunner(microdroidDevice);
-
-        microdroid.run("mkdir -p /mnt/ramdisk && chmod 777 /mnt/ramdisk");
-        microdroid.run("mount -t tmpfs -o size=32G tmpfs /mnt/ramdisk");
-
-        // Allocate memory for the VM until it fails and make sure that we touch
-        // the allocated memory in the guest to be able to create stage2 fragmentation.
         try {
-            microdroid.tryRun(
-                    String.format(
-                            "cd /mnt/ramdisk && truncate -s %dM sprayMemory"
-                                    + " && dd if=/dev/zero of=sprayMemory bs=1MB count=%d",
-                            vm_mem_mb, vm_mem_mb));
-        } catch (Exception ex) {
-        }
+            microdroidDevice.waitForBootComplete(30000);
+            microdroidDevice.enableAdbRoot();
 
-        // Run the app during the VM run and collect cold startup time.
-        for (int i = 0; i < ROUND_COUNT; i++) {
-            AmStartupTimeCmdParser duringVmStartApp = getColdRunStartupTimes(android, pkgName);
-            metricColector.addStartupTimeMetricDuringVmRun(duringVmStartApp);
-        }
+            CommandRunner microdroid = new CommandRunner(microdroidDevice);
 
-        device.shutdownMicrodroid(microdroidDevice);
+            microdroid.run("mkdir -p /mnt/ramdisk && chmod 777 /mnt/ramdisk");
+            microdroid.run("mount -t tmpfs -o size=32G tmpfs /mnt/ramdisk");
+
+            // Allocate memory for the VM until it fails and make sure that we touch
+            // the allocated memory in the guest to be able to create stage2 fragmentation.
+            try {
+                microdroid.tryRun(
+                        String.format(
+                                "cd /mnt/ramdisk && truncate -s %dM sprayMemory"
+                                        + " && dd if=/dev/zero of=sprayMemory bs=1MB count=%d",
+                                vm_mem_mb, vm_mem_mb));
+            } catch (Exception expected) {
+            }
+
+            // Run the app during the VM run and collect cold startup time.
+            for (int i = 0; i < ROUND_COUNT; i++) {
+                AmStartupTimeCmdParser duringVmStartApp = getColdRunStartupTimes(android, pkgName);
+                metricColector.addStartupTimeMetricDuringVmRun(duringVmStartApp);
+            }
+        } finally {
+            device.shutdownMicrodroid(microdroidDevice);
+        }
 
         // Run the app after the VM run and collect cold startup time.
         for (int i = 0; i < ROUND_COUNT; i++) {
@@ -304,12 +299,12 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
             String[] lines = startAppLog.split("[\r\n]+");
             mTotalTime = mWaitTime = 0;
 
-            for (int i = 0; i < lines.length; i++) {
-                if (lines[i].contains("TotalTime:")) {
-                    mTotalTime = Integer.parseInt(lines[i].replaceAll("\\D+", ""));
+            for (String line : lines) {
+                if (line.contains("TotalTime:")) {
+                    mTotalTime = Integer.parseInt(line.replaceAll("\\D+", ""));
                 }
-                if (lines[i].contains("WaitTime:")) {
-                    mWaitTime = Integer.parseInt(lines[i].replaceAll("\\D+", ""));
+                if (line.contains("WaitTime:")) {
+                    mWaitTime = Integer.parseInt(line.replaceAll("\\D+", ""));
                 }
             }
         }
@@ -365,9 +360,9 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
         String content = android.runForResult("cat /proc/meminfo").getStdout().trim();
         String[] lines = content.split("[\r\n]+");
 
-        for (int i = 0; i < lines.length; i++) {
-            if (lines[i].contains("MemFree:")) {
-                freeMemory = Integer.parseInt(lines[i].replaceAll("\\D+", "")) / 1024;
+        for (String line : lines) {
+            if (line.contains("MemFree:")) {
+                freeMemory = Integer.parseInt(line.replaceAll("\\D+", "")) / 1024;
                 return freeMemory;
             }
         }
@@ -416,7 +411,7 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
 
         CommandRunner android = new CommandRunner(getDevice());
         String result = android.run("dmesg");
-        Pattern pattern = Pattern.compile("\\[(.*)\\].*sys.boot_completed=1.*");
+        Pattern pattern = Pattern.compile("\\[(.*)].*sys.boot_completed=1.*");
         for (String line : result.split("[\r\n]+")) {
             Matcher matcher = pattern.matcher(line);
             if (matcher.find()) {
@@ -426,36 +421,6 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
         throw new IllegalArgumentException("Failed to get boot time info.");
     }
 
-    private void enableDisablePKVMTestHelper(boolean isEnable) throws Exception {
-        assumePKVMStatusSwitchSupported();
-
-        List<Double> bootDmesgTime = new ArrayList<>(ROUND_COUNT);
-        Map<String, List<Double>> bootloaderTime = new HashMap<>();
-
-        setPKVMStatusWithRebootToBootloader(isEnable);
-        rebootFromBootloaderAndWaitBootCompleted();
-        for (int round = 0; round < ROUND_COUNT; ++round) {
-            getDevice().nonBlockingReboot();
-            waitForBootCompleted();
-
-            updateBootloaderTimeInfo(bootloaderTime);
-
-            double elapsedSec = getDmesgBootTime();
-            bootDmesgTime.add(elapsedSec);
-        }
-
-        String suffix = "";
-        if (isEnable) {
-            suffix = "enable";
-        } else {
-            suffix = "disable";
-        }
-
-        reportMetric(bootDmesgTime, "dmesg_boot_time_with_pkvm_" + suffix, "s");
-        reportAggregatedMetrics(bootloaderTime,
-                "bootloader_time_with_pkvm_" + suffix, "ms");
-    }
-
     private void composTestHelper(boolean isWithCompos) throws Exception {
         assumeFalse("Skip on CF; too slow", isCuttlefish());
 
@@ -463,11 +428,16 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
 
         for (int round = 0; round < ROUND_COUNT; ++round) {
             reInstallApex(REINSTALL_APEX_TIMEOUT_SEC);
-            if (isWithCompos) {
-                compileStagedApex(COMPILE_STAGED_APEX_TIMEOUT_SEC);
+            try {
+                if (isWithCompos) {
+                    compileStagedApex(COMPILE_STAGED_APEX_TIMEOUT_SEC);
+                }
+            } finally {
+                // If compilation fails, we still have a staged APEX, and we need to reboot to
+                // clean that up for further tests.
+                getDevice().nonBlockingReboot();
+                waitForBootCompleted();
             }
-            getDevice().nonBlockingReboot();
-            waitForBootCompleted();
 
             double elapsedSec = getDmesgBootTime();
             bootDmesgTime.add(elapsedSec);
@@ -483,29 +453,6 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
         reportMetric(bootDmesgTime, "dmesg_boot_time_" + suffix, "s");
     }
 
-    private void assumePKVMStatusSwitchSupported() throws Exception {
-        assumeFalse("Skip on CF; can't reboot to bootloader", isCuttlefish());
-
-        // This is an overkill. The intention is to exclude remote_device_proxy, which uses
-        // different serial for fastboot. But there's no good way to distinguish from regular IP
-        // transport. This is currently not a problem until someone really needs to run the test
-        // over regular IP transport.
-        assumeFalse("Skip over IP (overkill for remote_device_proxy)", getDevice().isAdbTcp());
-
-        if (!getDevice().isStateBootloaderOrFastbootd()) {
-            getDevice().rebootIntoBootloader();
-        }
-        getDevice().waitForDeviceBootloader();
-
-        CommandResult result;
-        result = getDevice().executeFastbootCommand("oem", "pkvm", "status");
-        rebootFromBootloaderAndWaitBootCompleted();
-        assumeFalse(result.getStderr().contains("Invalid oem command"));
-        // Skip the test if running on a build with pkvm_enabler. Disabling pKVM
-        // for such builds results in a bootloop.
-        assumeTrue(result.getStderr().contains("misc=auto"));
-    }
-
     private void reportMetric(List<Double> data, String name, String unit) {
         CLog.d("Report metric " + name + "(" + unit + ") : " + data.toString());
         Map<String, Double> stats = mMetricsProcessor.computeStats(data, name, unit);
@@ -513,50 +460,6 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
             CLog.d("Add test metrics " + entry.getKey() + " : " + entry.getValue().toString());
             mMetrics.addTestMetric(entry.getKey(), entry.getValue().toString());
         }
-    }
-
-    private void reportAggregatedMetrics(Map<String, List<Double>> bootloaderTime,
-            String prefix, String unit) {
-
-        for (Map.Entry<String, List<Double>> entry : bootloaderTime.entrySet()) {
-            reportMetric(entry.getValue(), prefix + "_" + entry.getKey(), unit);
-        }
-    }
-
-    private void setPKVMStatusWithRebootToBootloader(boolean isEnable) throws Exception {
-        mNeedToRestartPkvmStatus = true;
-
-        if (!getDevice().isStateBootloaderOrFastbootd()) {
-            getDevice().rebootIntoBootloader();
-        }
-        getDevice().waitForDeviceBootloader();
-
-        CommandResult result;
-        if (isEnable) {
-            result = getDevice().executeFastbootCommand("oem", "pkvm", "enable");
-        } else {
-            result = getDevice().executeFastbootCommand("oem", "pkvm", "disable");
-        }
-
-        result = getDevice().executeFastbootCommand("oem", "pkvm", "status");
-        CLog.i("Gets PKVM status : " + result);
-
-        String expectedOutput = "";
-
-        if (isEnable) {
-            expectedOutput = "pkvm is enabled";
-        } else {
-            expectedOutput = "pkvm is disabled";
-        }
-        assertWithMessage("Failed to set PKVM status. Reason: " + result)
-            .that(result.toString()).ignoringCase().contains(expectedOutput);
-    }
-
-    private void rebootFromBootloaderAndWaitBootCompleted() throws Exception {
-        getDevice().executeFastbootCommand("reboot");
-        getDevice().waitForDeviceOnline(BOOT_COMPLETE_TIMEOUT_MS);
-        getDevice().waitForBootComplete(BOOT_COMPLETE_TIMEOUT_MS);
-        getDevice().enableAdbRoot();
     }
 
     private void waitForBootCompleted() throws Exception {
@@ -568,15 +471,16 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     private void compileStagedApex(int timeoutSec) throws Exception {
 
         long timeStart = System.currentTimeMillis();
-        long timeEnd = timeStart + timeoutSec * 1000;
+        long timeEnd = timeStart + timeoutSec * 1000L;
 
         while (true) {
 
             try {
                 CommandRunner android = new CommandRunner(getDevice());
 
-                String result = android.run(
-                        COMPOSD_CMD_BIN + " staged-apex-compile");
+                String result =
+                        android.runWithTimeout(
+                                3 * 60 * 1000, COMPOSD_CMD_BIN + " staged-apex-compile");
                 assertWithMessage("Failed to compile staged APEX. Reason: " + result)
                     .that(result).ignoringCase().contains("all ok");
 
@@ -599,7 +503,7 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     private void reInstallApex(int timeoutSec) throws Exception {
 
         long timeStart = System.currentTimeMillis();
-        long timeEnd = timeStart + timeoutSec * 1000;
+        long timeEnd = timeStart + timeoutSec * 1000L;
 
         while (true) {
 

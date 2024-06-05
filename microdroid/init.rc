@@ -12,6 +12,11 @@ import /init.environ.rc
 
 # Cgroups are mounted right before early-init using list from /etc/cgroups.json
 on early-init
+    # Android doesn't need kernel module autoloading, and it causes SELinux
+    # denials.  So disable it by setting modprobe to the empty string.  Note: to
+    # explicitly set a sysctl to an empty string, a trailing newline is needed.
+    write /proc/sys/kernel/modprobe \n
+
     # set RLIMIT_NICE to allow priorities from 19 to -20
     setrlimit nice 40 40
 
@@ -25,14 +30,20 @@ on early-init
     # We don't directly exec the binary to specify stdio_to_kmsg.
     exec_start init_debug_policy
 
+    # Wait for ueventd to have finished cold boot.
+    # This is needed by prng-seeder (at least).
+    # (In Android this happens inside apexd-bootstrap.)
+    wait_for_prop ro.cold_boot_done true
+
 on init
-    mkdir /mnt/apk 0755 system system
+    mkdir /mnt/apk 0755 root root
     mkdir /mnt/extra-apk 0755 root root
+
+    # Allow the payload access to the console (default is 0600)
+    chmod 0666 /dev/console
+
     # Microdroid_manager starts apkdmverity/zipfuse/apexd
     start microdroid_manager
-
-    # restorecon so microdroid_manager can create subdirectories
-    restorecon /mnt/extra-apk
 
     # Wait for apexd to finish activating APEXes before starting more processes.
     # Microdroid starts apexd in VM mode in which apexd doesn't wait for init after setting
@@ -82,9 +93,6 @@ on late-init
     wait_for_prop microdroid_manager.config_done 1
 
     trigger post-fs-data
-
-    # Load persist properties and override properties (if enabled) from /data.
-    trigger load_persist_props_action
 
     trigger early-boot
     trigger boot
@@ -163,6 +171,7 @@ service console /system/bin/sh
     setenv HOSTNAME console
 
 service init_debug_policy /system/bin/init_debug_policy
+    user root
     oneshot
     disabled
     stdio_to_kmsg

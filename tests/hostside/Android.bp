@@ -2,26 +2,6 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-genrule_defaults {
-    name: "test_avf_debug_policy_overlay",
-    tools: ["dtc"],
-    cmd: "$(location dtc) -I dts -O dtb $(in) -o $(out)",
-}
-
-genrule {
-    name: "test_avf_debug_policy_with_adb",
-    defaults: ["test_avf_debug_policy_overlay"],
-    srcs: ["assets/avf_debug_policy_with_adb.dts"],
-    out: ["avf_debug_policy_with_adb.dtbo"],
-}
-
-genrule {
-    name: "test_avf_debug_policy_without_adb",
-    defaults: ["test_avf_debug_policy_overlay"],
-    srcs: ["assets/avf_debug_policy_without_adb.dts"],
-    out: ["avf_debug_policy_without_adb.dtbo"],
-}
-
 java_test_host {
     name: "MicrodroidHostTestCases",
     srcs: ["java/**/*.java"],
@@ -36,20 +16,17 @@ java_test_host {
     static_libs: [
         "MicrodroidHostTestHelper",
         "compatibility-host-util",
+        "cts-host-utils",
         "cts-statsd-atom-host-test-utils",
         "microdroid_payload_metadata",
-        "MicrodroidTestPreparer", // Workaround for sandboxed test environment to install this
     ],
     per_testcase_directory: true,
     data: [
         ":MicrodroidTestApp",
+        ":MicrodroidTestAppUpdated",
         ":microdroid_general_sepolicy.conf",
         ":test.com.android.virt.pem",
         ":test2.com.android.virt.pem",
-        ":pvmfw_test",
-        ":test_avf_debug_policy_with_adb",
-        ":test_avf_debug_policy_without_adb",
-        "assets/bcc.dat",
     ],
     data_native_bins: [
         "sepolicy-analyze",
@@ -59,6 +36,7 @@ java_test_host {
         "initrd_bootconfig",
         "lpmake",
         "lpunpack",
+        "lz4",
         "sign_virt_apex",
         "simg2img",
     ],
@@ -76,5 +54,4 @@ java_test_host {
         "libsparse",
         "libz",
     ],
-    required: ["MicrodroidTestPreparer"],
 }

@@ -17,10 +17,12 @@
 use serde::{Deserialize, Serialize};
 
 /// VM payload config
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VmPayloadConfig {
-    /// OS config. Default: "microdroid"
+    /// OS config.
+    /// Deprecated: don't use. Error if not "" or "microdroid".
     #[serde(default)]
+    #[deprecated]
     pub os: OsConfig,
 
     /// Task to run in a VM
@@ -47,6 +49,13 @@ pub struct VmPayloadConfig {
     /// files with integrity checking, but not confidentiality.
     #[serde(default)]
     pub enable_authfs: bool,
+
+    /// Ask the kernel for transparent huge-pages (THP). This is only a hint and
+    /// the kernel will allocate THP-backed memory only if globally enabled by
+    /// the system and if any can be found. See
+    /// https://docs.kernel.org/admin-guide/mm/transhuge.html
+    #[serde(default)]
+    pub hugepages: bool,
 }
 
 /// OS config
@@ -58,7 +67,7 @@ pub struct OsConfig {
 
 impl Default for OsConfig {
     fn default() -> Self {
-        Self { name: "microdroid".to_owned() }
+        Self { name: "".to_owned() }
     }
 }
 

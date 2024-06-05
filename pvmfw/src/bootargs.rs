@@ -94,7 +94,7 @@ impl<'a> Iterator for BootArgsIterator<'a> {
         // after.
         let name_end = arg.find(|c: char| c.is_whitespace() || c == '=').unwrap_or(arg.len());
         let (arg, equal_sign) = match arg.chars().nth(name_end) {
-            Some(c) if c == '=' => {
+            Some('=') => {
                 let value_end = name_end + Self::find_value_end(&arg[name_end..]);
                 (&arg[..value_end], Some(name_end))
             }
@@ -106,14 +106,9 @@ impl<'a> Iterator for BootArgsIterator<'a> {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-mod helpers;
-
-#[cfg(test)]
 mod tests {
-
     use super::*;
-    use crate::cstr;
+    use cstr::cstr;
 
     fn check(raw: &CStr, expected: Result<&[(&str, Option<&str>)], ()>) {
         let actual = BootArgsIterator::new(raw);

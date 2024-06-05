@@ -14,7 +14,7 @@ android_test {
         "androidx.test.runner",
         "androidx.test.ext.junit",
         "com.android.microdroid.testservice-java",
-        "truth-prebuilt",
+        "truth",
     ],
     jni_libs: [
         "MicrodroidBenchmarkNativeLib",
@@ -26,11 +26,14 @@ android_test {
     sdk_version: "test_current",
     use_embedded_native_libs: true,
     compile_multilib: "64",
+    required: ["perf-setup"],
     host_required: ["MicrodroidTestPreparer"],
+    data: [":test_microdroid_vendor_image"],
 }
 
 cc_library_shared {
     name: "MicrodroidBenchmarkNativeLib",
+    defaults: ["avf_build_flags_cc"],
     srcs: ["src/native/*.cpp"],
     local_include_dirs: ["src/native/include"],
     static_libs: [

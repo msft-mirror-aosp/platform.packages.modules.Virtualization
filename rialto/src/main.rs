@@ -17,124 +17,221 @@
 #![no_main]
 #![no_std]
 
+mod communication;
 mod error;
 mod exceptions;
+mod fdt;
 
 extern crate alloc;
 
+use crate::communication::VsockStream;
 use crate::error::{Error, Result};
-use aarch64_paging::{
-    idmap::IdMap,
-    paging::{Attributes, MemoryRegion},
-};
-use buddy_system_allocator::LockedHeap;
-use core::ops::Range;
-use hyp::get_hypervisor;
+use crate::fdt::{read_dice_range_from, read_vendor_hashtree_root_digest};
+use alloc::boxed::Box;
+use bssl_sys::CRYPTO_library_init;
+use ciborium_io::Write;
+use core::num::NonZeroUsize;
+use core::slice;
+use diced_open_dice::{bcc_handover_parse, DiceArtifacts};
+use fdtpci::PciInfo;
+use libfdt::FdtError;
 use log::{debug, error, info};
-use vmbase::{layout, main, power::reboot};
+use service_vm_comm::{ServiceVmRequest, VmType};
+use service_vm_fake_chain::service_vm;
+use service_vm_requests::{process_request, RequestContext};
+use virtio_drivers::{
+    device::socket::{VsockAddr, VMADDR_CID_HOST},
+    transport::{pci::bus::PciRoot, DeviceType, Transport},
+    Hal,
+};
+use vmbase::{
+    configure_heap,
+    fdt::SwiotlbInfo,
+    hyp::{get_mem_sharer, get_mmio_guard},
+    layout::{self, crosvm},
+    main,
+    memory::{MemoryTracker, PageTable, MEMORY, PAGE_SIZE, SIZE_128KB},
+    power::reboot,
+    virtio::{
+        pci::{self, PciTransportIterator, VirtIOSocket},
+        HalImpl,
+    },
+};
 
-const SZ_1K: usize = 1024;
-const SZ_4K: usize = 4 * SZ_1K;
-const SZ_64K: usize = 64 * SZ_1K;
-const SZ_1M: usize = 1024 * SZ_1K;
-const SZ_1G: usize = 1024 * SZ_1M;
-
-// Root level is given by the value of TCR_EL1.TG0 and TCR_EL1.T0SZ, set in
-// entry.S. For 4KB granule and 39-bit VA, the root level is 1.
-const PT_ROOT_LEVEL: usize = 1;
-const PT_ASID: usize = 1;
-
-const PROT_DEV: Attributes = Attributes::from_bits_truncate(
-    Attributes::DEVICE_NGNRE.bits() | Attributes::EXECUTE_NEVER.bits(),
-);
-const PROT_RX: Attributes = Attributes::from_bits_truncate(
-    Attributes::NORMAL.bits() | Attributes::NON_GLOBAL.bits() | Attributes::READ_ONLY.bits(),
-);
-const PROT_RO: Attributes = Attributes::from_bits_truncate(
-    Attributes::NORMAL.bits()
-        | Attributes::NON_GLOBAL.bits()
-        | Attributes::READ_ONLY.bits()
-        | Attributes::EXECUTE_NEVER.bits(),
-);
-const PROT_RW: Attributes = Attributes::from_bits_truncate(
-    Attributes::NORMAL.bits() | Attributes::NON_GLOBAL.bits() | Attributes::EXECUTE_NEVER.bits(),
-);
-
-#[global_allocator]
-static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::new();
-
-static mut HEAP: [u8; SZ_64K] = [0; SZ_64K];
-
-fn into_memreg(r: &Range<usize>) -> MemoryRegion {
-    MemoryRegion::new(r.start, r.end)
+fn host_addr() -> VsockAddr {
+    VsockAddr { cid: VMADDR_CID_HOST, port: vm_type().port() }
 }
 
-fn init_heap() {
-    // SAFETY: Allocator set to otherwise unused, static memory.
-    unsafe {
-        HEAP_ALLOCATOR.lock().init(&mut HEAP as *mut u8 as usize, HEAP.len());
+fn vm_type() -> VmType {
+    // Use MMIO support to determine whether the VM is protected.
+    if get_mmio_guard().is_some() {
+        VmType::ProtectedVm
+    } else {
+        VmType::NonProtectedVm
     }
 }
 
-fn init_kernel_pgt(pgt: &mut IdMap) -> Result<()> {
-    // The first 1 GiB of address space is used by crosvm for MMIO.
-    let reg_dev = MemoryRegion::new(0, SZ_1G);
-    let reg_text = into_memreg(&layout::text_range());
-    let reg_rodata = into_memreg(&layout::rodata_range());
-    let reg_scratch = into_memreg(&layout::scratch_range());
-    let reg_stack = into_memreg(&layout::stack_range(40 * SZ_4K));
+fn new_page_table() -> Result<PageTable> {
+    let mut page_table = PageTable::default();
 
-    debug!("Preparing kernel page table.");
-    debug!("  dev:    {}-{}", reg_dev.start(), reg_dev.end());
-    debug!("  text:   {}-{}", reg_text.start(), reg_text.end());
-    debug!("  rodata: {}-{}", reg_rodata.start(), reg_rodata.end());
-    debug!("  scratch:{}-{}", reg_scratch.start(), reg_scratch.end());
-    debug!("  stack:  {}-{}", reg_stack.start(), reg_stack.end());
+    page_table.map_data(&layout::scratch_range().into())?;
+    page_table.map_data(&layout::stack_range(40 * PAGE_SIZE).into())?;
+    page_table.map_code(&layout::text_range().into())?;
+    page_table.map_rodata(&layout::rodata_range().into())?;
+    page_table.map_device(&layout::console_uart_range().into())?;
 
-    pgt.map_range(&reg_dev, PROT_DEV)?;
-    pgt.map_range(&reg_text, PROT_RX)?;
-    pgt.map_range(&reg_rodata, PROT_RO)?;
-    pgt.map_range(&reg_scratch, PROT_RW)?;
-    pgt.map_range(&reg_stack, PROT_RW)?;
-
-    pgt.activate();
-    info!("Activated kernel page table.");
-    Ok(())
+    Ok(page_table)
 }
 
-fn try_init_logger() -> Result<()> {
-    match get_hypervisor().mmio_guard_init() {
-        // pKVM blocks MMIO by default, we need to enable MMIO guard to support logging.
-        Ok(()) => get_hypervisor().mmio_guard_map(vmbase::console::BASE_ADDRESS)?,
-        // MMIO guard enroll is not supported in unprotected VM.
-        Err(hyp::Error::MmioGuardNotsupported) => {}
-        Err(e) => return Err(e.into()),
-    };
-    vmbase::logger::init(log::LevelFilter::Debug).map_err(|_| Error::LoggerInit)
-}
-
-fn try_main() -> Result<()> {
+/// # Safety
+///
+/// Behavior is undefined if any of the following conditions are violated:
+/// * The `fdt_addr` must be a valid pointer and points to a valid `Fdt`.
+unsafe fn try_main(fdt_addr: usize) -> Result<()> {
     info!("Welcome to Rialto!");
+    let page_table = new_page_table()?;
 
-    let mut pgt = IdMap::new(PT_ASID, PT_ROOT_LEVEL);
-    init_kernel_pgt(&mut pgt)?;
+    MEMORY.lock().replace(MemoryTracker::new(
+        page_table,
+        crosvm::MEM_START..layout::MAX_VIRT_ADDR,
+        crosvm::MMIO_RANGE,
+        None, // Rialto doesn't have any payload for now.
+    ));
+
+    let fdt_range = MEMORY
+        .lock()
+        .as_mut()
+        .unwrap()
+        .alloc(fdt_addr, NonZeroUsize::new(crosvm::FDT_MAX_SIZE).unwrap())?;
+    // SAFETY: The tracker validated the range to be in main memory, mapped, and not overlap.
+    let fdt = unsafe { slice::from_raw_parts(fdt_range.start as *mut u8, fdt_range.len()) };
+    // We do not need to validate the DT since it is already validated in pvmfw.
+    let fdt = libfdt::Fdt::from_slice(fdt)?;
+
+    let memory_range = fdt.first_memory_range()?;
+    MEMORY.lock().as_mut().unwrap().shrink(&memory_range).map_err(|e| {
+        error!("Failed to use memory range value from DT: {memory_range:#x?}");
+        e
+    })?;
+
+    if let Some(mem_sharer) = get_mem_sharer() {
+        let granule = mem_sharer.granule()?;
+        MEMORY.lock().as_mut().unwrap().init_dynamic_shared_pool(granule).map_err(|e| {
+            error!("Failed to initialize dynamically shared pool.");
+            e
+        })?;
+    } else if let Ok(swiotlb_info) = SwiotlbInfo::new_from_fdt(fdt) {
+        let range = swiotlb_info.fixed_range().ok_or_else(|| {
+            error!("Pre-shared pool range not specified in swiotlb node");
+            Error::from(FdtError::BadValue)
+        })?;
+        MEMORY.lock().as_mut().unwrap().init_static_shared_pool(range).map_err(|e| {
+            error!("Failed to initialize pre-shared pool.");
+            e
+        })?;
+    } else {
+        info!("No MEM_SHARE capability detected or swiotlb found: allocating buffers from heap.");
+        MEMORY.lock().as_mut().unwrap().init_heap_shared_pool().map_err(|e| {
+            error!("Failed to initialize heap-based pseudo-shared pool.");
+            e
+        })?;
+    }
+
+    // Initializes the crypto library before any crypto operations and after the heap is
+    // initialized.
+    // SAFETY: It is safe to call this function multiple times and concurrently.
+    unsafe {
+        CRYPTO_library_init();
+    }
+    let bcc_handover: Box<dyn DiceArtifacts> = match vm_type() {
+        VmType::ProtectedVm => {
+            let dice_range = read_dice_range_from(fdt)?;
+            info!("DICE range: {dice_range:#x?}");
+            // SAFETY: This region was written by pvmfw in its writable_data region. The region
+            // has no overlap with the main memory region and is safe to be mapped as read-only
+            // data.
+            let res = unsafe {
+                MEMORY.lock().as_mut().unwrap().alloc_range_outside_main_memory(&dice_range)
+            };
+            res.map_err(|e| {
+                error!("Failed to use DICE range from DT: {dice_range:#x?}");
+                e
+            })?;
+            let dice_start = dice_range.start as *const u8;
+            // SAFETY: There's no memory overlap and the region is mapped as read-only data.
+            let bcc_handover = unsafe { slice::from_raw_parts(dice_start, dice_range.len()) };
+            Box::new(bcc_handover_parse(bcc_handover)?)
+        }
+        // Currently, a sample DICE data is used for non-protected VMs, as these VMs only run
+        // in tests at the moment.
+        VmType::NonProtectedVm => Box::new(service_vm::fake_service_vm_dice_artifacts()?),
+    };
+
+    let pci_info = PciInfo::from_fdt(fdt)?;
+    debug!("PCI: {pci_info:#x?}");
+    let mut pci_root = pci::initialize(pci_info, MEMORY.lock().as_mut().unwrap())
+        .map_err(Error::PciInitializationFailed)?;
+    debug!("PCI root: {pci_root:#x?}");
+    let socket_device = find_socket_device::<HalImpl>(&mut pci_root)?;
+    debug!("Found socket device: guest cid = {:?}", socket_device.guest_cid());
+    let vendor_hashtree_root_digest = read_vendor_hashtree_root_digest(fdt)?;
+    let request_context =
+        RequestContext { dice_artifacts: bcc_handover.as_ref(), vendor_hashtree_root_digest };
+
+    let mut vsock_stream = VsockStream::new(socket_device, host_addr())?;
+    while let ServiceVmRequest::Process(req) = vsock_stream.read_request()? {
+        info!("Received request: {}", req.name());
+        let response = process_request(req, &request_context);
+        info!("Sending response: {}", response.name());
+        vsock_stream.write_response(&response)?;
+        vsock_stream.flush()?;
+    }
+    vsock_stream.shutdown()?;
+
     Ok(())
+}
+
+fn find_socket_device<T: Hal>(pci_root: &mut PciRoot) -> Result<VirtIOSocket<T>> {
+    PciTransportIterator::<T>::new(pci_root)
+        .find(|t| DeviceType::Socket == t.device_type())
+        .map(VirtIOSocket::<T>::new)
+        .transpose()
+        .map_err(Error::VirtIOSocketCreationFailed)?
+        .ok_or(Error::MissingVirtIOSocketDevice)
+}
+
+fn try_unshare_all_memory() -> Result<()> {
+    info!("Starting unsharing memory...");
+
+    // No logging after unmapping UART.
+    if let Some(mmio_guard) = get_mmio_guard() {
+        mmio_guard.unmap(vmbase::console::BASE_ADDRESS)?;
+    }
+    // Unshares all memory and deactivates page table.
+    drop(MEMORY.lock().take());
+    Ok(())
+}
+
+fn unshare_all_memory() {
+    if let Err(e) = try_unshare_all_memory() {
+        error!("Failed to unshare the memory: {e}");
+    }
 }
 
 /// Entry point for Rialto.
-pub fn main(_a0: u64, _a1: u64, _a2: u64, _a3: u64) {
-    init_heap();
-    if try_init_logger().is_err() {
-        // Don't log anything if the logger initialization fails.
-        reboot();
-    }
-    match try_main() {
-        Ok(()) => info!("Rialto ends successfully."),
+pub fn main(fdt_addr: u64, _a1: u64, _a2: u64, _a3: u64) {
+    log::set_max_level(log::LevelFilter::Debug);
+    // SAFETY: `fdt_addr` is supposed to be a valid pointer and points to
+    // a valid `Fdt`.
+    match unsafe { try_main(fdt_addr as usize) } {
+        Ok(()) => unshare_all_memory(),
         Err(e) => {
             error!("Rialto failed with {e}");
+            unshare_all_memory();
             reboot()
         }
     }
 }
 
 main!(main);
+configure_heap!(SIZE_128KB * 2);

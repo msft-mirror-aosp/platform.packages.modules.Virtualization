@@ -39,12 +39,10 @@ SECTIONS
 	 * Collect together the code. This is page aligned so it can be mapped
 	 * as executable-only.
 	 */
-	.init : ALIGN(4096) {
+	.text : ALIGN(4096) {
 		text_begin = .;
 		*(.init.entry)
 		*(.init.*)
-	} >image
-	.text : {
 		*(.text.*)
 	} >image
 	text_end = .;
@@ -108,6 +106,9 @@ SECTIONS
 		stack_limit = .;
 		. = init_stack_pointer;
 	} >writable_data
+
+	/* Make our Bionic stack protector compatible with mainline LLVM */
+	__stack_chk_guard = __bionic_tls + 40;
 
 	/*
 	 * Remove unused sections from the image.
