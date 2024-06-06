@@ -463,7 +463,7 @@ impl VirtualizationService {
 
         let debug_config = DebugConfig::new(config);
 
-        let ramdump = if debug_config.is_ramdump_needed() {
+        let ramdump = if !uses_gki_kernel(config) && debug_config.is_ramdump_needed() {
             Some(prepare_ramdump_file(&temporary_directory)?)
         } else {
             None
@@ -607,16 +607,25 @@ impl VirtualizationService {
         };
 
         // Create TAP network interface if the VM supports network.
-        let _tap_fd = if cfg!(network) && config.networkSupported {
+        let tap = if cfg!(network) && config.networkSupported {
             if *is_protected {
                 return Err(anyhow!("Network feature is not supported for pVM yet"))
                     .with_log()
                     .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION)?;
             }
-            Some(GLOBAL_SERVICE.createTapInterface(&get_this_pid().to_string())?)
+            Some(File::from(
+                GLOBAL_SERVICE
+                    .createTapInterface(&get_this_pid().to_string())?
+                    .as_ref()
+                    .try_clone()
+                    .context("Failed to get TAP interface from ParcelFileDescriptor")
+                    .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?,
+            ))
         } else {
             None
         };
+        let virtio_snd_backend =
+            if cfg!(paravirtualized_devices) { Some(String::from("aaudio")) } else { None };
 
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
@@ -646,6 +655,9 @@ impl VirtualizationService {
             display_config,
             input_device_options,
             hugepages: config.hugePages,
+            tap,
+            virtio_snd_backend,
+            console_input_device: config.consoleInputDevice.clone(),
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -855,6 +867,16 @@ fn get_supported_os_names() -> Result<HashSet<String>> {
 
 fn is_valid_os(os_name: &str) -> bool {
     SUPPORTED_OS_NAMES.contains(os_name)
+}
+
+fn uses_gki_kernel(config: &VirtualMachineConfig) -> bool {
+    if !cfg!(vendor_modules) {
+        return false;
+    }
+    match config {
+        VirtualMachineConfig::RawConfig(_) => false,
+        VirtualMachineConfig::AppConfig(config) => config.osName.starts_with("microdroid_gki-"),
+    }
 }
 
 fn load_app_config(

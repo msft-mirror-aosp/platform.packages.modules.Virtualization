@@ -809,8 +809,10 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         // Check VmCreationRequested atom
         AtomsProto.VmCreationRequested atomVmCreationRequested =
                 data.get(0).getAtom().getVmCreationRequested();
-        assertThat(atomVmCreationRequested.getHypervisor())
-                .isEqualTo(AtomsProto.VmCreationRequested.Hypervisor.PKVM);
+        if (isPkvmHypervisor()) {
+            assertThat(atomVmCreationRequested.getHypervisor())
+                    .isEqualTo(AtomsProto.VmCreationRequested.Hypervisor.PKVM);
+        }
         assertThat(atomVmCreationRequested.getIsProtected()).isEqualTo(mProtectedVm);
         assertThat(atomVmCreationRequested.getCreationSucceeded()).isTrue();
         assertThat(atomVmCreationRequested.getBinderExceptionCode()).isEqualTo(0);
@@ -832,7 +834,11 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertThat(atomVmExited.getDeathReason()).isEqualTo(AtomsProto.VmExited.DeathReason.KILLED);
         assertThat(atomVmExited.getExitSignal()).isEqualTo(9);
         // In CPU & memory related fields, check whether positive values are collected or not.
-        assertThat(atomVmExited.getGuestTimeMillis()).isGreaterThan(0);
+        if (isPkvmHypervisor()) {
+            // Guest Time may not be updated on other hypervisors.
+            // Checking only if the hypervisor is PKVM.
+            assertThat(atomVmExited.getGuestTimeMillis()).isGreaterThan(0);
+        }
         assertThat(atomVmExited.getRssVmKb()).isGreaterThan(0);
         assertThat(atomVmExited.getRssCrosvmKb()).isGreaterThan(0);
 
@@ -871,10 +877,13 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertWithMessage("Incorrect ABI list").that(abis).hasLength(1);
 
         // Check that no denials have happened so far
-        String logText =
-                getDevice().pullFileContents(CONSOLE_PATH) + getDevice().pullFileContents(LOG_PATH);
+        String consoleText = getDevice().pullFileContents(TRADEFED_CONSOLE_PATH);
+        assertWithMessage("Console output shouldn't be empty").that(consoleText).isNotEmpty();
+        String logText = getDevice().pullFileContents(TRADEFED_LOG_PATH);
+        assertWithMessage("Log output shouldn't be empty").that(logText).isNotEmpty();
+
         assertWithMessage("Unexpected denials during VM boot")
-                .that(logText)
+                .that(consoleText + logText)
                 .doesNotContainMatch("avc:\\s+denied");
 
         assertThat(getDeviceNumCpus(microdroid)).isEqualTo(getDeviceNumCpus(android));
@@ -1168,6 +1177,40 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
             assertTrue(
                     "Unknown gki \"" + gki + "\". Supported gkis: " + SUPPORTED_GKI_VERSIONS,
                     SUPPORTED_GKI_VERSIONS.contains(gki));
+        }
+    }
+
+    @Test
+    public void testHugePages() throws Exception {
+        ITestDevice device = getDevice();
+        boolean disableRoot = !device.isAdbRoot();
+        CommandRunner android = new CommandRunner(device);
+
+        final String SHMEM_ENABLED_PATH = "/sys/kernel/mm/transparent_hugepage/shmem_enabled";
+        String thpShmemStr = android.run("cat", SHMEM_ENABLED_PATH);
+
+        assumeFalse("shmem already enabled, skip", thpShmemStr.contains("[advise]"));
+        assumeTrue("Unsupported shmem, skip", thpShmemStr.contains("[never]"));
+
+        device.enableAdbRoot();
+        assumeTrue("adb root is not enabled", device.isAdbRoot());
+        android.run("echo advise > " + SHMEM_ENABLED_PATH);
+
+        final String configPath = "assets/vm_config.json";
+        mMicrodroidDevice =
+                MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
+                        .debugLevel("full")
+                        .memoryMib(minMemorySize())
+                        .cpuTopology("match_host")
+                        .protectedVm(mProtectedVm)
+                        .gki(mGki)
+                        .hugePages(true)
+                        .build(getAndroidDevice());
+        mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
+
+        android.run("echo never >" + SHMEM_ENABLED_PATH);
+        if (disableRoot) {
+            device.disableAdbRoot();
         }
     }
 
