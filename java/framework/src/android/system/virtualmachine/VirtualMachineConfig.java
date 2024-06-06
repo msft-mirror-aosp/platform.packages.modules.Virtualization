@@ -48,7 +48,6 @@ import android.util.Log;
 
 import com.android.system.virtualmachine.flags.Flags;
 
-
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -91,9 +90,11 @@ public final class VirtualMachineConfig {
     private static final String KEY_PROTECTED_VM = "protectedVm";
     private static final String KEY_MEMORY_BYTES = "memoryBytes";
     private static final String KEY_CPU_TOPOLOGY = "cpuTopology";
+    private static final String KEY_CONSOLE_INPUT_DEVICE = "consoleInputDevice";
     private static final String KEY_ENCRYPTED_STORAGE_BYTES = "encryptedStorageBytes";
     private static final String KEY_VM_OUTPUT_CAPTURED = "vmOutputCaptured";
     private static final String KEY_VM_CONSOLE_INPUT_SUPPORTED = "vmConsoleInputSupported";
+    private static final String KEY_CONNECT_VM_CONSOLE = "connectVmConsole";
     private static final String KEY_VENDOR_DISK_IMAGE_PATH = "vendorDiskImagePath";
     private static final String KEY_OS = "os";
     private static final String KEY_EXTRA_APKS = "extraApks";
@@ -173,6 +174,9 @@ public final class VirtualMachineConfig {
     /** CPU topology configuration of the VM. */
     @CpuTopology private final int mCpuTopology;
 
+    /** The serial device for VM console input. */
+    @Nullable private final String mConsoleInputDevice;
+
     /**
      * Path within the APK to the payload config file that defines software aspects of the VM.
      */
@@ -192,6 +196,9 @@ public final class VirtualMachineConfig {
 
     /** Whether the app can write console input to the VM */
     private final boolean mVmConsoleInputSupported;
+
+    /** Whether to connect the VM console to a host console. */
+    private final boolean mConnectVmConsole;
 
     @Nullable private final File mVendorDiskImage;
 
@@ -226,9 +233,11 @@ public final class VirtualMachineConfig {
             boolean protectedVm,
             long memoryBytes,
             @CpuTopology int cpuTopology,
+            @Nullable String consoleInputDevice,
             long encryptedStorageBytes,
             boolean vmOutputCaptured,
             boolean vmConsoleInputSupported,
+            boolean connectVmConsole,
             @Nullable File vendorDiskImage,
             @NonNull @OsName String os) {
         // This is only called from Builder.build(); the builder handles parameter validation.
@@ -246,9 +255,11 @@ public final class VirtualMachineConfig {
         mProtectedVm = protectedVm;
         mMemoryBytes = memoryBytes;
         mCpuTopology = cpuTopology;
+        mConsoleInputDevice = consoleInputDevice;
         mEncryptedStorageBytes = encryptedStorageBytes;
         mVmOutputCaptured = vmOutputCaptured;
         mVmConsoleInputSupported = vmConsoleInputSupported;
+        mConnectVmConsole = connectVmConsole;
         mVendorDiskImage = vendorDiskImage;
         mOs = os;
     }
@@ -325,12 +336,17 @@ public final class VirtualMachineConfig {
             builder.setMemoryBytes(memoryBytes);
         }
         builder.setCpuTopology(b.getInt(KEY_CPU_TOPOLOGY));
+        String consoleInputDevice = b.getString(KEY_CONSOLE_INPUT_DEVICE);
+        if (consoleInputDevice != null) {
+            builder.setConsoleInputDevice(consoleInputDevice);
+        }
         long encryptedStorageBytes = b.getLong(KEY_ENCRYPTED_STORAGE_BYTES);
         if (encryptedStorageBytes != 0) {
             builder.setEncryptedStorageBytes(encryptedStorageBytes);
         }
         builder.setVmOutputCaptured(b.getBoolean(KEY_VM_OUTPUT_CAPTURED));
         builder.setVmConsoleInputSupported(b.getBoolean(KEY_VM_CONSOLE_INPUT_SUPPORTED));
+        builder.setConnectVmConsole(b.getBoolean(KEY_CONNECT_VM_CONSOLE));
 
         String vendorDiskImagePath = b.getString(KEY_VENDOR_DISK_IMAGE_PATH);
         if (vendorDiskImagePath != null) {
@@ -376,6 +392,9 @@ public final class VirtualMachineConfig {
         b.putInt(KEY_DEBUGLEVEL, mDebugLevel);
         b.putBoolean(KEY_PROTECTED_VM, mProtectedVm);
         b.putInt(KEY_CPU_TOPOLOGY, mCpuTopology);
+        if (mConsoleInputDevice != null) {
+            b.putString(KEY_CONSOLE_INPUT_DEVICE, mConsoleInputDevice);
+        }
         if (mMemoryBytes > 0) {
             b.putLong(KEY_MEMORY_BYTES, mMemoryBytes);
         }
@@ -384,6 +403,7 @@ public final class VirtualMachineConfig {
         }
         b.putBoolean(KEY_VM_OUTPUT_CAPTURED, mVmOutputCaptured);
         b.putBoolean(KEY_VM_CONSOLE_INPUT_SUPPORTED, mVmConsoleInputSupported);
+        b.putBoolean(KEY_CONNECT_VM_CONSOLE, mConnectVmConsole);
         if (mVendorDiskImage != null) {
             b.putString(KEY_VENDOR_DISK_IMAGE_PATH, mVendorDiskImage.getAbsolutePath());
         }
@@ -544,6 +564,16 @@ public final class VirtualMachineConfig {
     }
 
     /**
+     * Returns whether to connect the VM console to a host console.
+     *
+     * @see Builder#setConnectVmConsole
+     * @hide
+     */
+    public boolean isConnectVmConsole() {
+        return mConnectVmConsole;
+    }
+
+    /**
      * Returns the OS of the VM.
      *
      * @see Builder#setOs
@@ -577,6 +607,8 @@ public final class VirtualMachineConfig {
                 && this.mEncryptedStorageBytes == other.mEncryptedStorageBytes
                 && this.mVmOutputCaptured == other.mVmOutputCaptured
                 && this.mVmConsoleInputSupported == other.mVmConsoleInputSupported
+                && this.mConnectVmConsole == other.mConnectVmConsole
+                && this.mConsoleInputDevice == other.mConsoleInputDevice
                 && (this.mVendorDiskImage == null) == (other.mVendorDiskImage == null)
                 && Objects.equals(this.mPayloadConfigPath, other.mPayloadConfigPath)
                 && Objects.equals(this.mPayloadBinaryName, other.mPayloadBinaryName)
@@ -648,6 +680,7 @@ public final class VirtualMachineConfig {
         config.protectedVm = this.mProtectedVm;
         config.memoryMib = bytesToMebiBytes(mMemoryBytes);
         config.cpuTopology = (byte) this.mCpuTopology;
+        config.consoleInputDevice = mConsoleInputDevice;
         config.devices = EMPTY_STRING_ARRAY;
         config.platformVersion = "~1.0";
         return config;
@@ -786,9 +819,11 @@ public final class VirtualMachineConfig {
         private boolean mProtectedVmSet;
         private long mMemoryBytes;
         @CpuTopology private int mCpuTopology = CPU_TOPOLOGY_ONE_CPU;
+        @Nullable private String mConsoleInputDevice;
         private long mEncryptedStorageBytes;
         private boolean mVmOutputCaptured = false;
         private boolean mVmConsoleInputSupported = false;
+        private boolean mConnectVmConsole = false;
         @Nullable private File mVendorDiskImage;
         @NonNull @OsName private String mOs = DEFAULT_OS;
 
@@ -862,6 +897,11 @@ public final class VirtualMachineConfig {
                 throw new IllegalStateException("debug level must be FULL to use console input");
             }
 
+            if (mConnectVmConsole && mDebugLevel != DEBUG_LEVEL_FULL) {
+                throw new IllegalStateException(
+                        "debug level must be FULL to connect to the console");
+            }
+
             return new VirtualMachineConfig(
                     packageName,
                     apkPath,
@@ -873,9 +913,11 @@ public final class VirtualMachineConfig {
                     mProtectedVm,
                     mMemoryBytes,
                     mCpuTopology,
+                    mConsoleInputDevice,
                     mEncryptedStorageBytes,
                     mVmOutputCaptured,
                     mVmConsoleInputSupported,
+                    mConnectVmConsole,
                     mVendorDiskImage,
                     mOs);
         }
@@ -1055,6 +1097,17 @@ public final class VirtualMachineConfig {
         }
 
         /**
+         * Sets the serial device for VM console input.
+         *
+         * @see android.system.virtualizationservice.ConsoleInputDevice
+         * @hide
+         */
+        public Builder setConsoleInputDevice(@Nullable String consoleInputDevice) {
+            mConsoleInputDevice = consoleInputDevice;
+            return this;
+        }
+
+        /**
          * Sets the size (in bytes) of encrypted storage available to the VM. If not set, no
          * encrypted storage is provided.
          *
@@ -1121,6 +1174,23 @@ public final class VirtualMachineConfig {
         @NonNull
         public Builder setVmConsoleInputSupported(boolean supported) {
             mVmConsoleInputSupported = supported;
+            return this;
+        }
+
+        /**
+         * Sets whether to connect the VM console to a host console. Default is {@code false}.
+         *
+         * <p>Setting this as {@code true} will allow the shell to directly communicate with the VM
+         * console through the connected host console.
+         *
+         * <p>The {@linkplain #setDebugLevel debug level} must be {@link #DEBUG_LEVEL_FULL} to be
+         * set as true.
+         *
+         * @hide
+         */
+        @NonNull
+        public Builder setConnectVmConsole(boolean supported) {
+            mConnectVmConsole = supported;
             return this;
         }
 
