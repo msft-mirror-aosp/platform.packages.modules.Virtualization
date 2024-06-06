@@ -463,7 +463,7 @@ impl VirtualizationService {
 
         let debug_config = DebugConfig::new(config);
 
-        let ramdump = if debug_config.is_ramdump_needed() {
+        let ramdump = if !uses_gki_kernel(config) && debug_config.is_ramdump_needed() {
             Some(prepare_ramdump_file(&temporary_directory)?)
         } else {
             None
@@ -657,6 +657,7 @@ impl VirtualizationService {
             hugepages: config.hugePages,
             tap,
             virtio_snd_backend,
+            console_input_device: config.consoleInputDevice.clone(),
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -866,6 +867,16 @@ fn get_supported_os_names() -> Result<HashSet<String>> {
 
 fn is_valid_os(os_name: &str) -> bool {
     SUPPORTED_OS_NAMES.contains(os_name)
+}
+
+fn uses_gki_kernel(config: &VirtualMachineConfig) -> bool {
+    if !cfg!(vendor_modules) {
+        return false;
+    }
+    match config {
+        VirtualMachineConfig::RawConfig(_) => false,
+        VirtualMachineConfig::AppConfig(config) => config.osName.starts_with("microdroid_gki-"),
+    }
 }
 
 fn load_app_config(
