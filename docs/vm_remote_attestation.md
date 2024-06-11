@@ -106,3 +106,27 @@ In `AttestationExtension`:
     normal mode.
 -   The `vmComponents` field contains a list of all the APKs and apexes loaded
     by the pVM.
+
+## To Support It
+
+VM remote attestation is a strongly recommended feature from Android V. To support
+it, you only need to provide a valid VM DICE chain satisfying the following
+requirements:
+
+- The DICE chain must have a UDS-rooted public key registered at the RKP factory.
+- The DICE chain should have RKP VM markers that help identify RKP VM as required
+  by the [remote provisioning HAL][rkp-hal-markers].
+
+The feature is enabled by default. To disable it, you have two options:
+
+1. Set `PRODUCT_AVF_REMOTE_ATTESTATION_DISABLED` to `true` in your Makefile to
+   disable the feature at build time.
+
+2. Set the system property `avf.remote_attestation.enabled` to `0` to disable
+   the feature at boot time by including the following line in vendor init:
+   `setprop avf.remote_attestation.enabled 0`.
+
+If you don't set any of these variables, VM remote attestation will be enabled
+by default.
+
+[rkp-hal-markers]: https://android.googlesource.com/platform/hardware/interfaces/+/main/security/rkp/README.md#hal
