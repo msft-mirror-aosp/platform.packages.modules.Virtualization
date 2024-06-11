@@ -13,15 +13,47 @@
 // limitations under the License.
 
 //! Support for DICE derivation and BCC generation.
+extern crate alloc;
 
+use alloc::format;
+use alloc::vec::Vec;
+use ciborium::cbor;
+use ciborium::Value;
 use core::mem::size_of;
-use cstr::cstr;
 use diced_open_dice::{
-    bcc_format_config_descriptor, bcc_handover_main_flow, hash, Config, DiceConfigValues, DiceMode,
-    Hash, InputValues, HIDDEN_SIZE,
+    bcc_handover_main_flow, hash, Config, DiceMode, Hash, InputValues, HIDDEN_SIZE,
 };
 use pvmfw_avb::{Capability, DebugLevel, Digest, VerifiedBootData};
 use zerocopy::AsBytes;
+
+const COMPONENT_NAME_KEY: i64 = -70002;
+const SECURITY_VERSION_KEY: i64 = -70005;
+const RKP_VM_MARKER_KEY: i64 = -70006;
+// TODO(b/291245237): Document this key along with others used in ConfigDescriptor in AVF based VM.
+const INSTANCE_HASH_KEY: i64 = -71003;
+
+#[derive(Debug)]
+pub enum Error {
+    /// Error in CBOR operations
+    CborError(ciborium::value::Error),
+    /// Error in DICE operations
+    DiceError(diced_open_dice::DiceError),
+}
+
+impl From<ciborium::value::Error> for Error {
+    fn from(e: ciborium::value::Error) -> Self {
+        Self::CborError(e)
+    }
+}
+
+impl From<diced_open_dice::DiceError> for Error {
+    fn from(e: diced_open_dice::DiceError) -> Self {
+        Self::DiceError(e)
+    }
+}
+
+// DICE in pvmfw result type.
+type Result<T> = core::result::Result<T, Error>;
 
 fn to_dice_mode(debug_level: DebugLevel) -> DiceMode {
     match debug_level {
@@ -30,15 +62,16 @@ fn to_dice_mode(debug_level: DebugLevel) -> DiceMode {
     }
 }
 
-fn to_dice_hash(verified_boot_data: &VerifiedBootData) -> diced_open_dice::Result<Hash> {
+fn to_dice_hash(verified_boot_data: &VerifiedBootData) -> Result<Hash> {
     let mut digests = [0u8; size_of::<Digest>() * 2];
     digests[..size_of::<Digest>()].copy_from_slice(&verified_boot_data.kernel_digest);
     if let Some(initrd_digest) = verified_boot_data.initrd_digest {
         digests[size_of::<Digest>()..].copy_from_slice(&initrd_digest);
     }
-    hash(&digests)
+    Ok(hash(&digests)?)
 }
 
+#[derive(Clone)]
 pub struct PartialInputs {
     pub code_hash: Hash,
     pub auth_hash: Hash,
@@ -48,7 +81,7 @@ pub struct PartialInputs {
 }
 
 impl PartialInputs {
-    pub fn new(data: &VerifiedBootData) -> diced_open_dice::Result<Self> {
+    pub fn new(data: &VerifiedBootData) -> Result<Self> {
         let code_hash = to_dice_hash(data)?;
         let auth_hash = hash(data.public_key)?;
         let mode = to_dice_mode(data.debug_level);
@@ -63,26 +96,36 @@ impl PartialInputs {
         self,
         current_bcc_handover: &[u8],
         salt: &[u8; HIDDEN_SIZE],
+        instance_hash: Option<Hash>,
+        deferred_rollback_protection: bool,
         next_bcc: &mut [u8],
-    ) -> diced_open_dice::Result<()> {
-        let mut config_descriptor_buffer = [0; 128];
-        let config = self.generate_config_descriptor(&mut config_descriptor_buffer)?;
+    ) -> Result<()> {
+        let config = self
+            .generate_config_descriptor(instance_hash)
+            .map_err(|_| diced_open_dice::DiceError::InvalidInput)?;
 
         let dice_inputs = InputValues::new(
             self.code_hash,
-            Config::Descriptor(config),
+            Config::Descriptor(&config),
             self.auth_hash,
             self.mode,
-            self.make_hidden(salt)?,
+            self.make_hidden(salt, deferred_rollback_protection)?,
         );
         let _ = bcc_handover_main_flow(current_bcc_handover, &dice_inputs, next_bcc)?;
         Ok(())
     }
 
-    fn make_hidden(&self, salt: &[u8; HIDDEN_SIZE]) -> diced_open_dice::Result<[u8; HIDDEN_SIZE]> {
+    fn make_hidden(
+        &self,
+        salt: &[u8; HIDDEN_SIZE],
+        deferred_rollback_protection: bool,
+    ) -> diced_open_dice::Result<[u8; HIDDEN_SIZE]> {
         // We want to make sure we get a different sealing CDI for:
         // - VMs with different salt values
         // - An RKP VM and any other VM (regardless of salt)
+        // - depending on whether rollback protection has been deferred to payload. This ensures the
+        //   adversary cannot leak the secrets by using old images & setting
+        //   `deferred_rollback_protection` to true.
         // The hidden input for DICE affects the sealing CDI (but the values in the config
         // descriptor do not).
         // Since the hidden input has to be a fixed size, create it as a hash of the values we
@@ -92,26 +135,34 @@ impl PartialInputs {
         struct HiddenInput {
             rkp_vm_marker: bool,
             salt: [u8; HIDDEN_SIZE],
+            deferred_rollback_protection: bool,
         }
-        // TODO(b/291213394): Include `defer_rollback_protection` flag in the Hidden Input to
-        // differentiate the secrets in both cases.
-        hash(HiddenInput { rkp_vm_marker: self.rkp_vm_marker, salt: *salt }.as_bytes())
+        hash(
+            HiddenInput {
+                rkp_vm_marker: self.rkp_vm_marker,
+                salt: *salt,
+                deferred_rollback_protection,
+            }
+            .as_bytes(),
+        )
     }
 
-    fn generate_config_descriptor<'a>(
-        &self,
-        config_descriptor_buffer: &'a mut [u8],
-    ) -> diced_open_dice::Result<&'a [u8]> {
-        let config_values = DiceConfigValues {
-            component_name: Some(cstr!("vm_entry")),
-            security_version: if cfg!(dice_changes) { Some(self.security_version) } else { None },
-            rkp_vm_marker: self.rkp_vm_marker,
-            ..Default::default()
-        };
-        let config_descriptor_size =
-            bcc_format_config_descriptor(&config_values, config_descriptor_buffer)?;
-        let config = &config_descriptor_buffer[..config_descriptor_size];
-        Ok(config)
+    fn generate_config_descriptor(&self, instance_hash: Option<Hash>) -> Result<Vec<u8>> {
+        let mut config = Vec::with_capacity(4);
+        config.push((cbor!(COMPONENT_NAME_KEY)?, cbor!("vm_entry")?));
+        if cfg!(dice_changes) {
+            config.push((cbor!(SECURITY_VERSION_KEY)?, cbor!(self.security_version)?));
+        }
+        if self.rkp_vm_marker {
+            config.push((cbor!(RKP_VM_MARKER_KEY)?, Value::Null))
+        }
+        if let Some(instance_hash) = instance_hash {
+            config.push((cbor!(INSTANCE_HASH_KEY)?, Value::from(instance_hash.as_slice())));
+        }
+        let config = Value::Map(config);
+        Ok(cbor_util::serialize(&config).map_err(|e| {
+            ciborium::value::Error::Custom(format!("Error in serialization: {e:?}"))
+        })?)
     }
 }
 
@@ -140,17 +191,24 @@ unsafe extern "C" fn DiceClearMemory(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::{
+        Hash, PartialInputs, COMPONENT_NAME_KEY, INSTANCE_HASH_KEY, RKP_VM_MARKER_KEY,
+        SECURITY_VERSION_KEY,
+    };
     use ciborium::Value;
+    use diced_open_dice::DiceArtifacts;
+    use diced_open_dice::DiceMode;
+    use diced_open_dice::HIDDEN_SIZE;
+    use pvmfw_avb::Capability;
+    use pvmfw_avb::DebugLevel;
+    use pvmfw_avb::Digest;
+    use pvmfw_avb::VerifiedBootData;
     use std::collections::HashMap;
+    use std::mem::size_of;
     use std::vec;
 
-    const COMPONENT_NAME_KEY: i64 = -70002;
     const COMPONENT_VERSION_KEY: i64 = -70003;
     const RESETTABLE_KEY: i64 = -70004;
-    const SECURITY_VERSION_KEY: i64 = -70005;
-    const RKP_VM_MARKER_KEY: i64 = -70006;
-
     const BASE_VB_DATA: VerifiedBootData = VerifiedBootData {
         debug_level: DebugLevel::None,
         kernel_digest: [1u8; size_of::<Digest>()],
@@ -159,6 +217,7 @@ mod tests {
         capabilities: vec![],
         rollback_index: 42,
     };
+    const HASH: Hash = *b"sixtyfourbyteslongsentencearerarebutletsgiveitatrycantbethathard";
 
     #[test]
     fn base_data_conversion() {
@@ -193,7 +252,7 @@ mod tests {
     fn base_config_descriptor() {
         let vb_data = BASE_VB_DATA;
         let inputs = PartialInputs::new(&vb_data).unwrap();
-        let config_map = decode_config_descriptor(&inputs);
+        let config_map = decode_config_descriptor(&inputs, None);
 
         assert_eq!(config_map.get(&COMPONENT_NAME_KEY).unwrap().as_text().unwrap(), "vm_entry");
         assert_eq!(config_map.get(&COMPONENT_VERSION_KEY), None);
@@ -214,21 +273,104 @@ mod tests {
         let vb_data =
             VerifiedBootData { capabilities: vec![Capability::RemoteAttest], ..BASE_VB_DATA };
         let inputs = PartialInputs::new(&vb_data).unwrap();
-        let config_map = decode_config_descriptor(&inputs);
+        let config_map = decode_config_descriptor(&inputs, Some(HASH));
 
         assert!(config_map.get(&RKP_VM_MARKER_KEY).unwrap().is_null());
     }
 
-    fn decode_config_descriptor(inputs: &PartialInputs) -> HashMap<i64, Value> {
-        let mut buffer = [0; 128];
-        let config_descriptor = inputs.generate_config_descriptor(&mut buffer).unwrap();
+    #[test]
+    fn config_descriptor_with_instance_hash() {
+        let vb_data =
+            VerifiedBootData { capabilities: vec![Capability::RemoteAttest], ..BASE_VB_DATA };
+        let inputs = PartialInputs::new(&vb_data).unwrap();
+        let config_map = decode_config_descriptor(&inputs, Some(HASH));
+        assert_eq!(*config_map.get(&INSTANCE_HASH_KEY).unwrap(), Value::from(HASH.as_slice()));
+    }
+
+    #[test]
+    fn config_descriptor_without_instance_hash() {
+        let vb_data =
+            VerifiedBootData { capabilities: vec![Capability::RemoteAttest], ..BASE_VB_DATA };
+        let inputs = PartialInputs::new(&vb_data).unwrap();
+        let config_map = decode_config_descriptor(&inputs, None);
+        assert!(!config_map.contains_key(&INSTANCE_HASH_KEY));
+    }
+
+    fn decode_config_descriptor(
+        inputs: &PartialInputs,
+        instance_hash: Option<Hash>,
+    ) -> HashMap<i64, Value> {
+        let config_descriptor = inputs.generate_config_descriptor(instance_hash).unwrap();
 
         let cbor_map =
-            cbor_util::deserialize::<Value>(config_descriptor).unwrap().into_map().unwrap();
+            cbor_util::deserialize::<Value>(&config_descriptor).unwrap().into_map().unwrap();
 
         cbor_map
             .into_iter()
             .map(|(k, v)| ((k.into_integer().unwrap().try_into().unwrap()), v))
             .collect()
+    }
+
+    #[test]
+    fn changing_deferred_rpb_changes_secrets() {
+        let vb_data = VerifiedBootData { debug_level: DebugLevel::Full, ..BASE_VB_DATA };
+        let inputs = PartialInputs::new(&vb_data).unwrap();
+        let mut buffer_without_defer = [0; 4096];
+        let mut buffer_with_defer = [0; 4096];
+        let mut buffer_without_defer_retry = [0; 4096];
+
+        let sample_dice_input: &[u8] = &[
+            0xa3, // CDI attest
+            0x01, 0x58, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // CDI seal
+            0x02, 0x58, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // DICE chain
+            0x03, 0x82, 0xa6, 0x01, 0x02, 0x03, 0x27, 0x04, 0x02, 0x20, 0x01, 0x21, 0x40, 0x22,
+            0x40, 0x84, 0x40, 0xa0, 0x40, 0x40,
+            // 8-bytes of trailing data that aren't part of the DICE chain.
+            0x84, 0x41, 0x55, 0xa0, 0x42, 0x11, 0x22, 0x40,
+        ];
+
+        inputs
+            .clone()
+            .write_next_bcc(
+                sample_dice_input,
+                &[0u8; HIDDEN_SIZE],
+                Some([0u8; 64]),
+                false,
+                &mut buffer_without_defer,
+            )
+            .unwrap();
+        let bcc_handover1 = diced_open_dice::bcc_handover_parse(&buffer_without_defer).unwrap();
+
+        inputs
+            .clone()
+            .write_next_bcc(
+                sample_dice_input,
+                &[0u8; HIDDEN_SIZE],
+                Some([0u8; 64]),
+                true,
+                &mut buffer_with_defer,
+            )
+            .unwrap();
+        let bcc_handover2 = diced_open_dice::bcc_handover_parse(&buffer_with_defer).unwrap();
+
+        inputs
+            .clone()
+            .write_next_bcc(
+                sample_dice_input,
+                &[0u8; HIDDEN_SIZE],
+                Some([0u8; 64]),
+                false,
+                &mut buffer_without_defer_retry,
+            )
+            .unwrap();
+        let bcc_handover3 =
+            diced_open_dice::bcc_handover_parse(&buffer_without_defer_retry).unwrap();
+
+        assert_ne!(bcc_handover1.cdi_seal(), bcc_handover2.cdi_seal());
+        assert_eq!(bcc_handover1.cdi_seal(), bcc_handover3.cdi_seal());
     }
 }
