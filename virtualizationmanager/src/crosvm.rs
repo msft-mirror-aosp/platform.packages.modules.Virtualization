@@ -82,6 +82,12 @@ const MILLIS_PER_SEC: i64 = 1000;
 
 const SYSPROP_CUSTOM_PVMFW_PATH: &str = "hypervisor.pvmfw.path";
 
+/// Serial device for VM console input.
+/// Hypervisor (virtio-console)
+const CONSOLE_HVC0: &str = "hvc0";
+/// Serial (emulated uart)
+const CONSOLE_TTYS0: &str = "ttyS0";
+
 lazy_static! {
     /// If the VM doesn't move to the Started state within this amount time, a hang-up error is
     /// triggered.
@@ -122,6 +128,9 @@ pub struct CrosvmConfig {
     pub display_config: Option<DisplayConfig>,
     pub input_device_options: Vec<InputDeviceOption>,
     pub hugepages: bool,
+    pub tap: Option<File>,
+    pub virtio_snd_backend: Option<String>,
+    pub console_input_device: Option<String>,
 }
 
 #[derive(Debug)]
@@ -917,19 +926,29 @@ fn run_vm(
     let log_arg = format_serial_out_arg(&mut preserved_fds, &config.log_fd);
     let failure_serial_path = add_preserved_fd(&mut preserved_fds, &failure_pipe_write);
     let ramdump_arg = format_serial_out_arg(&mut preserved_fds, &config.ramdump);
+    let console_input_device = config.console_input_device.as_deref().unwrap_or(CONSOLE_HVC0);
+    match console_input_device {
+        CONSOLE_HVC0 | CONSOLE_TTYS0 => {}
+        _ => bail!("Unsupported serial device {console_input_device}"),
+    };
 
     // Warning: Adding more serial devices requires you to shift the PCI device ID of the boot
     // disks in bootconfig.x86_64. This is because x86 crosvm puts serial devices and the block
     // devices in the same PCI bus and serial devices comes before the block devices. Arm crosvm
     // doesn't have the issue.
     // /dev/ttyS0
-    command.arg(format!("--serial={},hardware=serial,num=1", &console_out_arg));
+    command.arg(format!(
+        "--serial={}{},hardware=serial,num=1",
+        &console_out_arg,
+        if console_input_device == CONSOLE_TTYS0 { &console_in_arg } else { "" }
+    ));
     // /dev/ttyS1
     command.arg(format!("--serial=type=file,path={},hardware=serial,num=2", &failure_serial_path));
     // /dev/hvc0
     command.arg(format!(
         "--serial={}{},hardware=virtio-console,num=1",
-        &console_out_arg, &console_in_arg
+        &console_out_arg,
+        if console_input_device == CONSOLE_HVC0 { &console_in_arg } else { "" }
     ));
     // /dev/hvc1
     command.arg(format!("--serial={},hardware=virtio-console,num=2", &ramdump_arg));
@@ -979,11 +998,19 @@ fn run_vm(
     }
 
     if cfg!(paravirtualized_devices) {
-        // TODO(b/325929096): Need to set up network from the config
+        // TODO(b/340376951): Remove this after tap in CrosvmConfig is connected to tethering.
         if rustutils::system_properties::read_bool("ro.crosvm.network.setup.done", false)
             .unwrap_or(false)
         {
             command.arg("--net").arg("tap-name=crosvm_tap");
+        }
+    }
+
+    if cfg!(network) {
+        if let Some(tap) = &config.tap {
+            let tap_fd = tap.as_raw_fd();
+            preserved_fds.push(tap_fd);
+            command.arg("--net").arg(format!("tap-fd={}", tap_fd));
         }
     }
 
@@ -1019,6 +1046,12 @@ fn run_vm(
 
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);
+
+    if cfg!(paravirtualized_devices) {
+        if let Some(virtio_snd_backend) = &config.virtio_snd_backend {
+            command.arg("--virtio-snd").arg(format!("backend={}", virtio_snd_backend));
+        }
+    }
 
     print_crosvm_args(&command);
 
