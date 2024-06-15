@@ -28,8 +28,6 @@ import static android.system.virtualmachine.VirtualMachineManager.CAPABILITY_PRO
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
-import com.android.virt.vm_attestation.testservice.IAttestationService.AttestationStatus;
-import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -70,7 +68,14 @@ import com.android.microdroid.test.vmshare.IVmShareTestService;
 import com.android.microdroid.testservice.IAppCallback;
 import com.android.microdroid.testservice.ITestService;
 import com.android.microdroid.testservice.IVmCallback;
+import com.android.virt.vm_attestation.testservice.IAttestationService.AttestationStatus;
+import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 import com.android.virt.vm_attestation.util.X509Utils;
+
+import co.nstant.in.cbor.CborDecoder;
+import co.nstant.in.cbor.model.Array;
+import co.nstant.in.cbor.model.DataItem;
+import co.nstant.in.cbor.model.MajorType;
 
 import com.google.common.base.Strings;
 import com.google.common.truth.BooleanSubject;
@@ -113,17 +118,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
-import co.nstant.in.cbor.CborDecoder;
-import co.nstant.in.cbor.model.Array;
-import co.nstant.in.cbor.model.DataItem;
-import co.nstant.in.cbor.model.MajorType;
-
 @RunWith(Parameterized.class)
 public class MicrodroidTests extends MicrodroidDeviceTestBase {
     private static final String TAG = "MicrodroidTests";
     private static final String TEST_APP_PACKAGE_NAME = "com.android.microdroid.test";
     private static final String VM_ATTESTATION_PAYLOAD_PATH = "libvm_attestation_test_payload.so";
     private static final String VM_ATTESTATION_MESSAGE = "Hello RKP from AVF!";
+    private static final int ENCRYPTED_STORAGE_BYTES = 4_000_000;
 
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
 
@@ -571,8 +572,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(minimal.isProtectedVm()).isEqualTo(isProtectedVm());
         assertThat(minimal.isEncryptedStorageEnabled()).isFalse();
         assertThat(minimal.getEncryptedStorageBytes()).isEqualTo(0);
-        assertThat(minimal.isVmOutputCaptured()).isEqualTo(false);
+        assertThat(minimal.isVmOutputCaptured()).isFalse();
         assertThat(minimal.getOs()).isEqualTo("microdroid");
+        assertThat(minimal.isNetworkSupported()).isFalse();
 
         // Maximal has everything that can be set to some non-default value. (And has different
         // values than minimal for the required fields.)
@@ -589,6 +591,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setEncryptedStorageBytes(1_000_000)
                         .setVmOutputCaptured(true)
                         .setOs("microdroid_gki-android14-6.1");
+        if (!mProtectedVm) {
+            maximalBuilder.setNetworkSupported(true);
+        }
         VirtualMachineConfig maximal = maximalBuilder.build();
 
         assertThat(maximal.getApkPath()).isEqualTo("/apk/path");
@@ -603,8 +608,11 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(maximal.isProtectedVm()).isEqualTo(isProtectedVm());
         assertThat(maximal.isEncryptedStorageEnabled()).isTrue();
         assertThat(maximal.getEncryptedStorageBytes()).isEqualTo(1_000_000);
-        assertThat(maximal.isVmOutputCaptured()).isEqualTo(true);
+        assertThat(maximal.isVmOutputCaptured()).isTrue();
         assertThat(maximal.getOs()).isEqualTo("microdroid_gki-android14-6.1");
+        if (!mProtectedVm) {
+            assertThat(maximal.isNetworkSupported()).isTrue();
+        }
 
         assertThat(minimal.isCompatibleWith(maximal)).isFalse();
         assertThat(minimal.isCompatibleWith(minimal)).isTrue();
@@ -659,6 +667,18 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setVmConsoleInputSupported(true);
         e = assertThrows(IllegalStateException.class, () -> captureInputOnNonDebuggable.build());
         assertThat(e).hasMessageThat().contains("debug level must be FULL to use console input");
+
+        if (mProtectedVm) {
+            VirtualMachineConfig.Builder networkSupportedOnProtectedVm =
+                    newVmConfigBuilderWithPayloadBinary("binary.so")
+                            .setProtectedVm(mProtectedVm)
+                            .setNetworkSupported(true);
+            e =
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> networkSupportedOnProtectedVm.build());
+            assertThat(e).hasMessageThat().contains("network is not supported on pVM");
+        }
     }
 
     @Test
@@ -1583,7 +1603,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_FULL);
         if (encryptedStoreEnabled) {
-            builder.setEncryptedStorageBytes(4_000_000);
+            builder.setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES);
         }
         VirtualMachineConfig config = builder.build();
         String vmNameOrig = "test_vm_orig";
@@ -1637,7 +1657,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setMemoryBytes(minMemoryRequired())
-                        .setEncryptedStorageBytes(4_000_000)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("test_vm", config);
@@ -1664,7 +1684,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setMemoryBytes(minMemoryRequired())
-                        .setEncryptedStorageBytes(4_000_000)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
 
@@ -1771,7 +1791,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setMemoryBytes(minMemoryRequired())
-                        .setEncryptedStorageBytes(4_000_000)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_a", config);
@@ -2263,7 +2283,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig vmConfig =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
-                        .setEncryptedStorageBytes(4_000_000)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_encstore_no_exec", vmConfig);
 
@@ -2298,6 +2318,49 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         if (major == 5) {
             assertTrue(minor >= 15);
         }
+    }
+
+    private VirtualMachineConfig buildVmConfigWithNetworkSupported() throws Exception {
+        return buildVmConfigWithNetworkSupported("MicrodroidTestNativeLib.so");
+    }
+
+    private VirtualMachineConfig buildVmConfigWithNetworkSupported(String binaryPath)
+            throws Exception {
+        assumeSupportedDevice();
+        assumeNonProtectedVM();
+        assumeFeatureEnabled(VirtualMachineManager.FEATURE_NETWORK);
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary(binaryPath)
+                        .setNetworkSupported(true)
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+        grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        return config;
+    }
+
+    @Test
+    public void configuringNetworkSupportedRequiresCustomPermission() throws Exception {
+        VirtualMachineConfig config = buildVmConfigWithNetworkSupported();
+        revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+
+        VirtualMachine vm =
+                forceCreateNewVirtualMachine(
+                        "test_network_supported_req_custom_permission", config);
+        SecurityException e =
+                assertThrows(
+                        SecurityException.class, () -> runVmTestService(TAG, vm, (ts, tr) -> {}));
+        assertThat(e)
+                .hasMessageThat()
+                .contains("android.permission.USE_CUSTOM_VIRTUAL_MACHINE permission");
+    }
+
+    @Test
+    public void bootsWithNetworkSupported() throws Exception {
+        VirtualMachineConfig config = buildVmConfigWithNetworkSupported();
+
+        VirtualMachine vm =
+                forceCreateNewVirtualMachine("test_boot_with_network_supported", config);
+        runVmTestService(TAG, vm, (ts, tr) -> {}).assertNoException();
     }
 
     private VirtualMachineConfig buildVmConfigWithVendor(File vendorDiskImage) throws Exception {
