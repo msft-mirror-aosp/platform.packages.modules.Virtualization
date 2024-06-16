@@ -13,19 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package android.system.virtualizationservice_internal;
+package android.system.virtualizationservice;
 
-interface IVmnic {
-    /**
-     * Create TAP network interface for a VM.
-     * @param suffix of network interface name.
-     * @return file descriptor of the TAP network interface.
-     */
-    ParcelFileDescriptor createTapInterface(String ifaceNameSuffix);
-
-    /**
-     * Delete TAP network interface created for a VM.
-     * @param file descriptor of the TAP network interface.
-     */
-    void deleteTapInterface(in ParcelFileDescriptor tapFd);
+parcelable GpuConfig {
+    @nullable String backend;
+    @nullable String[] contextTypes;
+    @nullable String pciAddress;
+    @nullable String rendererFeatures;
+    boolean rendererUseEgl = false;
+    boolean rendererUseGles = false;
+    boolean rendererUseGlx = false;
+    boolean rendererUseSurfaceless = false;
+    boolean rendererUseVulkan = false;
 }
