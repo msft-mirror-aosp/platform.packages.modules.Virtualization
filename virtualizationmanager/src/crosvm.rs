@@ -14,10 +14,11 @@
 
 //! Functions for running instances of `crosvm`.
 
-use crate::aidl::{remove_temporary_files, Cid, VirtualMachineCallbacks};
+use crate::aidl::{remove_temporary_files, Cid, GLOBAL_SERVICE, VirtualMachineCallbacks};
 use crate::atom::{get_num_cpus, write_vm_exited_stats_sync};
 use crate::debug_config::DebugConfig;
 use anyhow::{anyhow, bail, Context, Error, Result};
+use binder::ParcelFileDescriptor;
 use command_fds::CommandFdExt;
 use lazy_static::lazy_static;
 use libc::{sysconf, _SC_CLK_TCK};
@@ -34,7 +35,7 @@ use std::fs::{read_to_string, File};
 use std::io::{self, Read};
 use std::mem;
 use std::num::{NonZeroU16, NonZeroU32};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -46,6 +47,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     MemoryTrimLevel::MemoryTrimLevel,
     VirtualMachineAppConfig::DebugLevel::DebugLevel,
     DisplayConfig::DisplayConfig as DisplayConfigParcelable,
+    GpuConfig::GpuConfig as GpuConfigParcelable,
 };
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IBoundDevice::IBoundDevice;
@@ -81,6 +83,12 @@ const RAMDUMP_RESERVED_MIB: u32 = 17;
 const MILLIS_PER_SEC: i64 = 1000;
 
 const SYSPROP_CUSTOM_PVMFW_PATH: &str = "hypervisor.pvmfw.path";
+
+/// Serial device for VM console input.
+/// Hypervisor (virtio-console)
+const CONSOLE_HVC0: &str = "hvc0";
+/// Serial (emulated uart)
+const CONSOLE_TTYS0: &str = "ttyS0";
 
 lazy_static! {
     /// If the VM doesn't move to the Started state within this amount time, a hang-up error is
@@ -122,6 +130,11 @@ pub struct CrosvmConfig {
     pub display_config: Option<DisplayConfig>,
     pub input_device_options: Vec<InputDeviceOption>,
     pub hugepages: bool,
+    pub tap: Option<File>,
+    pub virtio_snd_backend: Option<String>,
+    pub console_input_device: Option<String>,
+    pub boost_uclamp: bool,
+    pub gpu_config: Option<GpuConfig>,
 }
 
 #[derive(Debug)]
@@ -141,6 +154,37 @@ impl DisplayConfig {
         let vertical_dpi = try_into_non_zero_u32(raw_config.verticalDpi)?;
         let refresh_rate = try_into_non_zero_u32(raw_config.refreshRate)?;
         Ok(DisplayConfig { width, height, horizontal_dpi, vertical_dpi, refresh_rate })
+    }
+}
+
+#[derive(Debug)]
+pub struct GpuConfig {
+    pub backend: Option<String>,
+    pub context_types: Option<Vec<String>>,
+    pub pci_address: Option<String>,
+    pub renderer_features: Option<String>,
+    pub renderer_use_egl: Option<bool>,
+    pub renderer_use_gles: Option<bool>,
+    pub renderer_use_glx: Option<bool>,
+    pub renderer_use_surfaceless: Option<bool>,
+    pub renderer_use_vulkan: Option<bool>,
+}
+
+impl GpuConfig {
+    pub fn new(raw_config: &GpuConfigParcelable) -> Result<GpuConfig> {
+        Ok(GpuConfig {
+            backend: raw_config.backend.clone(),
+            context_types: raw_config.contextTypes.clone().map(|context_types| {
+                context_types.iter().filter_map(|context_type| context_type.clone()).collect()
+            }),
+            pci_address: raw_config.pciAddress.clone(),
+            renderer_features: raw_config.rendererFeatures.clone(),
+            renderer_use_egl: Some(raw_config.rendererUseEgl),
+            renderer_use_gles: Some(raw_config.rendererUseGles),
+            renderer_use_glx: Some(raw_config.rendererUseGlx),
+            renderer_use_surfaceless: Some(raw_config.rendererUseSurfaceless),
+            renderer_use_vulkan: Some(raw_config.rendererUseVulkan),
+        })
     }
 }
 
@@ -232,6 +276,8 @@ impl VmState {
             let detect_hangup = config.detect_hangup;
             let (failure_pipe_read, failure_pipe_write) = create_pipe()?;
             let vfio_devices = config.vfio_devices.clone();
+            let tap =
+                if let Some(tap_file) = &config.tap { Some(tap_file.try_clone()?) } else { None };
 
             // If this fails and returns an error, `self` will be left in the `Failed` state.
             let child =
@@ -246,7 +292,7 @@ impl VmState {
             let child_clone = child.clone();
             let instance_clone = instance.clone();
             let monitor_vm_exit_thread = Some(thread::spawn(move || {
-                instance_clone.monitor_vm_exit(child_clone, failure_pipe_read, vfio_devices);
+                instance_clone.monitor_vm_exit(child_clone, failure_pipe_read, vfio_devices, tap);
             }));
 
             if detect_hangup {
@@ -270,7 +316,7 @@ impl VmState {
 #[derive(Debug)]
 pub struct VmContext {
     #[allow(dead_code)] // Keeps the global context alive
-    global_context: Strong<dyn IGlobalVmContext>,
+    pub(crate) global_context: Strong<dyn IGlobalVmContext>,
     #[allow(dead_code)] // Keeps the server alive
     vm_server: RpcServer,
 }
@@ -289,7 +335,7 @@ pub struct VmInstance {
     pub vm_state: Mutex<VmState>,
     /// Global resources allocated for this VM.
     #[allow(dead_code)] // Keeps the context alive
-    vm_context: VmContext,
+    pub(crate) vm_context: VmContext,
     /// The CID assigned to the VM for vsock communication.
     pub cid: Cid,
     /// Path to crosvm control socket
@@ -388,6 +434,7 @@ impl VmInstance {
         child: Arc<SharedChild>,
         mut failure_pipe_read: File,
         vfio_devices: Vec<VfioDevice>,
+        tap: Option<File>,
     ) {
         let result = child.wait();
         match &result {
@@ -446,6 +493,14 @@ impl VmInstance {
         remove_temporary_files(&self.temporary_directory).unwrap_or_else(|e| {
             error!("Error removing temporary files from {:?}: {}", self.temporary_directory, e);
         });
+
+        if let Some(tap_file) = tap {
+            GLOBAL_SERVICE
+                .deleteTapInterface(&ParcelFileDescriptor::new(OwnedFd::from(tap_file)))
+                .unwrap_or_else(|e| {
+                    error!("Error deleting TAP interface: {e:?}");
+                });
+        }
 
         drop(vfio_devices); // Cleanup devices.
     }
@@ -833,6 +888,8 @@ fn run_vm(
         command.arg("--no-balloon");
     }
 
+    let mut memory_mib = config.memory_mib;
+
     if config.protected {
         match system_properties::read(SYSPROP_CUSTOM_PVMFW_PATH)? {
             Some(pvmfw_path) if !pvmfw_path.is_empty() => {
@@ -847,6 +904,12 @@ fn run_vm(
         // enough.
         let swiotlb_size_mib = 2 * virtio_pci_device_count as u32;
         command.arg("--swiotlb").arg(swiotlb_size_mib.to_string());
+
+        // b/346770542 for consistent "usable" memory across protected and non-protected VMs under
+        // pKVM.
+        if hypervisor_props::is_pkvm()? {
+            memory_mib = memory_mib.map(|m| m.saturating_add(swiotlb_size_mib));
+        }
 
         // Workaround to keep crash_dump from trying to read protected guest memory.
         // Context in b/238324526.
@@ -869,7 +932,7 @@ fn run_vm(
         command.arg("--params").arg("console=hvc0");
     }
 
-    if let Some(memory_mib) = config.memory_mib {
+    if let Some(memory_mib) = memory_mib {
         command.arg("--mem").arg(memory_mib.to_string());
     }
 
@@ -917,19 +980,29 @@ fn run_vm(
     let log_arg = format_serial_out_arg(&mut preserved_fds, &config.log_fd);
     let failure_serial_path = add_preserved_fd(&mut preserved_fds, &failure_pipe_write);
     let ramdump_arg = format_serial_out_arg(&mut preserved_fds, &config.ramdump);
+    let console_input_device = config.console_input_device.as_deref().unwrap_or(CONSOLE_HVC0);
+    match console_input_device {
+        CONSOLE_HVC0 | CONSOLE_TTYS0 => {}
+        _ => bail!("Unsupported serial device {console_input_device}"),
+    };
 
     // Warning: Adding more serial devices requires you to shift the PCI device ID of the boot
     // disks in bootconfig.x86_64. This is because x86 crosvm puts serial devices and the block
     // devices in the same PCI bus and serial devices comes before the block devices. Arm crosvm
     // doesn't have the issue.
     // /dev/ttyS0
-    command.arg(format!("--serial={},hardware=serial,num=1", &console_out_arg));
+    command.arg(format!(
+        "--serial={}{},hardware=serial,num=1",
+        &console_out_arg,
+        if console_input_device == CONSOLE_TTYS0 { &console_in_arg } else { "" }
+    ));
     // /dev/ttyS1
     command.arg(format!("--serial=type=file,path={},hardware=serial,num=2", &failure_serial_path));
     // /dev/hvc0
     command.arg(format!(
         "--serial={}{},hardware=virtio-console,num=1",
-        &console_out_arg, &console_in_arg
+        &console_out_arg,
+        if console_input_device == CONSOLE_HVC0 { &console_in_arg } else { "" }
     ));
     // /dev/hvc1
     command.arg(format!("--serial={},hardware=virtio-console,num=2", &ramdump_arg));
@@ -969,21 +1042,65 @@ fn run_vm(
     }
 
     if cfg!(paravirtualized_devices) {
+        if let Some(gpu_config) = &config.gpu_config {
+            let mut gpu_args = Vec::new();
+            if let Some(backend) = &gpu_config.backend {
+                gpu_args.push(format!("backend={}", backend));
+            }
+            if let Some(context_types) = &gpu_config.context_types {
+                gpu_args.push(format!("context-types={}", context_types.join(":")));
+            }
+            if let Some(pci_address) = &gpu_config.pci_address {
+                gpu_args.push(format!("pci-address={}", pci_address));
+            }
+            if let Some(renderer_features) = &gpu_config.renderer_features {
+                gpu_args.push(format!("renderer-features={}", renderer_features));
+            }
+            if gpu_config.renderer_use_egl.unwrap_or(false) {
+                gpu_args.push("egl=true".to_string());
+            }
+            if gpu_config.renderer_use_gles.unwrap_or(false) {
+                gpu_args.push("gles=true".to_string());
+            }
+            if gpu_config.renderer_use_glx.unwrap_or(false) {
+                gpu_args.push("glx=true".to_string());
+            }
+            if gpu_config.renderer_use_surfaceless.unwrap_or(false) {
+                gpu_args.push("surfaceless=true".to_string());
+            }
+            if gpu_config.renderer_use_vulkan.unwrap_or(false) {
+                gpu_args.push("vulkan=true".to_string());
+            }
+            command.arg(format!("--gpu={}", gpu_args.join(",")));
+        }
         if let Some(display_config) = &config.display_config {
-            command.arg("--gpu")
-            // TODO(b/331708504): support backend config as well
-            .arg("backend=virglrenderer,context-types=virgl2,egl=true,surfaceless=true,glx=false,gles=true")
-            .arg(format!("--gpu-display=mode=windowed[{},{}],dpi=[{},{}],refresh-rate={}", display_config.width, display_config.height, display_config.horizontal_dpi, display_config.vertical_dpi, display_config.refresh_rate))
-            .arg(format!("--android-display-service={}", config.name));
+            command
+                .arg(format!(
+                    "--gpu-display=mode=windowed[{},{}],dpi=[{},{}],refresh-rate={}",
+                    display_config.width,
+                    display_config.height,
+                    display_config.horizontal_dpi,
+                    display_config.vertical_dpi,
+                    display_config.refresh_rate
+                ))
+                .arg(format!("--android-display-service={}", config.name));
         }
     }
 
     if cfg!(paravirtualized_devices) {
-        // TODO(b/325929096): Need to set up network from the config
+        // TODO(b/340376951): Remove this after tap in CrosvmConfig is connected to tethering.
         if rustutils::system_properties::read_bool("ro.crosvm.network.setup.done", false)
             .unwrap_or(false)
         {
             command.arg("--net").arg("tap-name=crosvm_tap");
+        }
+    }
+
+    if cfg!(network) {
+        if let Some(tap) = &config.tap {
+            let tap_fd = tap.as_raw_fd();
+            preserved_fds.push(tap_fd);
+            command.arg("--net").arg(format!("tap-fd={}", tap_fd));
         }
     }
 
@@ -1015,10 +1132,20 @@ fn run_vm(
         command.arg("--hugepages");
     }
 
+    if config.boost_uclamp {
+        command.arg("--boost-uclamp");
+    }
+
     append_platform_devices(&mut command, &mut preserved_fds, &config)?;
 
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);
+
+    if cfg!(paravirtualized_devices) {
+        if let Some(virtio_snd_backend) = &config.virtio_snd_backend {
+            command.arg("--virtio-snd").arg(format!("backend={}", virtio_snd_backend));
+        }
+    }
 
     print_crosvm_args(&command);
 

@@ -190,11 +190,16 @@ $ cat > vm_config.json; adb push vm_config.json /data/local/tmp
             "writable": true
         }
     ],
+    "gpu": {
+        "backend": "virglrenderer",
+        "context_types": ["virgl2"]
+    },
     "params": "root=/dev/vda3 rootwait noinitrd ro enforcing=0 cros_debug cros_secure",
     "protected": false,
     "cpu_topology": "match_host",
     "platform_version": "~1.0",
-    "memory_mib" : 8096
+    "memory_mib" : 8096,
+    "console_input_device": "ttyS0"
 }
 ```
 
@@ -209,6 +214,14 @@ $ adb shell pm enable com.android.virtualization.vmlauncher/.MainActivity
 $ adb unroot
 ```
 
+If virt apex is Google-signed, you need to enable the app and grant the
+permission to the app.
+```
+$ adb root
+$ adb shell pm enable com.google.android.virtualization.vmlauncher/com.android.virtualization.vmlauncher.MainActivity
+$ adb shell pm grant com.google.android.virtualization.vmlauncher android.permission.USE_CUSTOM_VIRTUAL_MACHINE
+$ adb unroot
+```
 Then execute the below to set up the network. In the future, this step won't be necessary.
 
 ```
@@ -276,6 +289,8 @@ If it doesn’t work well, try
 
 ```
 $ adb shell pm clear com.android.virtualization.vmlauncher
+# or
+$ adb shell pm clear com.google.android.virtualization.vmlauncher
 ```
 
 ### Inside guest OS (for ChromiumOS only)
@@ -288,4 +303,27 @@ Go to the network setting and configure as below.
 * DNS: 8.8.8.8 (or any DNS server you know)
 
 These settings are persistent; stored in chromiumos_test_image.bin. So you
-don’t have to repeat this next time.`
+don’t have to repeat this next time.
+
+### Debugging
+
+To open the serial console (interactive terminal):
+```shell
+$ adb shell -t /apex/com.android.virt/bin/vm console
+```
+
+To see console logs only, check
+`/data/data/com.android.virtualization.vmlauncher/files/console.log`
+Or
+`/data/data/com.google.android.virtualization.vmlauncher/files/console.log`
+
+```shell
+$ adb shell su root tail +0 -F /data/data/com{,.google}.android.virtualization.vmlauncher/files/console.log
+```
+
+For ChromiumOS, you can ssh-in. Use following commands after network setup.
+
+```shell
+$ adb kill-server ; adb start-server; adb forward tcp:9222 tcp:9222
+$ ssh -oProxyCommand=none -o UserKnownHostsFile=/dev/null root@localhost -p 9222
+```
