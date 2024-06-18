@@ -55,6 +55,7 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
     protected static final String LOG_PATH = TEST_ROOT + "log.txt";
     protected static final String CONSOLE_PATH = TEST_ROOT + "console.txt";
     protected static final String TRADEFED_CONSOLE_PATH = TRADEFED_TEST_ROOT + "console.txt";
+    protected static final String TRADEFED_LOG_PATH = TRADEFED_TEST_ROOT + "log.txt";
     private static final int TEST_VM_ADB_PORT = 8000;
     private static final String MICRODROID_SERIAL = "localhost:" + TEST_VM_ADB_PORT;
     private static final String INSTANCE_IMG = "instance.img";
@@ -139,7 +140,7 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         assumeTrue("Requires VM support", testDevice.supportsMicrodroid());
 
         CommandRunner android = new CommandRunner(androidDevice);
-        long vendorApiLevel = androidDevice.getIntProperty("ro.vendor.api_level", 0);
+        long vendorApiLevel = androidDevice.getIntProperty("ro.board.api_level", 0);
         boolean isGsi =
                 android.runForResult("[ -e /system/system_ext/etc/init/init.gsi.rc ]").getStatus()
                         == CommandStatus.SUCCESS;
@@ -280,5 +281,9 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
                 .filter(os -> os.startsWith("microdroid_gki-"))
                 .map(os -> os.replaceFirst("^microdroid_gki-", ""))
                 .collect(Collectors.toList());
+    }
+
+    protected boolean isPkvmHypervisor() throws DeviceNotAvailableException {
+        return getDevice().getProperty("ro.boot.hypervisor.version").equals("kvm.arm-protected");
     }
 }

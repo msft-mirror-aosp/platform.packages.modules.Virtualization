@@ -116,21 +116,6 @@ fn main(
         info!("Please disregard any previous libavb ERROR about initrd_normal.");
     }
 
-    if verified_boot_data.has_capability(Capability::RemoteAttest) {
-        info!("Service VM capable of remote attestation detected");
-        if service_vm_version::VERSION != verified_boot_data.rollback_index {
-            // For RKP VM, we only boot if the version in the AVB footer of its kernel matches
-            // the one embedded in pvmfw at build time.
-            // This prevents the pvmfw from booting a roll backed RKP VM.
-            error!(
-                "Service VM version mismatch: expected {}, found {}",
-                service_vm_version::VERSION,
-                verified_boot_data.rollback_index
-            );
-            return Err(RebootReason::InvalidPayload);
-        }
-    }
-
     let next_bcc = heap::aligned_boxed_slice(NEXT_BCC_SIZE, GUEST_PAGE_SIZE).ok_or_else(|| {
         error!("Failed to allocate the next-stage BCC");
         RebootReason::InternalError
@@ -143,10 +128,10 @@ fn main(
         RebootReason::InternalError
     })?;
 
-    let (new_instance, salt) = if cfg!(llpvm_changes)
-        && should_defer_rollback_protection(fdt)?
-        && verified_boot_data.has_capability(Capability::SecretkeeperProtection)
-    {
+    let instance_hash = if cfg!(llpvm_changes) { Some(salt_from_instance_id(fdt)?) } else { None };
+    let defer_rollback_protection = should_defer_rollback_protection(fdt)?
+        && verified_boot_data.has_capability(Capability::SecretkeeperProtection);
+    let (new_instance, salt) = if defer_rollback_protection {
         info!("Guest OS is capable of Secretkeeper protection, deferring rollback protection");
         // rollback_index of the image is used as security_version and is expected to be > 0 to
         // discourage implicit allocation.
@@ -154,28 +139,39 @@ fn main(
             error!("Expected positive rollback_index, found 0");
             return Err(RebootReason::InvalidPayload);
         };
-        // `new_instance` cannot be known to pvmfw
-        (false, salt_from_instance_id(fdt)?)
+        (false, instance_hash.unwrap())
+    } else if verified_boot_data.has_capability(Capability::RemoteAttest) {
+        info!("Service VM capable of remote attestation detected, performing version checks");
+        if service_vm_version::VERSION != verified_boot_data.rollback_index {
+            // For RKP VM, we only boot if the version in the AVB footer of its kernel matches
+            // the one embedded in pvmfw at build time.
+            // This prevents the pvmfw from booting a roll backed RKP VM.
+            error!(
+                "Service VM version mismatch: expected {}, found {}",
+                service_vm_version::VERSION,
+                verified_boot_data.rollback_index
+            );
+            return Err(RebootReason::InvalidPayload);
+        }
+        (false, instance_hash.unwrap())
     } else {
+        info!("Fallback to instance.img based rollback checks");
         let (recorded_entry, mut instance_img, header_index) =
             get_recorded_entry(&mut pci_root, cdi_seal).map_err(|e| {
                 error!("Failed to get entry from instance.img: {e}");
                 RebootReason::InternalError
             })?;
         let (new_instance, salt) = if let Some(entry) = recorded_entry {
-            maybe_check_dice_measurements_match_entry(&dice_inputs, &entry)?;
-            let salt = if cfg!(llpvm_changes) { salt_from_instance_id(fdt)? } else { entry.salt };
+            check_dice_measurements_match_entry(&dice_inputs, &entry)?;
+            let salt = instance_hash.unwrap_or(entry.salt);
             (false, salt)
         } else {
             // New instance!
-            let salt = if cfg!(llpvm_changes) {
-                salt_from_instance_id(fdt)?
-            } else {
-                rand::random_array().map_err(|e| {
-                    error!("Failed to generated instance.img salt: {e}");
-                    RebootReason::InternalError
-                })?
-            };
+            let salt = instance_hash.map_or_else(rand::random_array, Ok).map_err(|e| {
+                error!("Failed to generated instance.img salt: {e}");
+                RebootReason::InternalError
+            })?;
+
             let entry = EntryBody::new(&dice_inputs, &salt);
             record_instance_entry(&entry, cdi_seal, &mut instance_img, header_index).map_err(
                 |e| {
@@ -204,10 +200,18 @@ fn main(
         Cow::Owned(truncated_bcc_handover)
     };
 
-    dice_inputs.write_next_bcc(new_bcc_handover.as_ref(), &salt, next_bcc).map_err(|e| {
-        error!("Failed to derive next-stage DICE secrets: {e:?}");
-        RebootReason::SecretDerivationError
-    })?;
+    dice_inputs
+        .write_next_bcc(
+            new_bcc_handover.as_ref(),
+            &salt,
+            instance_hash,
+            defer_rollback_protection,
+            next_bcc,
+        )
+        .map_err(|e| {
+            error!("Failed to derive next-stage DICE secrets: {e:?}");
+            RebootReason::SecretDerivationError
+        })?;
     flush(next_bcc);
 
     let kaslr_seed = u64::from_ne_bytes(rand::random_array().map_err(|e| {
@@ -239,21 +243,10 @@ fn main(
     Ok(bcc_range)
 }
 
-fn maybe_check_dice_measurements_match_entry(
+fn check_dice_measurements_match_entry(
     dice_inputs: &PartialInputs,
     entry: &EntryBody,
 ) -> Result<(), RebootReason> {
-    // The RKP VM is allowed to run if it has passed the verified boot check and
-    // contains the expected version in its AVB footer.
-    // The comparison below with the previous boot information is skipped to enable the
-    // simultaneous update of the pvmfw and RKP VM.
-    // For instance, when both the pvmfw and RKP VM are updated, the code hash of the
-    // RKP VM will differ from the one stored in the instance image. In this case, the
-    // RKP VM is still allowed to run.
-    // This ensures that the updated RKP VM will retain the same CDIs in the next stage.
-    if dice_inputs.rkp_vm_marker {
-        return Ok(());
-    }
     ensure_dice_measurements_match_entry(dice_inputs, entry).map_err(|e| {
         error!(
             "Dice measurements do not match recorded entry. \
