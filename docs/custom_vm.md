@@ -190,6 +190,10 @@ $ cat > vm_config.json; adb push vm_config.json /data/local/tmp
             "writable": true
         }
     ],
+    "gpu": {
+        "backend": "virglrenderer",
+        "context_types": ["virgl2"]
+    },
     "params": "root=/dev/vda3 rootwait noinitrd ro enforcing=0 cros_debug cros_secure",
     "protected": false,
     "cpu_topology": "match_host",
@@ -285,6 +289,8 @@ If it doesn’t work well, try
 
 ```
 $ adb shell pm clear com.android.virtualization.vmlauncher
+# or
+$ adb shell pm clear com.google.android.virtualization.vmlauncher
 ```
 
 ### Inside guest OS (for ChromiumOS only)
@@ -301,8 +307,19 @@ don’t have to repeat this next time.
 
 ### Debugging
 
-To see console log, check
+To open the serial console (interactive terminal):
+```shell
+$ adb shell -t /apex/com.android.virt/bin/vm console
+```
+
+To see console logs only, check
 `/data/data/com.android.virtualization.vmlauncher/files/console.log`
+Or
+`/data/data/com.google.android.virtualization.vmlauncher/files/console.log`
+
+```shell
+$ adb shell su root tail +0 -F /data/data/com{,.google}.android.virtualization.vmlauncher/files/console.log
+```
 
 For ChromiumOS, you can ssh-in. Use following commands after network setup.
 
