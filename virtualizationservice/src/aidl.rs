@@ -282,11 +282,15 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             .held_contexts
             .iter()
             .filter_map(|(_, inst)| Weak::upgrade(inst))
-            .map(|vm| VirtualMachineDebugInfo {
-                cid: vm.cid as i32,
-                temporaryDirectory: vm.get_temp_dir().to_string_lossy().to_string(),
-                requesterUid: vm.requester_uid as i32,
-                requesterPid: vm.requester_debug_pid,
+            .map(|vm| {
+                let vm = vm.lock().unwrap();
+                VirtualMachineDebugInfo {
+                    cid: vm.cid as i32,
+                    temporaryDirectory: vm.get_temp_dir().to_string_lossy().to_string(),
+                    requesterUid: vm.requester_uid as i32,
+                    requesterPid: vm.requester_debug_pid,
+                    hostConsoleName: vm.host_console_name.clone(),
+                }
             })
             .collect();
         Ok(cids)
@@ -346,13 +350,14 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             ))
             .with_log();
         }
-        if !remotely_provisioned_component_service_exists()? {
+        if !is_remote_provisioning_hal_declared()? {
             return Err(Status::new_exception_str(
                 ExceptionCode::UNSUPPORTED_OPERATION,
                 Some("AVF remotely provisioned component service is not declared"),
             ))
             .with_log();
         }
+        remote_provisioning::check_remote_attestation_is_supported()?;
         info!("Received csr. Requestting attestation...");
         let (key_blob, certificate_chain) = if test_mode {
             check_use_custom_virtual_machine()?;
@@ -403,7 +408,8 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
     }
 
     fn isRemoteAttestationSupported(&self) -> binder::Result<bool> {
-        remotely_provisioned_component_service_exists()
+        Ok(is_remote_provisioning_hal_declared()?
+            && remote_provisioning::is_remote_attestation_supported())
     }
 
     fn getAssignableDevices(&self) -> binder::Result<Vec<AssignableDevice>> {
@@ -452,7 +458,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             .context("Failed to allocate instance_id")
             .or_service_specific_exception(-1)?;
         let uid = get_calling_uid();
-        info!("Allocated a VM's instance_id: {:?}, for uid: {:?}", hex::encode(id), uid);
+        info!("Allocated a VM's instance_id: {:?}..., for uid: {:?}", &hex::encode(id)[..8], uid);
         let state = &mut *self.state.lock().unwrap();
         if let Some(sk_state) = &mut state.sk_state {
             let user_id = multiuser_get_user_id(uid);
@@ -469,8 +475,16 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
     fn removeVmInstance(&self, instance_id: &[u8; 64]) -> binder::Result<()> {
         let state = &mut *self.state.lock().unwrap();
         if let Some(sk_state) = &mut state.sk_state {
-            info!("removeVmInstance(): delete secret");
-            sk_state.delete_ids(&[*instance_id]);
+            let uid = get_calling_uid();
+            info!(
+                "Removing a VM's instance_id: {:?}, for uid: {:?}",
+                hex::encode(instance_id),
+                uid
+            );
+
+            let user_id = multiuser_get_user_id(uid);
+            let app_id = multiuser_get_app_id(uid);
+            sk_state.delete_id(instance_id, user_id, app_id);
         } else {
             info!("ignoring removeVmInstance() as no ISecretkeeper");
         }
@@ -500,6 +514,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
     }
 
     fn createTapInterface(&self, iface_name_suffix: &str) -> binder::Result<ParcelFileDescriptor> {
+        check_internet_permission()?;
         check_use_custom_virtual_machine()?;
         if !cfg!(network) {
             return Err(Status::new_exception_str(
@@ -509,6 +524,19 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             .with_log();
         }
         NETWORK_SERVICE.createTapInterface(iface_name_suffix)
+    }
+
+    fn deleteTapInterface(&self, tap_fd: &ParcelFileDescriptor) -> binder::Result<()> {
+        check_internet_permission()?;
+        check_use_custom_virtual_machine()?;
+        if !cfg!(network) {
+            return Err(Status::new_exception_str(
+                ExceptionCode::UNSUPPORTED_OPERATION,
+                Some("deleteTapInterface is not supported with the network feature disabled"),
+            ))
+            .with_log();
+        }
+        NETWORK_SERVICE.deleteTapInterface(tap_fd)
     }
 }
 
@@ -619,6 +647,8 @@ struct GlobalVmInstance {
     requester_uid: uid_t,
     /// PID of the client who requested this VM instance.
     requester_debug_pid: pid_t,
+    /// Name of the host console.
+    host_console_name: Option<String>,
 }
 
 impl GlobalVmInstance {
@@ -633,7 +663,7 @@ impl GlobalVmInstance {
 struct GlobalState {
     /// VM contexts currently allocated to running VMs. A CID is never recycled as long
     /// as there is a strong reference held by a GlobalVmContext.
-    held_contexts: HashMap<Cid, Weak<GlobalVmInstance>>,
+    held_contexts: HashMap<Cid, Weak<Mutex<GlobalVmInstance>>>,
 
     /// Cached read-only FD of VM DTBO file. Also serves as a lock for creating the file.
     dtbo_file: Mutex<Option<File>>,
@@ -713,8 +743,13 @@ impl GlobalState {
         self.held_contexts.retain(|_, instance| instance.strong_count() > 0);
 
         let cid = self.get_next_available_cid()?;
-        let instance = Arc::new(GlobalVmInstance { cid, requester_uid, requester_debug_pid });
-        create_temporary_directory(&instance.get_temp_dir(), Some(requester_uid))?;
+        let instance = Arc::new(Mutex::new(GlobalVmInstance {
+            cid,
+            requester_uid,
+            requester_debug_pid,
+            ..Default::default()
+        }));
+        create_temporary_directory(&instance.lock().unwrap().get_temp_dir(), Some(requester_uid))?;
 
         self.held_contexts.insert(cid, Arc::downgrade(&instance));
         let binder = GlobalVmContext { instance, ..Default::default() };
@@ -794,7 +829,7 @@ fn get_or_create_common_dir() -> Result<PathBuf> {
 #[derive(Debug, Default)]
 struct GlobalVmContext {
     /// Strong reference to the context's instance data structure.
-    instance: Arc<GlobalVmInstance>,
+    instance: Arc<Mutex<GlobalVmInstance>>,
     /// Keeps our service process running as long as this VM context exists.
     #[allow(dead_code)]
     lazy_service_guard: LazyServiceGuard,
@@ -804,11 +839,16 @@ impl Interface for GlobalVmContext {}
 
 impl IGlobalVmContext for GlobalVmContext {
     fn getCid(&self) -> binder::Result<i32> {
-        Ok(self.instance.cid as i32)
+        Ok(self.instance.lock().unwrap().cid as i32)
     }
 
     fn getTemporaryDirectory(&self) -> binder::Result<String> {
-        Ok(self.instance.get_temp_dir().to_string_lossy().to_string())
+        Ok(self.instance.lock().unwrap().get_temp_dir().to_string_lossy().to_string())
+    }
+
+    fn setHostConsoleName(&self, pathname: &str) -> binder::Result<()> {
+        self.instance.lock().unwrap().host_console_name = Some(pathname.to_string());
+        Ok(())
     }
 }
 
@@ -862,7 +902,9 @@ fn handle_tombstone(stream: &mut VsockStream) -> Result<()> {
     Ok(())
 }
 
-fn remotely_provisioned_component_service_exists() -> binder::Result<bool> {
+/// Returns true if the AVF remotely provisioned component service is declared in the
+/// VINTF manifest.
+pub(crate) fn is_remote_provisioning_hal_declared() -> binder::Result<bool> {
     Ok(binder::is_declared(REMOTELY_PROVISIONED_COMPONENT_SERVICE_NAME)?)
 }
 
@@ -897,6 +939,12 @@ fn check_manage_access() -> binder::Result<()> {
 /// Check whether the caller of the current Binder method is allowed to use custom VMs
 fn check_use_custom_virtual_machine() -> binder::Result<()> {
     check_permission("android.permission.USE_CUSTOM_VIRTUAL_MACHINE")
+}
+
+/// Check whether the caller of the current Binder method is allowed to create socket and
+/// establish connection between the VM and the Internet.
+fn check_internet_permission() -> binder::Result<()> {
+    check_permission("android.permission.INTERNET")
 }
 
 #[cfg(test)]
