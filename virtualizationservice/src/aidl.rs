@@ -25,6 +25,7 @@ use android_system_virtualizationmaintenance::aidl::android::system::virtualizat
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice;
 use android_system_virtualizationservice_internal as android_vs_internal;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice;
+use android_system_vmtethering::aidl::android::system::vmtethering;
 use android_vs_internal::aidl::android::system::virtualizationservice_internal;
 use anyhow::{anyhow, ensure, Context, Result};
 use avflog::LogResult;
@@ -33,7 +34,7 @@ use binder::{
     LazyServiceGuard, ParcelFileDescriptor, Status, Strong,
 };
 use lazy_static::lazy_static;
-use libc::VMADDR_CID_HOST;
+use libc::{VMADDR_CID_HOST, VMADDR_CID_HYPERVISOR, VMADDR_CID_LOCAL};
 use log::{error, info, warn};
 use nix::unistd::{chown, Uid};
 use openssl::x509::X509;
@@ -73,6 +74,7 @@ use virtualizationservice_internal::{
     IVmnic::{BpVmnic, IVmnic},
 };
 use virtualmachineservice::IVirtualMachineService::VM_TOMBSTONES_SERVICE_PORT;
+use vmtethering::IVmTethering::{BpVmTethering, IVmTethering};
 use vsock::{VsockListener, VsockStream};
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
@@ -163,6 +165,9 @@ lazy_static! {
     static ref NETWORK_SERVICE: Strong<dyn IVmnic> =
         wait_for_interface(<BpVmnic as IVmnic>::get_descriptor())
             .expect("Could not connect to Vmnic");
+    static ref TETHERING_SERVICE: Strong<dyn IVmTethering> =
+        wait_for_interface(<BpVmTethering as IVmTethering>::get_descriptor())
+            .expect("Could not connect to VmTethering");
 }
 
 fn is_valid_guest_cid(cid: Cid) -> bool {
@@ -513,7 +518,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         Ok(())
     }
 
-    fn createTapInterface(&self, iface_name_suffix: &str) -> binder::Result<ParcelFileDescriptor> {
+    fn createTapInterface(&self, _iface_name_suffix: &str) -> binder::Result<ParcelFileDescriptor> {
         check_internet_permission()?;
         check_use_custom_virtual_machine()?;
         if !cfg!(network) {
@@ -523,7 +528,16 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             ))
             .with_log();
         }
-        NETWORK_SERVICE.createTapInterface(iface_name_suffix)
+        // TODO(340377643): Use iface_name_suffix after introducing bridge interface, not fixed
+        // value.
+        let tap_fd = NETWORK_SERVICE.createTapInterface("fixed")?;
+
+        // TODO(340377643): Due to lack of implementation of creating bridge interface, tethering is
+        // enabled for TAP interface instead of bridge interface. After introducing creation of
+        // bridge interface in AVF, we should modify it.
+        TETHERING_SERVICE.enableVmTethering()?;
+
+        Ok(tap_fd)
     }
 
     fn deleteTapInterface(&self, tap_fd: &ParcelFileDescriptor) -> binder::Result<()> {
@@ -536,6 +550,10 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             ))
             .with_log();
         }
+
+        // TODO(340377643): Disabling tethering should be for bridge interface, not TAP interface.
+        TETHERING_SERVICE.disableVmTethering()?;
+
         NETWORK_SERVICE.deleteTapInterface(tap_fd)
     }
 }
@@ -860,11 +878,21 @@ fn handle_stream_connection_tombstoned() -> Result<()> {
     for incoming_stream in listener.incoming() {
         let mut incoming_stream = match incoming_stream {
             Err(e) => {
-                warn!("invalid incoming connection: {:?}", e);
+                warn!("invalid incoming connection: {e:?}");
                 continue;
             }
             Ok(s) => s,
         };
+        if let Ok(addr) = incoming_stream.peer_addr() {
+            let cid = addr.cid();
+            match cid {
+                VMADDR_CID_LOCAL | VMADDR_CID_HOST | VMADDR_CID_HYPERVISOR => {
+                    warn!("Rejecting non-guest tombstone vsock connection from cid={cid}");
+                    continue;
+                }
+                _ => info!("Vsock Stream connected to cid={cid} for tombstones"),
+            }
+        }
         std::thread::spawn(move || {
             if let Err(e) = handle_tombstone(&mut incoming_stream) {
                 error!("Failed to write tombstone- {:?}", e);
@@ -875,9 +903,6 @@ fn handle_stream_connection_tombstoned() -> Result<()> {
 }
 
 fn handle_tombstone(stream: &mut VsockStream) -> Result<()> {
-    if let Ok(addr) = stream.peer_addr() {
-        info!("Vsock Stream connected to cid={} for tombstones", addr.cid());
-    }
     let tb_connection =
         TombstonedConnection::connect(std::process::id() as i32, DebuggerdDumpType::Tombstone)
             .context("Failed to connect to tombstoned")?;
