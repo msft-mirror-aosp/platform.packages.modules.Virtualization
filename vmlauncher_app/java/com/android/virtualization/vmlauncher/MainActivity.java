@@ -188,6 +188,7 @@ public class MainActivity extends Activity {
             customImageConfigBuilder.useTouch(true);
             customImageConfigBuilder.useKeyboard(true);
             customImageConfigBuilder.useMouse(true);
+            customImageConfigBuilder.useNetwork(true);
 
             configBuilder.setCustomImageConfig(customImageConfigBuilder.build());
 
