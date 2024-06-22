@@ -2,7 +2,7 @@
     "name": "cros",
     "disks": [
         {
-            "image": "/data/local/tmp/ferrochrome/chromiumos_test_image.bin",
+            "image": "/data/local/tmp/chromiumos_test_image.bin",
             "partitions": [],
             "writable": true
         }
@@ -11,7 +11,10 @@
     "protected": false,
     "cpu_topology": "match_host",
     "platform_version": "~1.0",
-    "memory_mib" : 8096,
+    "memory_mib": 8096,
+    "gpu": {
+        "backend": "virglrenderer",
+        "context_types": ["virgl2"]
+    },
     "console_input_device": "ttyS0"
 }
-

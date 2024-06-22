@@ -100,18 +100,14 @@ if [[ -z "${fecr_skip}" ]]; then
     # DISCLAIMER: Image is too large (1.5G+ for compressed, 6.5G+ for uncompressed), so can't submit.
     fecr_dir=$(mktemp -d)
 
-    echo "Downloading ferrochrome image to ${fecr_dir}"
+    echo "Downloading & extracting ferrochrome image to ${fecr_dir}"
     fecr_version=${fecr_version:-${FECR_DEFAULT_VERSION}}
-    curl --output-dir ${fecr_dir} -O ${FECR_GS_URL}/${fecr_version}/image.zip
-  fi
-  if [[ ! -f "${fecr_dir}/chromiumos_test_image.bin" ]]; then
-    unzip ${fecr_dir}/image.zip chromiumos_test_image.bin boot_images/vmlinuz* -d ${fecr_dir} > /dev/null
+    curl ${FECR_GS_URL}/${fecr_version}/chromiumos_test_image.tar.xz | tar xfJ - -C ${fecr_dir}
   fi
 
   echo "Pushing ferrochrome image to ${FECR_DEVICE_DIR}"
   adb shell mkdir -p ${FECR_DEVICE_DIR} > /dev/null || true
   adb push ${fecr_dir}/chromiumos_test_image.bin ${FECR_DEVICE_DIR}
-  adb push ${fecr_dir}/boot_images/vmlinuz ${FECR_DEVICE_DIR}
   adb push ${fecr_script_path}/assets/vm_config.json ${FECR_CONFIG_PATH}
 fi
 

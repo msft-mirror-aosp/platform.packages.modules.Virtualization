@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The Android Open Source Project
+ * Copyright 2024 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,15 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package android.system.virtualizationservice_internal;
 
-interface IGlobalVmContext {
-    /** Get the CID allocated to the VM. */
-    int getCid();
+package android.system.vmtethering;
 
-    /** Get the path to the temporary folder of the VM. */
-    String getTemporaryDirectory();
+interface IVmTethering {
+    /**
+     * Start VM tethering to provide external network to VM.
+     */
+    void enableVmTethering();
 
-    /** Set the name of the peer end (ptsname) of the host console. */
-    void setHostConsoleName(@utf8InCpp String pathname);
+    /**
+     * Terminate VM tethering that providing external network to VM.
+     */
+    void disableVmTethering();
 }
