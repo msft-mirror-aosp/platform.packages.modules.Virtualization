@@ -924,6 +924,11 @@ public class VirtualMachine implements AutoCloseable {
         }
         rawConfig.inputDevices = inputDevices.toArray(new InputDevice[0]);
 
+        // Handle network support
+        if (vmConfig.getCustomImageConfig() != null) {
+            rawConfig.networkSupported = vmConfig.getCustomImageConfig().useNetwork();
+        }
+
         return android.system.virtualizationservice.VirtualMachineConfig.rawConfig(rawConfig);
     }
 
@@ -1214,6 +1219,9 @@ public class VirtualMachine implements AutoCloseable {
                         service.createVm(vmConfigParcel, consoleOutFd, consoleInFd, mLogWriter);
                 mVirtualMachine.registerCallback(new CallbackTranslator(service));
                 mContext.registerComponentCallbacks(mMemoryManagementCallbacks);
+                if (mConnectVmConsole) {
+                    mVirtualMachine.setHostConsoleName(getHostConsoleName());
+                }
                 mVirtualMachine.start();
             } catch (IOException e) {
                 throw new VirtualMachineException("failed to persist files", e);
@@ -1335,7 +1343,7 @@ public class VirtualMachine implements AutoCloseable {
      * @hide
      */
     @NonNull
-    public String getHostConsoleName() throws VirtualMachineException {
+    private String getHostConsoleName() throws VirtualMachineException {
         if (!mConnectVmConsole) {
             throw new VirtualMachineException("Host console is not enabled");
         }
