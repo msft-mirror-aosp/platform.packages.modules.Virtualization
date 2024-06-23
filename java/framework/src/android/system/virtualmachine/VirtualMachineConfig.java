@@ -22,7 +22,6 @@ import static android.os.ParcelFileDescriptor.MODE_READ_WRITE;
 
 import static java.util.Objects.requireNonNull;
 
-import android.Manifest;
 import android.annotation.FlaggedApi;
 import android.annotation.IntDef;
 import android.annotation.IntRange;
@@ -82,7 +81,7 @@ public final class VirtualMachineConfig {
 
     // These define the schema of the config file persisted on disk.
     // Please bump up the version number when adding a new key.
-    private static final int VERSION = 9;
+    private static final int VERSION = 10;
     private static final String KEY_VERSION = "version";
     private static final String KEY_PACKAGENAME = "packageName";
     private static final String KEY_APKPATH = "apkPath";
@@ -101,8 +100,8 @@ public final class VirtualMachineConfig {
     private static final String KEY_VENDOR_DISK_IMAGE_PATH = "vendorDiskImagePath";
     private static final String KEY_OS = "os";
     private static final String KEY_EXTRA_APKS = "extraApks";
-    private static final String KEY_NETWORK_SUPPORTED = "networkSupported";
     private static final String KEY_SHOULD_BOOST_UCLAMP = "shouldBoostUclamp";
+    private static final String KEY_SHOULD_USE_HUGEPAGES = "shouldUseHugepages";
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -210,10 +209,9 @@ public final class VirtualMachineConfig {
     /** OS name of the VM using payload binaries. */
     @NonNull @OsName private final String mOs;
 
-    /** Whether to run the VM with supporting network feature or not. */
-    private final boolean mNetworkSupported;
-
     private final boolean mShouldBoostUclamp;
+
+    private final boolean mShouldUseHugepages;
 
     @Retention(RetentionPolicy.SOURCE)
     @StringDef(
@@ -250,8 +248,8 @@ public final class VirtualMachineConfig {
             boolean connectVmConsole,
             @Nullable File vendorDiskImage,
             @NonNull @OsName String os,
-            boolean networkSupported,
-            boolean shouldBoostUclamp) {
+            boolean shouldBoostUclamp,
+            boolean shouldUseHugepages) {
         // This is only called from Builder.build(); the builder handles parameter validation.
         mPackageName = packageName;
         mApkPath = apkPath;
@@ -274,8 +272,8 @@ public final class VirtualMachineConfig {
         mConnectVmConsole = connectVmConsole;
         mVendorDiskImage = vendorDiskImage;
         mOs = os;
-        mNetworkSupported = networkSupported;
         mShouldBoostUclamp = shouldBoostUclamp;
+        mShouldUseHugepages = shouldUseHugepages;
     }
 
     /** Loads a config from a file. */
@@ -376,9 +374,9 @@ public final class VirtualMachineConfig {
             }
         }
 
-        builder.setNetworkSupported(b.getBoolean(KEY_NETWORK_SUPPORTED));
-
         builder.setShouldBoostUclamp(b.getBoolean(KEY_SHOULD_BOOST_UCLAMP));
+        builder.setShouldUseHugepages(b.getBoolean(KEY_SHOULD_USE_HUGEPAGES));
+
         return builder.build();
     }
 
@@ -429,8 +427,8 @@ public final class VirtualMachineConfig {
             String[] extraApks = mExtraApks.toArray(new String[0]);
             b.putStringArray(KEY_EXTRA_APKS, extraApks);
         }
-        b.putBoolean(KEY_NETWORK_SUPPORTED, mNetworkSupported);
         b.putBoolean(KEY_SHOULD_BOOST_UCLAMP, mShouldBoostUclamp);
+        b.putBoolean(KEY_SHOULD_USE_HUGEPAGES, mShouldUseHugepages);
         b.writeToStream(output);
     }
 
@@ -607,16 +605,6 @@ public final class VirtualMachineConfig {
     }
 
     /**
-     * Returns whether the network feature is supported to the VM or not.
-     *
-     * @hide
-     */
-    @TestApi
-    public boolean isNetworkSupported() {
-        return mNetworkSupported;
-    }
-
-    /**
      * Tests if this config is compatible with other config. Being compatible means that the configs
      * can be interchangeably used for the same virtual machine; they do not change the VM identity
      * or secrets. Such changes include varying the number of CPUs or the size of the RAM. Changes
@@ -720,7 +708,6 @@ public final class VirtualMachineConfig {
         config.cpuTopology = (byte) this.mCpuTopology;
         config.consoleInputDevice = mConsoleInputDevice;
         config.devices = EMPTY_STRING_ARRAY;
-        config.networkSupported = this.mNetworkSupported;
         config.platformVersion = "~1.0";
         return config;
     }
@@ -773,26 +760,24 @@ public final class VirtualMachineConfig {
                 break;
         }
 
-        if (mVendorDiskImage != null || mNetworkSupported) {
+        if (mVendorDiskImage != null) {
             VirtualMachineAppConfig.CustomConfig customConfig =
                     new VirtualMachineAppConfig.CustomConfig();
             customConfig.devices = EMPTY_STRING_ARRAY;
-            if (mVendorDiskImage != null) {
-                try {
-                    customConfig.vendorImage =
-                            ParcelFileDescriptor.open(mVendorDiskImage, MODE_READ_ONLY);
-                } catch (FileNotFoundException e) {
-                    throw new VirtualMachineException(
-                            "Failed to open vendor disk image "
-                                    + mVendorDiskImage.getAbsolutePath(),
-                            e);
-                }
+            try {
+                customConfig.vendorImage =
+                        ParcelFileDescriptor.open(mVendorDiskImage, MODE_READ_ONLY);
+            } catch (FileNotFoundException e) {
+                throw new VirtualMachineException(
+                        "Failed to open vendor disk image " + mVendorDiskImage.getAbsolutePath(),
+                        e);
             }
-            customConfig.networkSupported = mNetworkSupported;
             vsConfig.customConfig = customConfig;
         }
 
         vsConfig.boostUclamp = mShouldBoostUclamp;
+        vsConfig.hugePages = mShouldUseHugepages;
+
         return vsConfig;
     }
 
@@ -872,8 +857,8 @@ public final class VirtualMachineConfig {
         private boolean mConnectVmConsole = false;
         @Nullable private File mVendorDiskImage;
         @NonNull @OsName private String mOs = DEFAULT_OS;
-        private boolean mNetworkSupported;
         private boolean mShouldBoostUclamp = false;
+        private boolean mShouldUseHugepages = false;
 
         /**
          * Creates a builder for the given context.
@@ -950,10 +935,6 @@ public final class VirtualMachineConfig {
                         "debug level must be FULL to connect to the console");
             }
 
-            if (mNetworkSupported && mProtectedVm) {
-                throw new IllegalStateException("network is not supported on pVM");
-            }
-
             return new VirtualMachineConfig(
                     packageName,
                     apkPath,
@@ -972,8 +953,8 @@ public final class VirtualMachineConfig {
                     mConnectVmConsole,
                     mVendorDiskImage,
                     mOs,
-                    mNetworkSupported,
-                    mShouldBoostUclamp);
+                    mShouldBoostUclamp,
+                    mShouldUseHugepages);
         }
 
         /**
@@ -1279,26 +1260,15 @@ public final class VirtualMachineConfig {
             return this;
         }
 
-        /**
-         * Sets whether to support network feature to VM. Default is {@code false}.
-         *
-         * @hide
-         */
-        @TestApi
-        @RequiresPermission(
-                allOf = {
-                    VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION,
-                    Manifest.permission.INTERNET
-                })
-        @NonNull
-        public Builder setNetworkSupported(boolean networkSupported) {
-            mNetworkSupported = networkSupported;
+        /** @hide */
+        public Builder setShouldBoostUclamp(boolean shouldBoostUclamp) {
+            mShouldBoostUclamp = shouldBoostUclamp;
             return this;
         }
 
         /** @hide */
-        public Builder setShouldBoostUclamp(boolean shouldBoostUclamp) {
-            mShouldBoostUclamp = shouldBoostUclamp;
+        public Builder setShouldUseHugepages(boolean shouldUseHugepages) {
+            mShouldUseHugepages = shouldUseHugepages;
             return this;
         }
     }
