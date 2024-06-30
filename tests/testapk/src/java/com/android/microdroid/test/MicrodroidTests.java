@@ -37,6 +37,7 @@ import static org.junit.Assume.assumeTrue;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static java.util.stream.Collectors.toList;
 
+import android.app.ActivityManager;
 import android.app.Instrumentation;
 import android.app.UiAutomation;
 import android.content.ComponentName;
@@ -2510,6 +2511,52 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             }
             return mVmShareTestService;
         }
+    }
+
+    @Test
+    public void concurrentVms() throws Exception {
+        final long vmSize = minMemoryRequired();
+        final int numVMs = 8;
+        final long availableMem = getAvailableMemory();
+
+        // Let's not use more than half of the available memory
+        assume().withMessage("Available memory (" + availableMem + " bytes) too small")
+                .that((numVMs * vmSize) <= (availableMem / 2))
+                .isTrue();
+
+        VirtualMachine[] vms = new VirtualMachine[numVMs];
+        try {
+            for (int i = 0; i < numVMs; i++) {
+                VirtualMachineConfig config =
+                        newVmConfigBuilderWithPayloadBinary("MicrodroidIdleNativeLib.so")
+                                .setDebugLevel(DEBUG_LEVEL_NONE)
+                                .setMemoryBytes(vmSize)
+                                .build();
+
+                vms[i] = forceCreateNewVirtualMachine("test_concurrent_vms_" + i, config);
+                vms[i].run();
+            }
+
+            for (VirtualMachine vm : vms) {
+                assertThat(vm.getStatus()).isEqualTo(VirtualMachine.STATUS_RUNNING);
+            }
+
+        } finally {
+            // Ensure that VMs are all stopped. Otherwise we may try to reuse some of these for
+            // another run of this test with different parameters.
+            for (VirtualMachine vm : vms) {
+                if (vm != null) {
+                    vm.close();
+                }
+            }
+        }
+    }
+
+    private long getAvailableMemory() {
+        ActivityManager am = getContext().getSystemService(ActivityManager.class);
+        ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
+        am.getMemoryInfo(memoryInfo);
+        return memoryInfo.availMem;
     }
 
     private VirtualMachineDescriptor toParcelFromParcel(VirtualMachineDescriptor descriptor) {
