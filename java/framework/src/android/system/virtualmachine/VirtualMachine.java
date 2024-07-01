@@ -924,6 +924,11 @@ public class VirtualMachine implements AutoCloseable {
         }
         rawConfig.inputDevices = inputDevices.toArray(new InputDevice[0]);
 
+        // Handle network support
+        if (vmConfig.getCustomImageConfig() != null) {
+            rawConfig.networkSupported = vmConfig.getCustomImageConfig().useNetwork();
+        }
+
         return android.system.virtualizationservice.VirtualMachineConfig.rawConfig(rawConfig);
     }
 
@@ -1132,7 +1137,9 @@ public class VirtualMachine implements AutoCloseable {
     /**
      * Runs this virtual machine. The returning of this method however doesn't mean that the VM has
      * actually started running or the OS has booted there. Such events can be notified by
-     * registering a callback using {@link #setCallback} before calling {@code run()}.
+     * registering a callback using {@link #setCallback} before calling {@code run()}. There is no
+     * limit other than available memory that limits the number of virtual machines that can run at
+     * the same time.
      *
      * <p>NOTE: This method may block and should not be called on the main thread.
      *
@@ -1214,6 +1221,9 @@ public class VirtualMachine implements AutoCloseable {
                         service.createVm(vmConfigParcel, consoleOutFd, consoleInFd, mLogWriter);
                 mVirtualMachine.registerCallback(new CallbackTranslator(service));
                 mContext.registerComponentCallbacks(mMemoryManagementCallbacks);
+                if (mConnectVmConsole) {
+                    mVirtualMachine.setHostConsoleName(getHostConsoleName());
+                }
                 mVirtualMachine.start();
             } catch (IOException e) {
                 throw new VirtualMachineException("failed to persist files", e);
@@ -1335,7 +1345,7 @@ public class VirtualMachine implements AutoCloseable {
      * @hide
      */
     @NonNull
-    public String getHostConsoleName() throws VirtualMachineException {
+    private String getHostConsoleName() throws VirtualMachineException {
         if (!mConnectVmConsole) {
             throw new VirtualMachineException("Host console is not enabled");
         }
