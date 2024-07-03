@@ -28,8 +28,6 @@ import static android.system.virtualmachine.VirtualMachineManager.CAPABILITY_PRO
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
-import com.android.virt.vm_attestation.testservice.IAttestationService.AttestationStatus;
-import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -39,6 +37,7 @@ import static org.junit.Assume.assumeTrue;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static java.util.stream.Collectors.toList;
 
+import android.app.ActivityManager;
 import android.app.Instrumentation;
 import android.app.UiAutomation;
 import android.content.ComponentName;
@@ -70,7 +69,14 @@ import com.android.microdroid.test.vmshare.IVmShareTestService;
 import com.android.microdroid.testservice.IAppCallback;
 import com.android.microdroid.testservice.ITestService;
 import com.android.microdroid.testservice.IVmCallback;
+import com.android.virt.vm_attestation.testservice.IAttestationService.AttestationStatus;
+import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 import com.android.virt.vm_attestation.util.X509Utils;
+
+import co.nstant.in.cbor.CborDecoder;
+import co.nstant.in.cbor.model.Array;
+import co.nstant.in.cbor.model.DataItem;
+import co.nstant.in.cbor.model.MajorType;
 
 import com.google.common.base.Strings;
 import com.google.common.truth.BooleanSubject;
@@ -113,17 +119,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
-import co.nstant.in.cbor.CborDecoder;
-import co.nstant.in.cbor.model.Array;
-import co.nstant.in.cbor.model.DataItem;
-import co.nstant.in.cbor.model.MajorType;
-
 @RunWith(Parameterized.class)
 public class MicrodroidTests extends MicrodroidDeviceTestBase {
     private static final String TAG = "MicrodroidTests";
     private static final String TEST_APP_PACKAGE_NAME = "com.android.microdroid.test";
     private static final String VM_ATTESTATION_PAYLOAD_PATH = "libvm_attestation_test_payload.so";
     private static final String VM_ATTESTATION_MESSAGE = "Hello RKP from AVF!";
+    private static final int ENCRYPTED_STORAGE_BYTES = 4_000_000;
 
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
 
@@ -196,6 +198,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                             tr.mSublibRunProp = ts.readProperty("debug.microdroid.app.sublib.run");
                             tr.mApkContentsPath = ts.getApkContentsPath();
                             tr.mEncryptedStoragePath = ts.getEncryptedStoragePath();
+                            tr.mInstanceSecret = ts.insecurelyExposeVmInstanceSecret();
                         });
         testResults.assertNoException();
         assertThat(testResults.mAddInteger).isEqualTo(123 + 456);
@@ -203,6 +206,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(testResults.mSublibRunProp).isEqualTo("true");
         assertThat(testResults.mApkContentsPath).isEqualTo("/mnt/apk");
         assertThat(testResults.mEncryptedStoragePath).isEqualTo("");
+        assertThat(testResults.mInstanceSecret).hasLength(32);
     }
 
     @Test
@@ -571,7 +575,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(minimal.isProtectedVm()).isEqualTo(isProtectedVm());
         assertThat(minimal.isEncryptedStorageEnabled()).isFalse();
         assertThat(minimal.getEncryptedStorageBytes()).isEqualTo(0);
-        assertThat(minimal.isVmOutputCaptured()).isEqualTo(false);
+        assertThat(minimal.isVmOutputCaptured()).isFalse();
         assertThat(minimal.getOs()).isEqualTo("microdroid");
 
         // Maximal has everything that can be set to some non-default value. (And has different
@@ -603,7 +607,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(maximal.isProtectedVm()).isEqualTo(isProtectedVm());
         assertThat(maximal.isEncryptedStorageEnabled()).isTrue();
         assertThat(maximal.getEncryptedStorageBytes()).isEqualTo(1_000_000);
-        assertThat(maximal.isVmOutputCaptured()).isEqualTo(true);
+        assertThat(maximal.isVmOutputCaptured()).isTrue();
         assertThat(maximal.getOs()).isEqualTo("microdroid_gki-android14-6.1");
 
         assertThat(minimal.isCompatibleWith(maximal)).isFalse();
@@ -1583,7 +1587,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_FULL);
         if (encryptedStoreEnabled) {
-            builder.setEncryptedStorageBytes(4_000_000);
+            builder.setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES);
         }
         VirtualMachineConfig config = builder.build();
         String vmNameOrig = "test_vm_orig";
@@ -1637,7 +1641,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setMemoryBytes(minMemoryRequired())
-                        .setEncryptedStorageBytes(4_000_000)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("test_vm", config);
@@ -1664,7 +1668,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setMemoryBytes(minMemoryRequired())
-                        .setEncryptedStorageBytes(4_000_000)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
 
@@ -1771,7 +1775,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setMemoryBytes(minMemoryRequired())
-                        .setEncryptedStorageBytes(4_000_000)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_a", config);
@@ -2263,7 +2267,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         VirtualMachineConfig vmConfig =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
-                        .setEncryptedStorageBytes(4_000_000)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("test_vm_encstore_no_exec", vmConfig);
 
@@ -2284,6 +2288,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @VsrTest(requirements = {"VSR-7.1-001.003"})
     public void kernelVersionRequirement() throws Exception {
+        assumeVsrCompliant();
         int firstApiLevel = SystemProperties.getInt("ro.product.first_api_level", 0);
         assume().withMessage("Skip on devices launched before Android 14 (API level 34)")
                 .that(firstApiLevel)
@@ -2298,6 +2303,63 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         if (major == 5) {
             assertTrue(minor >= 15);
         }
+    }
+
+    @Test
+    public void createAndRunRustVm() throws Exception {
+        // This test is here mostly to exercise the Rust wrapper around the VM Payload API.
+        // We're testing the same functionality as in other tests, the only difference is
+        // that the payload is written in Rust.
+
+        assumeSupportedDevice();
+
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("libmicrodroid_testlib_rust.so")
+                        .setMemoryBytes(minMemoryRequired())
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("rust_vm", config);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mAddInteger = ts.addInteger(37, 73);
+                            tr.mApkContentsPath = ts.getApkContentsPath();
+                            tr.mEncryptedStoragePath = ts.getEncryptedStoragePath();
+                            tr.mInstanceSecret = ts.insecurelyExposeVmInstanceSecret();
+                        });
+        testResults.assertNoException();
+        assertThat(testResults.mAddInteger).isEqualTo(37 + 73);
+        assertThat(testResults.mApkContentsPath).isEqualTo("/mnt/apk");
+        assertThat(testResults.mEncryptedStoragePath).isEqualTo("");
+        assertThat(testResults.mInstanceSecret).hasLength(32);
+    }
+
+    @Test
+    public void createAndRunRustVmWithEncryptedStorage() throws Exception {
+        // This test is here mostly to exercise the Rust wrapper around the VM Payload API.
+        // We're testing the same functionality as in other tests, the only difference is
+        // that the payload is written in Rust.
+
+        assumeSupportedDevice();
+
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("libmicrodroid_testlib_rust.so")
+                        .setMemoryBytes(minMemoryRequired())
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORAGE_BYTES)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("rust_vm", config);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> tr.mEncryptedStoragePath = ts.getEncryptedStoragePath());
+        testResults.assertNoException();
+        assertThat(testResults.mEncryptedStoragePath).isEqualTo("/mnt/encryptedstore");
     }
 
     private VirtualMachineConfig buildVmConfigWithVendor(File vendorDiskImage) throws Exception {
@@ -2450,6 +2512,52 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             }
             return mVmShareTestService;
         }
+    }
+
+    @Test
+    public void concurrentVms() throws Exception {
+        final long vmSize = minMemoryRequired();
+        final int numVMs = 8;
+        final long availableMem = getAvailableMemory();
+
+        // Let's not use more than half of the available memory
+        assume().withMessage("Available memory (" + availableMem + " bytes) too small")
+                .that((numVMs * vmSize) <= (availableMem / 2))
+                .isTrue();
+
+        VirtualMachine[] vms = new VirtualMachine[numVMs];
+        try {
+            for (int i = 0; i < numVMs; i++) {
+                VirtualMachineConfig config =
+                        newVmConfigBuilderWithPayloadBinary("MicrodroidIdleNativeLib.so")
+                                .setDebugLevel(DEBUG_LEVEL_NONE)
+                                .setMemoryBytes(vmSize)
+                                .build();
+
+                vms[i] = forceCreateNewVirtualMachine("test_concurrent_vms_" + i, config);
+                vms[i].run();
+            }
+
+            for (VirtualMachine vm : vms) {
+                assertThat(vm.getStatus()).isEqualTo(VirtualMachine.STATUS_RUNNING);
+            }
+
+        } finally {
+            // Ensure that VMs are all stopped. Otherwise we may try to reuse some of these for
+            // another run of this test with different parameters.
+            for (VirtualMachine vm : vms) {
+                if (vm != null) {
+                    vm.close();
+                }
+            }
+        }
+    }
+
+    private long getAvailableMemory() {
+        ActivityManager am = getContext().getSystemService(ActivityManager.class);
+        ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
+        am.getMemoryInfo(memoryInfo);
+        return memoryInfo.availMem;
     }
 
     private VirtualMachineDescriptor toParcelFromParcel(VirtualMachineDescriptor descriptor) {

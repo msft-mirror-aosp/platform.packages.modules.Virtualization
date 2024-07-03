@@ -395,12 +395,9 @@ prebuilt_etc {
 // python -c "import hashlib; print(hashlib.sha256(b'bootloader').hexdigest())"
 bootloader_salt = "3b4a12881d11f33cff968a24d7c53723a8232cde9a8d91e29fdbd6a95ae6adf0"
 
-// Note that keys can be different for filesystem images even though we're using the same key
-// for microdroid. However, the key signing VBmeta should match with the pubkey embedded in
-// bootloader.
 filegroup {
     name: "microdroid_sign_key",
-    srcs: [":avb_testkey_rsa4096"],
+    srcs: [":pvmfw_embedded_key"],
 }
 
 soong_config_module_type {
@@ -649,6 +646,74 @@ avb_gen_vbmeta_image {
     src: ":microdroid_gki-android14-6.1-pkvm_experimental_initrd_debuggable",
 }
 
+///////////////////////////////////////
+// GKI-android15-6.6
+///////////////////////////////////////
+prebuilt_etc {
+    name: "microdroid_gki-android15-6.6.json",
+    src: "microdroid_gki-android15-6.6.json",
+}
+
+avb_add_hash_footer {
+    name: "microdroid_gki-android15-6.6_kernel_signed",
+    defaults: ["microdroid_kernel_signed_defaults"],
+    filename: "microdroid_gki-android15-6.6_kernel_signed",
+    arch: {
+        arm64: {
+            src: ":microdroid_gki_kernel_prebuilts-android15-6.6-arm64",
+        },
+        x86_64: {
+            src: ":microdroid_gki_kernel_prebuilts-android15-6.6-x86_64",
+        },
+    },
+    include_descriptors_from_images: [
+        ":microdroid_gki-android15-6.6_initrd_normal_hashdesc",
+        ":microdroid_gki-android15-6.6_initrd_debug_hashdesc",
+    ],
+}
+
+// HACK: use cc_genrule for arch-specific properties
+cc_genrule {
+    name: "microdroid_gki-android15-6.6_kernel_signed-lz4",
+    out: ["microdroid_gki-android15-6.6_kernel_signed-lz4"],
+    srcs: [":empty_file"],
+    arch: {
+        arm64: {
+            srcs: [":microdroid_gki-android15-6.6_kernel_signed"],
+            exclude_srcs: [":empty_file"],
+        },
+    },
+    tools: ["lz4"],
+    cmd: "$(location lz4) -9 $(in) $(out)",
+}
+
+prebuilt_etc {
+    name: "microdroid_gki-android15-6.6_kernel",
+    filename: "microdroid_gki-android15-6.6_kernel",
+    src: ":empty_file",
+    relative_install_path: "fs",
+    arch: {
+        arm64: {
+            src: ":microdroid_gki-android15-6.6_kernel_signed",
+        },
+        x86_64: {
+            src: ":microdroid_gki-android15-6.6_kernel_signed",
+        },
+    },
+}
+
+avb_gen_vbmeta_image {
+    name: "microdroid_gki-android15-6.6_initrd_normal_hashdesc",
+    defaults: ["microdroid_initrd_normal_defaults"],
+    src: ":microdroid_gki-android15-6.6_initrd_normal",
+}
+
+avb_gen_vbmeta_image {
+    name: "microdroid_gki-android15-6.6_initrd_debug_hashdesc",
+    defaults: ["microdroid_initrd_debug_defaults"],
+    src: ":microdroid_gki-android15-6.6_initrd_debuggable",
+}
+
 python_binary_host {
     name: "extract_microdroid_kernel_hashes",
     srcs: ["extract_microdroid_kernel_hashes.py"],
@@ -660,10 +725,16 @@ cc_genrule {
     srcs: [":microdroid_kernel"],
     arch: {
         arm64: {
-            srcs: [":microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed"],
+            srcs: [
+                ":microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed",
+                ":microdroid_gki-android15-6.6_kernel_signed",
+            ],
         },
         x86_64: {
-            srcs: [":microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed"],
+            srcs: [
+                ":microdroid_gki-android14-6.1-pkvm_experimental_kernel_signed",
+                ":microdroid_gki-android15-6.6_kernel_signed",
+            ],
         },
     },
     out: ["lib.rs"],
