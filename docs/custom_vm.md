@@ -56,7 +56,13 @@ adb push vm_config.json /data/local/tmp/vm_config.json
 
 ## Graphical VMs
 
-To run OSes with graphics support, follow the instruction below.
+To run OSes with graphics support, simply
+`packages/modules/Virtualization/tests/ferrochrome/ferrochrome.sh`. It prepares
+and launches the ChromiumOS, which is the only officially supported guest
+payload. We will be adding more OSes in the future.
+
+If you want to do so by yourself (e.g. boot with your build), follow the
+instruction below.
 
 ### Prepare a guest image
 
@@ -232,18 +238,6 @@ $ adb shell pm clear com.android.virtualization.vmlauncher
 $ adb shell pm clear com.google.android.virtualization.vmlauncher
 ```
 
-### Inside guest OS (for ChromiumOS only)
-
-Go to the network setting and configure as below.
-
-* IP: 192.168.1.2 (other addresses in the 192.168.1.0/24 subnet also works)
-* netmask: 255.255.255.0
-* gateway: 192.168.1.1
-* DNS: 8.8.8.8 (or any DNS server you know)
-
-These settings are persistent; stored in chromiumos_test_image.bin. So you
-don’t have to repeat this next time.
-
 ### Debugging
 
 To open the serial console (interactive terminal):
@@ -252,17 +246,27 @@ $ adb shell -t /apex/com.android.virt/bin/vm console
 ```
 
 To see console logs only, check
-`/data/data/com.android.virtualization.vmlauncher/files/console.log`
-Or
-`/data/data/com.google.android.virtualization.vmlauncher/files/console.log`
+`/data/data/com{,.google}.android.virtualization.vmlauncher/files/console.log`
+
+For HSUM enabled devices,
+`/data/user/${current_user_id}/com{,.google}.android.virtualization.vmlauncher/files/console.log`
+
+You can monitor console out as follows
 
 ```shell
-$ adb shell su root tail +0 -F /data/data/com{,.google}.android.virtualization.vmlauncher/files/console.log
+$ adb shell 'su root tail +0 -F /data/user/$(am get-current-user)/com{,.google}.android.virtualization.vmlauncher/files/console.log'
 ```
 
-For ChromiumOS, you can ssh-in. Use following commands after network setup.
+For ChromiumOS, you can enter to the console via SSH connection. Check your IP
+address of ChromiumOS VM from the ethernet network setting page and follow
+commands below.
 
 ```shell
-$ adb kill-server ; adb start-server; adb forward tcp:9222 tcp:9222
+$ adb kill-server ; adb start-server
+$ adb shell nc -s localhost -L -p 9222 nc ${CHROMIUMOS_IPV4_ADDR} 22 # This command won't be terminated.
+$ adb forward tcp:9222 tcp:9222
 $ ssh -oProxyCommand=none -o UserKnownHostsFile=/dev/null root@localhost -p 9222
 ```
+
+For ChromiumOS, you would need to login after enthering its console.
+The user ID and the password is `root` and `test0000` respectively.
