@@ -682,6 +682,28 @@ impl VmInstance {
         conn.notify_completion()?;
         Ok(())
     }
+
+    /// Suspends the VM
+    pub fn suspend(&self) -> Result<(), Error> {
+        match vm_control::client::handle_request(
+            &VmRequest::SuspendVcpus,
+            &self.crosvm_control_socket_path,
+        ) {
+            Ok(VmResponse::Ok) => Ok(()),
+            e => bail!("Failed to suspend VM: {e:?}"),
+        }
+    }
+
+    /// Resumes the suspended VM
+    pub fn resume(&self) -> Result<(), Error> {
+        match vm_control::client::handle_request(
+            &VmRequest::ResumeVcpus,
+            &self.crosvm_control_socket_path,
+        ) {
+            Ok(VmResponse::Ok) => Ok(()),
+            e => bail!("Failed to resume: {e:?}"),
+        }
+    }
 }
 
 impl Rss {
@@ -1084,15 +1106,6 @@ fn run_vm(
                     display_config.refresh_rate
                 ))
                 .arg(format!("--android-display-service={}", config.name));
-        }
-    }
-
-    if cfg!(paravirtualized_devices) {
-        // TODO(b/340376951): Remove this after tap in CrosvmConfig is connected to tethering.
-        if rustutils::system_properties::read_bool("ro.crosvm.network.setup.done", false)
-            .unwrap_or(false)
-        {
-            command.arg("--net").arg("tap-name=crosvm_tap");
         }
     }
 

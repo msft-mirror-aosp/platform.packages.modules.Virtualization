@@ -56,34 +56,43 @@ adb push vm_config.json /data/local/tmp/vm_config.json
 
 ## Graphical VMs
 
-To run OSes with graphics support, follow the instruction below.
+To run OSes with graphics support, simply
+`packages/modules/Virtualization/tests/ferrochrome/ferrochrome.sh`. It prepares
+and launches the ChromiumOS, which is the only officially supported guest
+payload. We will be adding more OSes in the future.
+
+If you want to do so by yourself (e.g. boot with your build), follow the
+instruction below.
 
 ### Prepare a guest image
 
 As of today (April 2024), ChromiumOS is the only officially supported guest
 payload. We will be adding more OSes in the future.
 
-#### Download from build server
+#### Download ChromiumOS from build server
 
-  - Step 1) Go to the link https://ci.chromium.org/ui/p/chromeos/builders/chromiumos/ferrochrome-public-main/
-    - Note: I 'searched' the ferrochrome target with builder search.
-  - Step 2) Click a build number
-  - Step 3) Expand steps and find `48. upload artifacts`.
-  - Step 4) Click `gs upload dir`. You'll see Cloud storage with comprehensive artifacts (e.g. [Here](https://pantheon.corp.google.com/storage/browser/chromiumos-image-archive/ferrochrome-public/R126-15883.0.0) is the initial build of ferrochrome)
-  - Step 5) Download `image.zip`, which contains working vmlinuz.
-    - Note: DO NOT DOWNLOAD `vmlinuz.tar.xz` from the CI.
-  - Step 6) Uncompress `image.zip`, and boot with `chromiumos_test_image.bin` and `boot_images/vmlinuz`.
-    - Note: DO NOT USE `vmlinuz.bin`.
+Download
+https://storage.googleapis.com/chromiumos-image-archive/ferrochrome-public/R128-15926.0.0/chromiumos_test_image.tar.xz.
+The above will download ferrochrome test image with version `R128-15926.0.0`.
 
-IMPORTANT: DO NOT USE `vmlinuz.bin` for passing to crosvm. It doesn't pick-up the correct `init` process (picks `/init` instead of `/sbin/init`, and `cfg80211` keeps crashing (i.e. no network)
+To download latest version, use following code.
 
+```sh
+URL=https://storage.googleapis.com/chromiumos-image-archive/ferrochrome-public
+LATEST_VERSION=$(curl -s ${URL}/LATEST-main)
+curl -O ${URL}/${LATEST_VERSION}/chromiumos_test_image.tar.xz
+```
+
+To navigate build server artifacts,
+[install gsutil](https://cloud.google.com/storage/docs/gsutil_install).
+`gs://chromiumos-image-archive/ferrochrome-public` is the top level directory for ferrochrome build.
 
 #### Build ChromiumOS for VM
 
 First, check out source code from the ChromiumOS and Chromium projects.
 
+* Checking out Chromium: https://www.chromium.org/developers/how-tos/get-the-code/
 * Checking out ChromiumOS: https://www.chromium.org/chromium-os/developer-library/guides/development/developer-guide/
-* Checking out Chromium: https://g3doc.corp.google.com/chrome/chromeos/system_services_team/dev_instructions/g3doc/setup_checkout.md?cl=head
 
 Important: When you are at the step “Set up gclient args” in the Chromium checkout instruction, configure .gclient as follows.
 
@@ -95,9 +104,7 @@ solutions = [
     "url": "https://chromium.googlesource.com/chromium/src.git",
     "managed": False,
     "custom_deps": {},
-    "custom_vars": {
-      "checkout_src_internal": True,
-    },
+    "custom_vars": {},
   },
 ]
 target_os = ['chromeos']
@@ -162,10 +169,7 @@ invoking emerge directly:
 
 Don’t forget to call `build-image` afterwards.
 
-You need two outputs:
-
-* ChromiumOS disk image: ~/chromiumos/src/build/images/ferrochrome/latest/chromiumos_test_image.bin
-* The kernel: ~/chromiumos/src/build/images/ferrochrome/latest/boot_images/vmlinuz
+You need ChromiumOS disk image: ~/chromiumos/src/build/images/ferrochrome/latest/chromiumos_test_image.bin
 
 ### Create a guest VM configuration
 
@@ -173,7 +177,6 @@ Push the kernel and the main image to the Android device.
 
 ```
 $ adb push  ~/chromiumos/src/build/images/ferrochrome/latest/chromiumos_test_image.bin /data/local/tmp/
-$ adb push ~/chromiumos/out/build/ferrochrome/boot/vmlinuz /data/local/tmp/kernel
 ```
 
 Create a VM config file as below.
@@ -182,7 +185,6 @@ Create a VM config file as below.
 $ cat > vm_config.json; adb push vm_config.json /data/local/tmp
 {
     "name": "cros",
-    "kernel": "/data/local/tmp/kernel",
     "disks": [
         {
             "image": "/data/local/tmp/chromiumos_test_image.bin",
@@ -210,7 +212,7 @@ future, this step won't be necesssary.
 
 ```
 $ adb root
-$ adb shell pm enable com.android.virtualization.vmlauncher/.MainActivity
+$ adb shell pm enable com.android.virtualization.vmlauncher/.MainActivityAlias
 $ adb unroot
 ```
 
@@ -218,71 +220,14 @@ If virt apex is Google-signed, you need to enable the app and grant the
 permission to the app.
 ```
 $ adb root
-$ adb shell pm enable com.google.android.virtualization.vmlauncher/com.android.virtualization.vmlauncher.MainActivity
+$ adb shell pm enable com.google.android.virtualization.vmlauncher/com.android.virtualization.vmlauncher.MainActivityAlias
 $ adb shell pm grant com.google.android.virtualization.vmlauncher android.permission.USE_CUSTOM_VIRTUAL_MACHINE
 $ adb unroot
 ```
-Then execute the below to set up the network. In the future, this step won't be necessary.
 
-```
-$ cat > setup_network.sh; adb push setup_network.sh /data/local/tmp
-#!/system/bin/sh
+Second, ensure your device is connected to the Internet.
 
-set -e
-
-TAP_IFACE=crosvm_tap
-TAP_ADDR=192.168.1.1
-TAP_NET=192.168.1.0
-
-function setup_network() {
-  local WAN_IFACE=$(ip route get 8.8.8.8 2> /dev/null | awk -- '{printf $5}')
-  if [ "${WAN_IFACE}" == "" ]; then
-    echo "No network. Connect to a WiFi network and start again"
-    return 1
-  fi
-
-  if ip link show ${TAP_IFACE} &> /dev/null ; then
-    echo "TAP interface ${TAP_IFACE} already exists"
-    return 1
-  fi
-
-  ip tuntap add mode tap group virtualmachine vnet_hdr ${TAP_IFACE}
-  ip addr add ${TAP_ADDR}/24 dev ${TAP_IFACE}
-  ip link set ${TAP_IFACE} up
-  ip rule flush
-  ip rule add from all lookup ${WAN_IFACE}
-  ip route add ${TAP_NET}/24 dev ${TAP_IFACE} table ${WAN_IFACE}
-  sysctl net.ipv4.ip_forward=1
-  iptables -t filter -F
-  iptables -t nat -A POSTROUTING -s ${TAP_NET}/24 -j MASQUERADE
-}
-
-function setup_if_necessary() {
-  if [ "$(getprop ro.crosvm.network.setup.done)" == 1 ]; then
-    return
-  fi
-  echo "Setting up..."
-  check_privilege
-  setup_network
-  setenforce 0
-  chmod 666 /dev/tun
-  setprop ro.crosvm.network.setup.done 1
-}
-
-function check_privilege() {
-  if [ "$(id -u)" -ne 0 ]; then
-    echo "Run 'adb root' first"
-    return 1
-  fi
-}
-
-setup_if_necessary
-^D
-
-adb root; adb shell /data/local/tmp/setup_network.sh
-```
-
-Then, finally tap the VmLauncherApp app from the launcher UI. You will see
+Finally, tap the VmLauncherApp app from the launcher UI. You will see
 Ferrochrome booting!
 
 If it doesn’t work well, try
@@ -293,18 +238,6 @@ $ adb shell pm clear com.android.virtualization.vmlauncher
 $ adb shell pm clear com.google.android.virtualization.vmlauncher
 ```
 
-### Inside guest OS (for ChromiumOS only)
-
-Go to the network setting and configure as below.
-
-* IP: 192.168.1.2 (other addresses in the 192.168.1.0/24 subnet also works)
-* netmask: 255.255.255.0
-* gateway: 192.168.1.1
-* DNS: 8.8.8.8 (or any DNS server you know)
-
-These settings are persistent; stored in chromiumos_test_image.bin. So you
-don’t have to repeat this next time.
-
 ### Debugging
 
 To open the serial console (interactive terminal):
@@ -313,17 +246,27 @@ $ adb shell -t /apex/com.android.virt/bin/vm console
 ```
 
 To see console logs only, check
-`/data/data/com.android.virtualization.vmlauncher/files/console.log`
-Or
-`/data/data/com.google.android.virtualization.vmlauncher/files/console.log`
+`/data/data/com{,.google}.android.virtualization.vmlauncher/files/console.log`
+
+For HSUM enabled devices,
+`/data/user/${current_user_id}/com{,.google}.android.virtualization.vmlauncher/files/console.log`
+
+You can monitor console out as follows
 
 ```shell
-$ adb shell su root tail +0 -F /data/data/com{,.google}.android.virtualization.vmlauncher/files/console.log
+$ adb shell 'su root tail +0 -F /data/user/$(am get-current-user)/com{,.google}.android.virtualization.vmlauncher/files/console.log'
 ```
 
-For ChromiumOS, you can ssh-in. Use following commands after network setup.
+For ChromiumOS, you can enter to the console via SSH connection. Check your IP
+address of ChromiumOS VM from the ethernet network setting page and follow
+commands below.
 
 ```shell
-$ adb kill-server ; adb start-server; adb forward tcp:9222 tcp:9222
+$ adb kill-server ; adb start-server
+$ adb shell nc -s localhost -L -p 9222 nc ${CHROMIUMOS_IPV4_ADDR} 22 # This command won't be terminated.
+$ adb forward tcp:9222 tcp:9222
 $ ssh -oProxyCommand=none -o UserKnownHostsFile=/dev/null root@localhost -p 9222
 ```
+
+For ChromiumOS, you would need to login after enthering its console.
+The user ID and the password is `root` and `test0000` respectively.

@@ -37,6 +37,7 @@ import static org.junit.Assume.assumeTrue;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static java.util.stream.Collectors.toList;
 
+import android.app.ActivityManager;
 import android.app.Instrumentation;
 import android.app.UiAutomation;
 import android.content.ComponentName;
@@ -576,7 +577,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(minimal.getEncryptedStorageBytes()).isEqualTo(0);
         assertThat(minimal.isVmOutputCaptured()).isFalse();
         assertThat(minimal.getOs()).isEqualTo("microdroid");
-        assertThat(minimal.isNetworkSupported()).isFalse();
 
         // Maximal has everything that can be set to some non-default value. (And has different
         // values than minimal for the required fields.)
@@ -593,9 +593,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setEncryptedStorageBytes(1_000_000)
                         .setVmOutputCaptured(true)
                         .setOs("microdroid_gki-android14-6.1");
-        if (!mProtectedVm) {
-            maximalBuilder.setNetworkSupported(true);
-        }
         VirtualMachineConfig maximal = maximalBuilder.build();
 
         assertThat(maximal.getApkPath()).isEqualTo("/apk/path");
@@ -612,9 +609,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(maximal.getEncryptedStorageBytes()).isEqualTo(1_000_000);
         assertThat(maximal.isVmOutputCaptured()).isTrue();
         assertThat(maximal.getOs()).isEqualTo("microdroid_gki-android14-6.1");
-        if (!mProtectedVm) {
-            assertThat(maximal.isNetworkSupported()).isTrue();
-        }
 
         assertThat(minimal.isCompatibleWith(maximal)).isFalse();
         assertThat(minimal.isCompatibleWith(minimal)).isTrue();
@@ -669,18 +663,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setVmConsoleInputSupported(true);
         e = assertThrows(IllegalStateException.class, () -> captureInputOnNonDebuggable.build());
         assertThat(e).hasMessageThat().contains("debug level must be FULL to use console input");
-
-        if (mProtectedVm) {
-            VirtualMachineConfig.Builder networkSupportedOnProtectedVm =
-                    newVmConfigBuilderWithPayloadBinary("binary.so")
-                            .setProtectedVm(mProtectedVm)
-                            .setNetworkSupported(true);
-            e =
-                    assertThrows(
-                            IllegalStateException.class,
-                            () -> networkSupportedOnProtectedVm.build());
-            assertThat(e).hasMessageThat().contains("network is not supported on pVM");
-        }
     }
 
     @Test
@@ -2306,6 +2288,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @VsrTest(requirements = {"VSR-7.1-001.003"})
     public void kernelVersionRequirement() throws Exception {
+        assumeVsrCompliant();
         int firstApiLevel = SystemProperties.getInt("ro.product.first_api_level", 0);
         assume().withMessage("Skip on devices launched before Android 14 (API level 34)")
                 .that(firstApiLevel)
@@ -2320,49 +2303,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         if (major == 5) {
             assertTrue(minor >= 15);
         }
-    }
-
-    private VirtualMachineConfig buildVmConfigWithNetworkSupported() throws Exception {
-        return buildVmConfigWithNetworkSupported("MicrodroidTestNativeLib.so");
-    }
-
-    private VirtualMachineConfig buildVmConfigWithNetworkSupported(String binaryPath)
-            throws Exception {
-        assumeSupportedDevice();
-        assumeNonProtectedVM();
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_NETWORK);
-        VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadBinary(binaryPath)
-                        .setNetworkSupported(true)
-                        .setDebugLevel(DEBUG_LEVEL_FULL)
-                        .build();
-        grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
-        return config;
-    }
-
-    @Test
-    public void configuringNetworkSupportedRequiresCustomPermission() throws Exception {
-        VirtualMachineConfig config = buildVmConfigWithNetworkSupported();
-        revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
-
-        VirtualMachine vm =
-                forceCreateNewVirtualMachine(
-                        "test_network_supported_req_custom_permission", config);
-        SecurityException e =
-                assertThrows(
-                        SecurityException.class, () -> runVmTestService(TAG, vm, (ts, tr) -> {}));
-        assertThat(e)
-                .hasMessageThat()
-                .contains("android.permission.USE_CUSTOM_VIRTUAL_MACHINE permission");
-    }
-
-    @Test
-    public void bootsWithNetworkSupported() throws Exception {
-        VirtualMachineConfig config = buildVmConfigWithNetworkSupported();
-
-        VirtualMachine vm =
-                forceCreateNewVirtualMachine("test_boot_with_network_supported", config);
-        runVmTestService(TAG, vm, (ts, tr) -> {}).assertNoException();
     }
 
     @Test
@@ -2572,6 +2512,52 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             }
             return mVmShareTestService;
         }
+    }
+
+    @Test
+    public void concurrentVms() throws Exception {
+        final long vmSize = minMemoryRequired();
+        final int numVMs = 8;
+        final long availableMem = getAvailableMemory();
+
+        // Let's not use more than half of the available memory
+        assume().withMessage("Available memory (" + availableMem + " bytes) too small")
+                .that((numVMs * vmSize) <= (availableMem / 2))
+                .isTrue();
+
+        VirtualMachine[] vms = new VirtualMachine[numVMs];
+        try {
+            for (int i = 0; i < numVMs; i++) {
+                VirtualMachineConfig config =
+                        newVmConfigBuilderWithPayloadBinary("MicrodroidIdleNativeLib.so")
+                                .setDebugLevel(DEBUG_LEVEL_NONE)
+                                .setMemoryBytes(vmSize)
+                                .build();
+
+                vms[i] = forceCreateNewVirtualMachine("test_concurrent_vms_" + i, config);
+                vms[i].run();
+            }
+
+            for (VirtualMachine vm : vms) {
+                assertThat(vm.getStatus()).isEqualTo(VirtualMachine.STATUS_RUNNING);
+            }
+
+        } finally {
+            // Ensure that VMs are all stopped. Otherwise we may try to reuse some of these for
+            // another run of this test with different parameters.
+            for (VirtualMachine vm : vms) {
+                if (vm != null) {
+                    vm.close();
+                }
+            }
+        }
+    }
+
+    private long getAvailableMemory() {
+        ActivityManager am = getContext().getSystemService(ActivityManager.class);
+        ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
+        am.getMemoryInfo(memoryInfo);
+        return memoryInfo.availMem;
     }
 
     private VirtualMachineDescriptor toParcelFromParcel(VirtualMachineDescriptor descriptor) {
