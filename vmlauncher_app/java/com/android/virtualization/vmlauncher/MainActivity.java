@@ -16,8 +16,10 @@
 
 package com.android.virtualization.vmlauncher;
 
+import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 import static android.system.virtualmachine.VirtualMachineConfig.CPU_TOPOLOGY_MATCH_HOST;
 
+import android.Manifest.permission;
 import android.app.Activity;
 import android.crosvm.ICrosvmAndroidDisplayService;
 import android.graphics.PixelFormat;
@@ -31,6 +33,7 @@ import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineCallback;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig;
+import android.system.virtualmachine.VirtualMachineCustomImageConfig.AudioConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.DisplayConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.GpuConfig;
 import android.system.virtualmachine.VirtualMachineException;
@@ -76,6 +79,7 @@ public class MainActivity extends Activity {
     private ExecutorService mExecutorService;
     private VirtualMachine mVirtualMachine;
     private ParcelFileDescriptor mCursorStream;
+    private static final int RECORD_AUDIO_PERMISSION_REQUEST_CODE = 101;
 
     private VirtualMachineConfig createVirtualMachineConfig(String jsonPath) {
         VirtualMachineConfig.Builder configBuilder =
@@ -188,8 +192,13 @@ public class MainActivity extends Activity {
             customImageConfigBuilder.useTouch(true);
             customImageConfigBuilder.useKeyboard(true);
             customImageConfigBuilder.useMouse(true);
+            customImageConfigBuilder.useSwitches(true);
             customImageConfigBuilder.useNetwork(true);
 
+            AudioConfig.Builder audioConfigBuilder = new AudioConfig.Builder();
+            audioConfigBuilder.setUseMicrophone(true);
+            audioConfigBuilder.setUseSpeaker(true);
+            customImageConfigBuilder.setAudioConfig(audioConfigBuilder.build());
             configBuilder.setCustomImageConfig(customImageConfigBuilder.build());
 
         } catch (JSONException | IOException e) {
@@ -198,12 +207,18 @@ public class MainActivity extends Activity {
         return configBuilder.build();
     }
 
+    private static boolean isVolumeKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_VOLUME_UP
+                || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+                || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE;
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (mVirtualMachine == null) {
             return false;
         }
-        return mVirtualMachine.sendKeyEvent(event);
+        return !isVolumeKey(keyCode) && mVirtualMachine.sendKeyEvent(event);
     }
 
     @Override
@@ -211,12 +226,13 @@ public class MainActivity extends Activity {
         if (mVirtualMachine == null) {
             return false;
         }
-        return mVirtualMachine.sendKeyEvent(event);
+        return !isVolumeKey(keyCode) && mVirtualMachine.sendKeyEvent(event);
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        checkAndRequestRecordAudioPermission();
         mExecutorService = Executors.newCachedThreadPool();
         try {
             // To ensure that the previous display service is removed.
@@ -235,41 +251,34 @@ public class MainActivity extends Activity {
 
                     @Override
                     public void onPayloadStarted(VirtualMachine vm) {
-                        Log.e(TAG, "payload start");
+                        // This event is only from Microdroid-based VM. Custom VM shouldn't emit
+                        // this.
                     }
 
                     @Override
                     public void onPayloadReady(VirtualMachine vm) {
-                        // This check doesn't 100% prevent race condition or UI hang.
-                        // However, it's fine for demo.
-                        if (mService.isShutdown()) {
-                            return;
-                        }
-                        Log.d(TAG, "(Payload is ready. Testing VM service...)");
+                        // This event is only from Microdroid-based VM. Custom VM shouldn't emit
+                        // this.
                     }
 
                     @Override
                     public void onPayloadFinished(VirtualMachine vm, int exitCode) {
-                        // This check doesn't 100% prevent race condition, but is fine for demo.
-                        if (!mService.isShutdown()) {
-                            Log.d(
-                                    TAG,
-                                    String.format("(Payload finished. exit code: %d)", exitCode));
-                        }
+                        // This event is only from Microdroid-based VM. Custom VM shouldn't emit
+                        // this.
                     }
 
                     @Override
                     public void onError(VirtualMachine vm, int errorCode, String message) {
-                        Log.d(
-                                TAG,
-                                String.format(
-                                        "(Error occurred. code: %d, message: %s)",
-                                        errorCode, message));
+                        Log.e(TAG, "Error from VM. code: " + errorCode + " (" + message + ")");
+                        setResult(RESULT_CANCELED);
+                        finish();
                     }
 
                     @Override
                     public void onStopped(VirtualMachine vm, int reason) {
-                        Log.e(TAG, "vm stop");
+                        Log.d(TAG, "VM stopped. Reason: " + reason);
+                        setResult(RESULT_OK);
+                        finish();
                     }
                 };
 
@@ -416,6 +425,32 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStop() {
+        super.onStop();
+        if (mVirtualMachine != null) {
+            try {
+                mVirtualMachine.sendLidEvent(/* close */ true);
+                mVirtualMachine.suspend();
+            } catch (VirtualMachineException e) {
+                Log.e(TAG, "Failed to suspend VM" + e);
+            }
+        }
+    }
+
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        if (mVirtualMachine != null) {
+            try {
+                mVirtualMachine.resume();
+                mVirtualMachine.sendLidEvent(/* close */ false);
+            } catch (VirtualMachineException e) {
+                Log.e(TAG, "Failed to resume VM" + e);
+            }
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         if (mExecutorService != null) {
@@ -490,6 +525,14 @@ public class MainActivity extends Activity {
             } catch (IOException e) {
                 Log.e(TAG, e.getMessage());
             }
+        }
+    }
+
+    private void checkAndRequestRecordAudioPermission() {
+        if (getApplicationContext().checkSelfPermission(permission.RECORD_AUDIO)
+                != PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[] {permission.RECORD_AUDIO}, RECORD_AUDIO_PERMISSION_REQUEST_CODE);
         }
     }
 
