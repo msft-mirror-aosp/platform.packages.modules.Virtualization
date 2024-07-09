@@ -32,6 +32,7 @@ import android.system.virtualmachine.VirtualMachineCallback;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.DisplayConfig;
+import android.system.virtualmachine.VirtualMachineCustomImageConfig.GpuConfig;
 import android.system.virtualmachine.VirtualMachineException;
 import android.system.virtualmachine.VirtualMachineManager;
 import android.util.DisplayMetrics;
@@ -63,6 +64,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -125,6 +127,47 @@ public class MainActivity extends Activity {
             if (json.has("console_input_device")) {
                 configBuilder.setConsoleInputDevice(json.getString("console_input_device"));
             }
+            if (json.has("gpu")) {
+                JSONObject gpuJson = json.getJSONObject("gpu");
+
+                GpuConfig.Builder gpuConfigBuilder = new GpuConfig.Builder();
+
+                if (gpuJson.has("backend")) {
+                    gpuConfigBuilder.setBackend(gpuJson.getString("backend"));
+                }
+                if (gpuJson.has("context_types")) {
+                    ArrayList<String> contextTypes = new ArrayList<String>();
+                    JSONArray contextTypesJson = gpuJson.getJSONArray("context_types");
+                    for (int i = 0; i < contextTypesJson.length(); i++) {
+                        contextTypes.add(contextTypesJson.getString(i));
+                    }
+                    gpuConfigBuilder.setContextTypes(contextTypes.toArray(new String[0]));
+                }
+                if (gpuJson.has("pci_address")) {
+                    gpuConfigBuilder.setPciAddress(gpuJson.getString("pci_address"));
+                }
+                if (gpuJson.has("renderer_features")) {
+                    gpuConfigBuilder.setRendererFeatures(gpuJson.getString("renderer_features"));
+                }
+                if (gpuJson.has("renderer_use_egl")) {
+                    gpuConfigBuilder.setRendererUseEgl(gpuJson.getBoolean("renderer_use_egl"));
+                }
+                if (gpuJson.has("renderer_use_gles")) {
+                    gpuConfigBuilder.setRendererUseGles(gpuJson.getBoolean("renderer_use_gles"));
+                }
+                if (gpuJson.has("renderer_use_glx")) {
+                    gpuConfigBuilder.setRendererUseGlx(gpuJson.getBoolean("renderer_use_glx"));
+                }
+                if (gpuJson.has("renderer_use_surfaceless")) {
+                    gpuConfigBuilder.setRendererUseSurfaceless(
+                            gpuJson.getBoolean("renderer_use_surfaceless"));
+                }
+                if (gpuJson.has("renderer_use_vulkan")) {
+                    gpuConfigBuilder.setRendererUseVulkan(
+                            gpuJson.getBoolean("renderer_use_vulkan"));
+                }
+                customImageConfigBuilder.setGpuConfig(gpuConfigBuilder.build());
+            }
 
             configBuilder.setMemoryBytes(8L * 1024 * 1024 * 1024 /* 8 GB */);
             WindowMetrics windowMetrics = getWindowManager().getCurrentWindowMetrics();
@@ -145,6 +188,8 @@ public class MainActivity extends Activity {
             customImageConfigBuilder.useTouch(true);
             customImageConfigBuilder.useKeyboard(true);
             customImageConfigBuilder.useMouse(true);
+            customImageConfigBuilder.useSwitches(true);
+            customImageConfigBuilder.useNetwork(true);
 
             configBuilder.setCustomImageConfig(customImageConfigBuilder.build());
 
@@ -154,12 +199,18 @@ public class MainActivity extends Activity {
         return configBuilder.build();
     }
 
+    private static boolean isVolumeKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_VOLUME_UP
+                || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+                || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE;
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (mVirtualMachine == null) {
             return false;
         }
-        return mVirtualMachine.sendKeyEvent(event);
+        return !isVolumeKey(keyCode) && mVirtualMachine.sendKeyEvent(event);
     }
 
     @Override
@@ -167,7 +218,7 @@ public class MainActivity extends Activity {
         if (mVirtualMachine == null) {
             return false;
         }
-        return mVirtualMachine.sendKeyEvent(event);
+        return !isVolumeKey(keyCode) && mVirtualMachine.sendKeyEvent(event);
     }
 
     @Override
@@ -191,41 +242,34 @@ public class MainActivity extends Activity {
 
                     @Override
                     public void onPayloadStarted(VirtualMachine vm) {
-                        Log.e(TAG, "payload start");
+                        // This event is only from Microdroid-based VM. Custom VM shouldn't emit
+                        // this.
                     }
 
                     @Override
                     public void onPayloadReady(VirtualMachine vm) {
-                        // This check doesn't 100% prevent race condition or UI hang.
-                        // However, it's fine for demo.
-                        if (mService.isShutdown()) {
-                            return;
-                        }
-                        Log.d(TAG, "(Payload is ready. Testing VM service...)");
+                        // This event is only from Microdroid-based VM. Custom VM shouldn't emit
+                        // this.
                     }
 
                     @Override
                     public void onPayloadFinished(VirtualMachine vm, int exitCode) {
-                        // This check doesn't 100% prevent race condition, but is fine for demo.
-                        if (!mService.isShutdown()) {
-                            Log.d(
-                                    TAG,
-                                    String.format("(Payload finished. exit code: %d)", exitCode));
-                        }
+                        // This event is only from Microdroid-based VM. Custom VM shouldn't emit
+                        // this.
                     }
 
                     @Override
                     public void onError(VirtualMachine vm, int errorCode, String message) {
-                        Log.d(
-                                TAG,
-                                String.format(
-                                        "(Error occurred. code: %d, message: %s)",
-                                        errorCode, message));
+                        Log.e(TAG, "Error from VM. code: " + errorCode + " (" + message + ")");
+                        setResult(RESULT_CANCELED);
+                        finish();
                     }
 
                     @Override
                     public void onStopped(VirtualMachine vm, int reason) {
-                        Log.e(TAG, "vm stop");
+                        Log.d(TAG, "VM stopped. Reason: " + reason);
+                        setResult(RESULT_OK);
+                        finish();
                     }
                 };
 
@@ -369,6 +413,32 @@ public class MainActivity extends Activity {
         windowInsetsController.setSystemBarsBehavior(
                 WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
         windowInsetsController.hide(WindowInsets.Type.systemBars());
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (mVirtualMachine != null) {
+            try {
+                mVirtualMachine.sendLidEvent(/* close */ true);
+                mVirtualMachine.suspend();
+            } catch (VirtualMachineException e) {
+                Log.e(TAG, "Failed to suspend VM" + e);
+            }
+        }
+    }
+
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        if (mVirtualMachine != null) {
+            try {
+                mVirtualMachine.resume();
+                mVirtualMachine.sendLidEvent(/* close */ false);
+            } catch (VirtualMachineException e) {
+                Log.e(TAG, "Failed to resume VM" + e);
+            }
+        }
     }
 
     @Override

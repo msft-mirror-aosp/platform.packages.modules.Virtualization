@@ -15,8 +15,10 @@
 //! Rust entry point.
 
 use crate::{
-    bionic, console, heap, hyp, logger,
-    memory::{page_4kb_of, SIZE_16KB, SIZE_4KB},
+    bionic, console, heap, hyp,
+    layout::UART_PAGE_ADDR,
+    logger,
+    memory::{SIZE_16KB, SIZE_4KB},
     power::{reboot, shutdown},
     rand,
 };
@@ -43,8 +45,8 @@ fn try_console_init() -> Result<(), hyp::Error> {
             granule == SIZE_4KB || granule == SIZE_16KB
         });
         // Validate the assumption above by ensuring that the UART is not moved to another page:
-        const_assert_eq!(page_4kb_of(console::BASE_ADDRESS), 0);
-        mmio_guard.map(console::BASE_ADDRESS)?;
+        const_assert_eq!(UART_PAGE_ADDR, 0);
+        mmio_guard.map(UART_PAGE_ADDR)?;
     }
 
     Ok(())

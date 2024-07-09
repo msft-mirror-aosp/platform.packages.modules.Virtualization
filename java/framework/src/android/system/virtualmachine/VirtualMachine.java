@@ -172,6 +172,7 @@ public class VirtualMachine implements AutoCloseable {
     private ParcelFileDescriptor mTouchSock;
     private ParcelFileDescriptor mKeySock;
     private ParcelFileDescriptor mMouseSock;
+    private ParcelFileDescriptor mSwitchesSock;
 
     /**
      * Status of a virtual machine
@@ -921,8 +922,20 @@ public class VirtualMachine implements AutoCloseable {
                 m.pfd = pfds[1];
                 inputDevices.add(InputDevice.mouse(m));
             }
+            if (vmConfig.getCustomImageConfig().useSwitches()) {
+                ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
+                mSwitchesSock = pfds[0];
+                InputDevice.Switches s = new InputDevice.Switches();
+                s.pfd = pfds[1];
+                inputDevices.add(InputDevice.switches(s));
+            }
         }
         rawConfig.inputDevices = inputDevices.toArray(new InputDevice[0]);
+
+        // Handle network support
+        if (vmConfig.getCustomImageConfig() != null) {
+            rawConfig.networkSupported = vmConfig.getCustomImageConfig().useNetwork();
+        }
 
         return android.system.virtualizationservice.VirtualMachineConfig.rawConfig(rawConfig);
     }
@@ -1064,6 +1077,25 @@ public class VirtualMachine implements AutoCloseable {
                         new InputEvent(EV_SYN, SYN_REPORT, 0)));
     }
 
+    /** @hide */
+    public boolean sendLidEvent(boolean close) {
+        if (mSwitchesSock == null) {
+            Log.d(TAG, "mSwitcheSock == null");
+            return false;
+        }
+
+        // from include/uapi/linux/input-event-codes.h in the kernel.
+        short EV_SYN = 0x00;
+        short EV_SW = 0x05;
+        short SW_LID = 0x00;
+        short SYN_REPORT = 0x00;
+        return writeEventsToSock(
+                mSwitchesSock,
+                Arrays.asList(
+                        new InputEvent(EV_SW, SW_LID, close ? 1 : 0),
+                        new InputEvent(EV_SYN, SYN_REPORT, 0)));
+    }
+
     private boolean writeEventsToSock(ParcelFileDescriptor sock, List<InputEvent> evtList) {
         ByteBuffer byteBuffer =
                 ByteBuffer.allocate(8 /* (type: u16 + code: u16 + value: i32) */ * evtList.size());
@@ -1132,7 +1164,9 @@ public class VirtualMachine implements AutoCloseable {
     /**
      * Runs this virtual machine. The returning of this method however doesn't mean that the VM has
      * actually started running or the OS has booted there. Such events can be notified by
-     * registering a callback using {@link #setCallback} before calling {@code run()}.
+     * registering a callback using {@link #setCallback} before calling {@code run()}. There is no
+     * limit other than available memory that limits the number of virtual machines that can run at
+     * the same time.
      *
      * <p>NOTE: This method may block and should not be called on the main thread.
      *
@@ -1214,6 +1248,9 @@ public class VirtualMachine implements AutoCloseable {
                         service.createVm(vmConfigParcel, consoleOutFd, consoleInFd, mLogWriter);
                 mVirtualMachine.registerCallback(new CallbackTranslator(service));
                 mContext.registerComponentCallbacks(mMemoryManagementCallbacks);
+                if (mConnectVmConsole) {
+                    mVirtualMachine.setHostConsoleName(getHostConsoleName());
+                }
                 mVirtualMachine.start();
             } catch (IOException e) {
                 throw new VirtualMachineException("failed to persist files", e);
@@ -1335,7 +1372,7 @@ public class VirtualMachine implements AutoCloseable {
      * @hide
      */
     @NonNull
-    public String getHostConsoleName() throws VirtualMachineException {
+    private String getHostConsoleName() throws VirtualMachineException {
         if (!mConnectVmConsole) {
             throw new VirtualMachineException("Host console is not enabled");
         }
@@ -1453,6 +1490,38 @@ public class VirtualMachine implements AutoCloseable {
             try {
                 mVirtualMachine.stop();
                 dropVm();
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            } catch (ServiceSpecificException e) {
+                throw new VirtualMachineException(e);
+            }
+        }
+    }
+
+    /** @hide */
+    public void suspend() throws VirtualMachineException {
+        synchronized (mLock) {
+            if (mVirtualMachine == null) {
+                throw new VirtualMachineException("VM is not running");
+            }
+            try {
+                mVirtualMachine.suspend();
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            } catch (ServiceSpecificException e) {
+                throw new VirtualMachineException(e);
+            }
+        }
+    }
+
+    /** @hide */
+    public void resume() throws VirtualMachineException {
+        synchronized (mLock) {
+            if (mVirtualMachine == null) {
+                throw new VirtualMachineException("VM is not running");
+            }
+            try {
+                mVirtualMachine.resume();
             } catch (RemoteException e) {
                 throw e.rethrowAsRuntimeException();
             } catch (ServiceSpecificException e) {

@@ -16,14 +16,20 @@
 
 pub mod crosvm;
 
-use crate::console::BASE_ADDRESS;
+use crate::console;
 use crate::linker::__stack_chk_guard;
+use crate::memory::{page_4kb_of, PAGE_SIZE};
 use aarch64_paging::paging::VirtualAddress;
 use core::ops::Range;
 use core::ptr::addr_of;
+use static_assertions::const_assert_eq;
 
 /// First address that can't be translated by a level 1 TTBR0_EL1.
 pub const MAX_VIRT_ADDR: usize = 1 << 40;
+
+/// Address of the single page containing all the UART devices.
+pub const UART_PAGE_ADDR: usize = 0;
+const_assert_eq!(UART_PAGE_ADDR, page_4kb_of(console::BASE_ADDRESS));
 
 /// Get an address from a linker-defined symbol.
 #[macro_export]
@@ -86,11 +92,9 @@ pub fn scratch_range() -> Range<VirtualAddress> {
     linker_region!(eh_stack_limit, bss_end)
 }
 
-/// UART console range.
-pub fn console_uart_range() -> Range<VirtualAddress> {
-    const CONSOLE_LEN: usize = 1; // `uart::Uart` only uses one u8 register.
-
-    VirtualAddress(BASE_ADDRESS)..VirtualAddress(BASE_ADDRESS + CONSOLE_LEN)
+/// Range of the page at UART_PAGE_ADDR of PAGE_SIZE.
+pub fn console_uart_page() -> Range<VirtualAddress> {
+    VirtualAddress(UART_PAGE_ADDR)..VirtualAddress(UART_PAGE_ADDR + PAGE_SIZE)
 }
 
 /// Read-write data (original).
