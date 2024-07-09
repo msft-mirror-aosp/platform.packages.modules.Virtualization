@@ -14,8 +14,6 @@
 
 //! Low-level compatibility layer between baremetal Rust and Bionic C functions.
 
-use crate::console;
-use crate::eprintln;
 use crate::rand::fill_with_entropy;
 use crate::read_sysreg;
 use core::ffi::c_char;
@@ -27,6 +25,8 @@ use core::slice;
 use core::str;
 
 use cstr::cstr;
+use log::error;
+use log::info;
 
 const EOF: c_int = -1;
 const EIO: c_int = 5;
@@ -119,7 +119,7 @@ unsafe extern "C" fn async_safe_fatal_va_list(prefix: *const c_char, format: *co
 
     if let (Ok(prefix), Ok(format)) = (prefix.to_str(), format.to_str()) {
         // We don't bother with printf formatting.
-        eprintln!("FATAL BIONIC ERROR: {prefix}: \"{format}\" (unformatted)");
+        error!("FATAL BIONIC ERROR: {prefix}: \"{format}\" (unformatted)");
     }
 }
 
@@ -128,6 +128,23 @@ unsafe extern "C" fn async_safe_fatal_va_list(prefix: *const c_char, format: *co
 enum File {
     Stdout = 0x7670cf00,
     Stderr = 0x9d118200,
+}
+
+impl File {
+    fn write_lines(&self, s: &str) {
+        for line in s.split_inclusive('\n') {
+            let (line, ellipsis) = if let Some(stripped) = line.strip_suffix('\n') {
+                (stripped, "")
+            } else {
+                (line, " ...")
+            };
+
+            match self {
+                Self::Stdout => info!("{line}{ellipsis}"),
+                Self::Stderr => error!("{line}{ellipsis}"),
+            }
+        }
+    }
 }
 
 impl TryFrom<usize> for File {
@@ -152,8 +169,8 @@ extern "C" fn fputs(c_str: *const c_char, stream: usize) -> c_int {
     // SAFETY: Just like libc, we need to assume that `s` is a valid NULL-terminated string.
     let c_str = unsafe { CStr::from_ptr(c_str) };
 
-    if let (Ok(s), Ok(_)) = (c_str.to_str(), File::try_from(stream)) {
-        console::write_str(s);
+    if let (Ok(s), Ok(f)) = (c_str.to_str(), File::try_from(stream)) {
+        f.write_lines(s);
         0
     } else {
         set_errno(EOF);
@@ -168,8 +185,8 @@ extern "C" fn fwrite(ptr: *const c_void, size: usize, nmemb: usize, stream: usiz
     // SAFETY: Just like libc, we need to assume that `ptr` is valid.
     let bytes = unsafe { slice::from_raw_parts(ptr as *const u8, length) };
 
-    if let (Ok(s), Ok(_)) = (str::from_utf8(bytes), File::try_from(stream)) {
-        console::write_str(s);
+    if let (Ok(s), Ok(f)) = (str::from_utf8(bytes), File::try_from(stream)) {
+        f.write_lines(s);
         length
     } else {
         0
@@ -198,9 +215,9 @@ extern "C" fn perror(s: *const c_char) {
     let error = cstr_error(get_errno()).to_str().unwrap();
 
     if let Some(prefix) = prefix {
-        eprintln!("{prefix}: {error}");
+        error!("{prefix}: {error}");
     } else {
-        eprintln!("{error}");
+        error!("{error}");
     }
 }
 
