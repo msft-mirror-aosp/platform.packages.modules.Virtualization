@@ -123,11 +123,16 @@ unsafe extern "C" fn async_safe_fatal_va_list(prefix: *const c_char, format: *co
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::enum_clike_unportable_variant)] // No risk if AArch64 only.
 #[repr(usize)]
 /// Fake FILE* values used by C to refer to the default streams.
+///
+/// These values are intentionally invalid pointers so that dereferencing them will be caught.
 enum CFilePtr {
-    Stdout = 0x7670cf00,
-    Stderr = 0x9d118200,
+    // On AArch64 with TCR_EL1.EPD1 set or TCR_EL1.T1SZ > 12, these VAs can't be mapped.
+    Stdout = 0xfff0_badf_badf_bad0,
+    Stderr = 0xfff0_badf_badf_bad1,
 }
 
 impl CFilePtr {
