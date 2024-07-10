@@ -65,7 +65,7 @@ pub unsafe fn init(base_addresses: &[usize]) {
 /// Writes a formatted string followed by a newline to the n-th console.
 ///
 /// Panics if the n-th console was not initialized by calling [`init`] first.
-pub(crate) fn writeln(n: usize, format_args: Arguments) {
+pub fn writeln(n: usize, format_args: Arguments) {
     let mut guard = CONSOLES[n].lock();
     let uart = guard.as_mut().unwrap();
 
@@ -88,13 +88,26 @@ pub fn ewriteln(n: usize, format_args: Arguments) {
     let _ = uart.write_str("\n");
 }
 
+/// Prints the given formatted string to the n-th console, followed by a newline.
+///
+/// Panics if the console has not yet been initialized. May hang if used in an exception context;
+/// use `eprintln!` instead.
+#[macro_export]
+macro_rules! console_writeln {
+    ($n:expr, $($arg:tt)*) => ({
+        $crate::console::writeln($n, format_args!($($arg)*))
+    })
+}
+
+pub(crate) use console_writeln;
+
 /// Prints the given formatted string to the console, followed by a newline.
 ///
 /// Panics if the console has not yet been initialized. May hang if used in an exception context;
 /// use `eprintln!` instead.
 macro_rules! println {
     ($($arg:tt)*) => ({
-        $crate::console::writeln($crate::console::DEFAULT_CONSOLE_INDEX, format_args!($($arg)*))
+        $crate::console::console_writeln!($crate::console::DEFAULT_CONSOLE_INDEX, $($arg)*)
     })
 }
 
