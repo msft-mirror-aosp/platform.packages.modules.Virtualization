@@ -172,6 +172,8 @@ public class VirtualMachine implements AutoCloseable {
     private ParcelFileDescriptor mTouchSock;
     private ParcelFileDescriptor mKeySock;
     private ParcelFileDescriptor mMouseSock;
+    private ParcelFileDescriptor mSwitchesSock;
+    private ParcelFileDescriptor mTrackpadSock;
 
     /**
      * Status of a virtual machine
@@ -921,6 +923,23 @@ public class VirtualMachine implements AutoCloseable {
                 m.pfd = pfds[1];
                 inputDevices.add(InputDevice.mouse(m));
             }
+            if (vmConfig.getCustomImageConfig().useSwitches()) {
+                ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
+                mSwitchesSock = pfds[0];
+                InputDevice.Switches s = new InputDevice.Switches();
+                s.pfd = pfds[1];
+                inputDevices.add(InputDevice.switches(s));
+            }
+            if (vmConfig.getCustomImageConfig().useTrackpad()) {
+                ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
+                mTrackpadSock = pfds[0];
+                InputDevice.Trackpad t = new InputDevice.Trackpad();
+                // TODO(b/347253952): make it configurable
+                t.width = 2380;
+                t.height = 1369;
+                t.pfd = pfds[1];
+                inputDevices.add(InputDevice.trackpad(t));
+            }
         }
         rawConfig.inputDevices = inputDevices.toArray(new InputDevice[0]);
 
@@ -1066,6 +1085,84 @@ public class VirtualMachine implements AutoCloseable {
                         new InputEvent(EV_ABS, ABS_X, x),
                         new InputEvent(EV_ABS, ABS_Y, y),
                         new InputEvent(EV_KEY, BTN_TOUCH, down ? 1 : 0),
+                        new InputEvent(EV_SYN, SYN_REPORT, 0)));
+    }
+
+    /** @hide */
+    public boolean sendLidEvent(boolean close) {
+        if (mSwitchesSock == null) {
+            Log.d(TAG, "mSwitcheSock == null");
+            return false;
+        }
+
+        // from include/uapi/linux/input-event-codes.h in the kernel.
+        short EV_SYN = 0x00;
+        short EV_SW = 0x05;
+        short SW_LID = 0x00;
+        short SYN_REPORT = 0x00;
+        return writeEventsToSock(
+                mSwitchesSock,
+                Arrays.asList(
+                        new InputEvent(EV_SW, SW_LID, close ? 1 : 0),
+                        new InputEvent(EV_SYN, SYN_REPORT, 0)));
+    }
+
+    /** @hide */
+    public boolean sendTrackpadEvent(MotionEvent event) {
+        if (mTrackpadSock == null) {
+            Log.d(TAG, "mTrackpadSock == null");
+            return false;
+        }
+        // from include/uapi/linux/input-event-codes.h in the kernel.
+        short EV_SYN = 0x00;
+        short EV_ABS = 0x03;
+        short EV_KEY = 0x01;
+        short BTN_TOUCH = 0x14a;
+        short BTN_TOOL_FINGER = 0x145;
+        short ABS_X = 0x00;
+        short ABS_Y = 0x01;
+        short SYN_REPORT = 0x00;
+        short ABS_MT_SLOT = 0x2f;
+        short ABS_MT_TOUCH_MAJOR = 0x30;
+        short ABS_MT_TOUCH_MINOR = 0x31;
+        short ABS_MT_WIDTH_MAJOR = 0x32;
+        short ABS_MT_WIDTH_MINOR = 0x33;
+        short ABS_MT_ORIENTATION = 0x34;
+        short ABS_MT_POSITION_X = 0x35;
+        short ABS_MT_POSITION_Y = 0x36;
+        short ABS_MT_TOOL_TYPE = 0x37;
+        short ABS_MT_BLOB_ID = 0x38;
+        short ABS_MT_TRACKING_ID = 0x39;
+        short ABS_MT_PRESSURE = 0x3a;
+        short ABS_MT_DISTANCE = 0x3b;
+        short ABS_MT_TOOL_X = 0x3c;
+        short ABS_MT_TOOL_Y = 0x3d;
+        short ABS_PRESSURE = 0x18;
+        short ABS_TOOL_WIDTH = 0x1c;
+
+        int x = (int) event.getRawX();
+        int y = (int) event.getRawY();
+        boolean down = event.getAction() != MotionEvent.ACTION_UP;
+
+        // TODO(b/347253952): support multi-touch and button click
+        return writeEventsToSock(
+                mTrackpadSock,
+                Arrays.asList(
+                        new InputEvent(EV_KEY, BTN_TOUCH, down ? 1 : 0),
+                        new InputEvent(EV_KEY, BTN_TOOL_FINGER, down ? 1 : 0),
+                        new InputEvent(EV_ABS, ABS_MT_SLOT, 0),
+                        new InputEvent(
+                                EV_ABS, ABS_MT_TRACKING_ID, down ? event.getPointerId(0) : -1),
+                        new InputEvent(EV_ABS, ABS_MT_TOOL_TYPE, 0 /* MT_TOOL_FINGER */),
+                        new InputEvent(EV_ABS, ABS_MT_POSITION_X, x),
+                        new InputEvent(EV_ABS, ABS_MT_POSITION_Y, y),
+                        new InputEvent(EV_ABS, ABS_MT_TOUCH_MAJOR, (short) event.getTouchMajor()),
+                        new InputEvent(EV_ABS, ABS_MT_TOUCH_MINOR, (short) event.getTouchMinor()),
+                        new InputEvent(EV_ABS, ABS_X, x),
+                        new InputEvent(EV_ABS, ABS_Y, y),
+                        new InputEvent(EV_ABS, ABS_PRESSURE, (short) (255 * event.getPressure())),
+                        new InputEvent(
+                                EV_ABS, ABS_MT_PRESSURE, (short) (255 * event.getPressure())),
                         new InputEvent(EV_SYN, SYN_REPORT, 0)));
     }
 
