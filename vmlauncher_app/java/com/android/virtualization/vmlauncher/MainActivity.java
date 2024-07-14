@@ -16,9 +16,15 @@
 
 package com.android.virtualization.vmlauncher;
 
+import static android.content.pm.PackageManager.PERMISSION_GRANTED;
+import static android.os.ParcelFileDescriptor.AutoCloseInputStream;
+import static android.os.ParcelFileDescriptor.AutoCloseOutputStream;
 import static android.system.virtualmachine.VirtualMachineConfig.CPU_TOPOLOGY_MATCH_HOST;
 
+import android.Manifest.permission;
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.crosvm.ICrosvmAndroidDisplayService;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
@@ -31,6 +37,7 @@ import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineCallback;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig;
+import android.system.virtualmachine.VirtualMachineCustomImageConfig.AudioConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.DisplayConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.GpuConfig;
 import android.system.virtualmachine.VirtualMachineException;
@@ -62,6 +69,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -76,6 +84,8 @@ public class MainActivity extends Activity {
     private ExecutorService mExecutorService;
     private VirtualMachine mVirtualMachine;
     private ParcelFileDescriptor mCursorStream;
+    private ClipboardManager mClipboardManager;
+    private static final int RECORD_AUDIO_PERMISSION_REQUEST_CODE = 101;
 
     private VirtualMachineConfig createVirtualMachineConfig(String jsonPath) {
         VirtualMachineConfig.Builder configBuilder =
@@ -188,8 +198,13 @@ public class MainActivity extends Activity {
             customImageConfigBuilder.useTouch(true);
             customImageConfigBuilder.useKeyboard(true);
             customImageConfigBuilder.useMouse(true);
+            customImageConfigBuilder.useSwitches(true);
             customImageConfigBuilder.useNetwork(true);
 
+            AudioConfig.Builder audioConfigBuilder = new AudioConfig.Builder();
+            audioConfigBuilder.setUseMicrophone(true);
+            audioConfigBuilder.setUseSpeaker(true);
+            customImageConfigBuilder.setAudioConfig(audioConfigBuilder.build());
             configBuilder.setCustomImageConfig(customImageConfigBuilder.build());
 
         } catch (JSONException | IOException e) {
@@ -198,12 +213,18 @@ public class MainActivity extends Activity {
         return configBuilder.build();
     }
 
+    private static boolean isVolumeKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_VOLUME_UP
+                || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+                || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE;
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (mVirtualMachine == null) {
             return false;
         }
-        return mVirtualMachine.sendKeyEvent(event);
+        return !isVolumeKey(keyCode) && mVirtualMachine.sendKeyEvent(event);
     }
 
     @Override
@@ -211,12 +232,13 @@ public class MainActivity extends Activity {
         if (mVirtualMachine == null) {
             return false;
         }
-        return mVirtualMachine.sendKeyEvent(event);
+        return !isVolumeKey(keyCode) && mVirtualMachine.sendKeyEvent(event);
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        checkAndRequestRecordAudioPermission();
         mExecutorService = Executors.newCachedThreadPool();
         try {
             // To ensure that the previous display service is removed.
@@ -235,41 +257,34 @@ public class MainActivity extends Activity {
 
                     @Override
                     public void onPayloadStarted(VirtualMachine vm) {
-                        Log.e(TAG, "payload start");
+                        // This event is only from Microdroid-based VM. Custom VM shouldn't emit
+                        // this.
                     }
 
                     @Override
                     public void onPayloadReady(VirtualMachine vm) {
-                        // This check doesn't 100% prevent race condition or UI hang.
-                        // However, it's fine for demo.
-                        if (mService.isShutdown()) {
-                            return;
-                        }
-                        Log.d(TAG, "(Payload is ready. Testing VM service...)");
+                        // This event is only from Microdroid-based VM. Custom VM shouldn't emit
+                        // this.
                     }
 
                     @Override
                     public void onPayloadFinished(VirtualMachine vm, int exitCode) {
-                        // This check doesn't 100% prevent race condition, but is fine for demo.
-                        if (!mService.isShutdown()) {
-                            Log.d(
-                                    TAG,
-                                    String.format("(Payload finished. exit code: %d)", exitCode));
-                        }
+                        // This event is only from Microdroid-based VM. Custom VM shouldn't emit
+                        // this.
                     }
 
                     @Override
                     public void onError(VirtualMachine vm, int errorCode, String message) {
-                        Log.d(
-                                TAG,
-                                String.format(
-                                        "(Error occurred. code: %d, message: %s)",
-                                        errorCode, message));
+                        Log.e(TAG, "Error from VM. code: " + errorCode + " (" + message + ")");
+                        setResult(RESULT_CANCELED);
+                        finish();
                     }
 
                     @Override
                     public void onStopped(VirtualMachine vm, int reason) {
-                        Log.e(TAG, "vm stop");
+                        Log.d(TAG, "VM stopped. Reason: " + reason);
+                        setResult(RESULT_OK);
+                        finish();
                     }
                 };
 
@@ -416,12 +431,149 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStop() {
+        super.onStop();
+        if (mVirtualMachine != null) {
+            try {
+                mVirtualMachine.sendLidEvent(/* close */ true);
+                mVirtualMachine.suspend();
+            } catch (VirtualMachineException e) {
+                Log.e(TAG, "Failed to suspend VM" + e);
+            }
+        }
+    }
+
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        if (mVirtualMachine != null) {
+            try {
+                mVirtualMachine.resume();
+                mVirtualMachine.sendLidEvent(/* close */ false);
+            } catch (VirtualMachineException e) {
+                Log.e(TAG, "Failed to resume VM" + e);
+            }
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         if (mExecutorService != null) {
             mExecutorService.shutdownNow();
         }
         Log.d(TAG, "destroyed");
+    }
+
+    private static final int CLIPBOARD_SHARING_SERVER_PORT = 3580;
+    private static final byte READ_CLIPBOARD_FROM_VM = 0;
+    private static final byte WRITE_CLIPBOARD_TYPE_EMPTY = 1;
+    private static final byte WRITE_CLIPBOARD_TYPE_TEXT_PLAIN = 2;
+
+    private ClipboardManager getClipboardManager() {
+        if (mClipboardManager == null) {
+            mClipboardManager = getSystemService(ClipboardManager.class);
+        }
+        return mClipboardManager;
+    }
+
+    // Construct header for the clipboard data.
+    // Byte 0: Data type
+    // Byte 1-3: Padding alignment & Reserved for other use cases in the future
+    // Byte 4-7: Data size of the payload
+    private ByteBuffer constructClipboardHeader(byte type, int dataSize) {
+        ByteBuffer header = ByteBuffer.allocate(8);
+        header.clear();
+        header.order(ByteOrder.LITTLE_ENDIAN);
+        header.put(0, type);
+        header.putInt(4, dataSize);
+        return header;
+    }
+
+    private ParcelFileDescriptor connectClipboardSharingServer() {
+        ParcelFileDescriptor pfd;
+        try {
+            // TODO(349702313): Consider when clipboard sharing server is started to run in VM.
+            pfd = mVirtualMachine.connectVsock(CLIPBOARD_SHARING_SERVER_PORT);
+        } catch (VirtualMachineException e) {
+            Log.d(TAG, "cannot connect to the clipboard sharing server", e);
+            return null;
+        }
+        return pfd;
+    }
+
+    private boolean writeClipboardToVm() {
+        ClipboardManager clipboardManager = getClipboardManager();
+
+        if (!clipboardManager.hasPrimaryClip()) {
+            Log.d(TAG, "host device has no clipboard data");
+            return true;
+        }
+        ClipData clip = clipboardManager.getPrimaryClip();
+        String text = clip.getItemAt(0).getText().toString();
+        ByteBuffer header =
+                constructClipboardHeader(
+                        WRITE_CLIPBOARD_TYPE_TEXT_PLAIN, text.getBytes().length + 1);
+
+        ParcelFileDescriptor pfd = connectClipboardSharingServer();
+        if (pfd == null) {
+            Log.d(TAG, "file descriptor of ClipboardSharingServer is null");
+            return false;
+        }
+        OutputStream stream = new AutoCloseOutputStream(pfd);
+        try {
+            stream.write(header.array());
+            stream.write(text.getBytes());
+            stream.flush();
+            Log.d(TAG, "successfully wrote clipboard data to the VM");
+            return true;
+        } catch (IOException e) {
+            Log.e(TAG, "failed to write clipboard data to the VM", e);
+            return false;
+        }
+    }
+
+    private boolean readClipboardFromVm() {
+        ByteBuffer request = constructClipboardHeader(READ_CLIPBOARD_FROM_VM, 0);
+
+        ParcelFileDescriptor pfd = connectClipboardSharingServer();
+        if (pfd == null) {
+            Log.d(TAG, "file descriptor of ClipboardSharingServer is null");
+            return false;
+        }
+        OutputStream output = new AutoCloseOutputStream(pfd);
+        try {
+            output.write(request.array());
+            output.flush();
+            Log.d(TAG, "successfully send request to the VM for reading clipboard");
+        } catch (IOException e) {
+            Log.e(TAG, "failed to send request to the VM for read clipboard", e);
+            return false;
+        }
+
+        InputStream input = new AutoCloseInputStream(pfd);
+        try {
+            ByteBuffer header = ByteBuffer.wrap(input.readNBytes(8));
+            header.order(ByteOrder.LITTLE_ENDIAN);
+            switch (header.get(0)) {
+                case WRITE_CLIPBOARD_TYPE_EMPTY:
+                    Log.d(TAG, "clipboard data in VM is empty");
+                    return true;
+                case WRITE_CLIPBOARD_TYPE_TEXT_PLAIN:
+                    int dataSize = header.getInt(4);
+                    String text_data =
+                            new String(input.readNBytes(dataSize), StandardCharsets.UTF_8);
+                    getClipboardManager().setPrimaryClip(ClipData.newPlainText(null, text_data));
+                    Log.d(TAG, "successfully received clipboard data from VM");
+                    return true;
+                default:
+                    Log.e(TAG, "unknown clipboard response type");
+                    return false;
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "failed to receive clipboard content from the VM", e);
+            return false;
+        }
     }
 
     @Override
@@ -431,6 +583,15 @@ public class MainActivity extends Activity {
             SurfaceView surfaceView = findViewById(R.id.surface_view);
             Log.d(TAG, "requestPointerCapture()");
             surfaceView.requestPointerCapture();
+        }
+        if (mVirtualMachine != null) {
+            if (hasFocus) {
+                Log.d(TAG, "writing clipboard of host device into VM");
+                writeClipboardToVm();
+            } else {
+                Log.d(TAG, "reading clipboard of VM");
+                readClipboardFromVm();
+            }
         }
     }
 
@@ -490,6 +651,14 @@ public class MainActivity extends Activity {
             } catch (IOException e) {
                 Log.e(TAG, e.getMessage());
             }
+        }
+    }
+
+    private void checkAndRequestRecordAudioPermission() {
+        if (getApplicationContext().checkSelfPermission(permission.RECORD_AUDIO)
+                != PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[] {permission.RECORD_AUDIO}, RECORD_AUDIO_PERMISSION_REQUEST_CODE);
         }
     }
 
