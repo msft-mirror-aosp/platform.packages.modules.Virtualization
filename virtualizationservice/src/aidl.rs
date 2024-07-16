@@ -25,6 +25,7 @@ use android_system_virtualizationmaintenance::aidl::android::system::virtualizat
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice;
 use android_system_virtualizationservice_internal as android_vs_internal;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice;
+use android_system_vmtethering::aidl::android::system::vmtethering;
 use android_vs_internal::aidl::android::system::virtualizationservice_internal;
 use anyhow::{anyhow, ensure, Context, Result};
 use avflog::LogResult;
@@ -33,7 +34,7 @@ use binder::{
     LazyServiceGuard, ParcelFileDescriptor, Status, Strong,
 };
 use lazy_static::lazy_static;
-use libc::VMADDR_CID_HOST;
+use libc::{VMADDR_CID_HOST, VMADDR_CID_HYPERVISOR, VMADDR_CID_LOCAL};
 use log::{error, info, warn};
 use nix::unistd::{chown, Uid};
 use openssl::x509::X509;
@@ -73,6 +74,7 @@ use virtualizationservice_internal::{
     IVmnic::{BpVmnic, IVmnic},
 };
 use virtualmachineservice::IVirtualMachineService::VM_TOMBSTONES_SERVICE_PORT;
+use vmtethering::IVmTethering::{BpVmTethering, IVmTethering};
 use vsock::{VsockListener, VsockStream};
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
@@ -163,6 +165,9 @@ lazy_static! {
     static ref NETWORK_SERVICE: Strong<dyn IVmnic> =
         wait_for_interface(<BpVmnic as IVmnic>::get_descriptor())
             .expect("Could not connect to Vmnic");
+    static ref TETHERING_SERVICE: Strong<dyn IVmTethering> =
+        wait_for_interface(<BpVmTethering as IVmTethering>::get_descriptor())
+            .expect("Could not connect to VmTethering");
 }
 
 fn is_valid_guest_cid(cid: Cid) -> bool {
@@ -282,11 +287,15 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             .held_contexts
             .iter()
             .filter_map(|(_, inst)| Weak::upgrade(inst))
-            .map(|vm| VirtualMachineDebugInfo {
-                cid: vm.cid as i32,
-                temporaryDirectory: vm.get_temp_dir().to_string_lossy().to_string(),
-                requesterUid: vm.requester_uid as i32,
-                requesterPid: vm.requester_debug_pid,
+            .map(|vm| {
+                let vm = vm.lock().unwrap();
+                VirtualMachineDebugInfo {
+                    cid: vm.cid as i32,
+                    temporaryDirectory: vm.get_temp_dir().to_string_lossy().to_string(),
+                    requesterUid: vm.requester_uid as i32,
+                    requesterPid: vm.requester_debug_pid,
+                    hostConsoleName: vm.host_console_name.clone(),
+                }
             })
             .collect();
         Ok(cids)
@@ -454,7 +463,7 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             .context("Failed to allocate instance_id")
             .or_service_specific_exception(-1)?;
         let uid = get_calling_uid();
-        info!("Allocated a VM's instance_id: {:?}, for uid: {:?}", hex::encode(id), uid);
+        info!("Allocated a VM's instance_id: {:?}..., for uid: {:?}", &hex::encode(id)[..8], uid);
         let state = &mut *self.state.lock().unwrap();
         if let Some(sk_state) = &mut state.sk_state {
             let user_id = multiuser_get_user_id(uid);
@@ -509,7 +518,8 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
         Ok(())
     }
 
-    fn createTapInterface(&self, iface_name_suffix: &str) -> binder::Result<ParcelFileDescriptor> {
+    fn createTapInterface(&self, _iface_name_suffix: &str) -> binder::Result<ParcelFileDescriptor> {
+        check_internet_permission()?;
         check_use_custom_virtual_machine()?;
         if !cfg!(network) {
             return Err(Status::new_exception_str(
@@ -518,7 +528,33 @@ impl IVirtualizationServiceInternal for VirtualizationServiceInternal {
             ))
             .with_log();
         }
-        NETWORK_SERVICE.createTapInterface(iface_name_suffix)
+        // TODO(340377643): Use iface_name_suffix after introducing bridge interface, not fixed
+        // value.
+        let tap_fd = NETWORK_SERVICE.createTapInterface("fixed")?;
+
+        // TODO(340377643): Due to lack of implementation of creating bridge interface, tethering is
+        // enabled for TAP interface instead of bridge interface. After introducing creation of
+        // bridge interface in AVF, we should modify it.
+        TETHERING_SERVICE.enableVmTethering()?;
+
+        Ok(tap_fd)
+    }
+
+    fn deleteTapInterface(&self, tap_fd: &ParcelFileDescriptor) -> binder::Result<()> {
+        check_internet_permission()?;
+        check_use_custom_virtual_machine()?;
+        if !cfg!(network) {
+            return Err(Status::new_exception_str(
+                ExceptionCode::UNSUPPORTED_OPERATION,
+                Some("deleteTapInterface is not supported with the network feature disabled"),
+            ))
+            .with_log();
+        }
+
+        // TODO(340377643): Disabling tethering should be for bridge interface, not TAP interface.
+        TETHERING_SERVICE.disableVmTethering()?;
+
+        NETWORK_SERVICE.deleteTapInterface(tap_fd)
     }
 }
 
@@ -629,6 +665,8 @@ struct GlobalVmInstance {
     requester_uid: uid_t,
     /// PID of the client who requested this VM instance.
     requester_debug_pid: pid_t,
+    /// Name of the host console.
+    host_console_name: Option<String>,
 }
 
 impl GlobalVmInstance {
@@ -643,7 +681,7 @@ impl GlobalVmInstance {
 struct GlobalState {
     /// VM contexts currently allocated to running VMs. A CID is never recycled as long
     /// as there is a strong reference held by a GlobalVmContext.
-    held_contexts: HashMap<Cid, Weak<GlobalVmInstance>>,
+    held_contexts: HashMap<Cid, Weak<Mutex<GlobalVmInstance>>>,
 
     /// Cached read-only FD of VM DTBO file. Also serves as a lock for creating the file.
     dtbo_file: Mutex<Option<File>>,
@@ -723,8 +761,13 @@ impl GlobalState {
         self.held_contexts.retain(|_, instance| instance.strong_count() > 0);
 
         let cid = self.get_next_available_cid()?;
-        let instance = Arc::new(GlobalVmInstance { cid, requester_uid, requester_debug_pid });
-        create_temporary_directory(&instance.get_temp_dir(), Some(requester_uid))?;
+        let instance = Arc::new(Mutex::new(GlobalVmInstance {
+            cid,
+            requester_uid,
+            requester_debug_pid,
+            ..Default::default()
+        }));
+        create_temporary_directory(&instance.lock().unwrap().get_temp_dir(), Some(requester_uid))?;
 
         self.held_contexts.insert(cid, Arc::downgrade(&instance));
         let binder = GlobalVmContext { instance, ..Default::default() };
@@ -804,7 +847,7 @@ fn get_or_create_common_dir() -> Result<PathBuf> {
 #[derive(Debug, Default)]
 struct GlobalVmContext {
     /// Strong reference to the context's instance data structure.
-    instance: Arc<GlobalVmInstance>,
+    instance: Arc<Mutex<GlobalVmInstance>>,
     /// Keeps our service process running as long as this VM context exists.
     #[allow(dead_code)]
     lazy_service_guard: LazyServiceGuard,
@@ -814,11 +857,16 @@ impl Interface for GlobalVmContext {}
 
 impl IGlobalVmContext for GlobalVmContext {
     fn getCid(&self) -> binder::Result<i32> {
-        Ok(self.instance.cid as i32)
+        Ok(self.instance.lock().unwrap().cid as i32)
     }
 
     fn getTemporaryDirectory(&self) -> binder::Result<String> {
-        Ok(self.instance.get_temp_dir().to_string_lossy().to_string())
+        Ok(self.instance.lock().unwrap().get_temp_dir().to_string_lossy().to_string())
+    }
+
+    fn setHostConsoleName(&self, pathname: &str) -> binder::Result<()> {
+        self.instance.lock().unwrap().host_console_name = Some(pathname.to_string());
+        Ok(())
     }
 }
 
@@ -830,11 +878,21 @@ fn handle_stream_connection_tombstoned() -> Result<()> {
     for incoming_stream in listener.incoming() {
         let mut incoming_stream = match incoming_stream {
             Err(e) => {
-                warn!("invalid incoming connection: {:?}", e);
+                warn!("invalid incoming connection: {e:?}");
                 continue;
             }
             Ok(s) => s,
         };
+        if let Ok(addr) = incoming_stream.peer_addr() {
+            let cid = addr.cid();
+            match cid {
+                VMADDR_CID_LOCAL | VMADDR_CID_HOST | VMADDR_CID_HYPERVISOR => {
+                    warn!("Rejecting non-guest tombstone vsock connection from cid={cid}");
+                    continue;
+                }
+                _ => info!("Vsock Stream connected to cid={cid} for tombstones"),
+            }
+        }
         std::thread::spawn(move || {
             if let Err(e) = handle_tombstone(&mut incoming_stream) {
                 error!("Failed to write tombstone- {:?}", e);
@@ -845,9 +903,6 @@ fn handle_stream_connection_tombstoned() -> Result<()> {
 }
 
 fn handle_tombstone(stream: &mut VsockStream) -> Result<()> {
-    if let Ok(addr) = stream.peer_addr() {
-        info!("Vsock Stream connected to cid={} for tombstones", addr.cid());
-    }
     let tb_connection =
         TombstonedConnection::connect(std::process::id() as i32, DebuggerdDumpType::Tombstone)
             .context("Failed to connect to tombstoned")?;
@@ -909,6 +964,12 @@ fn check_manage_access() -> binder::Result<()> {
 /// Check whether the caller of the current Binder method is allowed to use custom VMs
 fn check_use_custom_virtual_machine() -> binder::Result<()> {
     check_permission("android.permission.USE_CUSTOM_VIRTUAL_MACHINE")
+}
+
+/// Check whether the caller of the current Binder method is allowed to create socket and
+/// establish connection between the VM and the Internet.
+fn check_internet_permission() -> binder::Result<()> {
+    check_permission("android.permission.INTERNET")
 }
 
 #[cfg(test)]

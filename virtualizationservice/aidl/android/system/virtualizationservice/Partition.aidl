@@ -25,4 +25,7 @@ parcelable Partition {
 
     /** Whether the partition should be writable by the VM. */
     boolean writable;
+
+    /** GUID of the partition. If not set, automatically created */
+    @nullable String guid;
 }

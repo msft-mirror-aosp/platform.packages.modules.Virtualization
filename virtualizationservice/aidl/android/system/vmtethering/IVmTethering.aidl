@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The Android Open Source Project
+ * Copyright 2024 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,15 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package android.system.virtualizationservice;
 
-/**
- * Memory trim levels propagated from the app to the VM.
- */
-@Backing(type="int")
-enum MemoryTrimLevel {
-    /* Same meaning as in ComponentCallbacks2 */
-    TRIM_MEMORY_RUNNING_CRITICAL = 0,
-    TRIM_MEMORY_RUNNING_LOW = 1,
-    TRIM_MEMORY_RUNNING_MODERATE = 2,
+package android.system.vmtethering;
+
+interface IVmTethering {
+    /**
+     * Start VM tethering to provide external network to VM.
+     */
+    void enableVmTethering();
+
+    /**
+     * Terminate VM tethering that providing external network to VM.
+     */
+    void disableVmTethering();
 }
