@@ -1119,6 +1119,9 @@ public class VirtualMachine implements AutoCloseable {
         short EV_KEY = 0x01;
         short BTN_TOUCH = 0x14a;
         short BTN_TOOL_FINGER = 0x145;
+        short BTN_TOOL_DOUBLETAP = 0x14d;
+        short BTN_TOOL_TRIPLETAP = 0x14e;
+        short BTN_TOOL_QUADTAP = 0x14f;
         short ABS_X = 0x00;
         short ABS_Y = 0x01;
         short SYN_REPORT = 0x00;
@@ -1140,29 +1143,114 @@ public class VirtualMachine implements AutoCloseable {
         short ABS_PRESSURE = 0x18;
         short ABS_TOOL_WIDTH = 0x1c;
 
-        int x = (int) event.getRawX();
-        int y = (int) event.getRawY();
-        boolean down = event.getAction() != MotionEvent.ACTION_UP;
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_BUTTON_PRESS:
+            case MotionEvent.ACTION_BUTTON_RELEASE:
+                short BTN_LEFT = 0x110;
+                short keyCode;
+                switch (event.getActionButton()) {
+                    case MotionEvent.BUTTON_PRIMARY:
+                        keyCode = BTN_LEFT;
+                        break;
+                    default:
+                        Log.d(TAG, event.toString());
+                        return false;
+                }
+                return writeEventsToSock(
+                        mMouseSock,
+                        Arrays.asList(
+                                new InputEvent(
+                                        EV_KEY,
+                                        keyCode,
+                                        event.getAction() == MotionEvent.ACTION_BUTTON_PRESS
+                                                ? 1
+                                                : 0),
+                                new InputEvent(EV_SYN, SYN_REPORT, 0)));
+            case MotionEvent.ACTION_MOVE:
+                List<InputEvent> events =
+                        new ArrayList<>(
+                                event.getPointerCount() * 10 /*InputEvent per a pointer*/
+                                        + 1 /*SYN*/);
+                for (int actionIdx = 0; actionIdx < event.getPointerCount(); actionIdx++) {
+                    int pointerId = event.getPointerId(actionIdx);
+                    int x = (int) event.getRawX(actionIdx);
+                    int y = (int) event.getRawY(actionIdx);
+                    events.add(new InputEvent(EV_ABS, ABS_MT_SLOT, pointerId));
+                    events.add(new InputEvent(EV_ABS, ABS_MT_TRACKING_ID, pointerId));
+                    events.add(new InputEvent(EV_ABS, ABS_MT_POSITION_X, x));
+                    events.add(new InputEvent(EV_ABS, ABS_MT_POSITION_Y, y));
+                    events.add(
+                            new InputEvent(
+                                    EV_ABS,
+                                    ABS_MT_TOUCH_MAJOR,
+                                    (short) event.getTouchMajor(actionIdx)));
+                    events.add(
+                            new InputEvent(
+                                    EV_ABS,
+                                    ABS_MT_TOUCH_MINOR,
+                                    (short) event.getTouchMinor(actionIdx)));
+                    events.add(new InputEvent(EV_ABS, ABS_X, x));
+                    events.add(new InputEvent(EV_ABS, ABS_Y, y));
+                    events.add(
+                            new InputEvent(
+                                    EV_ABS,
+                                    ABS_PRESSURE,
+                                    (short) (255 * event.getPressure(actionIdx))));
+                    events.add(
+                            new InputEvent(
+                                    EV_ABS,
+                                    ABS_MT_PRESSURE,
+                                    (short) (255 * event.getPressure(actionIdx))));
+                }
+                events.add(new InputEvent(EV_SYN, SYN_REPORT, 0));
+                return writeEventsToSock(mTrackpadSock, events);
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                break;
+            default:
+                return false;
+        }
 
-        // TODO(b/347253952): support multi-touch and button click
+        boolean down =
+                event.getActionMasked() == MotionEvent.ACTION_DOWN
+                        || event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN;
+        int actionIdx = event.getActionIndex();
+        int pointerId = event.getPointerId(actionIdx);
+        int x = (int) event.getRawX(actionIdx);
+        int y = (int) event.getRawY(actionIdx);
         return writeEventsToSock(
                 mTrackpadSock,
                 Arrays.asList(
                         new InputEvent(EV_KEY, BTN_TOUCH, down ? 1 : 0),
-                        new InputEvent(EV_KEY, BTN_TOOL_FINGER, down ? 1 : 0),
-                        new InputEvent(EV_ABS, ABS_MT_SLOT, 0),
                         new InputEvent(
-                                EV_ABS, ABS_MT_TRACKING_ID, down ? event.getPointerId(0) : -1),
+                                EV_KEY,
+                                BTN_TOOL_FINGER,
+                                down && event.getPointerCount() == 1 ? 1 : 0),
+                        new InputEvent(
+                                EV_KEY, BTN_TOOL_DOUBLETAP, event.getPointerCount() == 2 ? 1 : 0),
+                        new InputEvent(
+                                EV_KEY, BTN_TOOL_TRIPLETAP, event.getPointerCount() == 3 ? 1 : 0),
+                        new InputEvent(
+                                EV_KEY, BTN_TOOL_QUADTAP, event.getPointerCount() > 4 ? 1 : 0),
+                        new InputEvent(EV_ABS, ABS_MT_SLOT, pointerId),
+                        new InputEvent(EV_ABS, ABS_MT_TRACKING_ID, down ? pointerId : -1),
                         new InputEvent(EV_ABS, ABS_MT_TOOL_TYPE, 0 /* MT_TOOL_FINGER */),
                         new InputEvent(EV_ABS, ABS_MT_POSITION_X, x),
                         new InputEvent(EV_ABS, ABS_MT_POSITION_Y, y),
-                        new InputEvent(EV_ABS, ABS_MT_TOUCH_MAJOR, (short) event.getTouchMajor()),
-                        new InputEvent(EV_ABS, ABS_MT_TOUCH_MINOR, (short) event.getTouchMinor()),
+                        new InputEvent(
+                                EV_ABS, ABS_MT_TOUCH_MAJOR, (short) event.getTouchMajor(actionIdx)),
+                        new InputEvent(
+                                EV_ABS, ABS_MT_TOUCH_MINOR, (short) event.getTouchMinor(actionIdx)),
                         new InputEvent(EV_ABS, ABS_X, x),
                         new InputEvent(EV_ABS, ABS_Y, y),
-                        new InputEvent(EV_ABS, ABS_PRESSURE, (short) (255 * event.getPressure())),
                         new InputEvent(
-                                EV_ABS, ABS_MT_PRESSURE, (short) (255 * event.getPressure())),
+                                EV_ABS, ABS_PRESSURE, (short) (255 * event.getPressure(actionIdx))),
+                        new InputEvent(
+                                EV_ABS,
+                                ABS_MT_PRESSURE,
+                                (short) (255 * event.getPressure(actionIdx))),
                         new InputEvent(EV_SYN, SYN_REPORT, 0)));
     }
 
