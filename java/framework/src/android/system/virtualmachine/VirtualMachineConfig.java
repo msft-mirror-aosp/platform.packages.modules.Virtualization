@@ -77,9 +77,11 @@ public final class VirtualMachineConfig {
     private static final String TAG = "VirtualMachineConfig";
 
     private static String[] EMPTY_STRING_ARRAY = {};
+    private static final String U_BOOT_PREBUILT_PATH = "/apex/com.android.virt/etc/u-boot.bin";
 
     // These define the schema of the config file persisted on disk.
-    private static final int VERSION = 8;
+    // Please bump up the version number when adding a new key.
+    private static final int VERSION = 10;
     private static final String KEY_VERSION = "version";
     private static final String KEY_PACKAGENAME = "packageName";
     private static final String KEY_APKPATH = "apkPath";
@@ -98,6 +100,8 @@ public final class VirtualMachineConfig {
     private static final String KEY_VENDOR_DISK_IMAGE_PATH = "vendorDiskImagePath";
     private static final String KEY_OS = "os";
     private static final String KEY_EXTRA_APKS = "extraApks";
+    private static final String KEY_SHOULD_BOOST_UCLAMP = "shouldBoostUclamp";
+    private static final String KEY_SHOULD_USE_HUGEPAGES = "shouldUseHugepages";
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -205,6 +209,10 @@ public final class VirtualMachineConfig {
     /** OS name of the VM using payload binaries. */
     @NonNull @OsName private final String mOs;
 
+    private final boolean mShouldBoostUclamp;
+
+    private final boolean mShouldUseHugepages;
+
     @Retention(RetentionPolicy.SOURCE)
     @StringDef(
             prefix = "MICRODROID",
@@ -239,7 +247,9 @@ public final class VirtualMachineConfig {
             boolean vmConsoleInputSupported,
             boolean connectVmConsole,
             @Nullable File vendorDiskImage,
-            @NonNull @OsName String os) {
+            @NonNull @OsName String os,
+            boolean shouldBoostUclamp,
+            boolean shouldUseHugepages) {
         // This is only called from Builder.build(); the builder handles parameter validation.
         mPackageName = packageName;
         mApkPath = apkPath;
@@ -262,6 +272,8 @@ public final class VirtualMachineConfig {
         mConnectVmConsole = connectVmConsole;
         mVendorDiskImage = vendorDiskImage;
         mOs = os;
+        mShouldBoostUclamp = shouldBoostUclamp;
+        mShouldUseHugepages = shouldUseHugepages;
     }
 
     /** Loads a config from a file. */
@@ -362,6 +374,9 @@ public final class VirtualMachineConfig {
             }
         }
 
+        builder.setShouldBoostUclamp(b.getBoolean(KEY_SHOULD_BOOST_UCLAMP));
+        builder.setShouldUseHugepages(b.getBoolean(KEY_SHOULD_USE_HUGEPAGES));
+
         return builder.build();
     }
 
@@ -412,6 +427,8 @@ public final class VirtualMachineConfig {
             String[] extraApks = mExtraApks.toArray(new String[0]);
             b.putStringArray(KEY_EXTRA_APKS, extraApks);
         }
+        b.putBoolean(KEY_SHOULD_BOOST_UCLAMP, mShouldBoostUclamp);
+        b.putBoolean(KEY_SHOULD_USE_HUGEPAGES, mShouldUseHugepages);
         b.writeToStream(output);
     }
 
@@ -653,6 +670,11 @@ public final class VirtualMachineConfig {
                 Optional.ofNullable(customImageConfig.getBootloaderPath())
                         .map((path) -> openOrNull(new File(path), MODE_READ_ONLY))
                         .orElse(null);
+
+        if (config.kernel == null && config.bootloader == null) {
+            config.bootloader = openOrNull(new File(U_BOOT_PREBUILT_PATH), MODE_READ_ONLY);
+        }
+
         config.params =
                 Optional.ofNullable(customImageConfig.getParams())
                         .map((params) -> TextUtils.join(" ", params))
@@ -665,16 +687,36 @@ public final class VirtualMachineConfig {
         for (int i = 0; i < config.disks.length; i++) {
             config.disks[i] = new DiskImage();
             config.disks[i].writable = customImageConfig.getDisks()[i].isWritable();
+            String diskImagePath = customImageConfig.getDisks()[i].getImagePath();
+            if (diskImagePath != null) {
+                config.disks[i].image =
+                        ParcelFileDescriptor.open(
+                                new File(diskImagePath),
+                                config.disks[i].writable ? MODE_READ_WRITE : MODE_READ_ONLY);
+            }
 
-            config.disks[i].image =
-                    ParcelFileDescriptor.open(
-                            new File(customImageConfig.getDisks()[i].getImagePath()),
-                            config.disks[i].writable ? MODE_READ_WRITE : MODE_READ_ONLY);
-            config.disks[i].partitions = new Partition[0];
+            List<Partition> partitions = new ArrayList<>();
+            for (VirtualMachineCustomImageConfig.Partition p :
+                    customImageConfig.getDisks()[i].getPartitions()) {
+                Partition part = new Partition();
+                part.label = p.name;
+                part.image =
+                        ParcelFileDescriptor.open(
+                                new File(p.imagePath),
+                                p.writable ? MODE_READ_WRITE : MODE_READ_ONLY);
+                part.writable = p.writable;
+                part.guid = TextUtils.isEmpty(p.guid) ? null : p.guid;
+                partitions.add(part);
+            }
+            config.disks[i].partitions = partitions.toArray(new Partition[0]);
         }
 
         config.displayConfig =
                 Optional.ofNullable(customImageConfig.getDisplayConfig())
+                        .map(dc -> dc.toParcelable())
+                        .orElse(null);
+        config.gpuConfig =
+                Optional.ofNullable(customImageConfig.getGpuConfig())
                         .map(dc -> dc.toParcelable())
                         .orElse(null);
         config.protectedVm = this.mProtectedVm;
@@ -683,6 +725,10 @@ public final class VirtualMachineConfig {
         config.consoleInputDevice = mConsoleInputDevice;
         config.devices = EMPTY_STRING_ARRAY;
         config.platformVersion = "~1.0";
+        config.audioConfig =
+                Optional.ofNullable(customImageConfig.getAudioConfig())
+                        .map(ac -> ac.toParcelable())
+                        .orElse(null);
         return config;
     }
 
@@ -733,6 +779,7 @@ public final class VirtualMachineConfig {
                 vsConfig.cpuTopology = android.system.virtualizationservice.CpuTopology.ONE_CPU;
                 break;
         }
+
         if (mVendorDiskImage != null) {
             VirtualMachineAppConfig.CustomConfig customConfig =
                     new VirtualMachineAppConfig.CustomConfig();
@@ -747,6 +794,10 @@ public final class VirtualMachineConfig {
             }
             vsConfig.customConfig = customConfig;
         }
+
+        vsConfig.boostUclamp = mShouldBoostUclamp;
+        vsConfig.hugePages = mShouldUseHugepages;
+
         return vsConfig;
     }
 
@@ -826,6 +877,8 @@ public final class VirtualMachineConfig {
         private boolean mConnectVmConsole = false;
         @Nullable private File mVendorDiskImage;
         @NonNull @OsName private String mOs = DEFAULT_OS;
+        private boolean mShouldBoostUclamp = false;
+        private boolean mShouldUseHugepages = false;
 
         /**
          * Creates a builder for the given context.
@@ -919,7 +972,9 @@ public final class VirtualMachineConfig {
                     mVmConsoleInputSupported,
                     mConnectVmConsole,
                     mVendorDiskImage,
-                    mOs);
+                    mOs,
+                    mShouldBoostUclamp,
+                    mShouldUseHugepages);
         }
 
         /**
@@ -1222,6 +1277,18 @@ public final class VirtualMachineConfig {
         @NonNull
         public Builder setOs(@NonNull @OsName String os) {
             mOs = requireNonNull(os, "os must not be null");
+            return this;
+        }
+
+        /** @hide */
+        public Builder setShouldBoostUclamp(boolean shouldBoostUclamp) {
+            mShouldBoostUclamp = shouldBoostUclamp;
+            return this;
+        }
+
+        /** @hide */
+        public Builder setShouldUseHugepages(boolean shouldUseHugepages) {
+            mShouldUseHugepages = shouldUseHugepages;
             return this;
         }
     }

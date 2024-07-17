@@ -38,8 +38,33 @@ union InputDevice {
     parcelable Mouse {
         ParcelFileDescriptor pfd;
     }
+
+    // Switches input
+    parcelable Switches {
+        ParcelFileDescriptor pfd;
+    }
+
+    parcelable Trackpad {
+        ParcelFileDescriptor pfd;
+        // Default values come from https://crosvm.dev/book/devices/input.html#trackpad
+        int width = 1280;
+        int height = 1080;
+        @utf8InCpp String name = "";
+    }
+
+    parcelable MultiTouch {
+        ParcelFileDescriptor pfd;
+        // Default values come from https://crosvm.dev/book/devices/input.html#multi-touch
+        int width = 1280;
+        int height = 1080;
+        @utf8InCpp String name = "";
+    }
+
     SingleTouch singleTouch;
     EvDev evDev;
     Keyboard keyboard;
     Mouse mouse;
+    Switches switches;
+    Trackpad trackpad;
+    MultiTouch multiTouch;
 }
