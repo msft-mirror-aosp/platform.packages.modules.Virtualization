@@ -36,7 +36,6 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService,
-    MemoryTrimLevel::MemoryTrimLevel,
     Partition::Partition,
     PartitionType::PartitionType,
     VirtualMachineAppConfig::{DebugLevel::DebugLevel, Payload::Payload, VirtualMachineAppConfig},
@@ -596,7 +595,12 @@ impl VirtualizationService {
             params: config.params.to_owned(),
             protected: *is_protected,
             debug_config,
-            memory_mib: config.memoryMib.try_into().ok().and_then(NonZeroU32::new),
+            memory_mib: config
+                .memoryMib
+                .try_into()
+                .ok()
+                .and_then(NonZeroU32::new)
+                .unwrap_or(NonZeroU32::new(256).unwrap()),
             cpus,
             host_cpu_topology,
             console_out_fd,
@@ -813,6 +817,12 @@ fn to_input_device_option_from(input_device: &InputDevice) -> Result<InputDevice
             height: u32::try_from(trackpad.height)?,
             width: u32::try_from(trackpad.width)?,
             name: if !trackpad.name.is_empty() { Some(trackpad.name.clone()) } else { None },
+        },
+        InputDevice::MultiTouch(multi_touch) => InputDeviceOption::MultiTouch {
+            file: clone_file(multi_touch.pfd.as_ref().ok_or(anyhow!("pfd should have value"))?)?,
+            height: u32::try_from(multi_touch.height)?,
+            width: u32::try_from(multi_touch.width)?,
+            name: if !multi_touch.name.is_empty() { Some(multi_touch.name.clone()) } else { None },
         },
     })
 }
@@ -1234,10 +1244,20 @@ impl IVirtualMachine for VirtualMachine {
             .or_service_specific_exception(-1)
     }
 
-    fn onTrimMemory(&self, level: MemoryTrimLevel) -> binder::Result<()> {
+    fn getMemoryBalloon(&self) -> binder::Result<i64> {
+        let balloon = self
+            .instance
+            .get_memory_balloon()
+            .with_context(|| format!("Error getting balloon for VM with CID {}", self.instance.cid))
+            .with_log()
+            .or_service_specific_exception(-1)?;
+        Ok(balloon.try_into().unwrap())
+    }
+
+    fn setMemoryBalloon(&self, num_bytes: i64) -> binder::Result<()> {
         self.instance
-            .trim_memory(level)
-            .with_context(|| format!("Error trimming VM with CID {}", self.instance.cid))
+            .set_memory_balloon(num_bytes.try_into().unwrap())
+            .with_context(|| format!("Error setting balloon for VM with CID {}", self.instance.cid))
             .with_log()
             .or_service_specific_exception(-1)
     }
