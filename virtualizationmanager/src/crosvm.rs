@@ -44,7 +44,6 @@ use std::time::{Duration, SystemTime};
 use std::thread::{self, JoinHandle};
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::DeathReason::DeathReason;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    MemoryTrimLevel::MemoryTrimLevel,
     VirtualMachineAppConfig::DebugLevel::DebugLevel,
     AudioConfig::AudioConfig as AudioConfigParcelable,
     DisplayConfig::DisplayConfig as DisplayConfigParcelable,
@@ -114,7 +113,7 @@ pub struct CrosvmConfig {
     pub params: Option<String>,
     pub protected: bool,
     pub debug_config: DebugConfig,
-    pub memory_mib: Option<NonZeroU32>,
+    pub memory_mib: NonZeroU32,
     pub cpus: Option<NonZeroU32>,
     pub host_cpu_topology: bool,
     pub console_out_fd: Option<File>,
@@ -222,6 +221,8 @@ pub enum InputDeviceOption {
     Keyboard(File),
     Mouse(File),
     Switches(File),
+    MultiTouchTrackpad { file: File, width: u32, height: u32, name: Option<String> },
+    MultiTouch { file: File, width: u32, height: u32, name: Option<String> },
 }
 
 type VfioDevice = Strong<dyn IBoundDevice>;
@@ -626,42 +627,35 @@ impl VmInstance {
 
     /// Responds to memory-trimming notifications by inflating the virtio
     /// balloon to reclaim guest memory.
-    pub fn trim_memory(&self, level: MemoryTrimLevel) -> Result<(), Error> {
+    pub fn get_memory_balloon(&self) -> Result<u64, Error> {
         let request = VmRequest::BalloonCommand(BalloonControlCommand::Stats {});
-        match vm_control::client::handle_request(&request, &self.crosvm_control_socket_path) {
-            Ok(VmResponse::BalloonStats { stats, balloon_actual: _ }) => {
-                if let Some(total_memory) = stats.total_memory {
-                    // Reclaim up to 50% of total memory assuming worst case
-                    // most memory is anonymous and must be swapped to zram
-                    // with an approximate 2:1 compression ratio.
-                    let pct = match level {
-                        MemoryTrimLevel::TRIM_MEMORY_RUNNING_CRITICAL => 50,
-                        MemoryTrimLevel::TRIM_MEMORY_RUNNING_LOW => 30,
-                        MemoryTrimLevel::TRIM_MEMORY_RUNNING_MODERATE => 10,
-                        _ => bail!("Invalid memory trim level {:?}", level),
-                    };
-                    let command = BalloonControlCommand::Adjust {
-                        num_bytes: total_memory * pct / 100,
-                        wait_for_success: false,
-                    };
-                    if let Err(e) = vm_control::client::handle_request(
-                        &VmRequest::BalloonCommand(command),
-                        &self.crosvm_control_socket_path,
-                    ) {
-                        bail!("Error sending balloon adjustment: {:?}", e);
+        let result =
+            match vm_control::client::handle_request(&request, &self.crosvm_control_socket_path) {
+                Ok(VmResponse::BalloonStats { stats: _, balloon_actual }) => balloon_actual,
+                Ok(VmResponse::Err(e)) => {
+                    // ENOTSUP is returned when the balloon protocol is not initialized. This
+                    // can occur for numerous reasons: Guest is still booting, guest doesn't
+                    // support ballooning, host doesn't support ballooning. We don't log or
+                    // raise an error in this case: trim is just a hint and we can ignore it.
+                    if e.errno() != libc::ENOTSUP {
+                        bail!("Errno return when requesting balloon stats: {}", e.errno())
                     }
+                    0
                 }
-            }
-            Ok(VmResponse::Err(e)) => {
-                // ENOTSUP is returned when the balloon protocol is not initialized. This
-                // can occur for numerous reasons: Guest is still booting, guest doesn't
-                // support ballooning, host doesn't support ballooning. We don't log or
-                // raise an error in this case: trim is just a hint and we can ignore it.
-                if e.errno() != libc::ENOTSUP {
-                    bail!("Errno return when requesting balloon stats: {}", e.errno())
-                }
-            }
-            e => bail!("Error requesting balloon stats: {:?}", e),
+                e => bail!("Error requesting balloon stats: {:?}", e),
+            };
+        Ok(result)
+    }
+
+    /// Responds to memory-trimming notifications by inflating the virtio
+    /// balloon to reclaim guest memory.
+    pub fn set_memory_balloon(&self, num_bytes: u64) -> Result<(), Error> {
+        let command = BalloonControlCommand::Adjust { num_bytes, wait_for_success: false };
+        if let Err(e) = vm_control::client::handle_request(
+            &VmRequest::BalloonCommand(command),
+            &self.crosvm_control_socket_path,
+        ) {
+            bail!("Error sending balloon adjustment: {:?}", e);
         }
         Ok(())
     }
@@ -941,11 +935,8 @@ fn run_vm(
         let swiotlb_size_mib = 2 * virtio_pci_device_count as u32;
         command.arg("--swiotlb").arg(swiotlb_size_mib.to_string());
 
-        // b/346770542 for consistent "usable" memory across protected and non-protected VMs under
-        // pKVM.
-        if hypervisor_props::is_pkvm()? {
-            memory_mib = memory_mib.map(|m| m.saturating_add(swiotlb_size_mib));
-        }
+        // b/346770542 for consistent "usable" memory across protected and non-protected VMs.
+        memory_mib = memory_mib.saturating_add(swiotlb_size_mib);
 
         // Workaround to keep crash_dump from trying to read protected guest memory.
         // Context in b/238324526.
@@ -968,9 +959,7 @@ fn run_vm(
         command.arg("--params").arg("console=hvc0");
     }
 
-    if let Some(memory_mib) = memory_mib {
-        command.arg("--mem").arg(memory_mib.to_string());
-    }
+    command.arg("--mem").arg(memory_mib.to_string());
 
     if let Some(cpus) = config.cpus {
         command.arg("--cpus").arg(cpus.to_string());
@@ -1058,9 +1047,11 @@ fn run_vm(
     }
 
     for disk in &config.disks {
-        command
-            .arg(if disk.writable { "--rwdisk" } else { "--disk" })
-            .arg(add_preserved_fd(&mut preserved_fds, &disk.image));
+        command.arg("--block").arg(format!(
+            "path={},ro={}",
+            add_preserved_fd(&mut preserved_fds, &disk.image),
+            !disk.writable,
+        ));
     }
 
     if let Some(kernel) = &config.kernel {
@@ -1154,6 +1145,20 @@ fn run_vm(
                 InputDeviceOption::Switches(file) => {
                     format!("switches[path={}]", add_preserved_fd(&mut preserved_fds, file))
                 }
+                InputDeviceOption::MultiTouchTrackpad { file, width, height, name } => format!(
+                    "multi-touch-trackpad[path={},width={},height={}{}]",
+                    add_preserved_fd(&mut preserved_fds, file),
+                    width,
+                    height,
+                    name.as_ref().map_or("".into(), |n| format!(",name={}", n))
+                ),
+                InputDeviceOption::MultiTouch { file, width, height, name } => format!(
+                    "multi-touch[path={},width={},height={}{}]",
+                    add_preserved_fd(&mut preserved_fds, file),
+                    width,
+                    height,
+                    name.as_ref().map_or("".into(), |n| format!(",name={}", n))
+                ),
             });
         }
     }
