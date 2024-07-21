@@ -113,7 +113,7 @@ pub struct CrosvmConfig {
     pub params: Option<String>,
     pub protected: bool,
     pub debug_config: DebugConfig,
-    pub memory_mib: Option<NonZeroU32>,
+    pub memory_mib: NonZeroU32,
     pub cpus: Option<NonZeroU32>,
     pub host_cpu_topology: bool,
     pub console_out_fd: Option<File>,
@@ -222,6 +222,7 @@ pub enum InputDeviceOption {
     Mouse(File),
     Switches(File),
     MultiTouchTrackpad { file: File, width: u32, height: u32, name: Option<String> },
+    MultiTouch { file: File, width: u32, height: u32, name: Option<String> },
 }
 
 type VfioDevice = Strong<dyn IBoundDevice>;
@@ -935,7 +936,7 @@ fn run_vm(
         command.arg("--swiotlb").arg(swiotlb_size_mib.to_string());
 
         // b/346770542 for consistent "usable" memory across protected and non-protected VMs.
-        memory_mib = memory_mib.map(|m| m.saturating_add(swiotlb_size_mib));
+        memory_mib = memory_mib.saturating_add(swiotlb_size_mib);
 
         // Workaround to keep crash_dump from trying to read protected guest memory.
         // Context in b/238324526.
@@ -958,9 +959,7 @@ fn run_vm(
         command.arg("--params").arg("console=hvc0");
     }
 
-    if let Some(memory_mib) = memory_mib {
-        command.arg("--mem").arg(memory_mib.to_string());
-    }
+    command.arg("--mem").arg(memory_mib.to_string());
 
     if let Some(cpus) = config.cpus {
         command.arg("--cpus").arg(cpus.to_string());
@@ -1148,6 +1147,13 @@ fn run_vm(
                 }
                 InputDeviceOption::MultiTouchTrackpad { file, width, height, name } => format!(
                     "multi-touch-trackpad[path={},width={},height={}{}]",
+                    add_preserved_fd(&mut preserved_fds, file),
+                    width,
+                    height,
+                    name.as_ref().map_or("".into(), |n| format!(",name={}", n))
+                ),
+                InputDeviceOption::MultiTouch { file, width, height, name } => format!(
+                    "multi-touch[path={},width={},height={}{}]",
                     add_preserved_fd(&mut preserved_fds, file),
                     width,
                     height,

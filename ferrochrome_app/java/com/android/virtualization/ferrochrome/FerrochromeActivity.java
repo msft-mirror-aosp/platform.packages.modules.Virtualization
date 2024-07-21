@@ -74,9 +74,11 @@ public class FerrochromeActivity extends Activity {
 
         executorService.execute(
                 () -> {
-                    updateImageIfNeeded();
-                    updateStatus("Starting Ferrochrome...");
-                    runOnUiThread(() -> startActivityForResult(intent, REQUEST_CODE_VMLAUNCHER));
+                    if (updateImageIfNeeded()) {
+                        updateStatus("Starting Ferrochrome...");
+                        runOnUiThread(
+                                () -> startActivityForResult(intent, REQUEST_CODE_VMLAUNCHER));
+                    }
                 });
     }
 
@@ -87,18 +89,25 @@ public class FerrochromeActivity extends Activity {
         }
     }
 
-    private void updateImageIfNeeded() {
+    private boolean updateImageIfNeeded() {
         if (!isUpdateNeeded()) {
             Log.d(TAG, "No update needed.");
-            return;
+            return true;
         }
 
-        updateStatus("Copying images...");
         try {
             if (Files.notExists(DEST_DIR)) {
                 Files.createDirectory(DEST_DIR);
             }
-            for (String file : getAssets().list("ferrochrome")) {
+
+            String[] files = getAssets().list("ferrochrome");
+            if (files == null || files.length == 0) {
+                updateStatus("ChromeOS image not found. Please go/try-ferrochrome");
+                return false;
+            }
+
+            updateStatus("Copying images...");
+            for (String file : files) {
                 updateStatus(file);
                 Path dst = Path.of(DEST_DIR.toString(), file);
                 updateFile(getAssets().open("ferrochrome/" + file), dst);
@@ -106,11 +115,12 @@ public class FerrochromeActivity extends Activity {
         } catch (IOException e) {
             Log.e(TAG, "Error while updating image: " + e);
             updateStatus("Failed.");
-            return;
+            return false;
         }
         updateStatus("Done.");
 
         updateStatus("Extracting images...");
+        SystemProperties.set("debug.custom_vm_setup.done", "false");
         SystemProperties.set("debug.custom_vm_setup.start", "true");
         while (!SystemProperties.getBoolean("debug.custom_vm_setup.done", false)) {
             try {
@@ -118,10 +128,12 @@ public class FerrochromeActivity extends Activity {
             } catch (Exception e) {
                 Log.e(TAG, "Error while extracting image: " + e);
                 updateStatus("Failed.");
-                return;
+                return false;
             }
         }
+
         updateStatus("Done.");
+        return true;
     }
 
     private boolean isUpdateNeeded() {
