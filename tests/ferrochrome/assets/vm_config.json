@@ -2,7 +2,7 @@
     "name": "cros",
     "disks": [
         {
-            "image": "/data/local/tmp/chromiumos_test_image.bin",
+            "image": "/data/local/tmp/chromiumos_base_image.bin",
             "partitions": [],
             "writable": true
         }
@@ -16,5 +16,5 @@
     "cpu_topology": "match_host",
     "platform_version": "~1.0",
     "memory_mib" : 8096,
-    "console_input_device": "ttyS0"
+    "console_input_device": "hvc0"
 }
