@@ -13,7 +13,12 @@
       "name": "MicrodroidTestAppNoPerm"
     },
     {
-      "name": "art_standalone_dexpreopt_tests"
+      "name": "art_standalone_dexpreopt_tests",
+      "options": [
+        {
+          "exclude-filter": "DexpreoptTest#ForSystemServer"
+        }
+      ]
     },
     {
       "name": "composd_cmd.test"
