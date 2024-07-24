@@ -16,6 +16,7 @@ java_library_static {
         "androidx.test.runner",
         "androidx.test.ext.junit",
         "com.android.microdroid.testservice-java",
+        "com.android.virt.vm_attestation.testservice-java",
         "MicrodroidTestHelper",
         "truth",
     ],
@@ -32,4 +33,5 @@ java_test_helper_library {
     ],
     host_supported: true,
     device_supported: false,
+    sdk_version: "test_current",
 }

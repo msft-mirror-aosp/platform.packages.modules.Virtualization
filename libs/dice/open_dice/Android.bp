@@ -27,7 +27,6 @@ rust_library_rlib {
     ],
     visibility: [
         "//packages/modules/Virtualization:__subpackages__",
-        "//system/authgraph/tests:__subpackages__",
     ],
 }
 
@@ -39,20 +38,17 @@ rust_library {
     rustlibs: [
         "libopen_dice_android_bindgen",
         "libopen_dice_cbor_bindgen",
+        "libserde",
         "libzeroize",
     ],
     features: [
         "alloc",
+        "serde_derive",
         "std",
     ],
+    proc_macros: ["libserde_derive"],
     shared_libs: [
         "libcrypto",
-    ],
-    static_libs: [
-        "libopen_dice_cbor",
-    ],
-    whole_static_libs: [
-        "libopen_dice_android",
     ],
     visibility: [
         "//hardware/interfaces/security/secretkeeper/aidl/vts",
@@ -69,7 +65,7 @@ rust_library {
 rust_defaults {
     name: "libdiced_open_dice_test_defaults",
     crate_name: "diced_open_dice_test",
-    srcs: ["tests/*.rs"],
+    srcs: ["tests/api_test.rs"],
     test_suites: ["general-tests"],
 }
 
@@ -158,6 +154,7 @@ rust_defaults {
         "--allowlist-var=DICE_PUBLIC_KEY_SIZE",
         "--allowlist-var=DICE_PRIVATE_KEY_SIZE",
         "--allowlist-var=DICE_SIGNATURE_SIZE",
+        "--allowlist-var=DICE_COSE_KEY_ALG_VALUE",
     ],
 }
 

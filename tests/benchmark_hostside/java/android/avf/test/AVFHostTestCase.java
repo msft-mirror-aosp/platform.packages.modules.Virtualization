@@ -30,6 +30,7 @@ import android.platform.test.annotations.RootPermissionTest;
 
 import com.android.microdroid.test.common.MetricsProcessor;
 import com.android.microdroid.test.host.CommandRunner;
+import com.android.microdroid.test.host.KvmHypTracer;
 import com.android.microdroid.test.host.MicrodroidHostTestCaseBase;
 import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.device.ITestDevice;
@@ -37,6 +38,7 @@ import com.android.tradefed.device.TestDevice;
 import com.android.tradefed.log.LogUtil.CLog;
 import com.android.tradefed.testtype.DeviceJUnit4ClassRunner;
 import com.android.tradefed.util.CommandResult;
+import com.android.tradefed.util.SimpleStats;
 
 import org.junit.After;
 import org.junit.Before;
@@ -45,6 +47,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -115,6 +118,55 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
     @Test
     public void testBootWithoutCompOS() throws Exception {
         composTestHelper(false);
+    }
+
+    @Test
+    public void testNoLongHypSections() throws Exception {
+        String[] hypEvents = {
+            "hyp_enter", "hyp_exit"
+        };
+
+        assumeTrue("Skip without hypervisor tracing",
+            KvmHypTracer.isSupported(getDevice(), hypEvents));
+
+        KvmHypTracer tracer = new KvmHypTracer(getDevice(), hypEvents);
+        String result = tracer.run(COMPOSD_CMD_BIN + " test-compile");
+        assertWithMessage("Failed to test compilation VM.")
+                .that(result).ignoringCase().contains("all ok");
+
+        SimpleStats stats = tracer.getDurationStats();
+        reportMetric(stats.getData(), "hyp_sections", "s");
+        CLog.i("Hypervisor traces parsed successfully.");
+    }
+
+    @Test
+    public void testPsciMemProtect() throws Exception {
+        String[] hypEvents = {
+            "psci_mem_protect"
+        };
+
+        assumeTrue("Skip without hypervisor tracing",
+            KvmHypTracer.isSupported(getDevice(), hypEvents));
+        KvmHypTracer tracer = new KvmHypTracer(getDevice(), hypEvents);
+
+        /* We need to wait for crosvm to die so all the VM pages are reclaimed */
+        String result = tracer.run(COMPOSD_CMD_BIN + " test-compile && killall -w crosvm || true");
+        assertWithMessage("Failed to test compilation VM.")
+                .that(result).ignoringCase().contains("all ok");
+
+        List<Integer> values = tracer.getPsciMemProtect();
+
+        assertWithMessage("PSCI MEM_PROTECT events not recorded")
+            .that(values.size()).isGreaterThan(2);
+
+        assertWithMessage("PSCI MEM_PROTECT counter not starting from 0")
+            .that(values.get(0)).isEqualTo(0);
+
+        assertWithMessage("PSCI MEM_PROTECT counter not ending with 0")
+            .that(values.get(values.size() - 1)).isEqualTo(0);
+
+        assertWithMessage("PSCI MEM_PROTECT counter didn't increment")
+            .that(Collections.max(values)).isGreaterThan(0);
     }
 
     @Test
@@ -231,7 +283,7 @@ public final class AVFHostTestCase extends MicrodroidHostTestCaseBase {
         android.tryRun("rm", "-rf", MicrodroidHostTestCaseBase.TEST_ROOT);
 
         // Donate 80% of the available device memory to the VM
-        final String configPath = "assets/microdroid/vm_config.json";
+        final String configPath = "assets/vm_config.json";
         final int vm_mem_mb = getFreeMemoryInfoMb(android) * 80 / 100;
         ITestDevice microdroidDevice =
                 MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)

@@ -248,8 +248,7 @@ pub(crate) unsafe trait Libfdt {
         let prop = unsafe { libfdt_bindgen::fdt_get_property_by_offset(fdt, offset, &mut len) };
 
         let data_len = FdtRawResult::from(len).try_into()?;
-        // TODO(stable_feature(offset_of)): mem::offset_of!(fdt_property, data).
-        let data_offset = memoffset::offset_of!(libfdt_bindgen::fdt_property, data);
+        let data_offset = mem::offset_of!(libfdt_bindgen::fdt_property, data);
         let len = data_offset.checked_add(data_len).ok_or(FdtError::Internal)?;
 
         if !is_aligned(prop) || get_slice_at_ptr(self.as_fdt_slice(), prop.cast(), len).is_none() {
@@ -311,6 +310,7 @@ pub(crate) unsafe trait Libfdt {
     }
 
     /// Safe wrapper around `fdt_open_into()` (C function).
+    #[allow(dead_code)]
     fn open_into(&self, dest: &mut [u8]) -> Result<()> {
         let fdt = self.as_fdt_slice().as_ptr().cast();
 

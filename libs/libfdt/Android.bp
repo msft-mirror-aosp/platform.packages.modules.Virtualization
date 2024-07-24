@@ -39,7 +39,6 @@ rust_library_rlib {
     rustlibs: [
         "libcstr",
         "liblibfdt_bindgen",
-        "libmemoffset_nostd",
         "libstatic_assertions",
         "libzerocopy_nostd",
     ],
@@ -53,7 +52,7 @@ rust_test {
     name: "liblibfdt.integration_test",
     crate_name: "libfdt_test",
     defaults: ["avf_build_flags_rust"],
-    srcs: ["tests/*.rs"],
+    srcs: ["tests/api_test.rs"],
     test_suites: ["general-tests"],
     data: [
         ":fdt_test_tree_one_memory_range_dtb",
