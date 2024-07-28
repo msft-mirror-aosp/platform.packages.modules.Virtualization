@@ -1219,7 +1219,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         // TODO(b/325094712): VMs on CF with same payload have the same secret. This is because
         // `instance-id` which is input to DICE is contained in DT which is missing in CF.
         assumeFalse(
-                "Cuttlefish doesn't support device tree under /proc/device-tree", isCuttlefish());
+                "Cuttlefish/Goldfish doesn't support device tree under /proc/device-tree",
+                isCuttlefish() || isGoldfish());
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig normalConfig =
@@ -1693,7 +1694,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         // TODO(b/325094712): VMs on CF with same payload have the same secret. This is because
         // `instance-id` which is input to DICE is contained in DT which is missing in CF.
         assumeFalse(
-                "Cuttlefish doesn't support device tree under /proc/device-tree", isCuttlefish());
+                "Cuttlefish/Goldfish doesn't support device tree under /proc/device-tree",
+                isCuttlefish() || isGoldfish());
 
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
@@ -2401,7 +2403,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assumeSupportedDevice();
         // TODO(b/325094712): Boot fails with vendor partition in Cuttlefish.
         assumeFalse(
-                "Cuttlefish doesn't support device tree under /proc/device-tree", isCuttlefish());
+                "Cuttlefish/Goldfish doesn't support device tree under /proc/device-tree",
+                isCuttlefish() || isGoldfish());
         // TODO(b/317567210): Boot fails with vendor partition in HWASAN enabled microdroid
         // after introducing verification based on DT and fstab in microdroid vendor partition.
         assumeFalse(

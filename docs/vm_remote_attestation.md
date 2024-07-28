@@ -27,7 +27,7 @@ attestation process into two parts:
 1.  Attesting the RKP VM against the RKP server.
 2.  Attesting the pVM against the RKP VM.
 
-[rkpvm]: https://android.googlesource.com/platform/packages/modules/Virtualization/+/main/service_vm/README.md
+[rkpvm]: https://android.googlesource.com/platform/packages/modules/Virtualization/+/main/docs/service_vm.md
 
 ### RKP VM attestation
 
@@ -67,8 +67,8 @@ payload.
 For detailed information and usage examples, please refer to the
 [demo app][demo].
 
-[api]: https://android.googlesource.com/platform/packages/modules/Virtualization/+/main/vm_payload/README.md
-[demo]: https://android.googlesource.com/platform/packages/modules/Virtualization/+/main/service_vm/demo_apk
+[api]: https://android.googlesource.com/platform/packages/modules/Virtualization/+/main/libs/libvm_payload/README.md
+[demo]: https://android.googlesource.com/platform/packages/modules/Virtualization/+/main/android/VmAttestationDemoApp
 
 ## Output
 
@@ -105,7 +105,11 @@ In `AttestationExtension`:
     set to true only when all the DICE certificates in the pVM DICE chain are in
     normal mode.
 -   The `vmComponents` field contains a list of all the APKs and apexes loaded
-    by the pVM.
+    by the pVM. These components are extracted from the config descriptor of the
+    last DiceChainEntry of the pVM DICE chain. Refer to
+    [dice_for_avf_guest.cddl][dice_for_avf_guest_cddl] for more information.
+
+[dice_for_avf_guest_cddl]: https://cs.android.com/android/platform/superproject/main/+/main:packages/modules/Virtualization/dice_for_avf_guest.cddl
 
 ## To Support It
 
