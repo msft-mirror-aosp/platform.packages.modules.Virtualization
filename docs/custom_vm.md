@@ -56,7 +56,13 @@ adb push vm_config.json /data/local/tmp/vm_config.json
 
 ## Graphical VMs
 
-To run OSes with graphics support, follow the instruction below.
+To run OSes with graphics support, simply
+`packages/modules/Virtualization/tests/ferrochrome/ferrochrome.sh`. It prepares
+and launches the ChromiumOS, which is the only officially supported guest
+payload. We will be adding more OSes in the future.
+
+If you want to do so by yourself (e.g. boot with your build), follow the
+instruction below.
 
 ### Prepare a guest image
 
@@ -195,34 +201,23 @@ $ cat > vm_config.json; adb push vm_config.json /data/local/tmp
     "cpu_topology": "match_host",
     "platform_version": "~1.0",
     "memory_mib" : 8096,
-    "console_input_device": "ttyS0"
+    "console_input_device": "hvc0"
 }
 ```
 
 ### Running the VM
 
-First, enable the `VmLauncherApp` app. This needs to be done only once. In the
-future, this step won't be necesssary.
+1. Grant permission to the `VmLauncherApp` if the virt apex is Google-signed.
+    ```shell
+    $ adb shell su root pm grant com.google.android.virtualization.vmlauncher android.permission.USE_CUSTOM_VIRTUAL_MACHINE
+    ```
 
-```
-$ adb root
-$ adb shell pm enable com.android.virtualization.vmlauncher/.MainActivityAlias
-$ adb unroot
-```
+2. Ensure your device is connected to the Internet.
 
-If virt apex is Google-signed, you need to enable the app and grant the
-permission to the app.
-```
-$ adb root
-$ adb shell pm enable com.google.android.virtualization.vmlauncher/com.android.virtualization.vmlauncher.MainActivityAlias
-$ adb shell pm grant com.google.android.virtualization.vmlauncher android.permission.USE_CUSTOM_VIRTUAL_MACHINE
-$ adb unroot
-```
-
-Second, ensure your device is connected to the Internet.
-
-Finally, tap the VmLauncherApp app from the launcher UI. You will see
-Ferrochrome booting!
+3. Launch the app with adb.
+    ```shell
+    $ adb shell su root am start-activity -a android.virtualization.VM_LAUNCHER
+    ```
 
 If it doesn’t work well, try
 
@@ -231,18 +226,6 @@ $ adb shell pm clear com.android.virtualization.vmlauncher
 # or
 $ adb shell pm clear com.google.android.virtualization.vmlauncher
 ```
-
-### Inside guest OS (for ChromiumOS only)
-
-Go to the network setting and configure as below.
-
-* IP: 192.168.1.2 (other addresses in the 192.168.1.0/24 subnet also works)
-* netmask: 255.255.255.0
-* gateway: 192.168.1.1
-* DNS: 8.8.8.8 (or any DNS server you know)
-
-These settings are persistent; stored in chromiumos_test_image.bin. So you
-don’t have to repeat this next time.
 
 ### Debugging
 
@@ -263,9 +246,16 @@ You can monitor console out as follows
 $ adb shell 'su root tail +0 -F /data/user/$(am get-current-user)/com{,.google}.android.virtualization.vmlauncher/files/console.log'
 ```
 
-For ChromiumOS, you can ssh-in. Use following commands after network setup.
+For ChromiumOS, you can enter to the console via SSH connection. Check your IP
+address of ChromiumOS VM from the ethernet network setting page and follow
+commands below.
 
 ```shell
-$ adb kill-server ; adb start-server; adb forward tcp:9222 tcp:9222
+$ adb kill-server ; adb start-server
+$ adb shell nc -s localhost -L -p 9222 nc ${CHROMIUMOS_IPV4_ADDR} 22 # This command won't be terminated.
+$ adb forward tcp:9222 tcp:9222
 $ ssh -oProxyCommand=none -o UserKnownHostsFile=/dev/null root@localhost -p 9222
 ```
+
+For ChromiumOS, you would need to login after enthering its console.
+The user ID and the password is `root` and `test0000` respectively.
