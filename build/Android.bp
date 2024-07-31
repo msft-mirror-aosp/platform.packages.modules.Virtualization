@@ -1,0 +1,88 @@
+//
+// Copyright (C) 2021 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package {
+    default_team: "trendy_team_virtualization",
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_defaults {
+    name: "avf_build_flags_rust",
+    cfgs: select(release_flag("RELEASE_AVF_ENABLE_DEVICE_ASSIGNMENT"), {
+        true: ["device_assignment"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_DICE_CHANGES"), {
+        true: ["dice_changes"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_LLPVM_CHANGES"), {
+        true: ["llpvm_changes"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_MULTI_TENANT_MICRODROID_VM"), {
+        true: ["multi_tenant"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_NETWORK"), {
+        true: ["network"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_REMOTE_ATTESTATION"), {
+        true: ["remote_attestation"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_VENDOR_MODULES"), {
+        true: ["vendor_modules"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_VIRT_CPUFREQ"), {
+        true: ["virt_cpufreq"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES"), {
+        true: ["paravirtualized_devices"],
+        default: [],
+    }),
+}
+
+cc_defaults {
+    name: "avf_build_flags_cc",
+    cflags: select(release_flag("RELEASE_AVF_ENABLE_DICE_CHANGES"), {
+        true: ["-DAVF_OPEN_DICE_CHANGES=1"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_VENDOR_MODULES"), {
+        true: ["-DAVF_ENABLE_VENDOR_MODULES=1"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_VIRT_CPUFREQ"), {
+        true: ["-DAVF_ENABLE_VIRT_CPUFREQ=1"],
+        default: [],
+    }),
+}
+
+genrule_defaults {
+    name: "dts_to_dtb",
+    tools: ["dtc"],
+    cmd: "FILES=($(in)) && $(location dtc) -@ -I dts -O dtb $${FILES[-1]} -o $(out)",
+}
+
+// This is a temporary workaround until b/309090563 is implemented.
+aconfig_declarations {
+    name: "avf_aconfig_flags",
+    package: "com.android.system.virtualmachine.flags",
+    container: "com.android.virt",
+    srcs: [
+        "avf_flags.aconfig",
+    ],
+}
+
+java_aconfig_library {
+    name: "avf_aconfig_flags_java",
+    aconfig_declarations: "avf_aconfig_flags",
+    sdk_version: "module_current",
+    apex_available: ["com.android.virt"],
+}
