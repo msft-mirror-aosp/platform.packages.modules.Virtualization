@@ -15,7 +15,10 @@
  */
 package com.android.microdroid.test.device;
 
+import static android.content.pm.PackageManager.FEATURE_AUTOMOTIVE;
+import static android.content.pm.PackageManager.FEATURE_LEANBACK;
 import static android.content.pm.PackageManager.FEATURE_VIRTUALIZATION_FRAMEWORK;
+import static android.content.pm.PackageManager.FEATURE_WATCH;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
@@ -68,8 +71,7 @@ public abstract class MicrodroidDeviceTestBase {
 
     protected static final String KERNEL_VERSION = SystemProperties.get("ro.kernel.version");
     protected static final Set<String> SUPPORTED_GKI_VERSIONS =
-            Collections.unmodifiableSet(
-                    new HashSet(Arrays.asList("android14-6.1-pkvm_experimental")));
+            Collections.unmodifiableSet(new HashSet(Arrays.asList("android15-6.6")));
 
     public static boolean isCuttlefish() {
         return getDeviceProperties().isCuttlefish();
@@ -77,6 +79,14 @@ public abstract class MicrodroidDeviceTestBase {
 
     private static boolean isCuttlefishArm64() {
         return getDeviceProperties().isCuttlefishArm64();
+    }
+
+    public static boolean isGoldfish() {
+        return getDeviceProperties().isGoldfish();
+    }
+
+    private static boolean isGoldfishArm64() {
+        return getDeviceProperties().isGoldfishArm64();
     }
 
     public static boolean isHwasan() {
@@ -222,6 +232,15 @@ public abstract class MicrodroidDeviceTestBase {
                 .isFalse();
     }
 
+    protected void assumeVsrCompliant() {
+        boolean featureCheck = mCtx.getPackageManager().hasSystemFeature(FEATURE_WATCH) ||
+                               mCtx.getPackageManager().hasSystemFeature(FEATURE_AUTOMOTIVE) ||
+                               mCtx.getPackageManager().hasSystemFeature(FEATURE_LEANBACK);
+        assume().withMessage("This device is not VSR compliant")
+                .that(featureCheck)
+                .isFalse();
+    }
+
     protected boolean isGsi() {
         return new File("/system/system_ext/etc/init/init.gsi.rc").exists();
     }
@@ -235,10 +254,11 @@ public abstract class MicrodroidDeviceTestBase {
                 .that(KERNEL_VERSION)
                 .isNotEqualTo("5.4");
 
-        // Cuttlefish on Arm 64 doesn't and cannot support any form of virtualization, so there's
-        // no point running any of these tests.
-        assume().withMessage("Virtualization not supported on Arm64 Cuttlefish. b/341889915")
-                .that(isCuttlefishArm64())
+        // Cuttlefish/Goldfish on Arm 64 doesn't and cannot support any form of virtualization,
+        // so there's no point running any of these tests.
+        assume().withMessage("Virtualization not supported on Arm64 Cuttlefish/Goldfish."
+                + " b/341889915")
+                .that(isCuttlefishArm64() || isGoldfishArm64())
                 .isFalse();
     }
 
