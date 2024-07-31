@@ -1219,7 +1219,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         // TODO(b/325094712): VMs on CF with same payload have the same secret. This is because
         // `instance-id` which is input to DICE is contained in DT which is missing in CF.
         assumeFalse(
-                "Cuttlefish doesn't support device tree under /proc/device-tree", isCuttlefish());
+                "Cuttlefish/Goldfish doesn't support device tree under /proc/device-tree",
+                isCuttlefish() || isGoldfish());
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig normalConfig =
@@ -1305,6 +1306,36 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                 assertThat(diceChainSize).isEqualTo(3);
             }
         }
+    }
+
+    @Test
+    @VsrTest(requirements = {"VSR-7.1-001.005"})
+    public void protectedVmHasValidDiceChain() throws Exception {
+        // This test validates two things regarding the pVM DICE chain:
+        // 1. The DICE chain is well-formed that all the entries conform to the DICE spec.
+        // 2. Each entry in the DICE chain is signed by the previous entry's subject public key.
+        assumeSupportedDevice();
+        assumeProtectedVM();
+        assumeVsrCompliant();
+        assumeTrue("Vendor API must be at least 202404", getVendorApiLevel() >= 202404);
+
+        grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadConfig("assets/vm_config.json")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+        VirtualMachine vm = forceCreateNewVirtualMachine("bcc_vm_for_vsr", config);
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (service, results) -> {
+                            results.mBcc = service.getBcc();
+                        });
+        testResults.assertNoException();
+        byte[] bccBytes = testResults.mBcc;
+        assertThat(bccBytes).isNotNull();
+        assertThat(HwTrustJni.validateDiceChain(bccBytes)).isTrue();
     }
 
     @Test
@@ -1663,7 +1694,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         // TODO(b/325094712): VMs on CF with same payload have the same secret. This is because
         // `instance-id` which is input to DICE is contained in DT which is missing in CF.
         assumeFalse(
-                "Cuttlefish doesn't support device tree under /proc/device-tree", isCuttlefish());
+                "Cuttlefish/Goldfish doesn't support device tree under /proc/device-tree",
+                isCuttlefish() || isGoldfish());
 
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
@@ -2288,6 +2320,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @VsrTest(requirements = {"VSR-7.1-001.003"})
     public void kernelVersionRequirement() throws Exception {
+        assumeVsrCompliant();
         int firstApiLevel = SystemProperties.getInt("ro.product.first_api_level", 0);
         assume().withMessage("Skip on devices launched before Android 14 (API level 34)")
                 .that(firstApiLevel)
@@ -2370,7 +2403,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assumeSupportedDevice();
         // TODO(b/325094712): Boot fails with vendor partition in Cuttlefish.
         assumeFalse(
-                "Cuttlefish doesn't support device tree under /proc/device-tree", isCuttlefish());
+                "Cuttlefish/Goldfish doesn't support device tree under /proc/device-tree",
+                isCuttlefish() || isGoldfish());
         // TODO(b/317567210): Boot fails with vendor partition in HWASAN enabled microdroid
         // after introducing verification based on DT and fstab in microdroid vendor partition.
         assumeFalse(
