@@ -53,7 +53,7 @@ cat > vm_config.json <<EOF
     "name": "debian",
     "disks": [
         {
-            "image": "/data/local/tmp/debian.img
+            "image": "/data/local/tmp/debian.img",
             "partitions": [],
             "writable": true
         }
@@ -245,16 +245,34 @@ $ cat > vm_config.json; adb push vm_config.json /data/local/tmp
             "writable": true
         }
     ],
+    "protected": false,
+    "cpu_topology": "match_host",
+    "platform_version": "~1.0",
+    "memory_mib": 8096,
+    "debuggable": true,
+    "console_out": true,
+    "connect_console": true,
+    "console_input_device": "hvc0",
+    "network": true,
+    "input": {
+        "touchscreen": true,
+        "keyboard": true,
+        "mouse": true,
+        "trackpad": true,
+        "switches": true
+    },
+    "audio": {
+        "speaker": true,
+        "microphone": true
+    },
     "gpu": {
         "backend": "virglrenderer",
         "context_types": ["virgl2"]
     },
-    "params": "root=/dev/vda3 rootwait noinitrd ro enforcing=0 cros_debug cros_secure",
-    "protected": false,
-    "cpu_topology": "match_host",
-    "platform_version": "~1.0",
-    "memory_mib" : 8096,
-    "console_input_device": "hvc0"
+    "display": {
+        "scale": "0.77",
+        "refresh_rate": "30"
+    }
 }
 ```
 
@@ -288,15 +306,15 @@ $ adb shell -t /apex/com.android.virt/bin/vm console
 ```
 
 To see console logs only, check
-`/data/data/com{,.google}.android.virtualization.vmlauncher/files/console.log`
+`/data/data/com{,.google}.android.virtualization.vmlauncher/files/${vm_name}.log`
 
 For HSUM enabled devices,
-`/data/user/${current_user_id}/com{,.google}.android.virtualization.vmlauncher/files/console.log`
+`/data/user/${current_user_id}/com{,.google}.android.virtualization.vmlauncher/files/${vm_name}.log`
 
 You can monitor console out as follows
 
 ```shell
-$ adb shell 'su root tail +0 -F /data/user/$(am get-current-user)/com{,.google}.android.virtualization.vmlauncher/files/console.log'
+$ adb shell 'su root tail +0 -F /data/user/$(am get-current-user)/com{,.google}.android.virtualization.vmlauncher/files/${vm_name}.log'
 ```
 
 For ChromiumOS, you can enter to the console via SSH connection. Check your IP
