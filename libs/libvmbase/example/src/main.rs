@@ -35,7 +35,7 @@ use fdtpci::PciInfo;
 use libfdt::Fdt;
 use log::{debug, error, info, trace, warn, LevelFilter};
 use vmbase::{
-    bionic, configure_heap,
+    bionic, configure_heap, generate_image_header,
     layout::{
         crosvm::{FDT_MAX_SIZE, MEM_START},
         rodata_range, scratch_range, text_range,
@@ -48,6 +48,7 @@ static INITIALISED_DATA: [u32; 4] = [1, 2, 3, 4];
 static mut ZEROED_DATA: [u32; 10] = [0; 10];
 static mut MUTABLE_DATA: [u32; 4] = [1, 2, 3, 4];
 
+generate_image_header!();
 main!(main);
 configure_heap!(SIZE_64KB);
 
