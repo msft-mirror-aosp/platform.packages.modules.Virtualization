@@ -71,8 +71,7 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
                 / MICRODROID_COMMAND_RETRY_INTERVAL_MILLIS);
 
     protected static final Set<String> SUPPORTED_GKI_VERSIONS =
-            Collections.unmodifiableSet(
-                    new HashSet(Arrays.asList("android14-6.1-pkvm_experimental")));
+            Collections.unmodifiableSet(new HashSet(Arrays.asList("android15-6.6")));
 
     /* Keep this sync with AssignableDevice.aidl */
     public static final class AssignableDevice {
@@ -140,7 +139,7 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
         assumeTrue("Requires VM support", testDevice.supportsMicrodroid());
 
         CommandRunner android = new CommandRunner(androidDevice);
-        long vendorApiLevel = androidDevice.getIntProperty("ro.vendor.api_level", 0);
+        long vendorApiLevel = androidDevice.getIntProperty("ro.board.api_level", 0);
         boolean isGsi =
                 android.runForResult("[ -e /system/system_ext/etc/init/init.gsi.rc ]").getStatus()
                         == CommandStatus.SUCCESS;
@@ -281,5 +280,9 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
                 .filter(os -> os.startsWith("microdroid_gki-"))
                 .map(os -> os.replaceFirst("^microdroid_gki-", ""))
                 .collect(Collectors.toList());
+    }
+
+    protected boolean isPkvmHypervisor() throws DeviceNotAvailableException {
+        return "kvm.arm-protected".equals(getDevice().getProperty("ro.boot.hypervisor.version"));
     }
 }

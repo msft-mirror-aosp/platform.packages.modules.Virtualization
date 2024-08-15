@@ -32,6 +32,7 @@ use std::fs::{File, OpenOptions};
 use std::io::BufReader;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Configuration for a particular VM to be started.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -65,6 +66,8 @@ pub struct VmConfig {
     /// SysFS paths of devices assigned to the VM.
     #[serde(default)]
     pub devices: Vec<PathBuf>,
+    /// The serial device for VM console input.
+    pub console_input_device: Option<String>,
 }
 
 impl VmConfig {
@@ -124,6 +127,7 @@ impl VmConfig {
                     x.to_str().map(String::from).ok_or(anyhow!("Failed to convert {x:?} to String"))
                 })
                 .collect::<Result<_>>()?,
+            consoleInputDevice: self.console_input_device.clone(),
             ..Default::default()
         })
     }
@@ -173,6 +177,9 @@ pub struct Partition {
     /// Whether the partition should be writable.
     #[serde(default)]
     pub writable: bool,
+    /// GUID of this partition.
+    #[serde(default)]
+    pub guid: Option<Uuid>,
 }
 
 impl Partition {
@@ -181,6 +188,7 @@ impl Partition {
             image: Some(open_parcel_file(&self.path, self.writable)?),
             writable: self.writable,
             label: self.label.to_owned(),
+            guid: None,
         })
     }
 }
