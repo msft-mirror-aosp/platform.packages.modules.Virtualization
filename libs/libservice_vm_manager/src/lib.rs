@@ -227,7 +227,7 @@ pub fn protected_vm_instance(instance_img_path: PathBuf) -> Result<VmInstance> {
     let instance_id = get_or_allocate_instance_id(service.as_ref(), instance_id_file)?;
     let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
         name: String::from("Service VM"),
-        bootloader: Some(ParcelFileDescriptor::new(rialto)),
+        kernel: Some(ParcelFileDescriptor::new(rialto)),
         disks: vec![DiskImage { image: None, partitions: writable_partitions, writable: true }],
         instanceId: instance_id,
         protectedVm: true,
