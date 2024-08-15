@@ -21,12 +21,13 @@ set -e
 
 FECR_GS_URL="https://storage.googleapis.com/chromiumos-image-archive/ferrochrome-public"
 FECR_DEFAULT_VERSION="R128-15958.0.0"
+FECR_DEFAULT_SCREENSHOT_DIR="/data/local/tmp/ferrochrome_screenshots"  # Hardcoded at AndroidTest.xml
 FECR_TEST_IMAGE="chromiumos_test_image"
 FECR_BASE_IMAGE="chromiumos_base_image"
 FECR_DEVICE_DIR="/data/local/tmp"
 FECR_IMAGE_VM_CONFIG_JSON="chromiumos_base_image.bin"  # hardcoded at vm_config.json
 FECR_CONFIG_PATH="/data/local/tmp/vm_config.json"  # hardcoded at VmLauncherApp
-FECR_CONSOLE_LOG_PATH="/data/data/\${pkg_name}/files/console.log"
+FECR_CONSOLE_LOG_PATH="files/cros.log" # log file name is ${vm_name}.log
 FECR_TEST_IMAGE_BOOT_COMPLETED_LOG="Have fun and send patches!"
 FECR_BASE_IMAGE_BOOT_COMPLETED_LOG="Chrome started, our work is done, exiting"
 FECR_BOOT_TIMEOUT="300" # 5 minutes (300 seconds)
@@ -74,6 +75,7 @@ fecr_script_path=$(dirname ${0})
 fecr_verbose=""
 fecr_image="${FECR_DEFAULT_IMAGE}"
 fecr_boot_completed_log="${FECR_DEFAULT_BOOT_COMPLETED_LOG}"
+fecr_screenshot_dir="${FECR_DEFAULT_SCREENSHOT_DIR}"
 
 # Parse parameters
 while (( "${#}" )); do
@@ -153,18 +155,20 @@ echo "Ensure screen unlocked"
 adb shell svc power stayon true
 adb shell wm dismiss-keyguard
 
+echo "Granting runtime permissions to ensure VmLauncher is focused"
+adb shell pm grant ${pkg_name} android.permission.RECORD_AUDIO
+
 echo "Starting ferrochrome"
 adb shell am start-activity -a ${ACTION_NAME} > /dev/null
 
-if [[ $(adb shell getprop ro.fw.mu.headless_system_user) == "true" ]]; then
-  current_user=$(adb shell am get-current-user)
-  log_path="/data/user/${current_user}/${pkg_name}/files/console.log"
-else
-  log_path="/data/data/${pkg_name}/files/console.log"
-fi
+# HSUM aware log path
+current_user=$(adb shell am get-current-user)
+log_path="/data/user/${current_user}/${pkg_name}/${FECR_CONSOLE_LOG_PATH}"
 fecr_start_time=${EPOCHSECONDS}
 
+adb shell mkdir -p "${fecr_screenshot_dir}"
 while [[ $((EPOCHSECONDS - fecr_start_time)) -lt ${FECR_BOOT_TIMEOUT} ]]; do
+  adb shell screencap -p "${fecr_screenshot_dir}/screenshot-${EPOCHSECONDS}.png"
   adb shell grep -soF \""${fecr_boot_completed_log}"\" "${log_path}" && exit 0 || true
   sleep 10
 done
