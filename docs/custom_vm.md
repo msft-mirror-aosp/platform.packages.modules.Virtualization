@@ -25,19 +25,35 @@ adb shell "/apex/com.android.virt/bin/vm run /data/local/tmp/vm_config.json"
 The `vm` command also has other subcommands for debugging; run
 `/apex/com.android.virt/bin/vm help` for details.
 
-### Running Debian with u-boot
-1. Prepare u-boot binary from `u-boot_crosvm_aarch64` in https://ci.android.com/builds/branches/aosp_u-boot-mainline/grid
-or build it by https://source.android.com/docs/devices/cuttlefish/bootloader-dev#develop-bootloader
-2. Prepare Debian image from https://cloud.debian.org/images/cloud/ (We tested nocloud image)
-3. Copy `u-boot.bin`, Debian image file(like `debian-12-nocloud-arm64.raw`) and `vm_config.json` to `/data/local/tmp`
+### Running Debian
+1. Download an ARM64 image from https://cloud.debian.org/images/cloud/ (We tested nocloud image)
+
+2. Resize the image
+```shell
+truncate -s 20G debian.img
+virt-resize --expand /dev/sda1 <download_image_file> debian.img
+```
+
+3. Copy the image file
+```shell
+tar cfS debian.img.tar debian.img
+adb push debian.img.tar /data/local/tmp/
+adb shell tar xf /data/local/tmp/debian.img.tar -C /data/local/tmp/
+adb shell rm /data/local/tmp/debian.img.tar
+adb shell chmod a+w /data/local/tmp/debian.img
+rm debian.img.tar
+```
+
+Note: we tar and untar to keep the image file sparse.
+
+4. Make the VM config file
 ```shell
 cat > vm_config.json <<EOF
 {
     "name": "debian",
-    "bootloader": "/data/local/tmp/u-boot.bin",
     "disks": [
         {
-            "image": "/data/local/tmp/debian-12-nocloud-arm64.raw",
+            "image": "/data/local/tmp/debian.img",
             "partitions": [],
             "writable": true
         }
@@ -45,14 +61,51 @@ cat > vm_config.json <<EOF
     "protected": false,
     "cpu_topology": "match_host",
     "platform_version": "~1.0",
-    "memory_mib" : 8096
+    "memory_mib": 8096,
+    "debuggable": true,
+    "console_out": true,
+    "connect_console": true,
+    "console_input_device": "ttyS0",
+    "network": true,
+    "input": {
+        "touchscreen": true,
+        "keyboard": true,
+        "mouse": true,
+        "trackpad": true,
+        "switches": true
+    },
+    "audio": {
+        "speaker": true,
+         "microphone": true
+    },
+    "gpu": {
+        "backend": "virglrenderer",
+        "context_types": ["virgl2"]
+    },
+    "display": {
+        "refresh_rate": "30"
+    }
 }
 EOF
-adb push `u-boot.bin` /data/local/tmp
-adb push `debian-12-nocloud-arm64.raw` /data/local/tmp
-adb push vm_config.json /data/local/tmp/vm_config.json
+adb push vm_config.json /data/local/tmp/
 ```
-4. Launch VmLauncherApp(the detail will be explain below)
+
+5. Launch VmLauncherApp(the detail will be explain below)
+
+6. For console, we can refer to `Debugging` section below. (id: root)
+
+7. For graphical shell, you need to install xfce(for now, only xfce is tested)
+```
+apt install task-xfce-desktop
+dpkg --configure -a (if necessary)
+systemctl set-default graphical.target
+
+# need non-root user for graphical shell
+adduser linux
+# optional
+adduser linux sudo
+reboot
+```
 
 ## Graphical VMs
 
@@ -192,43 +245,50 @@ $ cat > vm_config.json; adb push vm_config.json /data/local/tmp
             "writable": true
         }
     ],
+    "protected": false,
+    "cpu_topology": "match_host",
+    "platform_version": "~1.0",
+    "memory_mib": 8096,
+    "debuggable": true,
+    "console_out": true,
+    "connect_console": true,
+    "console_input_device": "hvc0",
+    "network": true,
+    "input": {
+        "touchscreen": true,
+        "keyboard": true,
+        "mouse": true,
+        "trackpad": true,
+        "switches": true
+    },
+    "audio": {
+        "speaker": true,
+        "microphone": true
+    },
     "gpu": {
         "backend": "virglrenderer",
         "context_types": ["virgl2"]
     },
-    "params": "root=/dev/vda3 rootwait noinitrd ro enforcing=0 cros_debug cros_secure",
-    "protected": false,
-    "cpu_topology": "match_host",
-    "platform_version": "~1.0",
-    "memory_mib" : 8096,
-    "console_input_device": "ttyS0"
+    "display": {
+        "scale": "0.77",
+        "refresh_rate": "30"
+    }
 }
 ```
 
 ### Running the VM
 
-First, enable the `VmLauncherApp` app. This needs to be done only once. In the
-future, this step won't be necesssary.
+1. Grant permission to the `VmLauncherApp` if the virt apex is Google-signed.
+    ```shell
+    $ adb shell su root pm grant com.google.android.virtualization.vmlauncher android.permission.USE_CUSTOM_VIRTUAL_MACHINE
+    ```
 
-```
-$ adb root
-$ adb shell pm enable com.android.virtualization.vmlauncher/.MainActivityAlias
-$ adb unroot
-```
+2. Ensure your device is connected to the Internet.
 
-If virt apex is Google-signed, you need to enable the app and grant the
-permission to the app.
-```
-$ adb root
-$ adb shell pm enable com.google.android.virtualization.vmlauncher/com.android.virtualization.vmlauncher.MainActivityAlias
-$ adb shell pm grant com.google.android.virtualization.vmlauncher android.permission.USE_CUSTOM_VIRTUAL_MACHINE
-$ adb unroot
-```
-
-Second, ensure your device is connected to the Internet.
-
-Finally, tap the VmLauncherApp app from the launcher UI. You will see
-Ferrochrome booting!
+3. Launch the app with adb.
+    ```shell
+    $ adb shell su root am start-activity -a android.virtualization.VM_LAUNCHER
+    ```
 
 If it doesn’t work well, try
 
@@ -246,15 +306,15 @@ $ adb shell -t /apex/com.android.virt/bin/vm console
 ```
 
 To see console logs only, check
-`/data/data/com{,.google}.android.virtualization.vmlauncher/files/console.log`
+`/data/data/com{,.google}.android.virtualization.vmlauncher/files/${vm_name}.log`
 
 For HSUM enabled devices,
-`/data/user/${current_user_id}/com{,.google}.android.virtualization.vmlauncher/files/console.log`
+`/data/user/${current_user_id}/com{,.google}.android.virtualization.vmlauncher/files/${vm_name}.log`
 
 You can monitor console out as follows
 
 ```shell
-$ adb shell 'su root tail +0 -F /data/user/$(am get-current-user)/com{,.google}.android.virtualization.vmlauncher/files/console.log'
+$ adb shell 'su root tail +0 -F /data/user/$(am get-current-user)/com{,.google}.android.virtualization.vmlauncher/files/${vm_name}.log'
 ```
 
 For ChromiumOS, you can enter to the console via SSH connection. Check your IP
