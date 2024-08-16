@@ -1,0 +1,73 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+java_defaults {
+    name: "vm_attestation_testapp_defaults",
+    test_suites: [
+        "general-tests",
+        "pts",
+    ],
+    static_libs: [
+        "MicrodroidDeviceTestHelper",
+        "androidx.test.runner",
+        "androidx.test.ext.junit",
+        "com.android.virt.vm_attestation.testservice-java",
+        "truth",
+    ],
+    jni_libs: ["libvm_attestation_test_payload"],
+    jni_uses_platform_apis: true,
+    use_embedded_native_libs: true,
+    sdk_version: "test_current",
+}
+
+android_test {
+    name: "VmAttestationTestApp",
+    srcs: ["src/java/com/android/virt/vm_attestation/testapp/*.java"],
+    defaults: ["vm_attestation_testapp_defaults"],
+}
+
+rust_defaults {
+    name: "vm_attestation_test_payload_defaults",
+    crate_name: "vm_attestation_test_payload",
+    defaults: ["avf_build_flags_rust"],
+    srcs: ["src/native/main.rs"],
+    prefer_rlib: true,
+    rustlibs: [
+        "com.android.virt.vm_attestation.testservice-rust",
+        "libandroid_logger",
+        "libanyhow",
+        "libavflog",
+        "liblog_rust",
+        "libvm_payload_rs",
+    ],
+}
+
+rust_ffi {
+    name: "libvm_attestation_test_payload",
+    defaults: ["vm_attestation_test_payload_defaults"],
+    visibility: [
+        ":__subpackages__",
+        "//packages/modules/Virtualization/tests/testapk",
+    ],
+}
+
+android_test {
+    name: "AvfRkpdVmAttestationTestApp",
+    srcs: ["src/java/com/android/virt/rkpd/vm_attestation/testapp/*.java"],
+    defaults: ["vm_attestation_testapp_defaults"],
+    manifest: "AndroidManifest.rkpd.xml",
+    test_config: "AndroidTest.rkpd.xml",
+    static_libs: [
+        "VmAttestationTestUtil",
+    ],
+}
+
+java_library {
+    name: "VmAttestationTestUtil",
+    srcs: ["src/java/com/android/virt/vm_attestation/util/*.java"],
+    static_libs: [
+        "bouncycastle-unbundled",
+        "truth",
+    ],
+}
