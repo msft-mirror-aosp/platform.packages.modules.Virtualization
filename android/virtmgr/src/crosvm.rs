@@ -1103,9 +1103,9 @@ fn run_vm(
 
     if cfg!(network) {
         if let Some(tap) = config.tap {
-            command
-                .arg("--net")
-                .arg(format!("tap-fd={}", add_preserved_fd(&mut preserved_fds, tap)));
+            add_preserved_fd(&mut preserved_fds, tap);
+            let tap_fd = preserved_fds.last().unwrap().as_raw_fd();
+            command.arg("--net").arg(format!("tap-fd={tap_fd}"));
         }
     }
 
