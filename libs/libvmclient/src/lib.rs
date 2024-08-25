@@ -90,15 +90,12 @@ impl VirtualizationService {
         let (client_fd, server_fd) = posix_socketpair()?;
 
         let mut command = Command::new(VIRTMGR_PATH);
+        // Can't use BorrowedFd as it doesn't implement Display
         command.arg("--rpc-server-fd").arg(format!("{}", server_fd.as_raw_fd()));
         command.arg("--ready-fd").arg(format!("{}", ready_fd.as_raw_fd()));
-        command.preserved_fds(vec![server_fd.as_raw_fd(), ready_fd.as_raw_fd()]);
+        command.preserved_fds(vec![server_fd, ready_fd]);
 
         SharedChild::spawn(&mut command)?;
-
-        // Drop FDs that belong to virtmgr.
-        drop(server_fd);
-        drop(ready_fd);
 
         // Wait for the child to signal that the RpcBinder server is ready
         // by closing its end of the pipe.
