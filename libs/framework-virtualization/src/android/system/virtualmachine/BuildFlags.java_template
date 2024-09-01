@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 The Android Open Source Project
+ * Copyright (C) 2024 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,19 +14,20 @@
  * limitations under the License.
  */
 
-package com.android.microdroid.test;
+package android.system.virtualmachine;
 
-class HwTrustJni {
-    static {
-        System.loadLibrary("hwtrust_jni");
-    }
+/**
+ * Exposes AVF build flags (RELEASE_AVF_*) to java.
+ *
+ * @hide
+ */
+public final class BuildFlags {
 
     /**
-     * Validates a DICE chain.
-     *
-     * @param diceChain The dice chain to validate.
-     * @param allowAnyMode Allow the chain's certificates to have any mode.
-     * @return true if the dice chain is valid, false otherwise.
+     * Value of the {@code RELEASE_AVF_ENABLE_VENDOR_MODULES} build flag.
      */
-    public static native boolean validateDiceChain(byte[] diceChain, boolean allowAnyMode);
+    public static boolean VENDOR_MODULES_ENABLED = @vendor_modules_enabled_placeholder;
+
+    private BuildFlags() {};
 }
+
