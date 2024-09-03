@@ -623,6 +623,7 @@ impl VirtualizationService {
             boost_uclamp: config.boostUclamp,
             gpu_config,
             audio_config,
+            no_balloon: config.noBalloon,
         };
         let instance = Arc::new(
             VmInstance::new(

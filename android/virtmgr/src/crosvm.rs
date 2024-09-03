@@ -134,6 +134,7 @@ pub struct CrosvmConfig {
     pub boost_uclamp: bool,
     pub gpu_config: Option<GpuConfig>,
     pub audio_config: Option<AudioConfig>,
+    pub no_balloon: bool,
 }
 
 #[derive(Debug)]
@@ -892,7 +893,9 @@ fn run_vm(
         .arg("--cid")
         .arg(config.cid.to_string());
 
-    if system_properties::read_bool("hypervisor.memory_reclaim.supported", false)? {
+    if system_properties::read_bool("hypervisor.memory_reclaim.supported", false)?
+        && !config.no_balloon
+    {
         command.arg("--balloon-page-reporting");
     } else {
         command.arg("--no-balloon");
