@@ -109,6 +109,23 @@ pub struct DebugConfig {
     /// Note: this is only supported on Android kernels android14-5.15 and higher.
     #[arg(long)]
     gdb: Option<NonZeroU16>,
+
+    /// Whether to enable earlycon. Only supported for debuggable Linux-based VMs.
+    #[cfg(debuggable_vms_improvements)]
+    #[arg(long)]
+    enable_earlycon: bool,
+}
+
+impl DebugConfig {
+    #[cfg(debuggable_vms_improvements)]
+    fn enable_earlycon(&self) -> bool {
+        self.enable_earlycon
+    }
+
+    #[cfg(not(debuggable_vms_improvements))]
+    fn enable_earlycon(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Args, Default)]
