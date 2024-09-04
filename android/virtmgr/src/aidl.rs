@@ -67,12 +67,12 @@ use binder::{
 };
 use cstr::cstr;
 use glob::glob;
-use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use microdroid_payload_config::{ApkConfig, Task, TaskType, VmPayloadConfig};
 use nix::unistd::pipe;
 use rpcbinder::RpcServer;
 use rustutils::system_properties;
+use safe_ownedfd::take_fd_ownership;
 use semver::VersionReq;
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -82,10 +82,10 @@ use std::fs::{canonicalize, read_dir, remove_file, File, OpenOptions};
 use std::io::{BufRead, BufReader, Error, ErrorKind, Seek, SeekFrom, Write};
 use std::iter;
 use std::num::{NonZeroU16, NonZeroU32};
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::os::unix::raw::pid_t;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak, LazyLock};
 use vbmeta::VbMetaImage;
 use vmconfig::{VmConfig, get_debug_level};
 use vsock::VsockStream;
@@ -118,13 +118,13 @@ const PARTITION_GRANULARITY_BYTES: u64 = 4096;
 
 const VM_REFERENCE_DT_ON_HOST_PATH: &str = "/proc/device-tree/avf/reference";
 
-lazy_static! {
-    pub static ref GLOBAL_SERVICE: Strong<dyn IVirtualizationServiceInternal> =
+pub static GLOBAL_SERVICE: LazyLock<Strong<dyn IVirtualizationServiceInternal>> =
+    LazyLock::new(|| {
         wait_for_interface(BINDER_SERVICE_IDENTIFIER)
-            .expect("Could not connect to VirtualizationServiceInternal");
-    static ref SUPPORTED_OS_NAMES: HashSet<String> =
-        get_supported_os_names().expect("Failed to get list of supported os names");
-}
+            .expect("Could not connect to VirtualizationServiceInternal")
+    });
+static SUPPORTED_OS_NAMES: LazyLock<HashSet<String>> =
+    LazyLock::new(|| get_supported_os_names().expect("Failed to get list of supported os names"));
 
 fn create_or_update_idsig_file(
     input_fd: &ParcelFileDescriptor,
@@ -411,9 +411,9 @@ impl VirtualizationService {
 
         let state = &mut *self.state.lock().unwrap();
         let console_out_fd =
-            clone_or_prepare_logger_fd(&debug_config, console_out_fd, format!("Console({})", cid))?;
+            clone_or_prepare_logger_fd(console_out_fd, format!("Console({})", cid))?;
         let console_in_fd = console_in_fd.map(clone_file).transpose()?;
-        let log_fd = clone_or_prepare_logger_fd(&debug_config, log_fd, format!("Log({})", cid))?;
+        let log_fd = clone_or_prepare_logger_fd(log_fd, format!("Log({})", cid))?;
 
         // Counter to generate unique IDs for temporary image files.
         let mut next_temporary_image_id = 0;
@@ -622,6 +622,7 @@ impl VirtualizationService {
             boost_uclamp: config.boostUclamp,
             gpu_config,
             audio_config,
+            no_balloon: config.noBalloon,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -988,6 +989,10 @@ fn load_app_config(
 
         vm_config.devices.clone_from(&custom_config.devices);
         vm_config.networkSupported = custom_config.networkSupported;
+
+        for param in custom_config.extraKernelCmdlineParams.iter() {
+            append_kernel_param(param, &mut vm_config);
+        }
     }
 
     if config.memoryMib > 0 {
@@ -1274,7 +1279,7 @@ impl IVirtualMachine for VirtualMachine {
         let stream = VsockStream::connect_with_cid_port(self.instance.cid, port)
             .context("Failed to connect")
             .or_service_specific_exception(-1)?;
-        Ok(vsock_stream_to_pfd(stream))
+        vsock_stream_to_pfd(stream)
     }
 
     fn setHostConsoleName(&self, ptsname: &str) -> binder::Result<()> {
@@ -1433,10 +1438,12 @@ fn maybe_clone_file(file: &Option<ParcelFileDescriptor>) -> binder::Result<Optio
 }
 
 /// Converts a `VsockStream` to a `ParcelFileDescriptor`.
-fn vsock_stream_to_pfd(stream: VsockStream) -> ParcelFileDescriptor {
-    // SAFETY: ownership is transferred from stream to f
-    let f = unsafe { File::from_raw_fd(stream.into_raw_fd()) };
-    ParcelFileDescriptor::new(f)
+fn vsock_stream_to_pfd(stream: VsockStream) -> binder::Result<ParcelFileDescriptor> {
+    let owned_fd = take_fd_ownership(stream.into_raw_fd())
+        .context("Failed to take ownership of the vsock stream")
+        .with_log()
+        .or_service_specific_exception(-1)?;
+    Ok(ParcelFileDescriptor::new(owned_fd))
 }
 
 /// Parses the platform version requirement string.
@@ -1538,6 +1545,17 @@ fn check_no_extra_apks(config: &VirtualMachineConfig) -> binder::Result<()> {
     Ok(())
 }
 
+fn check_no_extra_kernel_cmdline_params(config: &VirtualMachineConfig) -> binder::Result<()> {
+    let VirtualMachineConfig::AppConfig(config) = config else { return Ok(()) };
+    if let Some(custom_config) = &config.customConfig {
+        if !custom_config.extraKernelCmdlineParams.is_empty() {
+            return Err(anyhow!("debuggable_vms_improvements feature is disabled"))
+                .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION);
+        }
+    }
+    Ok(())
+}
+
 fn check_protected_vm_is_supported() -> binder::Result<()> {
     let is_pvm_supported =
         hypervisor_props::is_protected_vm_supported().or_service_specific_exception(-1)?;
@@ -1559,21 +1577,19 @@ fn check_config_features(config: &VirtualMachineConfig) -> binder::Result<()> {
     if !cfg!(multi_tenant) {
         check_no_extra_apks(config)?;
     }
+    if !cfg!(debuggable_vms_improvements) {
+        check_no_extra_kernel_cmdline_params(config)?;
+    }
     Ok(())
 }
 
 fn clone_or_prepare_logger_fd(
-    debug_config: &DebugConfig,
     fd: Option<&ParcelFileDescriptor>,
     tag: String,
 ) -> Result<Option<File>, Status> {
     if let Some(fd) = fd {
         return Ok(Some(clone_file(fd)?));
     }
-
-    if !debug_config.should_prepare_console_output() {
-        return Ok(None);
-    };
 
     let (read_fd, write_fd) =
         pipe().context("Failed to create pipe").or_service_specific_exception(-1)?;
