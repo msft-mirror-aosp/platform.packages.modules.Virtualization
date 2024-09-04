@@ -25,7 +25,6 @@ use android_system_virtualizationservice::{
     binder::ParcelFileDescriptor,
 };
 use anyhow::{anyhow, ensure, Context, Result};
-use lazy_static::lazy_static;
 use log::{info, warn};
 use service_vm_comm::{Request, Response, ServiceVmRequest, VmType};
 use std::fs::{self, File, OpenOptions};
@@ -37,20 +36,21 @@ use std::time::Duration;
 use vmclient::{DeathReason, VmInstance};
 use vsock::{VsockListener, VsockStream, VMADDR_CID_HOST};
 
+/// Size of virtual memory allocated to the Service VM.
+pub const VM_MEMORY_MB: i32 = 6;
+
 const VIRT_DATA_DIR: &str = "/data/misc/apexdata/com.android.virt";
 const RIALTO_PATH: &str = "/apex/com.android.virt/etc/rialto.bin";
 const INSTANCE_IMG_NAME: &str = "service_vm_instance.img";
 const INSTANCE_ID_FILENAME: &str = "service_vm_instance_id";
 const INSTANCE_IMG_SIZE_BYTES: i64 = 1 << 20; // 1MB
-const MEMORY_MB: i32 = 300;
 const WRITE_BUFFER_CAPACITY: usize = 512;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-lazy_static! {
-    static ref PENDING_REQUESTS: AtomicCounter = AtomicCounter::default();
-    static ref SERVICE_VM: Mutex<Option<ServiceVm>> = Mutex::new(None);
-    static ref SERVICE_VM_SHUTDOWN: Condvar = Condvar::new();
-}
+
+static PENDING_REQUESTS: AtomicCounter = AtomicCounter::new();
+static SERVICE_VM: Mutex<Option<ServiceVm>> = Mutex::new(None);
+static SERVICE_VM_SHUTDOWN: Condvar = Condvar::new();
 
 /// Atomic counter with a condition variable that is used to wait for the counter
 /// to become positive within a timeout.
@@ -61,6 +61,10 @@ struct AtomicCounter {
 }
 
 impl AtomicCounter {
+    const fn new() -> Self {
+        Self { num: Mutex::new(0), num_increased: Condvar::new() }
+    }
+
     /// Checks if the counter becomes positive within the given timeout.
     fn is_positive_within_timeout(&self, timeout: Duration) -> bool {
         let (guard, _wait_result) = self
@@ -227,11 +231,11 @@ pub fn protected_vm_instance(instance_img_path: PathBuf) -> Result<VmInstance> {
     let instance_id = get_or_allocate_instance_id(service.as_ref(), instance_id_file)?;
     let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
         name: String::from("Service VM"),
-        bootloader: Some(ParcelFileDescriptor::new(rialto)),
+        kernel: Some(ParcelFileDescriptor::new(rialto)),
         disks: vec![DiskImage { image: None, partitions: writable_partitions, writable: true }],
         instanceId: instance_id,
         protectedVm: true,
-        memoryMib: MEMORY_MB,
+        memoryMib: VM_MEMORY_MB,
         cpuTopology: CpuTopology::ONE_CPU,
         platformVersion: "~1.0".to_string(),
         gdbPort: 0, // No gdb
