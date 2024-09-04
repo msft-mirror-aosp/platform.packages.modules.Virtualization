@@ -36,7 +36,7 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::{Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use vmclient::{ErrorCode, VmInstance};
 use vmconfig::{get_debug_level, open_parcel_file, VmConfig};
@@ -148,7 +148,7 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
 
     let payload_config_str = format!("{:?}!{:?}", config.apk, payload);
 
-    let custom_config = CustomConfig {
+    let mut custom_config = CustomConfig {
         gdbPort: config.debug.gdb.map(u16::from).unwrap_or(0) as i32, // 0 means no gdb
         vendorImage: vendor,
         devices: config
@@ -162,6 +162,21 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         networkSupported: config.common.network_supported(),
         ..Default::default()
     };
+
+    if config.debug.enable_earlycon() {
+        if config.debug.debug != DebugLevel::FULL {
+            bail!("earlycon is only supported for debuggable VMs")
+        }
+        if cfg!(target_arch = "aarch64") {
+            custom_config
+                .extraKernelCmdlineParams
+                .push(String::from("earlycon=uart8250,mmio,0x3f8"));
+        } else if cfg!(target_arch = "x86_64") {
+            custom_config.extraKernelCmdlineParams.push(String::from("earlycon=uart8250,io,0x3f8"));
+        } else {
+            bail!("unexpected architecture!");
+        }
+    }
 
     let vm_config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
         name: config.common.name.unwrap_or_else(|| String::from("VmRunApp")),
@@ -365,16 +380,6 @@ impl vmclient::VmCallback for Callback {
 }
 
 /// Safely duplicate the file descriptor.
-fn duplicate_fd<T: AsRawFd>(file: T) -> io::Result<File> {
-    let fd = file.as_raw_fd();
-    // SAFETY: This just duplicates a file descriptor which we know to be valid, and we check for an
-    // an error.
-    let dup_fd = unsafe { libc::dup(fd) };
-    if dup_fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        // SAFETY: We have just duplicated the file descriptor so we own it, and `from_raw_fd` takes
-        // ownership of it.
-        Ok(unsafe { File::from_raw_fd(dup_fd) })
-    }
+fn duplicate_fd<T: AsFd>(file: T) -> io::Result<File> {
+    Ok(file.as_fd().try_clone_to_owned()?.into())
 }

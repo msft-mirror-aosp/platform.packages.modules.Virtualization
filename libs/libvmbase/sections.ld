@@ -29,17 +29,13 @@ ENTRY(entry)
 
 SECTIONS
 {
-	.dtb (NOLOAD) : {
-		dtb_begin = .;
-		. += LENGTH(dtb_region);
-		dtb_end = .;
-	} >dtb_region
-
 	/*
 	 * Collect together the code. This is page aligned so it can be mapped
 	 * as executable-only.
 	 */
 	.text : ALIGN(4096) {
+		KEEP(*(.init.head));
+		*(.init.head)
 		text_begin = .;
 		*(.init.entry)
 		*(.init.*)
