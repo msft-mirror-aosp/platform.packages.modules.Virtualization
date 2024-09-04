@@ -67,7 +67,6 @@ use binder::{
 };
 use cstr::cstr;
 use glob::glob;
-use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use microdroid_payload_config::{ApkConfig, Task, TaskType, VmPayloadConfig};
 use nix::unistd::pipe;
@@ -86,7 +85,7 @@ use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::os::unix::raw::pid_t;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak, LazyLock};
 use vbmeta::VbMetaImage;
 use vmconfig::{VmConfig, get_debug_level};
 use vsock::VsockStream;
@@ -119,13 +118,13 @@ const PARTITION_GRANULARITY_BYTES: u64 = 4096;
 
 const VM_REFERENCE_DT_ON_HOST_PATH: &str = "/proc/device-tree/avf/reference";
 
-lazy_static! {
-    pub static ref GLOBAL_SERVICE: Strong<dyn IVirtualizationServiceInternal> =
+pub static GLOBAL_SERVICE: LazyLock<Strong<dyn IVirtualizationServiceInternal>> =
+    LazyLock::new(|| {
         wait_for_interface(BINDER_SERVICE_IDENTIFIER)
-            .expect("Could not connect to VirtualizationServiceInternal");
-    static ref SUPPORTED_OS_NAMES: HashSet<String> =
-        get_supported_os_names().expect("Failed to get list of supported os names");
-}
+            .expect("Could not connect to VirtualizationServiceInternal")
+    });
+static SUPPORTED_OS_NAMES: LazyLock<HashSet<String>> =
+    LazyLock::new(|| get_supported_os_names().expect("Failed to get list of supported os names"));
 
 fn create_or_update_idsig_file(
     input_fd: &ParcelFileDescriptor,

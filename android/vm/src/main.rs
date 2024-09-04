@@ -159,12 +159,12 @@ pub struct MicrodroidConfig {
 
 impl MicrodroidConfig {
     #[cfg(vendor_modules)]
-    fn vendor(&self) -> &Option<PathBuf> {
-        &self.vendor
+    fn vendor(&self) -> Option<&PathBuf> {
+        self.vendor.as_ref()
     }
 
     #[cfg(not(vendor_modules))]
-    fn vendor(&self) -> Option<PathBuf> {
+    fn vendor(&self) -> Option<&PathBuf> {
         None
     }
 
@@ -179,13 +179,13 @@ impl MicrodroidConfig {
     }
 
     #[cfg(device_assignment)]
-    fn devices(&self) -> &Vec<PathBuf> {
+    fn devices(&self) -> &[PathBuf] {
         &self.devices
     }
 
     #[cfg(not(device_assignment))]
-    fn devices(&self) -> Vec<PathBuf> {
-        Vec::new()
+    fn devices(&self) -> &[PathBuf] {
+        &[]
     }
 }
 
