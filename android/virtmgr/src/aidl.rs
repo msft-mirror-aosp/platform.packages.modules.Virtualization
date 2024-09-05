@@ -17,7 +17,7 @@
 use crate::{get_calling_pid, get_calling_uid, get_this_pid};
 use crate::atom::{write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
-use crate::crosvm::{AudioConfig, CrosvmConfig, DiskFile, DisplayConfig, GpuConfig, InputDeviceOption, PayloadState, VmContext, VmInstance, VmState};
+use crate::crosvm::{AudioConfig, CrosvmConfig, DiskFile, DisplayConfig, GpuConfig, InputDeviceOption, PayloadState, UsbConfig, VmContext, VmInstance, VmState};
 use crate::debug_config::DebugConfig;
 use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
@@ -67,7 +67,6 @@ use binder::{
 };
 use cstr::cstr;
 use glob::glob;
-use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use microdroid_payload_config::{ApkConfig, Task, TaskType, VmPayloadConfig};
 use nix::unistd::pipe;
@@ -86,7 +85,7 @@ use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::os::unix::raw::pid_t;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak, LazyLock};
 use vbmeta::VbMetaImage;
 use vmconfig::{VmConfig, get_debug_level};
 use vsock::VsockStream;
@@ -119,13 +118,13 @@ const PARTITION_GRANULARITY_BYTES: u64 = 4096;
 
 const VM_REFERENCE_DT_ON_HOST_PATH: &str = "/proc/device-tree/avf/reference";
 
-lazy_static! {
-    pub static ref GLOBAL_SERVICE: Strong<dyn IVirtualizationServiceInternal> =
+pub static GLOBAL_SERVICE: LazyLock<Strong<dyn IVirtualizationServiceInternal>> =
+    LazyLock::new(|| {
         wait_for_interface(BINDER_SERVICE_IDENTIFIER)
-            .expect("Could not connect to VirtualizationServiceInternal");
-    static ref SUPPORTED_OS_NAMES: HashSet<String> =
-        get_supported_os_names().expect("Failed to get list of supported os names");
-}
+            .expect("Could not connect to VirtualizationServiceInternal")
+    });
+static SUPPORTED_OS_NAMES: LazyLock<HashSet<String>> =
+    LazyLock::new(|| get_supported_os_names().expect("Failed to get list of supported os names"));
 
 fn create_or_update_idsig_file(
     input_fd: &ParcelFileDescriptor,
@@ -585,6 +584,13 @@ impl VirtualizationService {
             None
         };
 
+        let usb_config = config
+            .usbConfig
+            .as_ref()
+            .map(UsbConfig::new)
+            .unwrap_or(Ok(UsbConfig { controller: false }))
+            .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?;
+
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -623,6 +629,8 @@ impl VirtualizationService {
             boost_uclamp: config.boostUclamp,
             gpu_config,
             audio_config,
+            no_balloon: config.noBalloon,
+            usb_config,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -989,6 +997,10 @@ fn load_app_config(
 
         vm_config.devices.clone_from(&custom_config.devices);
         vm_config.networkSupported = custom_config.networkSupported;
+
+        for param in custom_config.extraKernelCmdlineParams.iter() {
+            append_kernel_param(param, &mut vm_config);
+        }
     }
 
     if config.memoryMib > 0 {
@@ -1541,6 +1553,17 @@ fn check_no_extra_apks(config: &VirtualMachineConfig) -> binder::Result<()> {
     Ok(())
 }
 
+fn check_no_extra_kernel_cmdline_params(config: &VirtualMachineConfig) -> binder::Result<()> {
+    let VirtualMachineConfig::AppConfig(config) = config else { return Ok(()) };
+    if let Some(custom_config) = &config.customConfig {
+        if !custom_config.extraKernelCmdlineParams.is_empty() {
+            return Err(anyhow!("debuggable_vms_improvements feature is disabled"))
+                .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION);
+        }
+    }
+    Ok(())
+}
+
 fn check_protected_vm_is_supported() -> binder::Result<()> {
     let is_pvm_supported =
         hypervisor_props::is_protected_vm_supported().or_service_specific_exception(-1)?;
@@ -1561,6 +1584,9 @@ fn check_config_features(config: &VirtualMachineConfig) -> binder::Result<()> {
     }
     if !cfg!(multi_tenant) {
         check_no_extra_apks(config)?;
+    }
+    if !cfg!(debuggable_vms_improvements) {
+        check_no_extra_kernel_cmdline_params(config)?;
     }
     Ok(())
 }
