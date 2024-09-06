@@ -54,7 +54,6 @@ rust_defaults {
         "libregex",
         "librpcbinder_rs",
         "librustutils",
-        "libsafe_ownedfd",
         "libsemver",
         "libselinux_bindgen",
         "libserde",
@@ -93,6 +92,13 @@ rust_binary {
     srcs: ["src/main.rs"],
     cfgs: ["early"],
     apex_available: ["com.android.virt"],
+}
+
+xsd_config {
+    name: "early_vms",
+    srcs: ["early_vms.xsd"],
+    api_dir: "schema",
+    package_name: "android.system.virtualizationservice",
 }
 
 rust_test {
