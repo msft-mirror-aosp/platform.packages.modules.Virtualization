@@ -490,6 +490,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .cpuTopology("match_host")
                         .protectedVm(true)
                         .gki(mGki)
+                        .name("protected_vm_runs_pvmfw")
                         .build(getAndroidDevice());
 
         // Assert
@@ -785,6 +786,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .cpuTopology("match_host")
                         .protectedVm(mProtectedVm)
                         .gki(mGki)
+                        .name("test_telemetry_pushed_atoms")
                         .build(device);
         microdroid.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
         device.shutdownMicrodroid(microdroid);
@@ -816,7 +818,8 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertThat(atomVmCreationRequested.getIsProtected()).isEqualTo(mProtectedVm);
         assertThat(atomVmCreationRequested.getCreationSucceeded()).isTrue();
         assertThat(atomVmCreationRequested.getBinderExceptionCode()).isEqualTo(0);
-        assertThat(atomVmCreationRequested.getVmIdentifier()).isEqualTo("VmRunApp");
+        assertThat(atomVmCreationRequested.getVmIdentifier())
+                .isEqualTo("test_telemetry_pushed_atoms");
         assertThat(atomVmCreationRequested.getConfigType())
                 .isEqualTo(AtomsProto.VmCreationRequested.ConfigType.VIRTUAL_MACHINE_APP_CONFIG);
         assertThat(atomVmCreationRequested.getNumCpus()).isEqualTo(getDeviceNumCpus(device));
@@ -826,11 +829,11 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
         // Check VmBooted atom
         AtomsProto.VmBooted atomVmBooted = data.get(1).getAtom().getVmBooted();
-        assertThat(atomVmBooted.getVmIdentifier()).isEqualTo("VmRunApp");
+        assertThat(atomVmBooted.getVmIdentifier()).isEqualTo("test_telemetry_pushed_atoms");
 
         // Check VmExited atom
         AtomsProto.VmExited atomVmExited = data.get(2).getAtom().getVmExited();
-        assertThat(atomVmExited.getVmIdentifier()).isEqualTo("VmRunApp");
+        assertThat(atomVmExited.getVmIdentifier()).isEqualTo("test_telemetry_pushed_atoms");
         assertThat(atomVmExited.getDeathReason()).isEqualTo(AtomsProto.VmExited.DeathReason.KILLED);
         assertThat(atomVmExited.getExitSignal()).isEqualTo(9);
         // In CPU & memory related fields, check whether positive values are collected or not.
@@ -927,6 +930,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(mProtectedVm)
+                        .name("test_microdroid_boots")
                         .gki(mGki));
     }
 
@@ -940,6 +944,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .cpuTopology("match_host")
                         .protectedVm(mProtectedVm)
                         .gki(mGki)
+                        .name("test_microdroid_ram_usage")
                         .build(getAndroidDevice());
         mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
         mMicrodroidDevice.enableAdbRoot();
@@ -1205,6 +1210,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .protectedVm(mProtectedVm)
                         .gki(mGki)
                         .hugePages(true)
+                        .name("test_huge_pages")
                         .build(getAndroidDevice());
         mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
 
