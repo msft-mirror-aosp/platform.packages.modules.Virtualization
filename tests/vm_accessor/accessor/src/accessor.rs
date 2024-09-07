@@ -31,12 +31,11 @@ pub struct Accessor {
     //       because 'trait Interface' requires 'static.
     vm: VmInstance,
     port: i32,
-    instance: String,
 }
 
 impl Accessor {
-    pub fn new(vm: VmInstance, port: i32, instance: &str) -> Self {
-        Self { vm, port, instance: instance.into() }
+    pub fn new(vm: VmInstance, port: i32) -> Self {
+        Self { vm, port }
     }
 }
 
@@ -44,13 +43,10 @@ impl Interface for Accessor {}
 
 impl IAccessor for Accessor {
     fn addConnection(&self) -> binder::Result<ParcelFileDescriptor> {
-        self.vm.wait_until_ready(Duration::from_secs(20)).unwrap();
+        self.vm.wait_until_ready(Duration::from_secs(10)).unwrap();
 
         info!("VM is ready. Connecting to service via port {}", self.port);
 
         self.vm.vm.connectVsock(self.port)
-    }
-    fn getInstanceName(&self) -> binder::Result<String> {
-        Ok(self.instance.clone())
     }
 }
