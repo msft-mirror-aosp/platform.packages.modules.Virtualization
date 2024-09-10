@@ -1,0 +1,70 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+java_sdk_library {
+    name: "framework-virtualization",
+
+    defaults: ["non-updatable-framework-module-defaults"],
+
+    jarjar_rules: "jarjar-rules.txt",
+
+    srcs: [
+        "src/**/*.java",
+        ":avf-build-flags-java-gen",
+    ],
+    static_libs: [
+        "android.system.virtualizationservice-java",
+        "avf_aconfig_flags_java",
+        // For android.sysprop.HypervisorProperties
+        "PlatformProperties",
+    ],
+
+    apex_available: ["com.android.virt"],
+
+    permitted_packages: [
+        "android.system.virtualmachine",
+        "android.system.virtualizationservice",
+        // android.sysprop.*, renamed by jarjar
+        "com.android.system.virtualmachine.sysprop",
+    ],
+    errorprone: {
+        enabled: true,
+        javacflags: [
+            // We use @GuardedBy and we want a test failure if our locking isn't consistent with it.
+            "-Xep:GuardedBy:ERROR",
+        ],
+    },
+
+    sdk_version: "core_platform",
+    stub_only_libs: [
+        "android_module_lib_stubs_current",
+    ],
+    impl_only_libs: [
+        "framework",
+    ],
+    impl_library_visibility: [
+        "//packages/modules/Virtualization:__subpackages__",
+    ],
+    aconfig_declarations: [
+        "avf_aconfig_flags",
+    ],
+    lint: {
+        baseline_filename: "lint-baseline.xml",
+        warning_checks: [
+            "FlaggedApi",
+        ],
+    },
+}
+
+gensrcs {
+    name: "avf-build-flags-java-gen",
+    srcs: ["src/**/BuildFlags.java_template"],
+    output_extension: "java",
+    cmd: "cp $(in) $(genDir)/tmp.java && " +
+        select(release_flag("RELEASE_AVF_ENABLE_VENDOR_MODULES"), {
+            true: "sed -ie 's/@vendor_modules_enabled_placeholder/true/g'",
+            default: "sed -ie 's/@vendor_modules_enabled_placeholder/false/g'",
+        }) + " $(genDir)/tmp.java && " +
+        " cp $(genDir)/tmp.java $(out)",
+}

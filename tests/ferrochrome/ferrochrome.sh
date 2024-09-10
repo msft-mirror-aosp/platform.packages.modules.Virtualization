@@ -20,17 +20,28 @@
 set -e
 
 FECR_GS_URL="https://storage.googleapis.com/chromiumos-image-archive/ferrochrome-public"
-FECR_DEFAULT_VERSION="R127-15916.0.0"
+FECR_DEFAULT_VERSION="R128-15958.0.0"
+FECR_DEFAULT_SCREENSHOT_DIR="/data/local/tmp/ferrochrome_screenshots"  # Hardcoded at AndroidTest.xml
+FECR_TEST_IMAGE="chromiumos_test_image"
+FECR_BASE_IMAGE="chromiumos_base_image"
 FECR_DEVICE_DIR="/data/local/tmp"
+FECR_IMAGE_VM_CONFIG_JSON="chromiumos_base_image.bin"  # hardcoded at vm_config.json
 FECR_CONFIG_PATH="/data/local/tmp/vm_config.json"  # hardcoded at VmLauncherApp
-FECR_CONSOLE_LOG_PATH="/data/data/\${pkg_name}/files/console.log"
-FECR_BOOT_COMPLETED_LOG="Have fun and send patches!"
+FECR_CONSOLE_LOG_PATH="files/cros.log" # log file name is ${vm_name}.log
+FECR_TEST_IMAGE_BOOT_COMPLETED_LOG="Have fun and send patches!"
+FECR_BASE_IMAGE_BOOT_COMPLETED_LOG="Chrome started, our work is done, exiting"
 FECR_BOOT_TIMEOUT="300" # 5 minutes (300 seconds)
 ACTION_NAME="android.virtualization.VM_LAUNCHER"
-TRY_UNLOCK_MAX=10
+
+# Match this with AndroidTest.xml and assets/vm_config.json
+FECR_DEFAULT_IMAGE="${FECR_BASE_IMAGE}"
+FECR_DEFAULT_BOOT_COMPLETED_LOG="${FECR_BASE_IMAGE_BOOT_COMPLETED_LOG}"
 
 fecr_clean_up() {
   trap - INT
+
+  # Reset screen always on
+  adb shell svc power stayon false
 
   if [[ -d ${fecr_dir} && -z ${fecr_keep} ]]; then
     rm -rf ${fecr_dir}
@@ -40,7 +51,7 @@ fecr_clean_up() {
 print_usage() {
   echo "ferochrome: Launches ferrochrome image"
   echo ""
-  echo "By default, this downloads ferrochrome image with version ${FECR_DEFAULT_VERSION},"
+  echo "By default, this downloads ${FECR_DEFAULT_VERSION} with version ${FECR_DEFAULT_VERSION},"
   echo "launches, and waits for boot completed."
   echo "When done, removes downloaded image on host while keeping pushed image on device."
   echo ""
@@ -53,14 +64,20 @@ print_usage() {
   echo "  --skip: Skipping downloading and/or pushing images"
   echo "  --version \${version}: ferrochrome version to be downloaded"
   echo "  --keep: Keep downloaded ferrochrome image"
+  echo "  --test: Download test image instead"
+  echo "  --forever: Keep ferrochrome running forever. Used for manual test"
 }
 
-fecr_version=""
+fecr_version="${FECR_DEFAULT_VERSION}"
 fecr_dir=""
 fecr_keep=""
 fecr_skip=""
 fecr_script_path=$(dirname ${0})
 fecr_verbose=""
+fecr_image="${FECR_DEFAULT_IMAGE}"
+fecr_boot_completed_log="${FECR_DEFAULT_BOOT_COMPLETED_LOG}"
+fecr_screenshot_dir="${FECR_DEFAULT_SCREENSHOT_DIR}"
+fecr_forever=""
 
 # Parse parameters
 while (( "${#}" )); do
@@ -82,6 +99,13 @@ while (( "${#}" )); do
       ;;
     --skip)
       fecr_skip="true"
+      ;;
+    --test)
+      fecr_image="${FECR_TEST_IMAGE}"
+      fecr_boot_completed_log="${FECR_TEST_IMAGE_BOOT_COMPLETED_LOG}"
+      ;;
+    --forever)
+      fecr_forever="true"
       ;;
     -h|--help)
       print_usage
@@ -112,9 +136,12 @@ if [[ "$(echo ${resolved_activities} | wc -l)" != "1" ]]; then
 fi
 
 pkg_name=$(dirname ${resolved_activities})
+current_user=$(adb shell am get-current-user)
 
-adb shell pm grant ${pkg_name} android.permission.USE_CUSTOM_VIRTUAL_MACHINE > /dev/null
-adb shell pm clear ${pkg_name} > /dev/null
+echo "Reset app & granting permission"
+adb shell pm clear --user ${current_user} ${pkg_name} > /dev/null
+adb shell pm grant --user ${current_user} ${pkg_name} android.permission.RECORD_AUDIO
+adb shell pm grant --user ${current_user} ${pkg_name} android.permission.USE_CUSTOM_VIRTUAL_MACHINE > /dev/null
 
 if [[ -z "${fecr_skip}" ]]; then
   if [[ -z "${fecr_dir}" ]]; then
@@ -123,62 +150,43 @@ if [[ -z "${fecr_skip}" ]]; then
     fecr_dir=$(mktemp -d)
 
     echo "Downloading & extracting ferrochrome image to ${fecr_dir}"
-    fecr_version=${fecr_version:-${FECR_DEFAULT_VERSION}}
-    curl ${FECR_GS_URL}/${fecr_version}/chromiumos_test_image.tar.xz | tar xfJ - -C ${fecr_dir}
+    curl ${FECR_GS_URL}/${fecr_version}/${fecr_image}.tar.xz | tar xfJ - -C ${fecr_dir}
   fi
 
   echo "Pushing ferrochrome image to ${FECR_DEVICE_DIR}"
   adb shell mkdir -p ${FECR_DEVICE_DIR} > /dev/null || true
-  adb push ${fecr_dir}/chromiumos_test_image.bin ${FECR_DEVICE_DIR}
+  adb push ${fecr_dir}/${fecr_image}.bin ${FECR_DEVICE_DIR}/${FECR_IMAGE_VM_CONFIG_JSON}
   adb push ${fecr_script_path}/assets/vm_config.json ${FECR_CONFIG_PATH}
 fi
 
 echo "Ensure screen unlocked"
-
-try_unlock=0
-while [[ "${try_unlock}" -le "${TRY_UNLOCK_MAX}" ]]; do
-  screen_state=$(adb shell dumpsys nfc | sed -n 's/^mScreenState=\(.*\)$/\1/p')
-  case "${screen_state}" in
-    "ON_UNLOCKED")
-      break
-      ;;
-    "ON_LOCKED")
-      # Disclaimer: This can unlock phone only if unlock method is swipe (default after FDR)
-      adb shell input keyevent KEYCODE_MENU
-      ;;
-    "OFF_LOCKED"|"OFF_UNLOCKED")
-      adb shell input keyevent KEYCODE_WAKEUP
-      ;;
-    *)
-      echo "Unknown screen state. Continue to boot, but may fail"
-      break
-      ;;
-  esac
-  sleep 1
-  try_unlock=$((try_unlock+1))
-done
-if [[ "${try_unlock}" -gt "${TRY_UNLOCK_MAX}" ]]; then
-  >&2 echo "Failed to unlock screen. Try again after manual unlock"
-  exit 1
-fi
+adb shell svc power stayon true
+adb shell wm dismiss-keyguard
 
 echo "Starting ferrochrome"
 adb shell am start-activity -a ${ACTION_NAME} > /dev/null
 
-if [[ $(adb shell getprop ro.fw.mu.headless_system_user) == "true" ]]; then
-  current_user=$(adb shell am get-current-user)
-  log_path="/data/user/${current_user}/${pkg_name}/files/console.log"
-else
-  log_path="/data/data/${pkg_name}/files/console.log"
-fi
+# HSUM aware log path
+log_path="/data/user/${current_user}/${pkg_name}/${FECR_CONSOLE_LOG_PATH}"
 fecr_start_time=${EPOCHSECONDS}
 
-while [[ $((EPOCHSECONDS - fecr_start_time)) -lt ${FECR_BOOT_TIMEOUT} ]]; do
-  adb shell grep -sF \""${FECR_BOOT_COMPLETED_LOG}"\" "${log_path}" && exit 0
-  sleep 10
-done
+echo "Check ${log_path} on device for console log"
 
->&2 echo "Ferrochrome failed to boot. Dumping console log"
->&2 adb shell cat ${log_path}
+if [[ "${fecr_forever}" == "true" ]]; then
+  echo "Ctrl+C to stop running"
+  echo "To open interactive serial console, use following command:"
+  echo "adb shell -t /apex/com.android.virt/bin/vm console"
+else
+  adb shell mkdir -p "${fecr_screenshot_dir}"
+  while [[ $((EPOCHSECONDS - fecr_start_time)) -lt ${FECR_BOOT_TIMEOUT} ]]; do
+    adb shell screencap -p "${fecr_screenshot_dir}/screenshot-${EPOCHSECONDS}.png"
+    adb shell grep -soF \""${fecr_boot_completed_log}"\" "${log_path}" && exit 0 || true
+    sleep 10
+  done
 
-exit 1
+  >&2 echo "Ferrochrome failed to boot. Dumping console log"
+  >&2 adb shell cat ${log_path}
+
+  exit 1
+fi
+

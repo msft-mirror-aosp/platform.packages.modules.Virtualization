@@ -1,0 +1,37 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_defaults {
+    name: "libvmclient.default",
+    crate_name: "vmclient",
+    defaults: ["avf_build_flags_rust"],
+    srcs: ["src/lib.rs"],
+    edition: "2021",
+    rustlibs: [
+        "android.system.virtualizationcommon-rust",
+        "android.system.virtualizationservice-rust",
+        "libbinder_rs",
+        "libcommand_fds",
+        "liblog_rust",
+        "libnix",
+        "librpcbinder_rs",
+        "libshared_child",
+        "libthiserror",
+    ],
+    apex_available: [
+        "com.android.compos",
+        "com.android.microfuchsia",
+        "com.android.virt",
+    ],
+}
+
+rust_library {
+    name: "libvmclient",
+    defaults: ["libvmclient.default"],
+}
+
+rust_ffi_static {
+    name: "libvmclient.ffi",
+    defaults: ["libvmclient.default"],
+}
