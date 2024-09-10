@@ -55,6 +55,7 @@ rust_library {
         "//packages/modules/Virtualization:__subpackages__",
         "//system/authgraph/tests:__subpackages__",
         "//system/secretkeeper/client:__subpackages__",
+        "//system/software_defined_vehicle:__subpackages__",
     ],
     apex_available: [
         "//apex_available:platform",
@@ -92,6 +93,9 @@ rust_defaults {
         "--ctypes-prefix=core::ffi",
         "--raw-line=#![no_std]",
     ],
+    dylib: {
+        enabled: false,
+    },
     no_stdlibs: true,
     prefer_rlib: true,
     stdlibs: [

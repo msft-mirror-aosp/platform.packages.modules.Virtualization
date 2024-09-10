@@ -7,12 +7,28 @@ microdroid_filesystem_images = [
     "microdroid_vbmeta",
 ]
 
-apex {
+soong_config_module_type {
+    name: "virt_apex",
+    module_type: "apex",
+    config_namespace: "ANDROID",
+    bool_variables: [
+        "avf_enabled",
+    ],
+    properties: [
+        "defaults",
+    ],
+}
+
+virt_apex {
     name: "com.android.virt",
-    defaults: select(soong_config_variable("ANDROID", "avf_enabled"), {
-        "true": ["com.android.virt_avf_enabled"],
-        default: ["com.android.virt_avf_disabled"],
-    }),
+    soong_config_variables: {
+        avf_enabled: {
+            defaults: ["com.android.virt_avf_enabled"],
+            conditions_default: {
+                defaults: ["com.android.virt_avf_disabled"],
+            },
+        },
+    },
 }
 
 apex_defaults {
@@ -30,7 +46,10 @@ apex_defaults {
     apps: [
         "android.system.virtualmachine.res",
     ] + select(release_flag("RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES"), {
-        true: ["VmLauncherApp"],
+        true: [
+            "VmLauncherApp",
+            "VmTerminalApp",
+        ],
         default: [],
     }),
 
@@ -81,6 +100,9 @@ apex_defaults {
             }) + select(release_flag("RELEASE_AVF_ENABLE_NETWORK"), {
                 true: ["vmnic"],
                 default: [],
+            }) + select(release_flag("RELEASE_AVF_ENABLE_EARLY_VM"), {
+                true: ["early_virtmgr"],
+                default: [],
             }),
             filesystems: microdroid_filesystem_images,
             prebuilts: [
@@ -98,6 +120,9 @@ apex_defaults {
             }) + select(release_flag("RELEASE_AVF_ENABLE_NETWORK"), {
                 true: ["vmnic"],
                 default: [],
+            }) + select(release_flag("RELEASE_AVF_ENABLE_EARLY_VM"), {
+                true: ["early_virtmgr"],
+                default: [],
             }),
             filesystems: microdroid_filesystem_images,
         },
@@ -105,10 +130,7 @@ apex_defaults {
     binaries: [
         "fd_server",
         "vm",
-    ] + select(release_flag("RELEASE_AVF_ENABLE_EARLY_VM"), {
-        true: ["early_virtmgr"],
-        default: [],
-    }),
+    ],
     prebuilts: [
         "features_com.android.virt.xml",
         "microdroid_initrd_debuggable",
