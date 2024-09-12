@@ -18,9 +18,6 @@
       "name": "MicrodroidTestApp"
     },
     {
-      "name": "MicrodroidTestAppNoInternetPerm"
-    },
-    {
       "name": "MicrodroidTestAppNoPerm"
     },
     {
@@ -67,6 +64,11 @@
     {
       "name": "AvfRkpdAppGoogleIntegrationTests",
       "keywords": ["internal"]
+    }
+  ],
+  "ferrochrome-postsubmit": [
+    {
+      "name": "ferrochrome-tests"
     }
   ],
   "postsubmit": [

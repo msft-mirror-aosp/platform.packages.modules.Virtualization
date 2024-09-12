@@ -16,7 +16,6 @@
 package android.system.virtualizationservice;
 
 import android.system.virtualizationservice.IVirtualMachineCallback;
-import android.system.virtualizationservice.MemoryTrimLevel;
 import android.system.virtualizationservice.VirtualMachineState;
 
 interface IVirtualMachine {
@@ -42,9 +41,19 @@ interface IVirtualMachine {
      */
     void stop();
 
-    /** Communicate app low-memory notifications to the VM. */
-    void onTrimMemory(MemoryTrimLevel level);
+    /** Access to the VM's memory balloon. */
+    long getMemoryBalloon();
+    void setMemoryBalloon(long num_bytes);
 
     /** Open a vsock connection to the CID of the VM on the given port. */
     ParcelFileDescriptor connectVsock(int port);
+
+    /** Set the name of the peer end (ptsname) of the host console. */
+    void setHostConsoleName(in @utf8InCpp String pathname);
+
+    /** Suspends the VM. */
+    void suspend();
+
+    /** Resumes the suspended VM. */
+    void resume();
 }

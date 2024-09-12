@@ -16,8 +16,8 @@
 
 package com.android.microdroid.benchmark;
 
-import static android.system.virtualmachine.VirtualMachineConfig.CPU_TOPOLOGY_ONE_CPU;
 import static android.system.virtualmachine.VirtualMachineConfig.CPU_TOPOLOGY_MATCH_HOST;
+import static android.system.virtualmachine.VirtualMachineConfig.CPU_TOPOLOGY_ONE_CPU;
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_FULL;
 import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_NONE;
 
@@ -27,17 +27,19 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 
+import android.app.Application;
 import android.app.Instrumentation;
+import android.content.ComponentCallbacks2;
+import android.content.Context;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.os.ParcelFileDescriptor.AutoCloseInputStream;
 import android.os.ParcelFileDescriptor.AutoCloseOutputStream;
-import android.os.Process;
 import android.os.RemoteException;
+import android.system.Os;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineException;
-import android.system.Os;
 import android.system.virtualmachine.VirtualMachineManager;
 import android.util.Log;
 
@@ -158,6 +160,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                 newVmConfigBuilderWithPayloadBinary("MicrodroidIdleNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
                         .setMemoryBytes(mem * ONE_MEBI)
+                        .setShouldUseHugepages(true)
                         .build();
 
         // returns true if succeeded at least once.
@@ -234,6 +237,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
             VirtualMachineConfig.Builder builder =
                     newVmConfigBuilderWithPayloadBinary("MicrodroidIdleNativeLib.so")
                             .setShouldBoostUclamp(true)
+                            .setShouldUseHugepages(true)
                             .setMemoryBytes(256 * ONE_MEBI)
                             .setDebugLevel(DEBUG_LEVEL_NONE);
             if (fullDebug) {
@@ -347,6 +351,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
                 newVmConfigBuilderWithPayloadConfig("assets/vm_config_io.json")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
                         .setShouldBoostUclamp(true)
+                        .setShouldUseHugepages(true)
                         .build();
         List<Double> transferRates = new ArrayList<>(IO_TEST_TRIAL_COUNT);
 
@@ -373,6 +378,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadConfig("assets/vm_config_io.json")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .setShouldUseHugepages(true)
                         .build();
         List<Double> readRates = new ArrayList<>(IO_TEST_TRIAL_COUNT);
 
@@ -524,6 +530,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadConfig("assets/vm_config_io.json")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .setShouldUseHugepages(true)
                         .setMemoryBytes(256 * ONE_MEBI)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine(vmName, config);
@@ -610,10 +617,12 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadConfig("assets/vm_config_io.json")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .setShouldUseHugepages(true)
                         .setMemoryBytes(256 * ONE_MEBI)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine(vmName, config);
-        MemoryReclaimListener listener = new MemoryReclaimListener(this::executeCommand);
+        MemoryReclaimListener listener =
+                new MemoryReclaimListener(this::executeCommand, getContext());
         BenchmarkVmListener.create(listener).runToFinish(TAG, vm);
         assertWithMessage("VM failed to start").that(listener.mPreCrosvm).isNotNull();
         assertWithMessage("Post trim stats not available").that(listener.mPostCrosvm).isNotNull();
@@ -648,11 +657,13 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     }
 
     private static class MemoryReclaimListener implements BenchmarkVmListener.InnerListener {
-        MemoryReclaimListener(Function<String, String> shellExecutor) {
+        MemoryReclaimListener(Function<String, String> shellExecutor, Context applicationCtx) {
             mShellExecutor = shellExecutor;
+            mApplication = (Application) applicationCtx;
         }
 
         public final Function<String, String> mShellExecutor;
+        private final Application mApplication;
 
         public CrosvmStats mPreCrosvm;
         public CrosvmStats mPostCrosvm;
@@ -668,7 +679,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
             service.allocAnonMemory(256);
             mPreCrosvm = new CrosvmStats(vmPid, mShellExecutor);
             // Send a memory trim hint to cause memory reclaim.
-            mShellExecutor.apply("am send-trim-memory " + Process.myPid() + " RUNNING_CRITICAL");
+            mApplication.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL);
             // Give time for the memory reclaim to do its work.
             try {
                 Thread.sleep(isCuttlefish() ? 10000 : 5000);
@@ -729,6 +740,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .setShouldUseHugepages(true)
                         .setShouldBoostUclamp(true)
                         .build();
 
@@ -778,6 +790,8 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .setShouldBoostUclamp(true)
+                        .setShouldUseHugepages(true)
                         .build();
 
         List<Double> requestLatencies = new ArrayList<>(IO_TEST_TRIAL_COUNT * NUM_REQUESTS);
@@ -836,6 +850,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadConfig("assets/vm_config_io.json")
                         .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .setShouldUseHugepages(true)
                         .build();
         List<Double> vmKillTime = new ArrayList<>(TEST_TRIAL_COUNT);
 

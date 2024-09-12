@@ -15,7 +15,10 @@
  */
 package com.android.microdroid.test.device;
 
+import static android.content.pm.PackageManager.FEATURE_AUTOMOTIVE;
+import static android.content.pm.PackageManager.FEATURE_LEANBACK;
 import static android.content.pm.PackageManager.FEATURE_VIRTUALIZATION_FRAMEWORK;
+import static android.content.pm.PackageManager.FEATURE_WATCH;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
@@ -68,8 +71,7 @@ public abstract class MicrodroidDeviceTestBase {
 
     protected static final String KERNEL_VERSION = SystemProperties.get("ro.kernel.version");
     protected static final Set<String> SUPPORTED_GKI_VERSIONS =
-            Collections.unmodifiableSet(
-                    new HashSet(Arrays.asList("android14-6.1-pkvm_experimental")));
+            Collections.unmodifiableSet(new HashSet(Arrays.asList("android15-6.6")));
 
     public static boolean isCuttlefish() {
         return getDeviceProperties().isCuttlefish();
@@ -219,6 +221,15 @@ public abstract class MicrodroidDeviceTestBase {
         Log.i(TAG, "isGsi = " + isGsi + ", vendor api level = " + vendorApiLevel);
         assume().withMessage("GSI with vendor API level < 202404 may not support AVF")
                 .that(isGsi && vendorApiLevel < 202404)
+                .isFalse();
+    }
+
+    protected void assumeVsrCompliant() {
+        boolean featureCheck = mCtx.getPackageManager().hasSystemFeature(FEATURE_WATCH) ||
+                               mCtx.getPackageManager().hasSystemFeature(FEATURE_AUTOMOTIVE) ||
+                               mCtx.getPackageManager().hasSystemFeature(FEATURE_LEANBACK);
+        assume().withMessage("This device is not VSR compliant")
+                .that(featureCheck)
                 .isFalse();
     }
 
@@ -556,6 +567,7 @@ public abstract class MicrodroidDeviceTestBase {
         public int mFileMode;
         public int mMountFlags;
         public String mConsoleInput;
+        public byte[] mInstanceSecret;
 
         public void assertNoException() {
             if (mException != null) {

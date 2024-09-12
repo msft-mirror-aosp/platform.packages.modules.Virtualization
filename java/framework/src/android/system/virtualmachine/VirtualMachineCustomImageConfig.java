@@ -32,11 +32,20 @@ public class VirtualMachineCustomImageConfig {
     private static final String KEY_PARAMS = "params";
     private static final String KEY_DISK_WRITABLES = "disk_writables";
     private static final String KEY_DISK_IMAGES = "disk_images";
+    private static final String KEY_PARTITION_LABELS = "partition_labels_";
+    private static final String KEY_PARTITION_IMAGES = "partition_images_";
+    private static final String KEY_PARTITION_WRITABLES = "partition_writables_";
+    private static final String KEY_PARTITION_GUIDS = "partition_guids_";
     private static final String KEY_DISPLAY_CONFIG = "display_config";
     private static final String KEY_TOUCH = "touch";
     private static final String KEY_KEYBOARD = "keyboard";
     private static final String KEY_MOUSE = "mouse";
+    private static final String KEY_SWITCHES = "switches";
+    private static final String KEY_NETWORK = "network";
     private static final String KEY_GPU = "gpu";
+    private static final String KEY_AUDIO_CONFIG = "audio_config";
+    private static final String KEY_TRACKPAD = "trackpad";
+    private static final String KEY_AUTO_MEMORY_BALLOON = "auto_memory_balloon";
 
     @Nullable private final String name;
     @Nullable private final String kernelPath;
@@ -45,10 +54,15 @@ public class VirtualMachineCustomImageConfig {
     @Nullable private final String[] params;
     @Nullable private final Disk[] disks;
     @Nullable private final DisplayConfig displayConfig;
+    @Nullable private final AudioConfig audioConfig;
     private final boolean touch;
     private final boolean keyboard;
     private final boolean mouse;
+    private final boolean switches;
+    private final boolean network;
     @Nullable private final GpuConfig gpuConfig;
+    private final boolean trackpad;
+    private final boolean autoMemoryBalloon;
 
     @Nullable
     public Disk[] getDisks() {
@@ -92,6 +106,22 @@ public class VirtualMachineCustomImageConfig {
         return mouse;
     }
 
+    public boolean useSwitches() {
+        return switches;
+    }
+
+    public boolean useTrackpad() {
+        return mouse;
+    }
+
+    public boolean useAutoMemoryBalloon() {
+        return autoMemoryBalloon;
+    }
+
+    public boolean useNetwork() {
+        return network;
+    }
+
     /** @hide */
     public VirtualMachineCustomImageConfig(
             String name,
@@ -104,7 +134,12 @@ public class VirtualMachineCustomImageConfig {
             boolean touch,
             boolean keyboard,
             boolean mouse,
-            GpuConfig gpuConfig) {
+            boolean switches,
+            boolean network,
+            GpuConfig gpuConfig,
+            AudioConfig audioConfig,
+            boolean trackpad,
+            boolean autoMemoryBalloon) {
         this.name = name;
         this.kernelPath = kernelPath;
         this.initrdPath = initrdPath;
@@ -115,7 +150,12 @@ public class VirtualMachineCustomImageConfig {
         this.touch = touch;
         this.keyboard = keyboard;
         this.mouse = mouse;
+        this.switches = switches;
+        this.network = network;
         this.gpuConfig = gpuConfig;
+        this.audioConfig = audioConfig;
+        this.trackpad = trackpad;
+        this.autoMemoryBalloon = autoMemoryBalloon;
     }
 
     static VirtualMachineCustomImageConfig from(PersistableBundle customImageConfigBundle) {
@@ -135,8 +175,23 @@ public class VirtualMachineCustomImageConfig {
         if (writables != null && diskImages != null) {
             if (writables.length == diskImages.length) {
                 for (int i = 0; i < writables.length; i++) {
-                    builder.addDisk(
-                            writables[i] ? Disk.RWDisk(diskImages[i]) : Disk.RODisk(diskImages[i]));
+                    String diskImage = diskImages[i];
+                    diskImage = diskImage.equals("") ? null : diskImage;
+                    Disk disk = writables[i] ? Disk.RWDisk(diskImage) : Disk.RODisk(diskImage);
+                    String[] labels =
+                            customImageConfigBundle.getStringArray(KEY_PARTITION_LABELS + i);
+                    String[] images =
+                            customImageConfigBundle.getStringArray(KEY_PARTITION_IMAGES + i);
+                    boolean[] partitionWritables =
+                            customImageConfigBundle.getBooleanArray(KEY_PARTITION_WRITABLES + i);
+                    String[] guids =
+                            customImageConfigBundle.getStringArray(KEY_PARTITION_GUIDS + i);
+                    for (int j = 0; j < labels.length; j++) {
+                        disk.addPartition(
+                                new Partition(
+                                        labels[j], images[j], partitionWritables[j], guids[j]));
+                    }
+                    builder.addDisk(disk);
                 }
             }
         }
@@ -146,7 +201,13 @@ public class VirtualMachineCustomImageConfig {
         builder.useTouch(customImageConfigBundle.getBoolean(KEY_TOUCH));
         builder.useKeyboard(customImageConfigBundle.getBoolean(KEY_KEYBOARD));
         builder.useMouse(customImageConfigBundle.getBoolean(KEY_MOUSE));
+        builder.useNetwork(customImageConfigBundle.getBoolean(KEY_NETWORK));
         builder.setGpuConfig(GpuConfig.from(customImageConfigBundle.getPersistableBundle(KEY_GPU)));
+        PersistableBundle audioConfigPb =
+                customImageConfigBundle.getPersistableBundle(KEY_AUDIO_CONFIG);
+        builder.setAudioConfig(AudioConfig.from(audioConfigPb));
+        builder.useTrackpad(customImageConfigBundle.getBoolean(KEY_TRACKPAD));
+        builder.useAutoMemoryBalloon(customImageConfigBundle.getBoolean(KEY_AUTO_MEMORY_BALLOON));
         return builder.build();
     }
 
@@ -165,7 +226,26 @@ public class VirtualMachineCustomImageConfig {
             String[] images = new String[disks.length];
             for (int i = 0; i < disks.length; i++) {
                 writables[i] = disks[i].writable;
-                images[i] = disks[i].imagePath;
+                String imagePath = disks[i].imagePath;
+                images[i] = imagePath == null ? "" : imagePath;
+
+                int numPartitions = disks[i].getPartitions().size();
+                String[] partitionLabels = new String[numPartitions];
+                String[] partitionImages = new String[numPartitions];
+                boolean[] partitionWritables = new boolean[numPartitions];
+                String[] partitionGuids = new String[numPartitions];
+
+                for (int j = 0; j < numPartitions; j++) {
+                    Partition p = disks[i].getPartitions().get(j);
+                    partitionLabels[j] = p.name;
+                    partitionImages[j] = p.imagePath;
+                    partitionWritables[j] = p.writable;
+                    partitionGuids[j] = p.guid == null ? "" : p.guid;
+                }
+                pb.putStringArray(KEY_PARTITION_LABELS + i, partitionLabels);
+                pb.putStringArray(KEY_PARTITION_IMAGES + i, partitionImages);
+                pb.putBooleanArray(KEY_PARTITION_WRITABLES + i, partitionWritables);
+                pb.putStringArray(KEY_PARTITION_GUIDS + i, partitionGuids);
             }
             pb.putBooleanArray(KEY_DISK_WRITABLES, writables);
             pb.putStringArray(KEY_DISK_IMAGES, images);
@@ -178,10 +258,22 @@ public class VirtualMachineCustomImageConfig {
         pb.putBoolean(KEY_TOUCH, touch);
         pb.putBoolean(KEY_KEYBOARD, keyboard);
         pb.putBoolean(KEY_MOUSE, mouse);
+        pb.putBoolean(KEY_SWITCHES, switches);
+        pb.putBoolean(KEY_NETWORK, network);
         pb.putPersistableBundle(
                 KEY_GPU,
                 Optional.ofNullable(gpuConfig).map(gc -> gc.toPersistableBundle()).orElse(null));
+        pb.putPersistableBundle(
+                KEY_AUDIO_CONFIG,
+                Optional.ofNullable(audioConfig).map(ac -> ac.toPersistableBundle()).orElse(null));
+        pb.putBoolean(KEY_TRACKPAD, trackpad);
+        pb.putBoolean(KEY_AUTO_MEMORY_BALLOON, autoMemoryBalloon);
         return pb;
+    }
+
+    @Nullable
+    public AudioConfig getAudioConfig() {
+        return audioConfig;
     }
 
     @Nullable
@@ -198,10 +290,12 @@ public class VirtualMachineCustomImageConfig {
     public static final class Disk {
         private final boolean writable;
         private final String imagePath;
+        private final List<Partition> partitions;
 
         private Disk(boolean writable, String imagePath) {
             this.writable = writable;
             this.imagePath = imagePath;
+            this.partitions = new ArrayList<>();
         }
 
         /** @hide */
@@ -223,6 +317,32 @@ public class VirtualMachineCustomImageConfig {
         public String getImagePath() {
             return imagePath;
         }
+
+        /** @hide */
+        public Disk addPartition(Partition p) {
+            this.partitions.add(p);
+            return this;
+        }
+
+        /** @hide */
+        public List<Partition> getPartitions() {
+            return partitions;
+        }
+    }
+
+    /** @hide */
+    public static final class Partition {
+        public final String name;
+        public final String imagePath;
+        public final boolean writable;
+        public final String guid;
+
+        public Partition(String name, String imagePath, boolean writable, String guid) {
+            this.name = name;
+            this.imagePath = imagePath;
+            this.writable = writable;
+            this.guid = guid;
+        }
     }
 
     /** @hide */
@@ -233,11 +353,16 @@ public class VirtualMachineCustomImageConfig {
         private String bootloaderPath;
         private List<String> params = new ArrayList<>();
         private List<Disk> disks = new ArrayList<>();
+        private AudioConfig audioConfig;
         private DisplayConfig displayConfig;
         private boolean touch;
         private boolean keyboard;
         private boolean mouse;
+        private boolean switches;
+        private boolean network;
         private GpuConfig gpuConfig;
+        private boolean trackpad;
+        private boolean autoMemoryBalloon = true;
 
         /** @hide */
         public Builder() {}
@@ -309,6 +434,36 @@ public class VirtualMachineCustomImageConfig {
         }
 
         /** @hide */
+        public Builder useSwitches(boolean switches) {
+            this.switches = switches;
+            return this;
+        }
+
+        /** @hide */
+        public Builder useTrackpad(boolean trackpad) {
+            this.trackpad = trackpad;
+            return this;
+        }
+
+        /** @hide */
+        public Builder useAutoMemoryBalloon(boolean autoMemoryBalloon) {
+            this.autoMemoryBalloon = autoMemoryBalloon;
+            return this;
+        }
+
+        /** @hide */
+        public Builder useNetwork(boolean network) {
+            this.network = network;
+            return this;
+        }
+
+        /** @hide */
+        public Builder setAudioConfig(AudioConfig audioConfig) {
+            this.audioConfig = audioConfig;
+            return this;
+        }
+
+        /** @hide */
         public VirtualMachineCustomImageConfig build() {
             return new VirtualMachineCustomImageConfig(
                     this.name,
@@ -321,7 +476,87 @@ public class VirtualMachineCustomImageConfig {
                     touch,
                     keyboard,
                     mouse,
-                    gpuConfig);
+                    switches,
+                    network,
+                    gpuConfig,
+                    audioConfig,
+                    trackpad,
+                    autoMemoryBalloon);
+        }
+    }
+
+    /** @hide */
+    public static final class AudioConfig {
+        private static final String KEY_USE_MICROPHONE = "use_microphone";
+        private static final String KEY_USE_SPEAKER = "use_speaker";
+        private final boolean useMicrophone;
+        private final boolean useSpeaker;
+
+        private AudioConfig(boolean useMicrophone, boolean useSpeaker) {
+            this.useMicrophone = useMicrophone;
+            this.useSpeaker = useSpeaker;
+        }
+
+        /** @hide */
+        public boolean useMicrophone() {
+            return useMicrophone;
+        }
+
+        /** @hide */
+        public boolean useSpeaker() {
+            return useSpeaker;
+        }
+
+        android.system.virtualizationservice.AudioConfig toParcelable() {
+            android.system.virtualizationservice.AudioConfig parcelable =
+                    new android.system.virtualizationservice.AudioConfig();
+            parcelable.useSpeaker = this.useSpeaker;
+            parcelable.useMicrophone = this.useMicrophone;
+
+            return parcelable;
+        }
+
+        private static AudioConfig from(PersistableBundle pb) {
+            if (pb == null) {
+                return null;
+            }
+            Builder builder = new Builder();
+            builder.setUseMicrophone(pb.getBoolean(KEY_USE_MICROPHONE));
+            builder.setUseSpeaker(pb.getBoolean(KEY_USE_SPEAKER));
+            return builder.build();
+        }
+
+        private PersistableBundle toPersistableBundle() {
+            PersistableBundle pb = new PersistableBundle();
+            pb.putBoolean(KEY_USE_MICROPHONE, this.useMicrophone);
+            pb.putBoolean(KEY_USE_SPEAKER, this.useSpeaker);
+            return pb;
+        }
+
+        /** @hide */
+        public static class Builder {
+            private boolean useMicrophone = false;
+            private boolean useSpeaker = false;
+
+            /** @hide */
+            public Builder() {}
+
+            /** @hide */
+            public Builder setUseMicrophone(boolean useMicrophone) {
+                this.useMicrophone = useMicrophone;
+                return this;
+            }
+
+            /** @hide */
+            public Builder setUseSpeaker(boolean useSpeaker) {
+                this.useSpeaker = useSpeaker;
+                return this;
+            }
+
+            /** @hide */
+            public AudioConfig build() {
+                return new AudioConfig(useMicrophone, useSpeaker);
+            }
         }
     }
 
