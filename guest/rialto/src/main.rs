@@ -28,7 +28,6 @@ use crate::communication::VsockStream;
 use crate::error::{Error, Result};
 use crate::fdt::{read_dice_range_from, read_is_strict_boot, read_vendor_hashtree_root_digest};
 use alloc::boxed::Box;
-use bssl_sys::CRYPTO_library_init;
 use ciborium_io::Write;
 use core::num::NonZeroUsize;
 use core::slice;
@@ -109,40 +108,30 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
     let fdt = libfdt::Fdt::from_slice(fdt)?;
 
     let memory_range = fdt.first_memory_range()?;
-    MEMORY.lock().as_mut().unwrap().shrink(&memory_range).map_err(|e| {
+    MEMORY.lock().as_mut().unwrap().shrink(&memory_range).inspect_err(|_| {
         error!("Failed to use memory range value from DT: {memory_range:#x?}");
-        e
     })?;
 
     if let Some(mem_sharer) = get_mem_sharer() {
         let granule = mem_sharer.granule()?;
-        MEMORY.lock().as_mut().unwrap().init_dynamic_shared_pool(granule).map_err(|e| {
+        MEMORY.lock().as_mut().unwrap().init_dynamic_shared_pool(granule).inspect_err(|_| {
             error!("Failed to initialize dynamically shared pool.");
-            e
         })?;
     } else if let Ok(swiotlb_info) = SwiotlbInfo::new_from_fdt(fdt) {
         let range = swiotlb_info.fixed_range().ok_or_else(|| {
             error!("Pre-shared pool range not specified in swiotlb node");
             Error::from(FdtError::BadValue)
         })?;
-        MEMORY.lock().as_mut().unwrap().init_static_shared_pool(range).map_err(|e| {
+        MEMORY.lock().as_mut().unwrap().init_static_shared_pool(range).inspect_err(|_| {
             error!("Failed to initialize pre-shared pool.");
-            e
         })?;
     } else {
         info!("No MEM_SHARE capability detected or swiotlb found: allocating buffers from heap.");
-        MEMORY.lock().as_mut().unwrap().init_heap_shared_pool().map_err(|e| {
+        MEMORY.lock().as_mut().unwrap().init_heap_shared_pool().inspect_err(|_| {
             error!("Failed to initialize heap-based pseudo-shared pool.");
-            e
         })?;
     }
 
-    // Initializes the crypto library before any crypto operations and after the heap is
-    // initialized.
-    // SAFETY: It is safe to call this function multiple times and concurrently.
-    unsafe {
-        CRYPTO_library_init();
-    }
     let bcc_handover: Box<dyn DiceArtifacts> = match vm_type(fdt)? {
         VmType::ProtectedVm => {
             let dice_range = read_dice_range_from(fdt)?;
@@ -153,9 +142,8 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
             let res = unsafe {
                 MEMORY.lock().as_mut().unwrap().alloc_range_outside_main_memory(&dice_range)
             };
-            res.map_err(|e| {
+            res.inspect_err(|_| {
                 error!("Failed to use DICE range from DT: {dice_range:#x?}");
-                e
             })?;
             let dice_start = dice_range.start as *const u8;
             // SAFETY: There's no memory overlap and the region is mapped as read-only data.
@@ -231,6 +219,28 @@ pub fn main(fdt_addr: u64, _a1: u64, _a2: u64, _a3: u64) {
             reboot()
         }
     }
+}
+
+/// Flushes data caches over the provided address range.
+///
+/// # Safety
+///
+/// The provided address and size must be to an address range that is valid for read and write
+/// (typically on the stack, .bss, .data, or provided BCC) from a single allocation
+/// (e.g. stack array).
+#[no_mangle]
+unsafe extern "C" fn DiceClearMemory(
+    _ctx: *mut core::ffi::c_void,
+    size: usize,
+    addr: *mut core::ffi::c_void,
+) {
+    use core::slice;
+    use vmbase::memory::flushed_zeroize;
+
+    // SAFETY: We require our caller to provide a valid range within a single object. The open-dice
+    // always calls this on individual stack-allocated arrays which ensures that.
+    let region = unsafe { slice::from_raw_parts_mut(addr as *mut u8, size) };
+    flushed_zeroize(region)
 }
 
 generate_image_header!();
