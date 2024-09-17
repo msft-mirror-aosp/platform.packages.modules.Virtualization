@@ -34,7 +34,6 @@ rust_defaults {
         "libapkverify",
         "libavf_features",
         "libavflog",
-        "libbase_rust",
         "libbinder_rs",
         "libcfg_if",
         "libclap",
@@ -70,6 +69,7 @@ rust_defaults {
         "liblibfdt",
         "libfsfdt",
         "libhypervisor_props",
+        "libzerocopy",
         "libuuid",
         // TODO(b/202115393) stabilize the interface
         "packagemanager_aidl-rust",
