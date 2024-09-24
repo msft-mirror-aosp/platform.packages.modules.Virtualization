@@ -5,8 +5,12 @@ touch $LOGDIR/skip.partition
 set -- $disklist
 device=/dev/$1
 file=$(losetup -O BACK-FILE ${device} | tail -1)
-device_root=$(losetup -o 262144 --show -f ${file})
-device_efi=$(losetup -o 2048 --sizelimit 260096 --show -f ${file})
+log_sec=$(losetup -O LOG-SEC ${device} | tail -1)
+root_offset_bytes=$(expr 262144 \* ${log_sec})
+efi_offset_bytes=$(expr 2048 \* ${log_sec})
+efi_sizelimit_bytes=$(expr 260096 \* ${log_sec})
+device_root=$(losetup -o ${root_offset_bytes} --show -f ${file})
+device_efi=$(losetup -o ${efi_offset_bytes} --sizelimit ${efi_sizelimit_bytes} --show -f ${file})
 
 wait_for_device() {
   for s in $(seq 10); do
