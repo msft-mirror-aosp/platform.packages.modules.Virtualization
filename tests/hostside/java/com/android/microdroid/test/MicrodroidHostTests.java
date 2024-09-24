@@ -506,7 +506,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
-    @CddTest(requirements = {"9.17/C-2-1", "9.17/C-2-2", "9.17/C-2-6"})
+    @CddTest(requirements = {"9.17/C-2-1", "9.17/C-2-2", "9.17/C-2-5", "9.17/C-2-6"})
     public void protectedVmWithImageSignedWithDifferentKeyFailsToVerifyPayload() throws Exception {
         // Arrange
         assumeProtectedVm();
@@ -551,7 +551,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
-    @CddTest(requirements = {"9.17/C-2-2", "9.17/C-2-6"})
+    @CddTest(requirements = {"9.17/C-2-2", "9.17/C-2-5", "9.17/C-2-6"})
     public void testBootFailsWhenVbMetaDigestDoesNotMatchBootconfig() throws Exception {
         // protectedVmWithImageSignedWithDifferentKeyRunsPvmfw() is the protected case.
         assumeNonProtectedVm();
