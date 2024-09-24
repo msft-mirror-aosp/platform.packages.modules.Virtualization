@@ -106,3 +106,4 @@ install_prerequisites
 download_debian_cloud_image
 copy_android_config
 run_fai
+fdisk -l image.raw
