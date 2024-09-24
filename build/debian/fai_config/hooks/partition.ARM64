@@ -32,6 +32,8 @@ efi_offset=$( parted -m ${device} unit B print | awk -F '[B:]' '/15:/{ print $2 
 efi_size=$(   parted -m ${device} unit B print | awk -F '[B:]' '/15:/{ print $6 }')
 device_root=$(losetup -o ${root_offset} --sizelimit ${root_size} --show -f ${file})
 device_efi=$(losetup -o ${efi_offset} --sizelimit ${efi_size} --show -f ${file})
+ln ${device_root} ${device}p1
+ln ${device_efi} ${device}p15
 
 losetup -a -l
 parted ${device} unit B print
