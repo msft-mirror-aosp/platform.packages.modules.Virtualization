@@ -53,6 +53,8 @@ install_prerequisites() {
 		udev \
 		qemu-system-arm \
 		qemu-user-static
+
+        sed -i s/losetup\ -f/losetup\ -P\ -f/g /usr/sbin/fai-diskimage
 }
 
 download_debian_cloud_image() {
