@@ -34,6 +34,7 @@ parse_options() {
 }
 
 install_prerequisites() {
+	apt update
 	DEBIAN_FRONTEND=noninteractive \
 	apt install --no-install-recommends --assume-yes \
 		ca-certificates \
