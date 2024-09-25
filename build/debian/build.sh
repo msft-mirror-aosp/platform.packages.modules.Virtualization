@@ -55,6 +55,11 @@ install_prerequisites() {
 		qemu-user-static
 
         sed -i s/losetup\ -f/losetup\ -P\ -f/g /usr/sbin/fai-diskimage
+
+        apt install --no-install-recommends --assume-yes curl
+        # just for testing
+        echo libseccomp: $(curl -is https://deb.debian.org/debian/pool/main/libs/libseccomp/libseccomp2_2.5.4-1+deb12u1_arm64.deb | head -n 1)
+        echo libsemanage-common: $(curl -is https://deb.debian.org/debian/pool/main/libs/libsemanage/libsemanage-common_3.4-1_all.deb | head -n 1)
 }
 
 download_debian_cloud_image() {
