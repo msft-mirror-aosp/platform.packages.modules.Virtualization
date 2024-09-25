@@ -34,6 +34,7 @@ parse_options() {
 }
 
 install_prerequisites() {
+	apt update
 	DEBIAN_FRONTEND=noninteractive \
 	apt install --no-install-recommends --assume-yes \
 		ca-certificates \
@@ -52,6 +53,8 @@ install_prerequisites() {
 		udev \
 		qemu-system-arm \
 		qemu-user-static
+
+        sed -i s/losetup\ -f/losetup\ -P\ -f/g /usr/sbin/fai-diskimage
 }
 
 download_debian_cloud_image() {
@@ -103,3 +106,4 @@ install_prerequisites
 download_debian_cloud_image
 copy_android_config
 run_fai
+fdisk -l image.raw

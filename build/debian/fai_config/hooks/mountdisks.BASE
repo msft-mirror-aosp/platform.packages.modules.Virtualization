@@ -1,0 +1,25 @@
+#!/bin/bash
+set -eu
+touch $LOGDIR/skip.mountdisks
+
+# Set filesystem context if running with SELinux enabled
+options="context=$(cat /proc/self/attr/current 2>/dev/null || :)"
+
+set -- $disklist
+device=/dev/$1
+file=$(losetup -O BACK-FILE ${device} | tail -1)
+parted -m ${device} unit B print
+root_offset=$(parted -m ${device} unit B print | awk -F '[B:]' '/1:/{ print $2 }')
+efi_offset=$( parted -m ${device} unit B print | awk -F '[B:]' '/15:/{ print $2 }')
+device_root=$(losetup -O NAME,OFFSET -j ${file} | grep ${root_offset} | cut -d ' ' -f 1)
+device_efi=$(losetup -O NAME,OFFSET -j ${file} | grep ${efi_offset} | cut -d ' ' -f 1)
+
+echo root=${device_root} efi=${device_efi}
+
+mount -o noatime -o "$options" "$device_root" "$FAI_ROOT"
+if ifclass -o AMD64 ARM64 RISCV64; then
+  mkdir -p "${FAI_ROOT}/boot/efi"
+  mount -o noatime -o "$options" "$device_efi" "${FAI_ROOT}/boot/efi"
+fi
+
+mount
