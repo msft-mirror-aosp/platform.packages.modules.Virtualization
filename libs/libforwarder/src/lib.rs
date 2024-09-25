@@ -15,5 +15,7 @@
 // Copied from ChromiumOS with relicensing:
 // src/platform2/vm_tools/chunnel/src/lib.rs
 
+//! Library for stream socket forwarding.
+
 pub mod forwarder;
 pub mod stream;

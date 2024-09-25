@@ -15,6 +15,8 @@
 // Copied from ChromiumOS with relicensing:
 // src/platform2/vm_tools/chunnel/src/stream.rs
 
+//! This module provides abstraction of various stream socket type.
+
 use std::fmt;
 use std::io;
 use std::net::TcpStream;
@@ -35,12 +37,8 @@ pub fn parse_vsock_addr(addr: &str) -> result::Result<VsockAddr, io::Error> {
     }
 
     Ok(VsockAddr::new(
-        components[1]
-            .parse()
-            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?,
-        components[2]
-            .parse()
-            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?,
+        components[1].parse().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?,
+        components[2].parse().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?,
     ))
 }
 
@@ -79,6 +77,7 @@ impl StreamSocket {
 
     /// Shuts down writes to the socket using shutdown(2).
     pub fn shut_down_write(&mut self) -> io::Result<()> {
+        // SAFETY:
         // Safe because no memory is modified and the return value is checked.
         let ret = unsafe { shutdown(self.fd, SHUT_WR) };
         if ret < 0 {
@@ -97,6 +96,7 @@ impl StreamSocket {
 
 impl io::Read for StreamSocket {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // SAFETY:
         // Safe because this will only modify the contents of |buf| and we check the return value.
         let ret = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
         if ret < 0 {
@@ -109,6 +109,7 @@ impl io::Read for StreamSocket {
 
 impl io::Write for StreamSocket {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // SAFETY:
         // Safe because this doesn't modify any memory and we check the return value.
         let ret = unsafe { libc::write(self.fd, buf.as_ptr() as *const c_void, buf.len()) };
         if ret < 0 {
@@ -140,42 +141,31 @@ impl AsRawFd for StreamSocket {
 
 impl From<TcpStream> for StreamSocket {
     fn from(stream: TcpStream) -> Self {
-        StreamSocket {
-            fd: stream.into_raw_fd(),
-            shut_down: false,
-        }
+        StreamSocket { fd: stream.into_raw_fd(), shut_down: false }
     }
 }
 
 impl From<UnixStream> for StreamSocket {
     fn from(stream: UnixStream) -> Self {
-        StreamSocket {
-            fd: stream.into_raw_fd(),
-            shut_down: false,
-        }
+        StreamSocket { fd: stream.into_raw_fd(), shut_down: false }
     }
 }
 
 impl From<VsockStream> for StreamSocket {
     fn from(stream: VsockStream) -> Self {
-        StreamSocket {
-            fd: stream.into_raw_fd(),
-            shut_down: false,
-        }
+        StreamSocket { fd: stream.into_raw_fd(), shut_down: false }
     }
 }
 
 impl FromRawFd for StreamSocket {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        StreamSocket {
-            fd,
-            shut_down: false,
-        }
+        StreamSocket { fd, shut_down: false }
     }
 }
 
 impl Drop for StreamSocket {
     fn drop(&mut self) {
+        // SAFETY:
         // Safe because this doesn't modify any memory and we are the only
         // owner of the file descriptor.
         unsafe { libc::close(self.fd) };
@@ -186,8 +176,11 @@ impl Drop for StreamSocket {
 #[remain::sorted]
 #[derive(Debug)]
 pub enum StreamSocketError {
+    /// Error on connecting TCP socket.
     ConnectTcp(String, io::Error),
+    /// Error on connecting unix socket.
     ConnectUnix(String, io::Error),
+    /// Error on connecting vsock socket.
     ConnectVsock(String, io::Error),
 }
 

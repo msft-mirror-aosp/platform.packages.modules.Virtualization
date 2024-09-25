@@ -15,6 +15,8 @@
 // Copied from ChromiumOS with relicensing:
 // src/platform2/vm_tools/chunnel/src/forwarder.rs
 
+//! This module contains forwarding mechanism between stream sockets.
+
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::result;
@@ -62,19 +64,13 @@ pub struct ForwarderSession {
 fn forward(from_stream: &mut StreamSocket, to_stream: &mut StreamSocket) -> Result<bool> {
     let mut buf = [0u8; MAX_FRAME_SIZE];
 
-    let count = from_stream
-        .read(&mut buf)
-        .map_err(ForwarderError::ReadFromStream)?;
+    let count = from_stream.read(&mut buf).map_err(ForwarderError::ReadFromStream)?;
     if count == 0 {
-        to_stream
-            .shut_down_write()
-            .map_err(ForwarderError::ShutDownStream)?;
+        to_stream.shut_down_write().map_err(ForwarderError::ShutDownStream)?;
         return Ok(true);
     }
 
-    to_stream
-        .write_all(&buf[..count])
-        .map_err(ForwarderError::WriteToStream)?;
+    to_stream.write_all(&buf[..count]).map_err(ForwarderError::WriteToStream)?;
     Ok(false)
 }
 
