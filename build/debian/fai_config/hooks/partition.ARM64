@@ -35,6 +35,7 @@ device_efi=$(losetup -o ${efi_offset} --sizelimit ${efi_size} --show -f ${file})
 ln ${device_root} ${device}p1
 ln ${device_efi} ${device}p15
 
+ls -al /dev/loop*
 losetup -a -l
 parted ${device} unit B print
 
