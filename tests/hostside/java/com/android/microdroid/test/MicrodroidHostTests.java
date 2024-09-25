@@ -38,6 +38,7 @@ import android.cts.statsdatom.lib.ConfigUtils;
 import android.cts.statsdatom.lib.ReportUtils;
 
 import com.android.compatibility.common.util.CddTest;
+import com.android.compatibility.common.util.VsrTest;
 import com.android.microdroid.test.common.ProcessUtil;
 import com.android.microdroid.test.host.CommandRunner;
 import com.android.microdroid.test.host.MicrodroidHostTestCaseBase;
@@ -416,6 +417,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     @CddTest
+    @VsrTest(requirements = {"VSR-7.1-001.008"})
     public void UpgradedPackageIsAcceptedWithSecretkeeper() throws Exception {
         assumeUpdatableVmSupported();
         getDevice().uninstallPackage(PACKAGE_NAME);
@@ -431,6 +433,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     @CddTest
+    @VsrTest(requirements = {"VSR-7.1-001.008"})
     public void DowngradedPackageIsRejectedProtectedVm() throws Exception {
         assumeProtectedVm(); // Rollback protection is provided only for protected VM.
 
