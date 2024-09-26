@@ -10,4 +10,4 @@ pyenv global 3.10
 python --version
 
 sudo losetup -D
-sudo ./build.sh
+sudo -E ./build.sh
