@@ -32,9 +32,12 @@ efi_offset=$( parted -m ${device} unit B print | awk -F '[B:]' '/15:/{ print $2 
 efi_size=$(   parted -m ${device} unit B print | awk -F '[B:]' '/15:/{ print $6 }')
 device_root=$(losetup -o ${root_offset} --sizelimit ${root_size} --show -f ${file})
 device_efi=$(losetup -o ${efi_offset} --sizelimit ${efi_size} --show -f ${file})
-ln ${device_root} ${device}p1
-ln ${device_efi} ${device}p15
+rm -f ${device}p1
+rm -f ${device}p15
+ln -sf ${device_root} ${device}p1
+ln -sf ${device_efi} ${device}p15
 
+ls -al /dev/loop*
 losetup -a -l
 parted ${device} unit B print
 
@@ -46,3 +49,5 @@ tune2fs -c 0 -i 0 "$device_root"
 
 wait_for_device "$device_efi"
 mkfs.vfat "$device_efi"
+
+parted ${device} unit B print
