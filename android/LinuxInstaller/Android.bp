@@ -30,7 +30,7 @@ android_app {
     srcs: ["java/**/*.java"],
     resource_dirs: ["res"],
     manifest: "AndroidManifest_stub.xml",
-    defaults: ["VmPayloadInstaller"],
+    defaults: ["LinuxVmPayloadInstaller"],
     required: [
         "privapp-permissions-linuxinstaller.xml",
     ],
