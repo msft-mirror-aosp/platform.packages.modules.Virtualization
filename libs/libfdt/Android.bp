@@ -19,7 +19,7 @@ rust_bindgen {
     dylib: {
         enabled: false,
     },
-    static_libs: [
+    header_libs: [
         "libfdt",
     ],
     apex_available: ["com.android.virt"],
