@@ -15,34 +15,26 @@
 // Copied from ChromiumOS with relicensing:
 // src/platform2/vm_tools/chunnel/src/bin/chunnel.rs
 
-use std::env;
+//! Guest-side stream socket forwarder
+
 use std::fmt;
-use std::process;
 use std::result;
 
-use chunnel::forwarder::{ForwarderError, ForwarderSession};
-use chunnel::stream::{StreamSocket, StreamSocketError};
-use getopts::Options;
-use libchromeos::deprecated::{PollContext, PollToken};
-use libchromeos::panic_handler::install_memfd_handler;
-use libchromeos::signal::block_signal;
-use libchromeos::syslog;
-use log::warn;
-use nix::sys::signal::Signal;
-
-// Program name.
-const IDENT: &str = "chunnel";
+use clap::Parser;
+use forwarder::forwarder::{ForwarderError, ForwarderSession};
+use forwarder::stream::{StreamSocket, StreamSocketError};
+use poll_token_derive::PollToken;
+use vmm_sys_util::poll::{PollContext, PollToken};
 
 #[remain::sorted]
 #[derive(Debug)]
 enum Error {
-    BlockSigpipe(nix::Error),
     ConnectSocket(StreamSocketError),
     Forward(ForwarderError),
-    PollContextDelete(nix::Error),
-    PollContextNew(nix::Error),
-    PollWait(nix::Error),
-    Syslog(libchromeos::syslog::Error),
+    PollContextAdd(vmm_sys_util::errno::Error),
+    PollContextDelete(vmm_sys_util::errno::Error),
+    PollContextNew(vmm_sys_util::errno::Error),
+    PollWait(vmm_sys_util::errno::Error),
 }
 
 type Result<T> = result::Result<T, Error>;
@@ -54,35 +46,25 @@ impl fmt::Display for Error {
 
         #[remain::sorted]
         match self {
-            BlockSigpipe(e) => write!(f, "failed to block SIGPIPE: {}", e),
-            ConnectSocket(e) => write!(f, "failed to connnect socket: {}", e),
+            ConnectSocket(e) => write!(f, "failed to connect socket: {}", e),
             Forward(e) => write!(f, "failed to forward traffic: {}", e),
+            PollContextAdd(e) => write!(f, "failed to add fd to poll context: {}", e),
             PollContextDelete(e) => write!(f, "failed to delete fd from poll context: {}", e),
             PollContextNew(e) => write!(f, "failed to create poll context: {}", e),
             PollWait(e) => write!(f, "failed to wait for poll: {}", e),
-            Syslog(e) => write!(f, "failed to initialize syslog: {}", e),
         }
     }
 }
 
-fn print_usage(program: &str, opts: &Options) {
-    let brief = format!("Usage: {} [options]", program);
-    print!("{}", opts.usage(&brief));
-}
-
 fn run_forwarder(local_stream: StreamSocket, remote_stream: StreamSocket) -> Result<()> {
-    block_signal(Signal::SIGPIPE).map_err(Error::BlockSigpipe)?;
-
     #[derive(PollToken)]
     enum Token {
         LocalStreamReadable,
         RemoteStreamReadable,
     }
-    let poll_ctx: PollContext<Token> = PollContext::build_with(&[
-        (&local_stream, Token::LocalStreamReadable),
-        (&remote_stream, Token::RemoteStreamReadable),
-    ])
-    .map_err(Error::PollContextNew)?;
+    let poll_ctx: PollContext<Token> = PollContext::new().map_err(Error::PollContextNew)?;
+    poll_ctx.add(&local_stream, Token::LocalStreamReadable).map_err(Error::PollContextAdd)?;
+    poll_ctx.add(&remote_stream, Token::RemoteStreamReadable).map_err(Error::PollContextAdd)?;
 
     let mut forwarder = ForwarderSession::new(local_stream, remote_stream);
 
@@ -115,69 +97,27 @@ fn run_forwarder(local_stream: StreamSocket, remote_stream: StreamSocket) -> Res
     }
 }
 
+#[derive(Parser)]
+/// Flags for running command
+pub struct Args {
+    /// Local socket address
+    #[arg(long)]
+    #[arg(alias = "local")]
+    local_sockaddr: String,
+
+    /// Remote socket address
+    #[arg(long)]
+    #[arg(alias = "remote")]
+    remote_sockaddr: String,
+}
+
+// TODO(b/370897694): Support forwarding for datagram socket
 fn main() -> Result<()> {
-    install_memfd_handler();
-    let args: Vec<String> = env::args().collect();
-    let program = args[0].clone();
+    let args = Args::parse();
 
-    let mut opts = Options::new();
-    opts.optflag("h", "help", "print this help menu");
-    opts.reqopt("l", "local", "local socket to forward", "SOCKADDR");
-    opts.reqopt("r", "remote", "remote socket to forward to", "SOCKADDR");
-    opts.optopt("t", "type", "type of traffic to forward", "stream|datagram");
-
-    let matches = match opts.parse(&args[1..]) {
-        Ok(m) => m,
-        Err(e) => {
-            warn!("failed to parse arg: {}", e);
-            print_usage(&program, &opts);
-            process::exit(1);
-        }
-    };
-    if matches.opt_present("h") {
-        print_usage(&program, &opts);
-        return Ok(());
-    }
-
-    syslog::init(IDENT.to_string(), false /* log_to_stderr */).map_err(Error::Syslog)?;
-
-    let local_sockaddr = match matches.opt_str("l") {
-        Some(sockaddr) => sockaddr,
-        None => {
-            warn!("local socket must be defined");
-            print_usage(&program, &opts);
-            process::exit(1);
-        }
-    };
-
-    let remote_sockaddr = match matches.opt_str("r") {
-        Some(sockaddr) => sockaddr,
-        None => {
-            warn!("remote socket must be defined");
-            print_usage(&program, &opts);
-            process::exit(1);
-        }
-    };
-
-    // Default to "stream" if traffic type is not defined.
-    let traffic_type = matches.opt_str("t");
-    if let Some(t) = traffic_type {
-        match t.as_ref() {
-            "stream" => {}
-            "datagram" => {
-                warn!("datagram sockets are not yet supported");
-                process::exit(1);
-            }
-            s => {
-                warn!("not a valid type of traffic: {}", s);
-                print_usage(&program, &opts);
-                process::exit(1);
-            }
-        }
-    }
-
-    let local_stream = StreamSocket::connect(&local_sockaddr).map_err(Error::ConnectSocket)?;
-    let remote_stream = StreamSocket::connect(&remote_sockaddr).map_err(Error::ConnectSocket)?;
+    let local_stream = StreamSocket::connect(&args.local_sockaddr).map_err(Error::ConnectSocket)?;
+    let remote_stream =
+        StreamSocket::connect(&args.remote_sockaddr).map_err(Error::ConnectSocket)?;
 
     run_forwarder(local_stream, remote_stream)
 }
