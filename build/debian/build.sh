@@ -37,6 +37,7 @@ install_prerequisites() {
 	apt update
 	DEBIAN_FRONTEND=noninteractive \
 	apt install --no-install-recommends --assume-yes \
+		binfmt-support \
 		ca-certificates \
 		debsums \
 		dosfstools \
@@ -49,10 +50,11 @@ install_prerequisites() {
 		python3-marshmallow \
 		python3-pytest \
 		python3-yaml \
+		qemu-system-arm \
+		qemu-user-static \
 		qemu-utils \
 		udev \
-		qemu-system-arm \
-		qemu-user-static
+
 
         sed -i s/losetup\ -f/losetup\ -P\ -f/g /usr/sbin/fai-diskimage
         sed -i 's/wget \$/wget -t 0 \$/g' /usr/share/debootstrap/functions
