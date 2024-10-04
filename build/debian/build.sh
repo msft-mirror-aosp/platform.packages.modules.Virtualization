@@ -54,6 +54,7 @@ install_prerequisites() {
 		qemu-system-arm \
 		qemu-user-static \
 		qemu-utils \
+		sudo \
 		udev \
 
 
