@@ -19,13 +19,13 @@
 #define VM_TOOLS_PORT_LISTENER_COMMON_H_
 
 enum State {
-  kPortListenerUp,
-  kPortListenerDown,
+    kPortListenerUp,
+    kPortListenerDown,
 };
 
 struct event {
-  enum State state;
-  uint16_t port;
+    enum State state;
+    uint16_t port;
 };
 
-#endif  // VM_TOOLS_PORT_LISTENER_COMMON_H_
+#endif // VM_TOOLS_PORT_LISTENER_COMMON_H_
