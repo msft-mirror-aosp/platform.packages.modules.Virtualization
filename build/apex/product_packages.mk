@@ -24,6 +24,7 @@ $(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)
 
 PRODUCT_PACKAGES += \
     com.android.compos \
+    features_com.android.virt.xml
 
 # TODO(b/207336449): Figure out how to get these off /system
 PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST := \
@@ -61,4 +62,16 @@ ifdef RELEASE_AVF_ENABLE_NETWORK
   ifndef RELEASE_AVF_ENABLE_LLPVM_CHANGES
     $(error RELEASE_AVF_ENABLE_LLPVM_CHANGES must also be enabled)
   endif
+endif
+
+ifdef RELEASE_AVF_ENABLE_EARLY_VM
+  # We can't query TARGET_RELEASE from here, so we use RELEASE_AIDL_USE_UNFROZEN as a proxy value of
+  # whether we are building -next release.
+  ifneq ($(RELEASE_AIDL_USE_UNFROZEN),true)
+    $(error RELEASE_AVF_ENABLE_EARLY_VM can only be enabled in trunk_staging until b/357025924 is fixed)
+  endif
+endif
+
+ifdef RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES
+  PRODUCT_PACKAGES += LinuxInstallerAppStub
 endif

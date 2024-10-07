@@ -1212,7 +1212,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7"})
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7", "9.17/C-3-4"})
     public void instancesOfSameVmHaveDifferentCdis() throws Exception {
         assumeSupportedDevice();
         // TODO(b/325094712): VMs on CF with same payload have the same secret. This is because
@@ -1239,7 +1239,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7"})
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7", "9.17/C-3-4"})
     public void sameInstanceKeepsSameCdis() throws Exception {
         assumeSupportedDevice();
         assume().withMessage("Skip on CF. Too Slow. b/257270529").that(isCuttlefish()).isFalse();
@@ -1305,7 +1305,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @VsrTest(requirements = {"VSR-7.1-001.005"})
+    @VsrTest(requirements = {"VSR-7.1-001.004"})
     public void protectedVmHasValidDiceChain() throws Exception {
         // This test validates two things regarding the pVM DICE chain:
         // 1. The DICE chain is well-formed that all the entries conform to the DICE spec.
@@ -1313,12 +1313,12 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assumeSupportedDevice();
         assumeProtectedVM();
         assumeVsrCompliant();
-        assumeTrue("Vendor API must be at least 202404", getVendorApiLevel() >= 202404);
+        assumeTrue("Vendor API must be newer than 202404", getVendorApiLevel() > 202404);
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadConfig("assets/vm_config.json")
-                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setDebugLevel(DEBUG_LEVEL_NONE)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("bcc_vm_for_vsr", config);
         TestResults testResults =
@@ -1331,7 +1331,11 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         testResults.assertNoException();
         byte[] bccBytes = testResults.mBcc;
         assertThat(bccBytes).isNotNull();
-        assertThat(HwTrustJni.validateDiceChain(bccBytes)).isTrue();
+
+        String buildType = SystemProperties.get("ro.build.type");
+        boolean nonUserBuild = !buildType.isEmpty() && buildType != "user";
+
+        assertThat(HwTrustJni.validateDiceChain(bccBytes, nonUserBuild)).isTrue();
     }
 
     @Test
