@@ -1,6 +1,0 @@
-#!/bin/bash
-
-set -e
-chmod +x $target/etc/port_listener/build.sh
-$ROOTCMD /bin/bash -c "/etc/port_listener/build.sh /usr/local/bin"
-rm -rf $target/etc/port_listener

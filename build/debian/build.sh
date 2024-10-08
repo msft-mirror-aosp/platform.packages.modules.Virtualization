@@ -100,21 +100,13 @@ copy_android_config() {
 	wget ${url} -O ${dst}/files/usr/local/bin/ttyd/AVF
 	chmod 777 ${dst}/files/usr/local/bin/ttyd/AVF
 
-	pushd $(dirname $0)/forwarder_guest > /dev/null
+        pushd $(dirname $0)/forwarder_guest > /dev/null
 		RUSTFLAGS="-C linker=aarch64-linux-gnu-gcc" cargo build \
 			--target aarch64-unknown-linux-gnu \
 			--target-dir ${workdir}/forwarder_guest
 		mkdir -p ${dst}/files/usr/local/bin/forwarder_guest
 		cp ${workdir}/forwarder_guest/aarch64-unknown-linux-gnu/debug/forwarder_guest ${dst}/files/usr/local/bin/forwarder_guest/AVF
 		chmod 777 ${dst}/files/usr/local/bin/forwarder_guest/AVF
-	popd > /dev/null
-
-	# Pasting files under port_listener into /etc/port_listener
-	pushd $(dirname $0) > /dev/null
-		for file in $(find port_listener -type f); do
-			mkdir -p ${dst}/files/etc/${file}
-			cp ${file} ${dst}/files/etc/${file}/AVF
-		done
 	popd > /dev/null
 }
 
