@@ -221,6 +221,7 @@ impl IVirtualizationService for VirtualizationService {
         console_out_fd: Option<&ParcelFileDescriptor>,
         console_in_fd: Option<&ParcelFileDescriptor>,
         log_fd: Option<&ParcelFileDescriptor>,
+        dump_dt_fd: Option<&ParcelFileDescriptor>,
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         let mut is_protected = false;
         let ret = self.create_vm_internal(
@@ -229,6 +230,7 @@ impl IVirtualizationService for VirtualizationService {
             console_in_fd,
             log_fd,
             &mut is_protected,
+            dump_dt_fd,
         );
         write_vm_creation_stats(config, is_protected, &ret);
         ret
@@ -485,6 +487,7 @@ impl VirtualizationService {
         console_in_fd: Option<&ParcelFileDescriptor>,
         log_fd: Option<&ParcelFileDescriptor>,
         is_protected: &mut bool,
+        dump_dt_fd: Option<&ParcelFileDescriptor>,
     ) -> binder::Result<Strong<dyn IVirtualMachine>> {
         let requester_uid = get_calling_uid();
         let requester_debug_pid = get_calling_pid();
@@ -527,6 +530,7 @@ impl VirtualizationService {
             clone_or_prepare_logger_fd(console_out_fd, format!("Console({})", cid))?;
         let console_in_fd = console_in_fd.map(clone_file).transpose()?;
         let log_fd = clone_or_prepare_logger_fd(log_fd, format!("Log({})", cid))?;
+        let dump_dt_fd = dump_dt_fd.map(clone_file).transpose()?;
 
         // Counter to generate unique IDs for temporary image files.
         let mut next_temporary_image_id = 0;
@@ -744,6 +748,7 @@ impl VirtualizationService {
             audio_config,
             no_balloon: config.noBalloon,
             usb_config,
+            dump_dt_fd,
         };
         let instance = Arc::new(
             VmInstance::new(
