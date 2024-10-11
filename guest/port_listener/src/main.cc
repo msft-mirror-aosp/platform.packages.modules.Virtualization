@@ -18,9 +18,8 @@
 #include <bpf/libbpf.h>
 #include <bpf/libbpf_legacy.h>
 #include <glog/logging.h>
-#include <sys/socket.h>
-
 #include <linux/vm_sockets.h> // Needs to come after sys/socket.h
+#include <sys/socket.h>
 
 #include <memory>
 #include <unordered_map>
