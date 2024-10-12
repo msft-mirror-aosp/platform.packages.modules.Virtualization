@@ -33,7 +33,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     CpuTopology::CpuTopology,
     DiskImage::DiskImage,
     InputDevice::InputDevice,
-    IVirtualMachine::{BnVirtualMachine, IVirtualMachine},
+    IVirtualMachine::{self, BnVirtualMachine},
     IVirtualMachineCallback::IVirtualMachineCallback,
     IVirtualizationService::IVirtualizationService,
     Partition::Partition,
@@ -62,9 +62,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use apkverify::{HashAlgorithm, V4Signature};
 use avflog::LogResult;
 use binder::{
-    self, wait_for_interface, BinderFeatures, ExceptionCode, Interface, ParcelFileDescriptor,
-    Status, StatusCode, Strong,
-    IntoBinderResult,
+    self, wait_for_interface, Accessor, BinderFeatures, ConnectionInfo, ExceptionCode, Interface, ParcelFileDescriptor,
+    SpIBinder, Status, StatusCode, Strong, IntoBinderResult,
 };
 use cstr::cstr;
 use glob::glob;
@@ -90,13 +89,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak, LazyLock};
 use vbmeta::VbMetaImage;
 use vmconfig::{VmConfig, get_debug_level};
-use vsock::VsockStream;
+use vsock::{VsockAddr, VsockStream};
 use zip::ZipArchive;
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
 pub type Cid = u32;
 
 pub const BINDER_SERVICE_IDENTIFIER: &str = "android.system.virtualizationservice";
+
+/// Vsock privileged ports are below this number.
+const VSOCK_PRIV_PORT_MAX: u32 = 1024;
 
 /// The size of zero.img.
 /// Gaps in composite disk images are filled with a shared zero.img.
@@ -222,7 +224,7 @@ impl IVirtualizationService for VirtualizationService {
         console_in_fd: Option<&ParcelFileDescriptor>,
         log_fd: Option<&ParcelFileDescriptor>,
         dump_dt_fd: Option<&ParcelFileDescriptor>,
-    ) -> binder::Result<Strong<dyn IVirtualMachine>> {
+    ) -> binder::Result<Strong<dyn IVirtualMachine::IVirtualMachine>> {
         let mut is_protected = false;
         let ret = self.create_vm_internal(
             config,
@@ -488,7 +490,7 @@ impl VirtualizationService {
         log_fd: Option<&ParcelFileDescriptor>,
         is_protected: &mut bool,
         dump_dt_fd: Option<&ParcelFileDescriptor>,
-    ) -> binder::Result<Strong<dyn IVirtualMachine>> {
+    ) -> binder::Result<Strong<dyn IVirtualMachine::IVirtualMachine>> {
         let requester_uid = get_calling_uid();
         let requester_debug_pid = get_calling_pid();
 
@@ -1331,14 +1333,14 @@ struct VirtualMachine {
 }
 
 impl VirtualMachine {
-    fn create(instance: Arc<VmInstance>) -> Strong<dyn IVirtualMachine> {
+    fn create(instance: Arc<VmInstance>) -> Strong<dyn IVirtualMachine::IVirtualMachine> {
         BnVirtualMachine::new_binder(VirtualMachine { instance }, BinderFeatures::default())
     }
 }
 
 impl Interface for VirtualMachine {}
 
-impl IVirtualMachine for VirtualMachine {
+impl IVirtualMachine::IVirtualMachine for VirtualMachine {
     fn getCid(&self) -> binder::Result<i32> {
         // Don't check permission. The owner of the VM might have passed this binder object to
         // others.
@@ -1399,17 +1401,46 @@ impl IVirtualMachine for VirtualMachine {
 
     fn connectVsock(&self, port: i32) -> binder::Result<ParcelFileDescriptor> {
         if !matches!(&*self.instance.vm_state.lock().unwrap(), VmState::Running { .. }) {
-            return Err(anyhow!("VM is not running")).or_service_specific_exception(-1);
+            return Err(Status::new_service_specific_error_str(
+                IVirtualMachine::ERROR_UNEXPECTED,
+                Some("Virtual Machine is not running"),
+            ));
         }
         let port = port as u32;
-        if port < 1024 {
-            return Err(anyhow!("Can't connect to privileged port {port}"))
-                .or_service_specific_exception(-1);
+        if port < VSOCK_PRIV_PORT_MAX {
+            return Err(Status::new_service_specific_error_str(
+                IVirtualMachine::ERROR_UNEXPECTED,
+                Some("Can't connect to privileged port {port}"),
+            ));
         }
         let stream = VsockStream::connect_with_cid_port(self.instance.cid, port)
             .context("Failed to connect")
-            .or_service_specific_exception(-1)?;
+            .or_service_specific_exception(IVirtualMachine::ERROR_UNEXPECTED)?;
         Ok(vsock_stream_to_pfd(stream))
+    }
+
+    fn createAccessorBinder(&self, name: &str, port: i32) -> binder::Result<SpIBinder> {
+        if !matches!(&*self.instance.vm_state.lock().unwrap(), VmState::Running { .. }) {
+            return Err(Status::new_service_specific_error_str(
+                IVirtualMachine::ERROR_UNEXPECTED,
+                Some("Virtual Machine is not running"),
+            ));
+        }
+        let port = port as u32;
+        if port < VSOCK_PRIV_PORT_MAX {
+            return Err(Status::new_service_specific_error_str(
+                IVirtualMachine::ERROR_UNEXPECTED,
+                Some("Can't connect to privileged port {port}"),
+            ));
+        }
+        let cid = self.instance.cid;
+        let get_connection_info =
+            move |_instance: &str| Some(ConnectionInfo::Vsock(VsockAddr::new(cid, port)));
+        let accessor = Accessor::new(name, get_connection_info);
+        accessor
+            .as_binder()
+            .context("The newly created Accessor should always have a binder")
+            .or_service_specific_exception(IVirtualMachine::ERROR_UNEXPECTED)
     }
 
     fn setHostConsoleName(&self, ptsname: &str) -> binder::Result<()> {
