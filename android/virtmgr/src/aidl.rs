@@ -53,6 +53,7 @@ use android_system_virtualmachineservice::aidl::android::system::virtualmachines
 };
 use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::ISecretkeeper::{BnSecretkeeper, ISecretkeeper};
 use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::SecretId::SecretId;
+use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::PublicKey::PublicKey;
 use android_hardware_security_authgraph::aidl::android::hardware::security::authgraph::{
     Arc::Arc as AuthgraphArc, IAuthGraphKeyExchange::IAuthGraphKeyExchange,
     IAuthGraphKeyExchange::BnAuthGraphKeyExchange, Identity::Identity, KeInitResult::KeInitResult,
@@ -865,15 +866,32 @@ fn maybe_create_device_tree_overlay(
         .context("Failed to extract vendor hashtree digest")
         .or_service_specific_exception(-1)?;
 
-    let trusted_props = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
+    let vendor_hashtree_digest = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
         info!(
             "Passing vendor hashtree digest to pvmfw. This will be rejected if it doesn't \
                 match the trusted digest in the pvmfw config, causing the VM to fail to start."
         );
-        vec![(cstr!("vendor_hashtree_descriptor_root_digest"), vendor_hashtree_digest.as_slice())]
+        Some((cstr!("vendor_hashtree_descriptor_root_digest"), vendor_hashtree_digest.as_slice()))
     } else {
-        vec![]
+        None
     };
+
+    let key_material;
+    let secretkeeper_public_key = if is_secretkeeper_supported() {
+        let sk: Strong<dyn ISecretkeeper> = binder::wait_for_interface(SECRETKEEPER_IDENTIFIER)?;
+        if sk.getInterfaceVersion()? >= 2 {
+            let PublicKey { keyMaterial } = sk.getSecretkeeperIdentity()?;
+            key_material = keyMaterial;
+            Some((cstr!("secretkeeper_public_key"), key_material.as_slice()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let trusted_props: Vec<(&CStr, &[u8])> =
+        vec![vendor_hashtree_digest, secretkeeper_public_key].into_iter().flatten().collect();
 
     let instance_id;
     let mut untrusted_props = Vec::with_capacity(2);
@@ -2013,6 +2031,14 @@ impl ISecretkeeper for SecretkeeperProxy {
 
     fn deleteAll(&self) -> binder::Result<()> {
         self.0.deleteAll()
+    }
+
+    fn getSecretkeeperIdentity(&self) -> binder::Result<PublicKey> {
+        // SecretkeeperProxy is really a RPC binder service for PVM (It is called by
+        // MicrodroidManager). PVMs do not & must not (for security reason) rely on
+        // getSecretKeeperIdentity, so we throw an exception if someone attempts to
+        // use this API from the proxy.
+        Err(ExceptionCode::SECURITY.into())
     }
 }
 
