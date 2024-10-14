@@ -19,8 +19,6 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -96,10 +94,7 @@ public class MainActivity extends AppCompatActivity implements
     public void onIpAddrAvailable(String ipAddr) {
         mVmIpAddr = ipAddr;
         ((TextView) findViewById(R.id.ip_addr_textview)).setText(mVmIpAddr);
-
-        // TODO(b/359523803): Use AVF API to be notified when shell is ready instead of using dealy
-        new Handler(Looper.getMainLooper())
-                .postDelayed(() -> gotoURL("http://" + mVmIpAddr + ":7681"), 2000);
+        gotoURL("http://" + mVmIpAddr + ":7681");
     }
 
     @Override
