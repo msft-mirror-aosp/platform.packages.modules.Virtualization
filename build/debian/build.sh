@@ -60,6 +60,7 @@ install_prerequisites() {
 		fai-setup-storage
 		fdisk
 		make
+		protobuf-compiler
 		python3
 		python3-libcloud
 		python3-marshmallow
@@ -115,13 +116,22 @@ copy_android_config() {
 	wget "${url}" -O "${dst}/files/usr/local/bin/ttyd/AVF"
 	chmod 777 "${dst}/files/usr/local/bin/ttyd/AVF"
 
-	pushd "$(dirname "$0")/forwarder_guest" > /dev/null
+	pushd "$(dirname "$0")/../../guest/forwarder_guest" > /dev/null
 	RUSTFLAGS="-C linker=${arch}-linux-gnu-gcc" cargo build \
 		--target "${arch}-unknown-linux-gnu" \
 		--target-dir "${workdir}/forwarder_guest"
 	mkdir -p "${dst}/files/usr/local/bin/forwarder_guest"
 	cp "${workdir}/forwarder_guest/${arch}-unknown-linux-gnu/debug/forwarder_guest" "${dst}/files/usr/local/bin/forwarder_guest/AVF"
 	chmod 777 "${dst}/files/usr/local/bin/forwarder_guest/AVF"
+	popd > /dev/null
+
+	pushd $(dirname $0)/../../guest/ip_addr_reporter > /dev/null
+	RUSTFLAGS="-C linker=aarch64-linux-gnu-gcc" cargo build \
+		--target aarch64-unknown-linux-gnu \
+		--target-dir ${workdir}/ip_addr_reporter
+	mkdir -p ${dst}/files/usr/local/bin/ip_addr_reporter
+	cp ${workdir}/ip_addr_reporter/aarch64-unknown-linux-gnu/debug/ip_addr_reporter ${dst}/files/usr/local/bin/ip_addr_reporter/AVF
+	chmod 777 ${dst}/files/usr/local/bin/ip_addr_reporter/AVF
 	popd > /dev/null
 }
 
