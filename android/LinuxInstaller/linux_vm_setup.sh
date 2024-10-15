@@ -11,7 +11,7 @@ function install() {
   src_dir=${src_dir/#\/storage\/emulated\//\/data\/media\/}
   dst_dir=/data/local/tmp/
 
-  cat $(find ${src_dir} -name "image.tar.gz*" | sort) | tar xz -C ${dst_dir}
+  cat $(find ${src_dir} -name "images.tar.gz*" | sort) | tar xz -C ${dst_dir}
   cp -u ${src_dir}/vm_config.json ${dst_dir}
   chmod 666 ${dst_dir}/*
 
