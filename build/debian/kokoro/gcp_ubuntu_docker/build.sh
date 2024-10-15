@@ -7,3 +7,6 @@ sudo losetup -D
 grep vmx /proc/cpuinfo || true
 sudo ./build.sh
 tar czvS -f ${KOKORO_ARTIFACTS_DIR}/image.tar.gz image.raw
+
+mkdir -p ${KOKORO_ARTIFACTS_DIR}/logs
+cp -r /var/log/fai/*/last/* ${KOKORO_ARTIFACTS_DIR}/logs
