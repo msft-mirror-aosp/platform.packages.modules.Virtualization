@@ -16,11 +16,10 @@
 // src/platform2/vm_tools/port_listener/listen_tracker.ebpf.c
 
 // bpf_helpers.h uses types defined here
-#include "vmlinux.h"
-
 #include <bpf/bpf_helpers.h>
 
 #include "common.h"
+#include "vmlinux.h"
 
 // For some reason 6.1 doesn't include these symbols in the debug build
 // so they don't get included in vmlinux.h. These features have existed since
