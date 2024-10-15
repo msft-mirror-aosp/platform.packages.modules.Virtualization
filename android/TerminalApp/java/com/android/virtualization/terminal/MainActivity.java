@@ -22,6 +22,7 @@ import android.os.Bundle;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.accessibility.AccessibilityManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -34,8 +35,9 @@ import com.android.virtualization.vmlauncher.VmLauncherServices;
 
 import com.google.android.material.appbar.MaterialToolbar;
 
-public class MainActivity extends AppCompatActivity implements
-        VmLauncherServices.VmLauncherServiceCallback {
+public class MainActivity extends AppCompatActivity
+        implements VmLauncherServices.VmLauncherServiceCallback,
+                AccessibilityManager.TouchExplorationStateChangeListener {
     private static final String TAG = "VmTerminalApp";
     private String mVmIpAddr;
     private WebView mWebView;
@@ -63,15 +65,31 @@ public class MainActivity extends AppCompatActivity implements
                         return true;
                     }
                 });
+
+        getSystemService(AccessibilityManager.class).addTouchExplorationStateChangeListener(this);
     }
 
     @Override
     protected void onDestroy() {
+        getSystemService(AccessibilityManager.class).removeTouchExplorationStateChangeListener(this);
         VmLauncherServices.stopVmLauncherService(this);
         super.onDestroy();
     }
 
-    private void gotoURL(String url) {
+    private void gotoTerminalURL() {
+        if (mVmIpAddr == null) {
+            Log.d(TAG, "ip addr is not set yet");
+            return;
+        }
+
+        boolean isTouchExplorationEnabled =
+                getSystemService(AccessibilityManager.class).isTouchExplorationEnabled();
+
+        String url =
+                "http://"
+                        + mVmIpAddr
+                        + ":7681/"
+                        + (isTouchExplorationEnabled ? "?screenReaderMode=true" : "");
         runOnUiThread(() -> mWebView.loadUrl(url));
     }
 
@@ -94,7 +112,7 @@ public class MainActivity extends AppCompatActivity implements
     public void onIpAddrAvailable(String ipAddr) {
         mVmIpAddr = ipAddr;
         ((TextView) findViewById(R.id.ip_addr_textview)).setText(mVmIpAddr);
-        gotoURL("http://" + mVmIpAddr + ":7681");
+        gotoTerminalURL();
     }
 
     @Override
@@ -121,5 +139,10 @@ public class MainActivity extends AppCompatActivity implements
             return true;
         }
         return super.onOptionsItemSelected(item);
+    }
+
+    @Override
+    public void onTouchExplorationStateChanged(boolean enabled) {
+        gotoTerminalURL();
     }
 }
