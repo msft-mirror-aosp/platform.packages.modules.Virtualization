@@ -44,6 +44,7 @@ public class MainActivity extends AppCompatActivity implements
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Toast.makeText(this, R.string.vm_creation_message, Toast.LENGTH_SHORT).show();
+        android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this);
 
         setContentView(R.layout.activity_headless);
@@ -61,6 +62,11 @@ public class MainActivity extends AppCompatActivity implements
                     public boolean shouldOverrideUrlLoading(WebView view, String url) {
                         view.loadUrl(url);
                         return true;
+                    }
+
+                    @Override
+                    public void onPageFinished(WebView view, String url) {
+                        android.os.Trace.endAsyncSection("executeTerminal", 0);
                     }
                 });
     }
