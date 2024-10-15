@@ -80,6 +80,11 @@ apex_defaults {
     }),
 }
 
+vintf_fragment {
+    name: "virtualizationservice.xml",
+    src: "virtualizationservice.xml",
+}
+
 apex_defaults {
     name: "com.android.virt_avf_enabled",
 
@@ -148,6 +153,14 @@ apex_defaults {
             "microdroid_gki-android15-6.6_kernel",
             "microdroid_gki-android15-6.6.json",
         ],
+        // Internal option used by pkvm team while developing new features.
+        // Should not be used on production kernels.
+        "pkvm_experimental": [
+            "microdroid_gki-pkvm_experimental_initrd_debuggable",
+            "microdroid_gki-pkvm_experimental_initrd_normal",
+            "microdroid_gki-pkvm_experimental_kernel",
+            "microdroid_gki-pkvm_experimental.json",
+        ],
         default: [],
     }) + select(release_flag("RELEASE_AVF_ENABLE_DEVICE_ASSIGNMENT"), {
         true: ["com.android.virt.vfio_handler.rc"],
@@ -166,7 +179,7 @@ apex_defaults {
         true: "AndroidManifest.xml",
         default: unset,
     }),
-    vintf_fragments: select(soong_config_variable("ANDROID", "avf_remote_attestation_enabled"), {
+    vintf_fragment_modules: select(soong_config_variable("ANDROID", "avf_remote_attestation_enabled"), {
         "true": ["virtualizationservice.xml"],
         default: unset,
     }),

@@ -15,12 +15,10 @@
  */
 package com.android.virtualization.terminal;
 
-import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Intent;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -30,9 +28,14 @@ import android.webkit.WebViewClient;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.appcompat.app.AppCompatActivity;
+
 import com.android.virtualization.vmlauncher.VmLauncherServices;
 
-public class MainActivity extends Activity implements VmLauncherServices.VmLauncherServiceCallback {
+import com.google.android.material.appbar.MaterialToolbar;
+
+public class MainActivity extends AppCompatActivity implements
+        VmLauncherServices.VmLauncherServiceCallback {
     private static final String TAG = "VmTerminalApp";
     private String mVmIpAddr;
     private WebView mWebView;
@@ -44,6 +47,9 @@ public class MainActivity extends Activity implements VmLauncherServices.VmLaunc
         VmLauncherServices.startVmLauncherService(this, this);
 
         setContentView(R.layout.activity_headless);
+
+        MaterialToolbar toolbar = (MaterialToolbar) findViewById(R.id.toolbar);
+        setSupportActionBar(toolbar);
         mWebView = (WebView) findViewById(R.id.webview);
         mWebView.getSettings().setDatabaseEnabled(true);
         mWebView.getSettings().setDomStorageEnabled(true);
@@ -69,29 +75,30 @@ public class MainActivity extends Activity implements VmLauncherServices.VmLaunc
         runOnUiThread(() -> mWebView.loadUrl(url));
     }
 
+    @Override
     public void onVmStart() {
         Log.i(TAG, "onVmStart()");
     }
 
+    @Override
     public void onVmStop() {
         Toast.makeText(this, R.string.vm_stop_message, Toast.LENGTH_SHORT).show();
         Log.i(TAG, "onVmStop()");
         finish();
     }
 
+    @Override
     public void onVmError() {
         Toast.makeText(this, R.string.vm_error_message, Toast.LENGTH_SHORT).show();
         Log.i(TAG, "onVmError()");
         finish();
     }
 
+    @Override
     public void onIpAddrAvailable(String ipAddr) {
         mVmIpAddr = ipAddr;
         ((TextView) findViewById(R.id.ip_addr_textview)).setText(mVmIpAddr);
-
-        // TODO(b/359523803): Use AVF API to be notified when shell is ready instead of using dealy
-        new Handler(Looper.getMainLooper())
-                .postDelayed(() -> gotoURL("http://" + mVmIpAddr + ":7681"), 2000);
+        gotoURL("http://" + mVmIpAddr + ":7681");
     }
 
     @Override
@@ -101,7 +108,7 @@ public class MainActivity extends Activity implements VmLauncherServices.VmLaunc
     }
 
     @Override
-    public boolean onMenuItemSelected(int featureId, MenuItem item) {
+    public boolean onOptionsItemSelected(MenuItem item) {
         int id = item.getItemId();
         if (id == R.id.copy_ip_addr) {
             // TODO(b/340126051): remove this menu item when port forwarding is supported.
@@ -111,7 +118,12 @@ public class MainActivity extends Activity implements VmLauncherServices.VmLaunc
         } else if (id == R.id.stop_vm) {
             VmLauncherServices.stopVmLauncherService(this);
             return true;
+
+        } else if (id == R.id.menu_item_settings) {
+            Intent intent = new Intent(this, SettingsActivity.class);
+            this.startActivity(intent);
+            return true;
         }
-        return super.onMenuItemSelected(featureId, item);
+        return super.onOptionsItemSelected(item);
     }
 }
