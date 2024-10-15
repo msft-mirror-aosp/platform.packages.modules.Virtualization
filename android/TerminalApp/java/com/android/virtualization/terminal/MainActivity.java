@@ -75,22 +75,26 @@ public class MainActivity extends AppCompatActivity implements
         runOnUiThread(() -> mWebView.loadUrl(url));
     }
 
+    @Override
     public void onVmStart() {
         Log.i(TAG, "onVmStart()");
     }
 
+    @Override
     public void onVmStop() {
         Toast.makeText(this, R.string.vm_stop_message, Toast.LENGTH_SHORT).show();
         Log.i(TAG, "onVmStop()");
         finish();
     }
 
+    @Override
     public void onVmError() {
         Toast.makeText(this, R.string.vm_error_message, Toast.LENGTH_SHORT).show();
         Log.i(TAG, "onVmError()");
         finish();
     }
 
+    @Override
     public void onIpAddrAvailable(String ipAddr) {
         mVmIpAddr = ipAddr;
         ((TextView) findViewById(R.id.ip_addr_textview)).setText(mVmIpAddr);
