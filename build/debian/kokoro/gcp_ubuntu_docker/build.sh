@@ -9,4 +9,4 @@ sudo ./build.sh
 tar czvS -f ${KOKORO_ARTIFACTS_DIR}/images.tar.gz image.raw
 
 mkdir -p ${KOKORO_ARTIFACTS_DIR}/logs
-cp -r /var/log/fai/* ${KOKORO_ARTIFACTS_DIR}/logs || true
+sudo cp -r /var/log/fai/* ${KOKORO_ARTIFACTS_DIR}/logs || true
