@@ -19,6 +19,8 @@ package com.android.virtualization.vmlauncher;
 import android.util.Log;
 
 import com.android.virtualization.vmlauncher.proto.DebianServiceGrpc;
+import com.android.virtualization.vmlauncher.proto.Empty;
+import com.android.virtualization.vmlauncher.proto.ForwardingRequestItem;
 import com.android.virtualization.vmlauncher.proto.IpAddr;
 import com.android.virtualization.vmlauncher.proto.ReportVmIpAddrResponse;
 
@@ -40,6 +42,16 @@ class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
         mCallback.onIpAddressAvailable(request.getAddr());
         ReportVmIpAddrResponse reply = ReportVmIpAddrResponse.newBuilder().setSuccess(true).build();
         responseObserver.onNext(reply);
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void openForwardingRequestQueue(
+            Empty request, StreamObserver<ForwardingRequestItem> responseObserver) {
+        Log.d(DebianServiceImpl.TAG, "OpenForwardingRequestQueue");
+
+        // TODO(b/340126051): Bring information from forwarder_host.
+
         responseObserver.onCompleted();
     }
 
