@@ -86,7 +86,10 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
 
         Runner runner;
         try {
+            android.os.Trace.beginSection("vmCreate");
             runner = Runner.create(this, config);
+            android.os.Trace.endSection();
+            android.os.Trace.beginAsyncSection("debianBoot", 0);
         } catch (VirtualMachineException e) {
             Log.e(TAG, "cannot create runner", e);
             stopSelf();
@@ -169,6 +172,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
 
     @Override
     public void onIpAddressAvailable(String ipAddr) {
+        android.os.Trace.endAsyncSection("debianBoot", 0);
         Bundle b = new Bundle();
         b.putString(VmLauncherService.KEY_VM_IP_ADDR, ipAddr);
         mResultReceiver.send(VmLauncherService.RESULT_IPADDR, b);

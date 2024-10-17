@@ -18,11 +18,6 @@ package com.android.virtualization.linuxinstaller;
 
 import android.annotation.WorkerThread;
 import android.app.Activity;
-import android.content.ComponentName;
-import android.content.Intent;
-import android.content.pm.ActivityInfo;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.SystemProperties;
@@ -65,12 +60,6 @@ public class MainActivity extends Activity {
     }
 
     private void installLinuxImage() {
-        ComponentName vmTerminalComponent = resolve(getPackageManager(), ACTION_VM_TERMINAL);
-        if (vmTerminalComponent == null) {
-            updateStatus("Failed to resolve VM terminal");
-            return;
-        }
-
         if (!hasLocalAssets()) {
             updateStatus("No local assets");
             return;
@@ -81,12 +70,6 @@ public class MainActivity extends Activity {
             Log.e(TAG, "failed to update image", e);
             return;
         }
-        updateStatus("Enabling terminal app...");
-        getPackageManager()
-                .setComponentEnabledSetting(
-                        vmTerminalComponent,
-                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                        PackageManager.DONT_KILL_APP);
         updateStatus("Done.");
     }
 
@@ -189,19 +172,5 @@ public class MainActivity extends Activity {
                     TextView statusView = findViewById(R.id.status_txt_view);
                     statusView.append(line + "\n");
                 });
-    }
-
-    private ComponentName resolve(PackageManager pm, String action) {
-        Intent intent = new Intent(action);
-        List<ResolveInfo> resolveInfos = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL);
-        if (resolveInfos.size() != 1) {
-            Log.w(
-                    TAG,
-                    "Failed to resolve activity, action=" + action + ", resolved=" + resolveInfos);
-            return null;
-        }
-        ActivityInfo activityInfo = resolveInfos.getFirst().activityInfo;
-        // MainActivityAlias shows in Launcher
-        return new ComponentName(activityInfo.packageName, activityInfo.name + "Alias");
     }
 }
