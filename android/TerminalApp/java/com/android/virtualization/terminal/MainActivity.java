@@ -25,11 +25,13 @@ import android.system.Os;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.View;
 import android.view.accessibility.AccessibilityManager;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -43,13 +45,20 @@ import java.io.FileDescriptor;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.net.InetAddress;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.net.UnknownHostException;
 
 public class MainActivity extends AppCompatActivity
         implements VmLauncherServices.VmLauncherServiceCallback,
                 AccessibilityManager.TouchExplorationStateChangeListener {
+
     private static final String TAG = "VmTerminalApp";
-    private String mVmIpAddr;
+    private static final String VM_ADDR = "192.168.0.2";
+    private static final int TTYD_PORT = 7681;
     private WebView mWebView;
+    private AccessibilityManager mAccessibilityManager;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -66,6 +75,7 @@ public class MainActivity extends AppCompatActivity
         }
 
         Toast.makeText(this, R.string.vm_creation_message, Toast.LENGTH_SHORT).show();
+        android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this);
 
         setContentView(R.layout.activity_headless);
@@ -77,16 +87,73 @@ public class MainActivity extends AppCompatActivity
         mWebView.getSettings().setDomStorageEnabled(true);
         mWebView.getSettings().setJavaScriptEnabled(true);
         mWebView.setWebChromeClient(new WebChromeClient());
+
+        mAccessibilityManager = getSystemService(AccessibilityManager.class);
+        mAccessibilityManager.addTouchExplorationStateChangeListener(this);
+
+        connectToTerminalService();
+    }
+
+    private URL getTerminalServiceUrl() {
+        boolean needsAccessibility = mAccessibilityManager.isTouchExplorationEnabled();
+        String file = "/";
+        String query = needsAccessibility ? "?screenReaderMode=true" : "";
+
+        try {
+            return new URL("http", VM_ADDR, TTYD_PORT, file + query);
+        } catch (MalformedURLException e) {
+            // this cannot happen
+            return null;
+        }
+    }
+
+    private void connectToTerminalService() {
+        Log.i(TAG, "URL=" + getTerminalServiceUrl().toString());
         mWebView.setWebViewClient(
                 new WebViewClient() {
                     @Override
-                    public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                        view.loadUrl(url);
-                        return true;
+                    public boolean shouldOverrideUrlLoading(
+                            WebView view, WebResourceRequest request) {
+                        return false;
+                    }
+
+                    @Override
+                    public void onReceivedError(
+                            WebView view, WebResourceRequest request, WebResourceError error) {
+                        switch (error.getErrorCode()) {
+                            case WebViewClient.ERROR_CONNECT:
+                            case WebViewClient.ERROR_HOST_LOOKUP:
+                                view.reload();
+                                return;
+                            default:
+                                String url = request.getUrl().toString();
+                                CharSequence msg = error.getDescription();
+                                Log.e(TAG, "Failed to load " + url + ": " + msg);
+                        }
+                    }
+
+                    @Override
+                    public void onPageFinished(WebView view, String url) {
+                        URL loadedUrl = null;
+                        try {
+                            loadedUrl = new URL(url);
+                        } catch (MalformedURLException e) {
+                            // cannot happen.
+                        }
+                        Log.i(TAG, "on page finished. URL=" + loadedUrl);
+                        if (getTerminalServiceUrl().toString().equals(url)) {
+                            android.os.Trace.endAsyncSection("executeTerminal", 0);
+                            view.setVisibility(View.VISIBLE);
+                        }
                     }
                 });
-
-        getSystemService(AccessibilityManager.class).addTouchExplorationStateChangeListener(this);
+        new Thread(
+                        () -> {
+                            waitUntilVmStarts();
+                            runOnUiThread(
+                                    () -> mWebView.loadUrl(getTerminalServiceUrl().toString()));
+                        })
+                .start();
     }
 
     private void diskResize(Context context, long sizeInBytes) throws IOException {
@@ -173,28 +240,27 @@ public class MainActivity extends AppCompatActivity
         }
     }
 
+    private static void waitUntilVmStarts() {
+        InetAddress addr = null;
+        try {
+            addr = InetAddress.getByName(VM_ADDR);
+        } catch (UnknownHostException e) {
+            // this can never happen.
+        }
+        try {
+            while (!addr.isReachable(10000)) {}
+        } catch (IOException e) {
+            // give up on network error
+            throw new RuntimeException(e);
+        }
+        return;
+    }
+
     @Override
     protected void onDestroy() {
         getSystemService(AccessibilityManager.class).removeTouchExplorationStateChangeListener(this);
         VmLauncherServices.stopVmLauncherService(this);
         super.onDestroy();
-    }
-
-    private void gotoTerminalURL() {
-        if (mVmIpAddr == null) {
-            Log.d(TAG, "ip addr is not set yet");
-            return;
-        }
-
-        boolean isTouchExplorationEnabled =
-                getSystemService(AccessibilityManager.class).isTouchExplorationEnabled();
-
-        String url =
-                "http://"
-                        + mVmIpAddr
-                        + ":7681/"
-                        + (isTouchExplorationEnabled ? "?screenReaderMode=true" : "");
-        runOnUiThread(() -> mWebView.loadUrl(url));
     }
 
     @Override
@@ -218,9 +284,7 @@ public class MainActivity extends AppCompatActivity
 
     @Override
     public void onIpAddrAvailable(String ipAddr) {
-        mVmIpAddr = ipAddr;
-        ((TextView) findViewById(R.id.ip_addr_textview)).setText(mVmIpAddr);
-        gotoTerminalURL();
+        // TODO: remove this
     }
 
     @Override
@@ -235,10 +299,11 @@ public class MainActivity extends AppCompatActivity
         if (id == R.id.copy_ip_addr) {
             // TODO(b/340126051): remove this menu item when port forwarding is supported.
             getSystemService(ClipboardManager.class)
-                    .setPrimaryClip(ClipData.newPlainText("A VM's IP address", mVmIpAddr));
+                    .setPrimaryClip(ClipData.newPlainText("A VM's IP address", VM_ADDR));
             return true;
         } else if (id == R.id.stop_vm) {
             VmLauncherServices.stopVmLauncherService(this);
+            mWebView.setVisibility(View.INVISIBLE);
             return true;
 
         } else if (id == R.id.menu_item_settings) {
@@ -251,6 +316,6 @@ public class MainActivity extends AppCompatActivity
 
     @Override
     public void onTouchExplorationStateChanged(boolean enabled) {
-        gotoTerminalURL();
+        connectToTerminalService();
     }
 }
