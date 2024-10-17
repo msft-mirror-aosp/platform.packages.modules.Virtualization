@@ -1,8 +1,9 @@
+
 {
     "name": "debian",
     "disks": [
         {
-            "image": "/data/local/tmp/debian.img",
+            "image": "/data/local/tmp/image.raw",
             "partitions": [],
             "writable": true
         }
@@ -17,3 +18,4 @@
     "console_input_device": "ttyS0",
     "network": true
 }
+
