@@ -20,6 +20,9 @@
     <!-- Application name of this terminal app shown in the launcher. This app provides computer terminal to connect to virtual machine. [CHAR LIMIT=16] -->
     <string name="app_name">Terminal</string>
 
+    <!-- Action bar icon name for the settings view CHAR LIMIT=none] -->
+    <string name="action_settings">Settings</string>
+
     <!-- Toast message to notify that preparing terminal to start [CHAR LIMIT=none] -->
     <string name="vm_creation_message">Preparing terminal</string>
     <!-- Toast message to notify that terminal is stopping [CHAR LIMIT=none] -->
