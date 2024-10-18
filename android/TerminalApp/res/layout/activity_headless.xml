@@ -21,12 +21,13 @@
             android:layout_gravity="center"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content">
-            <TextView
+            <com.google.android.material.textview.MaterialTextView
                 android:text="@string/vm_creation_message"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="5dp"/>
-            <ProgressBar
+            <com.google.android.material.progressindicator.CircularProgressIndicator
+                android:indeterminate="true"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"/>
         </LinearLayout>
