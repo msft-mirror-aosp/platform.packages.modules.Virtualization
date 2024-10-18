@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024 The Android Open Source Project
+ * Copyright 2024 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,15 +14,10 @@
  * limitations under the License.
  */
 
-package com.android.virtualization.linuxinstaller;
+package com.android.virtualization.terminal;
 
 import android.annotation.WorkerThread;
 import android.app.Activity;
-import android.content.ComponentName;
-import android.content.Intent;
-import android.content.pm.ActivityInfo;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.SystemProperties;
@@ -39,13 +34,11 @@ import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class MainActivity extends Activity {
+public class InstallerActivity extends Activity {
     private static final String TAG = "LinuxInstaller";
-    private static final String ACTION_VM_TERMINAL = "android.virtualization.VM_TERMINAL";
 
     private static final Path DEST_DIR =
             Path.of(Environment.getExternalStorageDirectory().getPath(), "linux");
@@ -59,20 +52,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
+        setResult(RESULT_CANCELED);
+
+        setContentView(R.layout.activity_installer);
 
         executorService.execute(this::installLinuxImage);
     }
 
     private void installLinuxImage() {
-        ComponentName vmTerminalComponent = resolve(getPackageManager(), ACTION_VM_TERMINAL);
-        if (vmTerminalComponent == null) {
-            updateStatus("Failed to resolve VM terminal");
-            return;
-        }
-
         if (!hasLocalAssets()) {
             updateStatus("No local assets");
+            setResult(RESULT_CANCELED, null);
             return;
         }
         try {
@@ -81,13 +71,9 @@ public class MainActivity extends Activity {
             Log.e(TAG, "failed to update image", e);
             return;
         }
-        updateStatus("Enabling terminal app...");
-        getPackageManager()
-                .setComponentEnabledSetting(
-                        vmTerminalComponent,
-                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                        PackageManager.DONT_KILL_APP);
         updateStatus("Done.");
+        setResult(RESULT_OK);
+        finish();
     }
 
     @WorkerThread
@@ -189,19 +175,5 @@ public class MainActivity extends Activity {
                     TextView statusView = findViewById(R.id.status_txt_view);
                     statusView.append(line + "\n");
                 });
-    }
-
-    private ComponentName resolve(PackageManager pm, String action) {
-        Intent intent = new Intent(action);
-        List<ResolveInfo> resolveInfos = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL);
-        if (resolveInfos.size() != 1) {
-            Log.w(
-                    TAG,
-                    "Failed to resolve activity, action=" + action + ", resolved=" + resolveInfos);
-            return null;
-        }
-        ActivityInfo activityInfo = resolveInfos.getFirst().activityInfo;
-        // MainActivityAlias shows in Launcher
-        return new ComponentName(activityInfo.packageName, activityInfo.name + "Alias");
     }
 }

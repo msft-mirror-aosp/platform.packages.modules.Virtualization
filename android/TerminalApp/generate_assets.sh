@@ -3,6 +3,7 @@ set -e
 
 if [ "$#" -ne 1 ]; then
     echo "$0 <image.raw path>"
+    echo "image.raw can be built with packages/modules/Virtualization/build/debian/build.sh"
     exit 1
 fi
 pushd $(dirname $0) > /dev/null
