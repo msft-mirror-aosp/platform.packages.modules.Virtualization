@@ -2,7 +2,7 @@
     "name": "debian",
     "disks": [
         {
-            "image": "$DATA_DIR/image.raw",
+            "image": "$PAYLOAD_DIR/image.raw",
             "partitions": [],
             "writable": true
         }

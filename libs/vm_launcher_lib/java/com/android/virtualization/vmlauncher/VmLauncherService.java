@@ -40,8 +40,6 @@ import java.util.concurrent.Executors;
 
 public class VmLauncherService extends Service implements DebianServiceImpl.DebianServiceCallback {
     private static final String TAG = "VmLauncherService";
-    // TODO: this path should be from outside of this service
-    private static final String VM_CONFIG_PATH = "/data/local/tmp/vm_config.json";
 
     private static final int RESULT_START = 0;
     private static final int RESULT_STOP = 1;
@@ -81,7 +79,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         }
         mExecutorService = Executors.newCachedThreadPool();
 
-        ConfigJson json = ConfigJson.from(VM_CONFIG_PATH);
+        ConfigJson json = ConfigJson.from(InstallUtils.getVmConfigPath(this));
         VirtualMachineConfig config = json.toConfig(this);
 
         Runner runner;
