@@ -388,7 +388,6 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void startVm() {
-        Toast.makeText(this, R.string.vm_creation_message, Toast.LENGTH_SHORT).show();
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this);
     }
