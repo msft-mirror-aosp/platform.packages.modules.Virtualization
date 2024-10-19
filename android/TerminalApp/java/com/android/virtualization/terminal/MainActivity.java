@@ -15,21 +15,24 @@
  */
 package com.android.virtualization.terminal;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.net.http.SslError;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.View;
 import android.view.accessibility.AccessibilityManager;
+import android.webkit.ClientCertRequest;
+import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -42,19 +45,37 @@ import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.RandomAccessFile;
+import java.net.InetAddress;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.net.UnknownHostException;
+import java.security.Key;
+import java.security.KeyStore;
+import java.security.PrivateKey;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 
 public class MainActivity extends AppCompatActivity
         implements VmLauncherServices.VmLauncherServiceCallback,
                 AccessibilityManager.TouchExplorationStateChangeListener {
+
     private static final String TAG = "VmTerminalApp";
-    private String mVmIpAddr;
+    private static final String VM_ADDR = "192.168.0.2";
+    private static final int TTYD_PORT = 7681;
+    private static final int REQUEST_CODE_INSTALLER = 0x33;
+
+    private X509Certificate[] mCertificates;
+    private PrivateKey mPrivateKey;
     private WebView mWebView;
+    private AccessibilityManager mAccessibilityManager;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        checkForUpdate();
         try {
             // No resize for now.
             long newSizeInBytes = 0;
@@ -65,10 +86,6 @@ public class MainActivity extends AppCompatActivity
                     .show();
         }
 
-        Toast.makeText(this, R.string.vm_creation_message, Toast.LENGTH_SHORT).show();
-        android.os.Trace.beginAsyncSection("executeTerminal", 0);
-        VmLauncherServices.startVmLauncherService(this, this);
-
         setContentView(R.layout.activity_headless);
 
         MaterialToolbar toolbar = (MaterialToolbar) findViewById(R.id.toolbar);
@@ -78,21 +95,113 @@ public class MainActivity extends AppCompatActivity
         mWebView.getSettings().setDomStorageEnabled(true);
         mWebView.getSettings().setJavaScriptEnabled(true);
         mWebView.setWebChromeClient(new WebChromeClient());
+
+        mAccessibilityManager = getSystemService(AccessibilityManager.class);
+        mAccessibilityManager.addTouchExplorationStateChangeListener(this);
+
+        connectToTerminalService();
+        readClientCertificate();
+    }
+
+    private URL getTerminalServiceUrl() {
+        boolean needsAccessibility = mAccessibilityManager.isTouchExplorationEnabled();
+        String file = "/";
+        String query = needsAccessibility ? "?screenReaderMode=true" : "";
+
+        try {
+            return new URL("https", VM_ADDR, TTYD_PORT, file + query);
+        } catch (MalformedURLException e) {
+            // this cannot happen
+            return null;
+        }
+    }
+
+    private void readClientCertificate() {
+        // TODO(b/363235314): instead of using the key in asset, it should be generated in runtime
+        // and then provisioned in the vm via virtio-fs
+        try (InputStream keystoreFileStream =
+                getClass().getResourceAsStream("/assets/client.p12")) {
+            KeyStore keyStore = KeyStore.getInstance("PKCS12");
+            String password = "1234";
+            String alias = "1";
+
+            keyStore.load(keystoreFileStream, password != null ? password.toCharArray() : null);
+            Key key = keyStore.getKey(alias, password.toCharArray());
+            if (key instanceof PrivateKey) {
+                mPrivateKey = (PrivateKey) key;
+                Certificate cert = keyStore.getCertificate(alias);
+                mCertificates = new X509Certificate[1];
+                mCertificates[0] = (X509Certificate) cert;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, e.getMessage());
+        }
+    }
+
+    private void connectToTerminalService() {
+        Log.i(TAG, "URL=" + getTerminalServiceUrl().toString());
         mWebView.setWebViewClient(
                 new WebViewClient() {
                     @Override
-                    public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                        view.loadUrl(url);
-                        return true;
+                    public boolean shouldOverrideUrlLoading(
+                            WebView view, WebResourceRequest request) {
+                        return false;
+                    }
+
+                    @Override
+                    public void onReceivedError(
+                            WebView view, WebResourceRequest request, WebResourceError error) {
+                        switch (error.getErrorCode()) {
+                            case WebViewClient.ERROR_CONNECT:
+                            case WebViewClient.ERROR_HOST_LOOKUP:
+                                view.reload();
+                                return;
+                            default:
+                                String url = request.getUrl().toString();
+                                CharSequence msg = error.getDescription();
+                                Log.e(TAG, "Failed to load " + url + ": " + msg);
+                        }
                     }
 
                     @Override
                     public void onPageFinished(WebView view, String url) {
-                        android.os.Trace.endAsyncSection("executeTerminal", 0);
+                        URL loadedUrl = null;
+                        try {
+                            loadedUrl = new URL(url);
+                        } catch (MalformedURLException e) {
+                            // cannot happen.
+                        }
+                        Log.i(TAG, "on page finished. URL=" + loadedUrl);
+                        if (getTerminalServiceUrl().toString().equals(url)) {
+                            android.os.Trace.endAsyncSection("executeTerminal", 0);
+                            view.setVisibility(View.VISIBLE);
+                        }
+                    }
+
+                    @Override
+                    public void onReceivedClientCertRequest(
+                            WebView view, ClientCertRequest request) {
+                        if (mPrivateKey != null && mCertificates != null) {
+                            request.proceed(mPrivateKey, mCertificates);
+                            return;
+                        }
+                        super.onReceivedClientCertRequest(view, request);
+                    }
+
+                    @Override
+                    public void onReceivedSslError(
+                            WebView view, SslErrorHandler handler, SslError error) {
+                        // ttyd uses self-signed certificate
+                        handler.proceed();
                     }
                 });
-
-        getSystemService(AccessibilityManager.class).addTouchExplorationStateChangeListener(this);
+        new Thread(
+                        () -> {
+                            waitUntilVmStarts();
+                            runOnUiThread(
+                                    () -> mWebView.loadUrl(getTerminalServiceUrl().toString()));
+                        })
+                .start();
     }
 
     private void diskResize(Context context, long sizeInBytes) throws IOException {
@@ -179,28 +288,27 @@ public class MainActivity extends AppCompatActivity
         }
     }
 
+    private static void waitUntilVmStarts() {
+        InetAddress addr = null;
+        try {
+            addr = InetAddress.getByName(VM_ADDR);
+        } catch (UnknownHostException e) {
+            // this can never happen.
+        }
+        try {
+            while (!addr.isReachable(10000)) {}
+        } catch (IOException e) {
+            // give up on network error
+            throw new RuntimeException(e);
+        }
+        return;
+    }
+
     @Override
     protected void onDestroy() {
         getSystemService(AccessibilityManager.class).removeTouchExplorationStateChangeListener(this);
         VmLauncherServices.stopVmLauncherService(this);
         super.onDestroy();
-    }
-
-    private void gotoTerminalURL() {
-        if (mVmIpAddr == null) {
-            Log.d(TAG, "ip addr is not set yet");
-            return;
-        }
-
-        boolean isTouchExplorationEnabled =
-                getSystemService(AccessibilityManager.class).isTouchExplorationEnabled();
-
-        String url =
-                "http://"
-                        + mVmIpAddr
-                        + ":7681/"
-                        + (isTouchExplorationEnabled ? "?screenReaderMode=true" : "");
-        runOnUiThread(() -> mWebView.loadUrl(url));
     }
 
     @Override
@@ -224,9 +332,7 @@ public class MainActivity extends AppCompatActivity
 
     @Override
     public void onIpAddrAvailable(String ipAddr) {
-        mVmIpAddr = ipAddr;
-        ((TextView) findViewById(R.id.ip_addr_textview)).setText(mVmIpAddr);
-        gotoTerminalURL();
+        // TODO: remove this
     }
 
     @Override
@@ -238,16 +344,7 @@ public class MainActivity extends AppCompatActivity
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         int id = item.getItemId();
-        if (id == R.id.copy_ip_addr) {
-            // TODO(b/340126051): remove this menu item when port forwarding is supported.
-            getSystemService(ClipboardManager.class)
-                    .setPrimaryClip(ClipData.newPlainText("A VM's IP address", mVmIpAddr));
-            return true;
-        } else if (id == R.id.stop_vm) {
-            VmLauncherServices.stopVmLauncherService(this);
-            return true;
-
-        } else if (id == R.id.menu_item_settings) {
+        if (id == R.id.menu_item_settings) {
             Intent intent = new Intent(this, SettingsActivity.class);
             this.startActivity(intent);
             return true;
@@ -257,6 +354,29 @@ public class MainActivity extends AppCompatActivity
 
     @Override
     public void onTouchExplorationStateChanged(boolean enabled) {
-        gotoTerminalURL();
+        connectToTerminalService();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == REQUEST_CODE_INSTALLER) {
+            if (resultCode != RESULT_OK) {
+                Log.e(TAG, "Failed to start VM. Installer returned error.");
+                finish();
+            }
+            startVm();
+        }
+    }
+
+    private void checkForUpdate() {
+        Intent intent = new Intent(this, InstallerActivity.class);
+        startActivityForResult(intent, REQUEST_CODE_INSTALLER);
+    }
+
+    private void startVm() {
+        android.os.Trace.beginAsyncSection("executeTerminal", 0);
+        VmLauncherServices.startVmLauncherService(this, this);
     }
 }
