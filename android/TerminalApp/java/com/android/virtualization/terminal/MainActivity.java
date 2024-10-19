@@ -15,8 +15,6 @@
  */
 package com.android.virtualization.terminal;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.net.http.SslError;
@@ -346,17 +344,7 @@ public class MainActivity extends AppCompatActivity
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         int id = item.getItemId();
-        if (id == R.id.copy_ip_addr) {
-            // TODO(b/340126051): remove this menu item when port forwarding is supported.
-            getSystemService(ClipboardManager.class)
-                    .setPrimaryClip(ClipData.newPlainText("A VM's IP address", VM_ADDR));
-            return true;
-        } else if (id == R.id.stop_vm) {
-            VmLauncherServices.stopVmLauncherService(this);
-            mWebView.setVisibility(View.INVISIBLE);
-            return true;
-
-        } else if (id == R.id.menu_item_settings) {
+        if (id == R.id.menu_item_settings) {
             Intent intent = new Intent(this, SettingsActivity.class);
             this.startActivity(intent);
             return true;
@@ -388,7 +376,6 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void startVm() {
-        Toast.makeText(this, R.string.vm_creation_message, Toast.LENGTH_SHORT).show();
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this);
     }
