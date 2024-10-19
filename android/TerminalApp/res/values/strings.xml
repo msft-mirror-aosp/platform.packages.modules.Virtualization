@@ -20,6 +20,9 @@
     <!-- Application name of this terminal app shown in the launcher. This app provides computer terminal to connect to virtual machine. [CHAR LIMIT=16] -->
     <string name="app_name">Terminal</string>
 
+    <!-- Action bar icon name for the settings view CHAR LIMIT=none] -->
+    <string name="action_settings">Settings</string>
+
     <!-- Toast message to notify that preparing terminal to start [CHAR LIMIT=none] -->
     <string name="vm_creation_message">Preparing terminal</string>
     <!-- Toast message to notify that terminal is stopping [CHAR LIMIT=none] -->
@@ -33,10 +36,10 @@
     <string name="settings_disk_resize_sub_title">Resize / Rootfs</string>
     <!-- Toast message after new disk size is set. [CHAR LIMIT=none] -->
     <string name="settings_disk_resize_resize_message">Disk size set</string>
-    <!-- Settings menu option description for the current disk size, followed by a text box with the actual number [CHAR LIMIT=none] -->
-    <string name="settings_disk_resize_resize_gb_assigned">GB Assigned</string>
-    <!-- Settings menu option description for the maximum resizable disk size. [CHAR LIMIT=none] -->
-    <string name="settings_disk_resize_resize_gb_total">256 GB total</string>
+    <!-- Settings menu option description format of the current disk size. [CHAR LIMIT=none] -->
+    <string name="settings_disk_resize_resize_gb_assigned_format"><xliff:g id="assigned_size" example="10GB">%1$s</xliff:g> assigned</string>
+    <!-- Settings menu option description format of the maximum resizable disk size. [CHAR LIMIT=none] -->
+    <string name="settings_disk_resize_resize_gb_max_format"><xliff:g id="max_size" example="256GB">%1$s</xliff:g> max</string>
     <!-- Settings menu button to cancel disk resize. [CHAR LIMIT=32] -->
     <string name="settings_disk_resize_resize_cancel">Cancel</string>
     <!-- Settings menu button to apply change that requires to restart VM (abbrev of virtual machine). [CHAR LIMIT=64] -->
