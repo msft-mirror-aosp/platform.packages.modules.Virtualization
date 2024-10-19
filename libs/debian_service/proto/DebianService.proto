@@ -23,12 +23,20 @@ option java_multiple_files = true;
 
 service DebianService {
   rpc ReportVmIpAddr (IpAddr) returns (ReportVmIpAddrResponse) {}
+  rpc OpenForwardingRequestQueue (Empty) returns (stream ForwardingRequestItem) {}
 }
+
+message Empty {}
 
 message IpAddr {
   string addr = 1;
 }
 
 message ReportVmIpAddrResponse {
-    bool success = 1;
+  bool success = 1;
+}
+
+message ForwardingRequestItem {
+  int32 guest_tcp_port = 1;
+  int32 vsock_port = 2;
 }

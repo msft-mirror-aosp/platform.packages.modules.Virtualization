@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-service linux_vm_setup /system_ext/bin/linux_vm_setup
+service linux_vm_setup /system/bin/linux_vm_setup
     user shell
     group shell media_rw
     disabled
