@@ -18,6 +18,7 @@ package com.android.virtualization.terminal;
 import android.content.Context;
 import android.content.Intent;
 import android.net.http.SslError;
+import android.os.Build;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -37,6 +38,7 @@ import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.android.virtualization.vmlauncher.InstallUtils;
 import com.android.virtualization.vmlauncher.VmLauncherServices;
 
 import com.google.android.material.appbar.MaterialToolbar;
@@ -75,7 +77,7 @@ public class MainActivity extends AppCompatActivity
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        checkForUpdate();
+        boolean launchInstaller = installIfNecessary();
         try {
             // No resize for now.
             long newSizeInBytes = 0;
@@ -101,6 +103,11 @@ public class MainActivity extends AppCompatActivity
 
         connectToTerminalService();
         readClientCertificate();
+
+        // if installer is launched, it will be handled in onActivityResult
+        if (!launchInstaller) {
+            startVm();
+        }
     }
 
     private URL getTerminalServiceUrl() {
@@ -370,12 +377,22 @@ public class MainActivity extends AppCompatActivity
         }
     }
 
-    private void checkForUpdate() {
-        Intent intent = new Intent(this, InstallerActivity.class);
-        startActivityForResult(intent, REQUEST_CODE_INSTALLER);
+    private boolean installIfNecessary() {
+        // If payload from external storage exists(only for debuggable build) or there is no
+        // installed image, launch installer activity.
+        if ((Build.isDebuggable() && InstallUtils.payloadFromExternalStorageExists())
+                || !InstallUtils.isImageInstalled(this)) {
+            Intent intent = new Intent(this, InstallerActivity.class);
+            startActivityForResult(intent, REQUEST_CODE_INSTALLER);
+            return true;
+        }
+        return false;
     }
 
     private void startVm() {
+        if (!InstallUtils.isImageInstalled(this)) {
+            return;
+        }
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this);
     }
