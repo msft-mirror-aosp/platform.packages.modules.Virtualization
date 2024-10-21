@@ -1152,6 +1152,8 @@ fn load_app_config(
         for param in custom_config.extraKernelCmdlineParams.iter() {
             append_kernel_param(param, &mut vm_config);
         }
+
+        vm_config.teeServices.clone_from(&custom_config.teeServices);
     }
 
     // Unfortunately specifying page_shift = 14 in bootconfig doesn't enable 16k pages emulation,
@@ -1759,6 +1761,26 @@ fn check_no_extra_kernel_cmdline_params(config: &VirtualMachineConfig) -> binder
     Ok(())
 }
 
+fn check_no_tee_services(config: &VirtualMachineConfig) -> binder::Result<()> {
+    match config {
+        VirtualMachineConfig::RawConfig(config) => {
+            if !config.teeServices.is_empty() {
+                return Err(anyhow!("tee_services_allowlist feature is disabled"))
+                    .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION);
+            }
+        }
+        VirtualMachineConfig::AppConfig(config) => {
+            if let Some(custom_config) = &config.customConfig {
+                if !custom_config.teeServices.is_empty() {
+                    return Err(anyhow!("tee_services_allowlist feature is disabled"))
+                        .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION);
+                }
+            }
+        }
+    };
+    Ok(())
+}
+
 fn check_protected_vm_is_supported() -> binder::Result<()> {
     let is_pvm_supported =
         hypervisor_props::is_protected_vm_supported().or_service_specific_exception(-1)?;
@@ -1782,6 +1804,9 @@ fn check_config_features(config: &VirtualMachineConfig) -> binder::Result<()> {
     }
     if !cfg!(debuggable_vms_improvements) {
         check_no_extra_kernel_cmdline_params(config)?;
+    }
+    if !cfg!(tee_services_allowlist) {
+        check_no_tee_services(config)?;
     }
     Ok(())
 }
