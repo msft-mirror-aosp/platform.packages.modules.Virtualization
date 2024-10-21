@@ -55,6 +55,11 @@
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
+        <service android:name=".InstallerService"
+            android:foregroundServiceType="specialUse"
+            android:value="Prepares Linux image"
+            android:exported="false"
+            android:stopWithTask="true" />
 
         <service
             android:name="com.android.virtualization.vmlauncher.VmLauncherService"
