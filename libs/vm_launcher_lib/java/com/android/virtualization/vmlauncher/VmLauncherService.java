@@ -17,8 +17,6 @@
 package com.android.virtualization.vmlauncher;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
 import android.os.Bundle;
@@ -39,6 +37,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class VmLauncherService extends Service implements DebianServiceImpl.DebianServiceCallback {
+    public static final String EXTRA_NOTIFICATION = "EXTRA_NOTIFICATION";
     private static final String TAG = "VmLauncherService";
 
     private static final int RESULT_START = 0;
@@ -57,18 +56,8 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         return null;
     }
 
-    private void startForeground() {
-        NotificationManager notificationManager = getSystemService(NotificationManager.class);
-        NotificationChannel notificationChannel =
-                new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
-        notificationManager.createNotificationChannel(notificationChannel);
-        startForeground(
-                this.hashCode(),
-                new Notification.Builder(this, TAG)
-                        .setChannelId(TAG)
-                        .setSmallIcon(android.R.drawable.ic_dialog_info)
-                        .setContentText("A VM " + mVirtualMachine.getName() + " is running")
-                        .build());
+    private void startForeground(Notification notification) {
+        startForeground(this.hashCode(), notification);
     }
 
     @Override
@@ -110,7 +99,10 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         Path logPath = getFileStreamPath(mVirtualMachine.getName() + ".log").toPath();
         Logger.setup(mVirtualMachine, logPath, mExecutorService);
 
-        startForeground();
+        Notification notification = intent.getParcelableExtra(EXTRA_NOTIFICATION,
+                Notification.class);
+
+        startForeground(notification);
 
         mResultReceiver.send(RESULT_START, null);
 
