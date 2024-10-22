@@ -1062,8 +1062,6 @@ fn run_vm(
         command.arg(add_preserved_fd(&mut preserved_fds, kernel));
     }
 
-    command.arg("--no-pmu");
-
     let control_sock = create_crosvm_control_listener(crosvm_control_socket_path)
         .context("failed to create control listener")?;
     command.arg("--socket").arg(add_preserved_fd(&mut preserved_fds, control_sock));
