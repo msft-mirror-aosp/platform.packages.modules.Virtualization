@@ -14,6 +14,8 @@
 
 //! High-level FDT functions.
 
+pub mod pci;
+
 use core::ops::Range;
 use cstr::cstr;
 use libfdt::{self, Fdt, FdtError};
@@ -51,9 +53,4 @@ impl SwiotlbInfo {
     pub fn fixed_range(&self) -> Option<Range<usize>> {
         self.addr.map(|addr| addr..addr + self.size)
     }
-}
-
-/// Library for working with (VirtIO) PCI devices discovered from a device tree.
-pub mod pci {
-    pub use fdtpci::*;
 }
