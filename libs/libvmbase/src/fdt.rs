@@ -52,3 +52,8 @@ impl SwiotlbInfo {
         self.addr.map(|addr| addr..addr + self.size)
     }
 }
+
+/// Library for working with (VirtIO) PCI devices discovered from a device tree.
+pub mod pci {
+    pub use fdtpci::*;
+}
