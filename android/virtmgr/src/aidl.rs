@@ -67,6 +67,7 @@ use binder::{
 };
 use cstr::cstr;
 use glob::glob;
+use libc::{AF_VSOCK, sa_family_t, sockaddr_vm};
 use log::{debug, error, info, warn};
 use microdroid_payload_config::{ApkConfig, Task, TaskType, VmPayloadConfig};
 use nix::unistd::pipe;
@@ -89,7 +90,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak, LazyLock};
 use vbmeta::VbMetaImage;
 use vmconfig::{VmConfig, get_debug_level};
-use vsock::{VsockAddr, VsockStream};
+use vsock::VsockStream;
 use zip::ZipArchive;
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
@@ -1434,8 +1435,14 @@ impl IVirtualMachine::IVirtualMachine for VirtualMachine {
             ));
         }
         let cid = self.instance.cid;
-        let get_connection_info =
-            move |_instance: &str| Some(ConnectionInfo::Vsock(VsockAddr::new(cid, port)));
+        let addr = sockaddr_vm {
+            svm_family: AF_VSOCK as sa_family_t,
+            svm_reserved1: 0,
+            svm_port: port,
+            svm_cid: cid,
+            svm_zero: [0u8; 4],
+        };
+        let get_connection_info = move |_instance: &str| Some(ConnectionInfo::Vsock(addr));
         let accessor = Accessor::new(name, get_connection_info);
         accessor
             .as_binder()

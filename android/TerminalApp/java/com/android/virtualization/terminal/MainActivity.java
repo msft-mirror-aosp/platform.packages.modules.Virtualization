@@ -15,10 +15,17 @@
  */
 package com.android.virtualization.terminal;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
+import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.graphics.drawable.Icon;
+import android.net.http.SslError;
+import android.os.Build;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -27,6 +34,8 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.accessibility.AccessibilityManager;
+import android.webkit.ClientCertRequest;
+import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -36,6 +45,7 @@ import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.android.virtualization.vmlauncher.InstallUtils;
 import com.android.virtualization.vmlauncher.VmLauncherServices;
 
 import com.google.android.material.appbar.MaterialToolbar;
@@ -44,11 +54,17 @@ import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
+import java.security.Key;
+import java.security.KeyStore;
+import java.security.PrivateKey;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 
 public class MainActivity extends AppCompatActivity
         implements VmLauncherServices.VmLauncherServiceCallback,
@@ -57,13 +73,19 @@ public class MainActivity extends AppCompatActivity
     private static final String TAG = "VmTerminalApp";
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
+    private static final int REQUEST_CODE_INSTALLER = 0x33;
+
+    private X509Certificate[] mCertificates;
+    private PrivateKey mPrivateKey;
     private WebView mWebView;
     private AccessibilityManager mAccessibilityManager;
+    private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        boolean launchInstaller = installIfNecessary();
         try {
             // No resize for now.
             long newSizeInBytes = 0;
@@ -74,9 +96,13 @@ public class MainActivity extends AppCompatActivity
                     .show();
         }
 
-        Toast.makeText(this, R.string.vm_creation_message, Toast.LENGTH_SHORT).show();
-        android.os.Trace.beginAsyncSection("executeTerminal", 0);
-        VmLauncherServices.startVmLauncherService(this, this);
+        checkAndRequestPostNotificationsPermission();
+
+        NotificationManager notificationManager = getSystemService(NotificationManager.class);
+        NotificationChannel notificationChannel =
+                new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
+        assert notificationManager != null;
+        notificationManager.createNotificationChannel(notificationChannel);
 
         setContentView(R.layout.activity_headless);
 
@@ -92,6 +118,12 @@ public class MainActivity extends AppCompatActivity
         mAccessibilityManager.addTouchExplorationStateChangeListener(this);
 
         connectToTerminalService();
+        readClientCertificate();
+
+        // if installer is launched, it will be handled in onActivityResult
+        if (!launchInstaller) {
+            startVm();
+        }
     }
 
     private URL getTerminalServiceUrl() {
@@ -100,10 +132,32 @@ public class MainActivity extends AppCompatActivity
         String query = needsAccessibility ? "?screenReaderMode=true" : "";
 
         try {
-            return new URL("http", VM_ADDR, TTYD_PORT, file + query);
+            return new URL("https", VM_ADDR, TTYD_PORT, file + query);
         } catch (MalformedURLException e) {
             // this cannot happen
             return null;
+        }
+    }
+
+    private void readClientCertificate() {
+        // TODO(b/363235314): instead of using the key in asset, it should be generated in runtime
+        // and then provisioned in the vm via virtio-fs
+        try (InputStream keystoreFileStream =
+                getClass().getResourceAsStream("/assets/client.p12")) {
+            KeyStore keyStore = KeyStore.getInstance("PKCS12");
+            String password = "1234";
+            String alias = "1";
+
+            keyStore.load(keystoreFileStream, password != null ? password.toCharArray() : null);
+            Key key = keyStore.getKey(alias, password.toCharArray());
+            if (key instanceof PrivateKey) {
+                mPrivateKey = (PrivateKey) key;
+                Certificate cert = keyStore.getCertificate(alias);
+                mCertificates = new X509Certificate[1];
+                mCertificates[0] = (X509Certificate) cert;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, e.getMessage());
         }
     }
 
@@ -145,6 +199,23 @@ public class MainActivity extends AppCompatActivity
                             android.os.Trace.endAsyncSection("executeTerminal", 0);
                             view.setVisibility(View.VISIBLE);
                         }
+                    }
+
+                    @Override
+                    public void onReceivedClientCertRequest(
+                            WebView view, ClientCertRequest request) {
+                        if (mPrivateKey != null && mCertificates != null) {
+                            request.proceed(mPrivateKey, mCertificates);
+                            return;
+                        }
+                        super.onReceivedClientCertRequest(view, request);
+                    }
+
+                    @Override
+                    public void onReceivedSslError(
+                            WebView view, SslErrorHandler handler, SslError error) {
+                        // ttyd uses self-signed certificate
+                        handler.proceed();
                     }
                 });
         new Thread(
@@ -256,6 +327,15 @@ public class MainActivity extends AppCompatActivity
         return;
     }
 
+    private void checkAndRequestPostNotificationsPermission() {
+        if (getApplicationContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                    POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE);
+        }
+    }
+
     @Override
     protected void onDestroy() {
         getSystemService(AccessibilityManager.class).removeTouchExplorationStateChangeListener(this);
@@ -296,17 +376,7 @@ public class MainActivity extends AppCompatActivity
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         int id = item.getItemId();
-        if (id == R.id.copy_ip_addr) {
-            // TODO(b/340126051): remove this menu item when port forwarding is supported.
-            getSystemService(ClipboardManager.class)
-                    .setPrimaryClip(ClipData.newPlainText("A VM's IP address", VM_ADDR));
-            return true;
-        } else if (id == R.id.stop_vm) {
-            VmLauncherServices.stopVmLauncherService(this);
-            mWebView.setVisibility(View.INVISIBLE);
-            return true;
-
-        } else if (id == R.id.menu_item_settings) {
+        if (id == R.id.menu_item_settings) {
             Intent intent = new Intent(this, SettingsActivity.class);
             this.startActivity(intent);
             return true;
@@ -317,5 +387,60 @@ public class MainActivity extends AppCompatActivity
     @Override
     public void onTouchExplorationStateChanged(boolean enabled) {
         connectToTerminalService();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == REQUEST_CODE_INSTALLER) {
+            if (resultCode != RESULT_OK) {
+                Log.e(TAG, "Failed to start VM. Installer returned error.");
+                finish();
+            }
+            startVm();
+        }
+    }
+
+    private boolean installIfNecessary() {
+        // If payload from external storage exists(only for debuggable build) or there is no
+        // installed image, launch installer activity.
+        if ((Build.isDebuggable() && InstallUtils.payloadFromExternalStorageExists())
+                || !InstallUtils.isImageInstalled(this)) {
+            Intent intent = new Intent(this, InstallerActivity.class);
+            startActivityForResult(intent, REQUEST_CODE_INSTALLER);
+            return true;
+        }
+        return false;
+    }
+
+    private void startVm() {
+        if (!InstallUtils.isImageInstalled(this)) {
+            return;
+        }
+        // TODO: implement intent for setting, close and tap to the notification
+        // Currently mock a PendingIntent for notification.
+        Intent intent = new Intent();
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Icon icon = Icon.createWithResource(getResources(), R.drawable.ic_launcher_foreground);
+        Notification notification = new Notification.Builder(this, TAG)
+                .setChannelId(TAG)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(getResources().getString(R.string.service_notification_title))
+                .setContentText(getResources().getString(R.string.service_notification_content))
+                .setContentIntent(pendingIntent)
+                .setOngoing(true)
+                .addAction(new Notification.Action.Builder(icon,
+                        getResources().getString(R.string.service_notification_settings),
+                        pendingIntent).build())
+                .addAction(new Notification.Action.Builder(icon,
+                        getResources().getString(R.string.service_notification_quit_action),
+                        pendingIntent).build())
+                .build();
+
+        android.os.Trace.beginAsyncSection("executeTerminal", 0);
+        VmLauncherServices.startVmLauncherService(this, this, notification);
     }
 }
