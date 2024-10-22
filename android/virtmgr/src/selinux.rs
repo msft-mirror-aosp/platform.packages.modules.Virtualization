@@ -117,3 +117,19 @@ pub fn getfilecon<F: AsRawFd>(file: &F) -> Result<SeContext> {
         _ => Err(anyhow!(io::Error::last_os_error())).context("fgetfilecon failed"),
     }
 }
+
+pub fn getprevcon() -> Result<SeContext> {
+    let mut con: *mut c_char = ptr::null_mut();
+    // SAFETY: the returned pointer `con` is wrapped in SeContext::Raw which is freed with
+    // `freecon` when it is dropped.
+    match unsafe { selinux_bindgen::getprevcon(&mut con) } {
+        0.. => {
+            if !con.is_null() {
+                Ok(SeContext::Raw(con))
+            } else {
+                Err(anyhow!("getprevcon returned a NULL context"))
+            }
+        }
+        _ => Err(anyhow!(io::Error::last_os_error())).context("getprevcon failed"),
+    }
+}

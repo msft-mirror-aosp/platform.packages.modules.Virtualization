@@ -21,7 +21,7 @@ use crate::crosvm::{AudioConfig, CrosvmConfig, DiskFile, SharedPathConfig, Displ
 use crate::debug_config::DebugConfig;
 use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
-use crate::selinux::{getfilecon, SeContext};
+use crate::selinux::{getfilecon, getprevcon, SeContext};
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::{
     Certificate::Certificate,
@@ -501,6 +501,9 @@ impl VirtualizationService {
         if cfg!(early) {
             check_config_allowed_for_early_vms(config)?;
         }
+
+        let caller_secontext = getprevcon().or_service_specific_exception(-1)?;
+        info!("callers secontext: {}", caller_secontext);
 
         // Allocating VM context checks the MANAGE_VIRTUAL_MACHINE permission.
         let (vm_context, cid, temporary_directory) = if cfg!(early) {
