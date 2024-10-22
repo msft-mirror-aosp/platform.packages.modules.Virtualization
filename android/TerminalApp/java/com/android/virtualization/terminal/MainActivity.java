@@ -15,8 +15,15 @@
  */
 package com.android.virtualization.terminal;
 
+import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.graphics.drawable.Icon;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
@@ -72,6 +79,7 @@ public class MainActivity extends AppCompatActivity
     private PrivateKey mPrivateKey;
     private WebView mWebView;
     private AccessibilityManager mAccessibilityManager;
+    private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -87,6 +95,14 @@ public class MainActivity extends AppCompatActivity
             Toast.makeText(this, "Error resizing disk: " + e.getMessage(), Toast.LENGTH_LONG)
                     .show();
         }
+
+        checkAndRequestPostNotificationsPermission();
+
+        NotificationManager notificationManager = getSystemService(NotificationManager.class);
+        NotificationChannel notificationChannel =
+                new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
+        assert notificationManager != null;
+        notificationManager.createNotificationChannel(notificationChannel);
 
         setContentView(R.layout.activity_headless);
 
@@ -311,6 +327,15 @@ public class MainActivity extends AppCompatActivity
         return;
     }
 
+    private void checkAndRequestPostNotificationsPermission() {
+        if (getApplicationContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                    POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE);
+        }
+    }
+
     @Override
     protected void onDestroy() {
         getSystemService(AccessibilityManager.class).removeTouchExplorationStateChangeListener(this);
@@ -393,7 +418,29 @@ public class MainActivity extends AppCompatActivity
         if (!InstallUtils.isImageInstalled(this)) {
             return;
         }
+        // TODO: implement intent for setting, close and tap to the notification
+        // Currently mock a PendingIntent for notification.
+        Intent intent = new Intent();
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Icon icon = Icon.createWithResource(getResources(), R.drawable.ic_launcher_foreground);
+        Notification notification = new Notification.Builder(this, TAG)
+                .setChannelId(TAG)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(getResources().getString(R.string.service_notification_title))
+                .setContentText(getResources().getString(R.string.service_notification_content))
+                .setContentIntent(pendingIntent)
+                .setOngoing(true)
+                .addAction(new Notification.Action.Builder(icon,
+                        getResources().getString(R.string.service_notification_settings),
+                        pendingIntent).build())
+                .addAction(new Notification.Action.Builder(icon,
+                        getResources().getString(R.string.service_notification_quit_action),
+                        pendingIntent).build())
+                .build();
+
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
-        VmLauncherServices.startVmLauncherService(this, this);
+        VmLauncherServices.startVmLauncherService(this, this, notification);
     }
 }
