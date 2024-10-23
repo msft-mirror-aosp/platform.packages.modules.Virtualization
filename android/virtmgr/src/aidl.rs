@@ -21,7 +21,7 @@ use crate::crosvm::{AudioConfig, CrosvmConfig, DiskFile, SharedPathConfig, Displ
 use crate::debug_config::DebugConfig;
 use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
-use crate::selinux::{getfilecon, getprevcon, SeContext};
+use crate::selinux::{check_tee_service_permission, getfilecon, getprevcon, SeContext};
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::{
     Certificate::Certificate,
@@ -560,6 +560,10 @@ impl VirtualizationService {
         };
         let config = config.as_ref();
         *is_protected = config.protectedVm;
+
+        check_tee_service_permission(&caller_secontext, &config.teeServices)
+            .with_log()
+            .or_binder_exception(ExceptionCode::SECURITY)?;
 
         // Check if partition images are labeled incorrectly. This is to prevent random images
         // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
