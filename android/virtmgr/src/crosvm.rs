@@ -108,6 +108,7 @@ pub struct CrosvmConfig {
     pub kernel: Option<File>,
     pub initrd: Option<File>,
     pub disks: Vec<DiskFile>,
+    pub shared_paths: Vec<SharedPathConfig>,
     pub params: Option<String>,
     pub protected: bool,
     pub debug_config: DebugConfig,
@@ -224,6 +225,19 @@ pub struct DiskFile {
     pub writable: bool,
 }
 
+/// Shared path between host and guest VM.
+#[derive(Debug)]
+pub struct SharedPathConfig {
+    pub path: String,
+    pub host_uid: i32,
+    pub host_gid: i32,
+    pub guest_uid: i32,
+    pub guest_gid: i32,
+    pub mask: i32,
+    pub tag: String,
+    pub socket_path: String,
+}
+
 /// virtio-input device configuration from `external/crosvm/src/crosvm/config.rs`
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -305,6 +319,8 @@ impl VmState {
             let vfio_devices = config.vfio_devices.clone();
             let tap =
                 if let Some(tap_file) = &config.tap { Some(tap_file.try_clone()?) } else { None };
+
+            run_virtiofs(&config)?;
 
             // If this fails and returns an error, `self` will be left in the `Failed` state.
             let child =
@@ -884,6 +900,39 @@ fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Erro
     }
 }
 
+fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
+    for shared_path in &config.shared_paths {
+        let ugid_map_value = format!(
+            "{} {} {} {} {} /",
+            shared_path.guest_uid,
+            shared_path.guest_gid,
+            shared_path.host_uid,
+            shared_path.host_gid,
+            shared_path.mask,
+        );
+
+        let cfg_arg = format!("writeback=true,cache_policy=always,ugid_map='{}'", ugid_map_value);
+
+        let mut command = Command::new(CROSVM_PATH);
+        command
+            .arg("device")
+            .arg("fs")
+            .arg(format!("--socket={}", &shared_path.socket_path))
+            .arg(format!("--tag={}", &shared_path.tag))
+            .arg(format!("--shared-dir={}", &shared_path.path))
+            .arg("--cfg")
+            .arg(cfg_arg.as_str())
+            .arg("--disable-sandbox");
+
+        print_crosvm_args(&command);
+
+        let result = SharedChild::spawn(&mut command)?;
+        info!("Spawned virtiofs crosvm({})", result.id());
+    }
+
+    Ok(())
+}
+
 /// Starts an instance of `crosvm` to manage a new VM.
 fn run_vm(
     config: CrosvmConfig,
@@ -1185,6 +1234,12 @@ fn run_vm(
     };
     for device in config.vfio_devices {
         command.arg(vfio_argument_for_platform_device(&device)?);
+    }
+
+    for shared_path in &config.shared_paths {
+        command
+            .arg("--vhost-user-fs")
+            .arg(format!("{},tag={}", &shared_path.socket_path, &shared_path.tag));
     }
 
     debug!("Preserving FDs {:?}", preserved_fds);
