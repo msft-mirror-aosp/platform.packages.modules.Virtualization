@@ -23,7 +23,9 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.drawable.Icon;
+import android.graphics.fonts.FontStyle;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
@@ -74,6 +76,7 @@ public class MainActivity extends AppCompatActivity
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
     private static final int REQUEST_CODE_INSTALLER = 0x33;
+    private static final int FONT_SIZE_DEFAULT = 12;
 
     private X509Certificate[] mCertificates;
     private PrivateKey mPrivateKey;
@@ -127,12 +130,20 @@ public class MainActivity extends AppCompatActivity
     }
 
     private URL getTerminalServiceUrl() {
-        boolean needsAccessibility = mAccessibilityManager.isTouchExplorationEnabled();
-        String file = "/";
-        String query = needsAccessibility ? "?screenReaderMode=true" : "";
+        Configuration config = getResources().getConfiguration();
+
+        String query =
+                "?fontSize="
+                        + (int) (config.fontScale * FONT_SIZE_DEFAULT)
+                        + "&fontWeight="
+                        + (FontStyle.FONT_WEIGHT_NORMAL + config.fontWeightAdjustment)
+                        + "&fontWeightBold="
+                        + (FontStyle.FONT_WEIGHT_BOLD + config.fontWeightAdjustment)
+                        + "&screenReaderMode="
+                        + mAccessibilityManager.isTouchExplorationEnabled();
 
         try {
-            return new URL("https", VM_ADDR, TTYD_PORT, file + query);
+            return new URL("https", VM_ADDR, TTYD_PORT, "/" + query);
         } catch (MalformedURLException e) {
             // this cannot happen
             return null;
