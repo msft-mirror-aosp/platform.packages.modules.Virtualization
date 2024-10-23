@@ -181,4 +181,4 @@ fi
 
 cp $(dirname $0)/vm_config.json.${arch} vm_config.json
 # --sparse option isn't supported in apache-commons-compress
-tar czv -f ${KOKORO_ARTIFACTS_DIR}/images.tar.gz ${images[@]} vm_config.json
+tar czv -f images.tar.gz ${images[@]} vm_config.json
