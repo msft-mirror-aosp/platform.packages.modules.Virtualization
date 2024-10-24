@@ -197,7 +197,7 @@ prebuilt_root {
     no_full_install: true,
 }
 
-genrule {
+java_genrule {
     name: "microdroid_build_prop_gen_x86_64",
     srcs: [
         "build.prop",
@@ -215,7 +215,7 @@ genrule {
         "echo ro.product.cpu.abi=x86_64) > $(out)",
 }
 
-genrule {
+java_genrule {
     name: "microdroid_build_prop_gen_arm64",
     srcs: [
         "build.prop",
