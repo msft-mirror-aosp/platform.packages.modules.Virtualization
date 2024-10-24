@@ -38,17 +38,15 @@ public class InstallUtils {
 
     private static final String VM_CONFIG_FILENAME = "vm_config.json";
     private static final String COMPRESSED_PAYLOAD_FILENAME = "images.tar.gz";
+    private static final String INSTALLATION_COMPLETED_FILENAME = "completed";
     private static final String PAYLOAD_DIR = "linux";
 
     public static String getVmConfigPath(Context context) {
-        return new File(context.getFilesDir(), PAYLOAD_DIR)
-                .toPath()
-                .resolve(VM_CONFIG_FILENAME)
-                .toString();
+        return getInternalStorageDir(context).toPath().resolve(VM_CONFIG_FILENAME).toString();
     }
 
     public static boolean isImageInstalled(Context context) {
-        return Files.exists(Path.of(getVmConfigPath(context)));
+        return Files.exists(getInstallationCompletedPath(context));
     }
 
     private static Path getPayloadPath() {
@@ -63,6 +61,14 @@ public class InstallUtils {
 
     public static boolean payloadFromExternalStorageExists() {
         return Files.exists(getPayloadPath());
+    }
+
+    private static File getInternalStorageDir(Context context) {
+        return new File(context.getFilesDir(), PAYLOAD_DIR);
+    }
+
+    private static Path getInstallationCompletedPath(Context context) {
+        return getInternalStorageDir(context).toPath().resolve(INSTALLATION_COMPLETED_FILENAME);
     }
 
     public static boolean installImageFromExternalStorage(Context context) {
@@ -89,10 +95,6 @@ public class InstallUtils {
             Log.e(TAG, "installation failed", e);
             return false;
         }
-        if (!isImageInstalled(context)) {
-            return false;
-        }
-
         if (!resolvePathInVmConfig(context)) {
             Log.d(TAG, "resolving path failed");
             try {
@@ -110,6 +112,14 @@ public class InstallUtils {
             Log.d(TAG, "failed to remove installed payload", e);
         }
 
+        // Create marker for installation done.
+        try {
+            File file = new File(getInstallationCompletedPath(context).toString());
+            file.createNewFile();
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to mark install completed", e);
+            return false;
+        }
         return true;
     }
 
