@@ -34,7 +34,6 @@ rust_defaults {
         "libapkverify",
         "libavf_features",
         "libavflog",
-        "libbase_rust",
         "libbinder_rs",
         "libcfg_if",
         "libclap",
@@ -54,7 +53,6 @@ rust_defaults {
         "libregex",
         "librpcbinder_rs",
         "librustutils",
-        "libsafe_ownedfd",
         "libsemver",
         "libselinux_bindgen",
         "libserde",
@@ -71,6 +69,7 @@ rust_defaults {
         "liblibfdt",
         "libfsfdt",
         "libhypervisor_props",
+        "libzerocopy",
         "libuuid",
         // TODO(b/202115393) stabilize the interface
         "packagemanager_aidl-rust",
@@ -93,6 +92,13 @@ rust_binary {
     srcs: ["src/main.rs"],
     cfgs: ["early"],
     apex_available: ["com.android.virt"],
+}
+
+xsd_config {
+    name: "early_vms",
+    srcs: ["early_vms.xsd"],
+    api_dir: "schema",
+    package_name: "android.system.virtualizationservice",
 }
 
 rust_test {

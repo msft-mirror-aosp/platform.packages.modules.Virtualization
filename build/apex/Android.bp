@@ -80,6 +80,11 @@ apex_defaults {
     }),
 }
 
+vintf_fragment {
+    name: "virtualizationservice.xml",
+    src: "virtualizationservice.xml",
+}
+
 apex_defaults {
     name: "com.android.virt_avf_enabled",
 
@@ -107,6 +112,7 @@ apex_defaults {
             filesystems: microdroid_filesystem_images,
             prebuilts: [
                 "rialto_bin",
+                "android_bootloader_crosvm_aarch64",
             ],
         },
         x86_64: {
@@ -125,6 +131,9 @@ apex_defaults {
                 default: [],
             }),
             filesystems: microdroid_filesystem_images,
+            prebuilts: [
+                "android_bootloader_crosvm_x86_64",
+            ],
         },
     },
     binaries: [
@@ -132,19 +141,25 @@ apex_defaults {
         "vm",
     ],
     prebuilts: [
-        "features_com.android.virt.xml",
         "microdroid_initrd_debuggable",
         "microdroid_initrd_normal",
         "microdroid.json",
         "microdroid_kernel",
         "com.android.virt.init.rc",
-        "android_bootloader_crosvm_aarch64",
     ] + select(soong_config_variable("ANDROID", "avf_microdroid_guest_gki_version"), {
         "android15_66": [
             "microdroid_gki-android15-6.6_initrd_debuggable",
             "microdroid_gki-android15-6.6_initrd_normal",
             "microdroid_gki-android15-6.6_kernel",
             "microdroid_gki-android15-6.6.json",
+        ],
+        // Internal option used by pkvm team while developing new features.
+        // Should not be used on production kernels.
+        "pkvm_experimental": [
+            "microdroid_gki-pkvm_experimental_initrd_debuggable",
+            "microdroid_gki-pkvm_experimental_initrd_normal",
+            "microdroid_gki-pkvm_experimental_kernel",
+            "microdroid_gki-pkvm_experimental.json",
         ],
         default: [],
     }) + select(release_flag("RELEASE_AVF_ENABLE_DEVICE_ASSIGNMENT"), {
@@ -164,7 +179,7 @@ apex_defaults {
         true: "AndroidManifest.xml",
         default: unset,
     }),
-    vintf_fragments: select(soong_config_variable("ANDROID", "avf_remote_attestation_enabled"), {
+    vintf_fragment_modules: select(soong_config_variable("ANDROID", "avf_remote_attestation_enabled"), {
         "true": ["virtualizationservice.xml"],
         default: unset,
     }),
@@ -278,8 +293,10 @@ sh_test_host {
         "libz",
     ],
     data: [
-        ":com.android.virt",
         ":test.com.android.virt.pem",
+    ],
+    device_common_data: [
+        ":com.android.virt",
     ],
     test_suites: ["general-tests"],
 }

@@ -47,6 +47,7 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     AudioConfig::AudioConfig as AudioConfigParcelable,
     DisplayConfig::DisplayConfig as DisplayConfigParcelable,
     GpuConfig::GpuConfig as GpuConfigParcelable,
+    UsbConfig::UsbConfig as UsbConfigParcelable,
 };
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IBoundDevice::IBoundDevice;
@@ -56,7 +57,6 @@ use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
 use rpcbinder::RpcServer;
 
 /// external/crosvm
-use base::UnixSeqpacketListener;
 use vm_control::{BalloonControlCommand, VmRequest, VmResponse};
 
 const CROSVM_PATH: &str = "/apex/com.android.virt/bin/crosvm";
@@ -108,6 +108,7 @@ pub struct CrosvmConfig {
     pub kernel: Option<File>,
     pub initrd: Option<File>,
     pub disks: Vec<DiskFile>,
+    pub shared_paths: Vec<SharedPathConfig>,
     pub params: Option<String>,
     pub protected: bool,
     pub debug_config: DebugConfig,
@@ -134,6 +135,8 @@ pub struct CrosvmConfig {
     pub gpu_config: Option<GpuConfig>,
     pub audio_config: Option<AudioConfig>,
     pub no_balloon: bool,
+    pub usb_config: UsbConfig,
+    pub dump_dt_fd: Option<File>,
 }
 
 #[derive(Debug)]
@@ -145,6 +148,17 @@ pub struct AudioConfig {
 impl AudioConfig {
     pub fn new(raw_config: &AudioConfigParcelable) -> Self {
         AudioConfig { use_microphone: raw_config.useMicrophone, use_speaker: raw_config.useSpeaker }
+    }
+}
+
+#[derive(Debug)]
+pub struct UsbConfig {
+    pub controller: bool,
+}
+
+impl UsbConfig {
+    pub fn new(raw_config: &UsbConfigParcelable) -> Result<UsbConfig> {
+        Ok(UsbConfig { controller: raw_config.controller })
     }
 }
 
@@ -209,6 +223,19 @@ fn try_into_non_zero_u32(value: i32) -> Result<NonZeroU32> {
 pub struct DiskFile {
     pub image: File,
     pub writable: bool,
+}
+
+/// Shared path between host and guest VM.
+#[derive(Debug)]
+pub struct SharedPathConfig {
+    pub path: String,
+    pub host_uid: i32,
+    pub host_gid: i32,
+    pub guest_uid: i32,
+    pub guest_gid: i32,
+    pub mask: i32,
+    pub tag: String,
+    pub socket_path: String,
 }
 
 /// virtio-input device configuration from `external/crosvm/src/crosvm/config.rs`
@@ -292,6 +319,8 @@ impl VmState {
             let vfio_devices = config.vfio_devices.clone();
             let tap =
                 if let Some(tap_file) = &config.tap { Some(tap_file.try_clone()?) } else { None };
+
+            run_virtiofs(&config)?;
 
             // If this fails and returns an error, `self` will be left in the `Failed` state.
             let child =
@@ -871,6 +900,39 @@ fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Erro
     }
 }
 
+fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
+    for shared_path in &config.shared_paths {
+        let ugid_map_value = format!(
+            "{} {} {} {} {} /",
+            shared_path.guest_uid,
+            shared_path.guest_gid,
+            shared_path.host_uid,
+            shared_path.host_gid,
+            shared_path.mask,
+        );
+
+        let cfg_arg = format!("writeback=true,cache_policy=always,ugid_map='{}'", ugid_map_value);
+
+        let mut command = Command::new(CROSVM_PATH);
+        command
+            .arg("device")
+            .arg("fs")
+            .arg(format!("--socket={}", &shared_path.socket_path))
+            .arg(format!("--tag={}", &shared_path.tag))
+            .arg(format!("--shared-dir={}", &shared_path.path))
+            .arg("--cfg")
+            .arg(cfg_arg.as_str())
+            .arg("--disable-sandbox");
+
+        print_crosvm_args(&command);
+
+        let result = SharedChild::spawn(&mut command)?;
+        info!("Spawned virtiofs crosvm({})", result.id());
+    }
+
+    Ok(())
+}
+
 /// Starts an instance of `crosvm` to manage a new VM.
 fn run_vm(
     config: CrosvmConfig,
@@ -898,6 +960,10 @@ fn run_vm(
         command.arg("--balloon-page-reporting");
     } else {
         command.arg("--no-balloon");
+    }
+
+    if !config.usb_config.controller {
+        command.arg("--no-usb");
     }
 
     let mut memory_mib = config.memory_mib;
@@ -969,6 +1035,11 @@ fn run_vm(
     // Keep track of what file descriptors should be mapped to the crosvm process.
     let mut preserved_fds = config.indirect_files.into_iter().map(|f| f.into()).collect();
 
+    if let Some(dump_dt_fd) = config.dump_dt_fd {
+        let dump_dt_fd = add_preserved_fd(&mut preserved_fds, dump_dt_fd);
+        command.arg("--dump-device-tree-blob").arg(dump_dt_fd);
+    }
+
     // Setup the serial devices.
     // 1. uart device: used as the output device by bootloaders and as early console by linux
     // 2. uart device: used to report the reason for the VM failing.
@@ -1028,8 +1099,9 @@ fn run_vm(
     }
 
     for disk in config.disks {
+        // Disk file locking is disabled because of missing SELinux policies.
         command.arg("--block").arg(format!(
-            "path={},ro={}",
+            "path={},ro={},lock=false",
             add_preserved_fd(&mut preserved_fds, disk.image),
             !disk.writable,
         ));
@@ -1039,8 +1111,11 @@ fn run_vm(
         command.arg(add_preserved_fd(&mut preserved_fds, kernel));
     }
 
-    let control_sock = UnixSeqpacketListener::bind(crosvm_control_socket_path)
-        .context("failed to create control server")?;
+    #[cfg(target_arch = "aarch64")]
+    command.arg("--no-pmu");
+
+    let control_sock = create_crosvm_control_listener(crosvm_control_socket_path)
+        .context("failed to create control listener")?;
     command.arg("--socket").arg(add_preserved_fd(&mut preserved_fds, control_sock));
 
     if let Some(dt_overlay) = config.device_tree_overlay {
@@ -1164,6 +1239,12 @@ fn run_vm(
         command.arg(vfio_argument_for_platform_device(&device)?);
     }
 
+    for shared_path in &config.shared_paths {
+        command
+            .arg("--vhost-user-fs")
+            .arg(format!("{},tag={}", &shared_path.socket_path, &shared_path.tag));
+    }
+
     debug!("Preserving FDs {:?}", preserved_fds);
     command.preserved_fds(preserved_fds);
 
@@ -1253,4 +1334,23 @@ fn format_serial_out_arg(preserved_fds: &mut Vec<OwnedFd>, file: Option<File>) -
 fn create_pipe() -> Result<(File, File), Error> {
     let (read_fd, write_fd) = pipe2(OFlag::O_CLOEXEC)?;
     Ok((read_fd.into(), write_fd.into()))
+}
+
+/// Creates and binds a unix seqpacket listening socket to be passed as crosvm's `--socket`
+/// argument. See `UnixSeqpacketListener::bind` in crosvm's code for reference.
+fn create_crosvm_control_listener(crosvm_control_socket_path: &Path) -> Result<OwnedFd> {
+    use nix::sys::socket;
+    let fd = socket::socket(
+        socket::AddressFamily::Unix,
+        socket::SockType::SeqPacket,
+        socket::SockFlag::empty(),
+        None,
+    )
+    .context("socket failed")?;
+    socket::bind(fd.as_raw_fd(), &socket::UnixAddr::new(crosvm_control_socket_path)?)
+        .context("bind failed")?;
+    // The exact backlog size isn't imporant. crosvm uses 128 internally. We use 127 here
+    // because of a `nix` bug.
+    socket::listen(&fd, socket::Backlog::new(127).unwrap()).context("listen failed")?;
+    Ok(fd)
 }
