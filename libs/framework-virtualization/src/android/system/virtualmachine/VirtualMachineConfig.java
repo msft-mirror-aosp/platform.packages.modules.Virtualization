@@ -40,6 +40,7 @@ import android.os.PersistableBundle;
 import android.sysprop.HypervisorProperties;
 import android.system.virtualizationservice.DiskImage;
 import android.system.virtualizationservice.Partition;
+import android.system.virtualizationservice.SharedPath;
 import android.system.virtualizationservice.UsbConfig;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
 import android.system.virtualizationservice.VirtualMachinePayloadConfig;
@@ -710,6 +711,15 @@ public final class VirtualMachineConfig {
                 partitions.add(part);
             }
             config.disks[i].partitions = partitions.toArray(new Partition[0]);
+        }
+
+        config.sharedPaths =
+                new SharedPath
+                        [Optional.ofNullable(customImageConfig.getSharedPaths())
+                                .map(arr -> arr.length)
+                                .orElse(0)];
+        for (int i = 0; i < config.sharedPaths.length; i++) {
+            config.sharedPaths[i] = customImageConfig.getSharedPaths()[i].toParcelable();
         }
 
         config.displayConfig =
