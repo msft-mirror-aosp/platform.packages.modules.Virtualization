@@ -35,6 +35,7 @@ use std::io::{self, Read};
 use std::mem;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::io::{AsRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -942,6 +943,9 @@ fn run_vm(
     validate_config(&config)?;
 
     let mut command = Command::new(CROSVM_PATH);
+
+    let vm_name = "crosvm_".to_owned() + &config.name;
+    command.arg0(vm_name.clone());
     // TODO(qwandor): Remove --disable-sandbox.
     command
         .arg("--extended-status")
@@ -950,6 +954,8 @@ fn run_vm(
         .arg("--log-level")
         .arg("info,disk=warn")
         .arg("run")
+        .arg("--name")
+        .arg(vm_name)
         .arg("--disable-sandbox")
         .arg("--cid")
         .arg(config.cid.to_string());
