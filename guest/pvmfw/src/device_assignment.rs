@@ -60,10 +60,14 @@ pub enum DeviceAssignmentError {
     InvalidSymbols,
     /// Malformed <reg>. Can't parse.
     MalformedReg,
-    /// Invalid physical <reg> of assigned device.
-    InvalidPhysReg(u64, u64),
+    /// Missing physical <reg> of assigned device.
+    MissingReg(u64, u64),
+    /// Extra <reg> of assigned device.
+    ExtraReg(u64, u64),
     /// Invalid virtual <reg> of assigned device.
-    InvalidReg(u64, u64),
+    InvalidReg(u64),
+    /// Token for <reg> of assigned device does not match expected value.
+    InvalidRegToken(u64, u64),
     /// Invalid <interrupts>
     InvalidInterrupts,
     /// Malformed <iommus>
@@ -111,11 +115,17 @@ impl fmt::Display for DeviceAssignmentError {
                 "Invalid property in /__symbols__. Must point to valid assignable device node."
             ),
             Self::MalformedReg => write!(f, "Malformed <reg>. Can't parse"),
-            Self::InvalidReg(addr, size) => {
-                write!(f, "Invalid guest MMIO region (addr: {addr:#x}, size: {size:#x})")
+            Self::MissingReg(addr, size) => {
+                write!(f, "Missing physical MMIO region: addr:{addr:#x}), size:{size:#x}")
             }
-            Self::InvalidPhysReg(addr, size) => {
-                write!(f, "Invalid physical MMIO region (addr: {addr:#x}, size: {size:#x})")
+            Self::ExtraReg(addr, size) => {
+                write!(f, "Unexpected extra MMIO region: addr:{addr:#x}), size:{size:#x}")
+            }
+            Self::InvalidReg(addr) => {
+                write!(f, "Invalid guest MMIO granule (addr: {addr:#x})")
+            }
+            Self::InvalidRegToken(token, expected) => {
+                write!(f, "Unexpected MMIO token ({token:#x}), should be {expected:#x}")
             }
             Self::InvalidInterrupts => write!(f, "Invalid <interrupts>"),
             Self::MalformedIommus => write!(f, "Malformed <iommus>. Can't parse."),
@@ -752,26 +762,26 @@ impl AssignedDeviceInfo {
         // PV reg and physical reg should have 1:1 match in order.
         for (reg, phys_reg) in virt_regs.by_ref().zip(phys_regs.by_ref()) {
             if reg.overlaps(&PVMFW_RANGE) {
-                return Err(DeviceAssignmentError::InvalidReg(reg.addr, reg.size));
+                return Err(DeviceAssignmentError::InvalidReg(reg.addr));
             }
+            let expected_token = phys_reg.addr;
             // If this call returns successfully, hyp has mapped the MMIO region at `reg`.
-            let addr = hypervisor.get_phys_mmio_token(reg.addr, reg.size).map_err(|e| {
+            let token = hypervisor.get_phys_mmio_token(reg.addr, reg.size).map_err(|e| {
                 error!("Hypervisor error while requesting MMIO token: {e}");
-                DeviceAssignmentError::InvalidReg(reg.addr, reg.size)
+                DeviceAssignmentError::InvalidReg(reg.addr)
             })?;
             // Only check address because hypervisor guarantees size match when success.
-            if phys_reg.addr != addr {
-                error!("Assigned device {reg:x?} has unexpected physical address");
-                return Err(DeviceAssignmentError::InvalidPhysReg(addr, reg.size));
+            if token != expected_token {
+                return Err(DeviceAssignmentError::InvalidRegToken(token, expected_token));
             }
         }
 
         if let Some(DeviceReg { addr, size }) = virt_regs.next() {
-            return Err(DeviceAssignmentError::InvalidReg(*addr, *size));
+            return Err(DeviceAssignmentError::ExtraReg(*addr, *size));
         }
 
         if let Some(DeviceReg { addr, size }) = phys_regs.next() {
-            return Err(DeviceAssignmentError::InvalidPhysReg(*addr, *size));
+            return Err(DeviceAssignmentError::MissingReg(*addr, *size));
         }
 
         Ok(())
@@ -1612,7 +1622,7 @@ mod tests {
         };
         let device_info = DeviceAssignmentInfo::parse(fdt, vm_dtbo, &hypervisor);
 
-        assert_eq!(device_info, Err(DeviceAssignmentError::InvalidReg(0x9, 0xFF)));
+        assert_eq!(device_info, Err(DeviceAssignmentError::InvalidReg(0x9)));
     }
 
     #[test]
@@ -1628,7 +1638,7 @@ mod tests {
         };
         let device_info = DeviceAssignmentInfo::parse(fdt, vm_dtbo, &hypervisor);
 
-        assert_eq!(device_info, Err(DeviceAssignmentError::InvalidPhysReg(0xF10000, 0x1000)));
+        assert_eq!(device_info, Err(DeviceAssignmentError::InvalidRegToken(0xF10000, 0xF00000)));
     }
 
     #[test]
@@ -1708,7 +1718,7 @@ mod tests {
         };
         let device_info = DeviceAssignmentInfo::parse(fdt, vm_dtbo, &hypervisor);
 
-        assert_eq!(device_info, Err(DeviceAssignmentError::InvalidReg(0x7fee0000, 0x1000)));
+        assert_eq!(device_info, Err(DeviceAssignmentError::InvalidReg(0x7fee0000)));
     }
 
     #[test]
