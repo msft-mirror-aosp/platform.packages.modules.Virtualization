@@ -25,7 +25,6 @@ import android.content.res.Configuration;
 import android.graphics.drawable.Icon;
 import android.graphics.fonts.FontStyle;
 import android.net.http.SslError;
-import android.os.Build;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -402,8 +401,7 @@ public class MainActivity extends BaseActivity
     private boolean installIfNecessary() {
         // If payload from external storage exists(only for debuggable build) or there is no
         // installed image, launch installer activity.
-        if ((Build.isDebuggable() && InstallUtils.payloadFromExternalStorageExists())
-                || !InstallUtils.isImageInstalled(this)) {
+        if (!InstallUtils.isImageInstalled(this)) {
             Intent intent = new Intent(this, InstallerActivity.class);
             startActivityForResult(intent, REQUEST_CODE_INSTALLER);
             return true;

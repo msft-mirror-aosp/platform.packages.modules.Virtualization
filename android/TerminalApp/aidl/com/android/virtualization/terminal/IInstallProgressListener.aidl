@@ -19,4 +19,5 @@ package com.android.virtualization.terminal;
 // TODO(b/374015561): Provide progress update
 oneway interface IInstallProgressListener {
     void onCompleted();
+    void onError(in String displayText);
 }

@@ -36,6 +36,10 @@
     <string name="installer_notif_title_text">Installing Linux terminal</string>
     <!-- Notification description for installer [CHAR LIMIT=none] -->
     <string name="installer_notif_desc_text">Linux terminal will be started after finish</string>
+    <!-- Toast error message for install failure due to the network issue [CHAR LIMIT=none] -->
+    <string name="installer_error_network">Failed to install due to the network issue</string>
+    <!-- Toast error message for install failure due to the unidentified issue [CHAR LIMIT=none] -->
+    <string name="installer_error_unknown">Failed to install. Try again.</string>
 
     <!-- Action bar icon name for the settings view CHAR LIMIT=none] -->
     <string name="action_settings">Settings</string>
