@@ -297,7 +297,7 @@ public class MainActivity extends BaseActivity
 
     private static void runE2fsck(String filePath) throws IOException {
         try {
-            runCommand("/system/bin/e2fsck", "-f", filePath);
+            runCommand("/system/bin/e2fsck", "-y", "-f", filePath);
             Log.d(TAG, "e2fsck completed: " + filePath);
         } catch (IOException e) {
             Log.e(TAG, "Failed to run e2fsck", e);
