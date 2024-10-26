@@ -22,6 +22,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.drawable.Icon;
 import android.graphics.fonts.FontStyle;
 import android.net.http.SslError;
@@ -170,6 +171,9 @@ public class MainActivity extends BaseActivity
         Log.i(TAG, "URL=" + getTerminalServiceUrl().toString());
         mWebView.setWebViewClient(
                 new WebViewClient() {
+                    private boolean mLoadFailed = false;
+                    private long mRequestId = 0;
+
                     @Override
                     public boolean shouldOverrideUrlLoading(
                             WebView view, WebResourceRequest request) {
@@ -177,8 +181,14 @@ public class MainActivity extends BaseActivity
                     }
 
                     @Override
+                    public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                        mLoadFailed = false;
+                    }
+
+                    @Override
                     public void onReceivedError(
                             WebView view, WebResourceRequest request, WebResourceError error) {
+                        mLoadFailed = true;
                         switch (error.getErrorCode()) {
                             case WebViewClient.ERROR_CONNECT:
                             case WebViewClient.ERROR_HOST_LOOKUP:
@@ -193,17 +203,22 @@ public class MainActivity extends BaseActivity
 
                     @Override
                     public void onPageFinished(WebView view, String url) {
-                        URL loadedUrl = null;
-                        try {
-                            loadedUrl = new URL(url);
-                        } catch (MalformedURLException e) {
-                            // cannot happen.
+                        if (mLoadFailed) {
+                            return;
                         }
-                        Log.i(TAG, "on page finished. URL=" + loadedUrl);
-                        if (getTerminalServiceUrl().toString().equals(url)) {
-                            android.os.Trace.endAsyncSection("executeTerminal", 0);
-                            view.setVisibility(View.VISIBLE);
-                        }
+
+                        mRequestId++;
+                        view.postVisualStateCallback(
+                                mRequestId,
+                                new WebView.VisualStateCallback() {
+                                    @Override
+                                    public void onComplete(long requestId) {
+                                        if (requestId == mRequestId) {
+                                            android.os.Trace.endAsyncSection("executeTerminal", 0);
+                                            view.setVisibility(View.VISIBLE);
+                                        }
+                                    }
+                                });
                     }
 
                     @Override
