@@ -15,19 +15,16 @@
  */
 package com.android.virtualization.terminal;
 
-import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.drawable.Icon;
 import android.graphics.fonts.FontStyle;
 import android.net.http.SslError;
-import android.os.Build;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -44,8 +41,6 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
-
-import androidx.appcompat.app.AppCompatActivity;
 
 import com.android.virtualization.vmlauncher.InstallUtils;
 import com.android.virtualization.vmlauncher.VmLauncherServices;
@@ -68,7 +63,7 @@ import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 
-public class MainActivity extends AppCompatActivity
+public class MainActivity extends BaseActivity
         implements VmLauncherServices.VmLauncherServiceCallback,
                 AccessibilityManager.TouchExplorationStateChangeListener {
 
@@ -99,13 +94,12 @@ public class MainActivity extends AppCompatActivity
                     .show();
         }
 
-        checkAndRequestPostNotificationsPermission();
-
         NotificationManager notificationManager = getSystemService(NotificationManager.class);
-        NotificationChannel notificationChannel =
-                new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
-        assert notificationManager != null;
-        notificationManager.createNotificationChannel(notificationChannel);
+        if (notificationManager.getNotificationChannel(TAG) == null) {
+            NotificationChannel notificationChannel =
+                    new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
+            notificationManager.createNotificationChannel(notificationChannel);
+        }
 
         setContentView(R.layout.activity_headless);
 
@@ -338,15 +332,6 @@ public class MainActivity extends AppCompatActivity
         return;
     }
 
-    private void checkAndRequestPostNotificationsPermission() {
-        if (getApplicationContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                    POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE);
-        }
-    }
-
     @Override
     protected void onDestroy() {
         getSystemService(AccessibilityManager.class).removeTouchExplorationStateChangeListener(this);
@@ -416,8 +401,7 @@ public class MainActivity extends AppCompatActivity
     private boolean installIfNecessary() {
         // If payload from external storage exists(only for debuggable build) or there is no
         // installed image, launch installer activity.
-        if ((Build.isDebuggable() && InstallUtils.payloadFromExternalStorageExists())
-                || !InstallUtils.isImageInstalled(this)) {
+        if (!InstallUtils.isImageInstalled(this)) {
             Intent intent = new Intent(this, InstallerActivity.class);
             startActivityForResult(intent, REQUEST_CODE_INSTALLER);
             return true;
