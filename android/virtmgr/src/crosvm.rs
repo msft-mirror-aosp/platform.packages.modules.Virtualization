@@ -920,7 +920,8 @@ fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
             .arg(format!("--shared-dir={}", &shared_path.path))
             .arg("--cfg")
             .arg(cfg_arg.as_str())
-            .arg("--disable-sandbox");
+            .arg("--disable-sandbox")
+            .arg("--skip-pivot-root=true");
 
         print_crosvm_args(&command);
 
