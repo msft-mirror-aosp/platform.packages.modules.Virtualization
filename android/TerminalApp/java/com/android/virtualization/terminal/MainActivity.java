@@ -15,10 +15,17 @@
  */
 package com.android.virtualization.terminal;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Configuration;
+import android.graphics.Bitmap;
+import android.graphics.drawable.Icon;
+import android.graphics.fonts.FontStyle;
 import android.net.http.SslError;
-import android.os.Build;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -35,8 +42,6 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
-
-import androidx.appcompat.app.AppCompatActivity;
 
 import com.android.virtualization.vmlauncher.InstallUtils;
 import com.android.virtualization.vmlauncher.VmLauncherServices;
@@ -59,7 +64,7 @@ import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 
-public class MainActivity extends AppCompatActivity
+public class MainActivity extends BaseActivity
         implements VmLauncherServices.VmLauncherServiceCallback,
                 AccessibilityManager.TouchExplorationStateChangeListener {
 
@@ -67,11 +72,13 @@ public class MainActivity extends AppCompatActivity
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
     private static final int REQUEST_CODE_INSTALLER = 0x33;
+    private static final int FONT_SIZE_DEFAULT = 12;
 
     private X509Certificate[] mCertificates;
     private PrivateKey mPrivateKey;
     private WebView mWebView;
     private AccessibilityManager mAccessibilityManager;
+    private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -86,6 +93,13 @@ public class MainActivity extends AppCompatActivity
             Log.e(TAG, "Failed to resize disk", e);
             Toast.makeText(this, "Error resizing disk: " + e.getMessage(), Toast.LENGTH_LONG)
                     .show();
+        }
+
+        NotificationManager notificationManager = getSystemService(NotificationManager.class);
+        if (notificationManager.getNotificationChannel(TAG) == null) {
+            NotificationChannel notificationChannel =
+                    new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
+            notificationManager.createNotificationChannel(notificationChannel);
         }
 
         setContentView(R.layout.activity_headless);
@@ -111,12 +125,20 @@ public class MainActivity extends AppCompatActivity
     }
 
     private URL getTerminalServiceUrl() {
-        boolean needsAccessibility = mAccessibilityManager.isTouchExplorationEnabled();
-        String file = "/";
-        String query = needsAccessibility ? "?screenReaderMode=true" : "";
+        Configuration config = getResources().getConfiguration();
+
+        String query =
+                "?fontSize="
+                        + (int) (config.fontScale * FONT_SIZE_DEFAULT)
+                        + "&fontWeight="
+                        + (FontStyle.FONT_WEIGHT_NORMAL + config.fontWeightAdjustment)
+                        + "&fontWeightBold="
+                        + (FontStyle.FONT_WEIGHT_BOLD + config.fontWeightAdjustment)
+                        + "&screenReaderMode="
+                        + mAccessibilityManager.isTouchExplorationEnabled();
 
         try {
-            return new URL("https", VM_ADDR, TTYD_PORT, file + query);
+            return new URL("https", VM_ADDR, TTYD_PORT, "/" + query);
         } catch (MalformedURLException e) {
             // this cannot happen
             return null;
@@ -149,6 +171,9 @@ public class MainActivity extends AppCompatActivity
         Log.i(TAG, "URL=" + getTerminalServiceUrl().toString());
         mWebView.setWebViewClient(
                 new WebViewClient() {
+                    private boolean mLoadFailed = false;
+                    private long mRequestId = 0;
+
                     @Override
                     public boolean shouldOverrideUrlLoading(
                             WebView view, WebResourceRequest request) {
@@ -156,8 +181,14 @@ public class MainActivity extends AppCompatActivity
                     }
 
                     @Override
+                    public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                        mLoadFailed = false;
+                    }
+
+                    @Override
                     public void onReceivedError(
                             WebView view, WebResourceRequest request, WebResourceError error) {
+                        mLoadFailed = true;
                         switch (error.getErrorCode()) {
                             case WebViewClient.ERROR_CONNECT:
                             case WebViewClient.ERROR_HOST_LOOKUP:
@@ -172,17 +203,22 @@ public class MainActivity extends AppCompatActivity
 
                     @Override
                     public void onPageFinished(WebView view, String url) {
-                        URL loadedUrl = null;
-                        try {
-                            loadedUrl = new URL(url);
-                        } catch (MalformedURLException e) {
-                            // cannot happen.
+                        if (mLoadFailed) {
+                            return;
                         }
-                        Log.i(TAG, "on page finished. URL=" + loadedUrl);
-                        if (getTerminalServiceUrl().toString().equals(url)) {
-                            android.os.Trace.endAsyncSection("executeTerminal", 0);
-                            view.setVisibility(View.VISIBLE);
-                        }
+
+                        mRequestId++;
+                        view.postVisualStateCallback(
+                                mRequestId,
+                                new WebView.VisualStateCallback() {
+                                    @Override
+                                    public void onComplete(long requestId) {
+                                        if (requestId == mRequestId) {
+                                            android.os.Trace.endAsyncSection("executeTerminal", 0);
+                                            view.setVisibility(View.VISIBLE);
+                                        }
+                                    }
+                                });
                     }
 
                     @Override
@@ -261,7 +297,7 @@ public class MainActivity extends AppCompatActivity
 
     private static void runE2fsck(String filePath) throws IOException {
         try {
-            runCommand("/system/bin/e2fsck", "-f", filePath);
+            runCommand("/system/bin/e2fsck", "-y", "-f", filePath);
             Log.d(TAG, "e2fsck completed: " + filePath);
         } catch (IOException e) {
             Log.e(TAG, "Failed to run e2fsck", e);
@@ -380,8 +416,7 @@ public class MainActivity extends AppCompatActivity
     private boolean installIfNecessary() {
         // If payload from external storage exists(only for debuggable build) or there is no
         // installed image, launch installer activity.
-        if ((Build.isDebuggable() && InstallUtils.payloadFromExternalStorageExists())
-                || !InstallUtils.isImageInstalled(this)) {
+        if (!InstallUtils.isImageInstalled(this)) {
             Intent intent = new Intent(this, InstallerActivity.class);
             startActivityForResult(intent, REQUEST_CODE_INSTALLER);
             return true;
@@ -393,7 +428,29 @@ public class MainActivity extends AppCompatActivity
         if (!InstallUtils.isImageInstalled(this)) {
             return;
         }
+        // TODO: implement intent for setting, close and tap to the notification
+        // Currently mock a PendingIntent for notification.
+        Intent intent = new Intent();
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Icon icon = Icon.createWithResource(getResources(), R.drawable.ic_launcher_foreground);
+        Notification notification = new Notification.Builder(this, TAG)
+                .setChannelId(TAG)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(getResources().getString(R.string.service_notification_title))
+                .setContentText(getResources().getString(R.string.service_notification_content))
+                .setContentIntent(pendingIntent)
+                .setOngoing(true)
+                .addAction(new Notification.Action.Builder(icon,
+                        getResources().getString(R.string.service_notification_settings),
+                        pendingIntent).build())
+                .addAction(new Notification.Action.Builder(icon,
+                        getResources().getString(R.string.service_notification_quit_action),
+                        pendingIntent).build())
+                .build();
+
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
-        VmLauncherServices.startVmLauncherService(this, this);
+        VmLauncherServices.startVmLauncherService(this, this, notification);
     }
 }
