@@ -206,7 +206,7 @@ public class InstallerService extends Service {
             notifyError(getString(R.string.installer_error_unknown));
             return false;
         }
-        return true;
+        return InstallUtils.createInstalledMarker(this);
     }
 
     private void notifyError(String displayText) {
