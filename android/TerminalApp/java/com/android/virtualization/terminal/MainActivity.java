@@ -15,19 +15,18 @@
  */
 package com.android.virtualization.terminal;
 
-import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
+import android.content.SharedPreferences;
 import android.graphics.drawable.Icon;
 import android.graphics.fonts.FontStyle;
 import android.net.http.SslError;
-import android.os.Build;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -44,8 +43,6 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
-
-import androidx.appcompat.app.AppCompatActivity;
 
 import com.android.virtualization.vmlauncher.InstallUtils;
 import com.android.virtualization.vmlauncher.VmLauncherServices;
@@ -68,7 +65,7 @@ import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 
-public class MainActivity extends AppCompatActivity
+public class MainActivity extends BaseActivity
         implements VmLauncherServices.VmLauncherServiceCallback,
                 AccessibilityManager.TouchExplorationStateChangeListener {
 
@@ -89,23 +86,13 @@ public class MainActivity extends AppCompatActivity
         super.onCreate(savedInstanceState);
 
         boolean launchInstaller = installIfNecessary();
-        try {
-            // No resize for now.
-            long newSizeInBytes = 0;
-            diskResize(this, newSizeInBytes);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to resize disk", e);
-            Toast.makeText(this, "Error resizing disk: " + e.getMessage(), Toast.LENGTH_LONG)
-                    .show();
-        }
-
-        checkAndRequestPostNotificationsPermission();
 
         NotificationManager notificationManager = getSystemService(NotificationManager.class);
-        NotificationChannel notificationChannel =
-                new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
-        assert notificationManager != null;
-        notificationManager.createNotificationChannel(notificationChannel);
+        if (notificationManager.getNotificationChannel(TAG) == null) {
+            NotificationChannel notificationChannel =
+                    new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
+            notificationManager.createNotificationChannel(notificationChannel);
+        }
 
         setContentView(R.layout.activity_headless);
 
@@ -176,6 +163,9 @@ public class MainActivity extends AppCompatActivity
         Log.i(TAG, "URL=" + getTerminalServiceUrl().toString());
         mWebView.setWebViewClient(
                 new WebViewClient() {
+                    private boolean mLoadFailed = false;
+                    private long mRequestId = 0;
+
                     @Override
                     public boolean shouldOverrideUrlLoading(
                             WebView view, WebResourceRequest request) {
@@ -183,8 +173,14 @@ public class MainActivity extends AppCompatActivity
                     }
 
                     @Override
+                    public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                        mLoadFailed = false;
+                    }
+
+                    @Override
                     public void onReceivedError(
                             WebView view, WebResourceRequest request, WebResourceError error) {
+                        mLoadFailed = true;
                         switch (error.getErrorCode()) {
                             case WebViewClient.ERROR_CONNECT:
                             case WebViewClient.ERROR_HOST_LOOKUP:
@@ -199,17 +195,22 @@ public class MainActivity extends AppCompatActivity
 
                     @Override
                     public void onPageFinished(WebView view, String url) {
-                        URL loadedUrl = null;
-                        try {
-                            loadedUrl = new URL(url);
-                        } catch (MalformedURLException e) {
-                            // cannot happen.
+                        if (mLoadFailed) {
+                            return;
                         }
-                        Log.i(TAG, "on page finished. URL=" + loadedUrl);
-                        if (getTerminalServiceUrl().toString().equals(url)) {
-                            android.os.Trace.endAsyncSection("executeTerminal", 0);
-                            view.setVisibility(View.VISIBLE);
-                        }
+
+                        mRequestId++;
+                        view.postVisualStateCallback(
+                                mRequestId,
+                                new WebView.VisualStateCallback() {
+                                    @Override
+                                    public void onComplete(long requestId) {
+                                        if (requestId == mRequestId) {
+                                            android.os.Trace.endAsyncSection("executeTerminal", 0);
+                                            view.setVisibility(View.VISIBLE);
+                                        }
+                                    }
+                                });
                     }
 
                     @Override
@@ -238,12 +239,11 @@ public class MainActivity extends AppCompatActivity
                 .start();
     }
 
-    private void diskResize(Context context, long sizeInBytes) throws IOException {
+    private void diskResize(File file, long sizeInBytes) throws IOException {
         try {
             if (sizeInBytes == 0) {
                 return;
             }
-            File file = getPartitionFile(context, "root_part");
             String filePath = file.getAbsolutePath();
             Log.d(TAG, "Disk-resize in progress for partition: " + filePath);
 
@@ -267,7 +267,7 @@ public class MainActivity extends AppCompatActivity
             throws FileNotFoundException {
         File file = new File(context.getFilesDir(), fileName);
         if (!file.exists()) {
-            Log.d(TAG, fileName + " - file not found");
+            Log.d(TAG, file.getAbsolutePath() + " - file not found");
             throw new FileNotFoundException("File not found: " + fileName);
         }
         return file;
@@ -288,7 +288,7 @@ public class MainActivity extends AppCompatActivity
 
     private static void runE2fsck(String filePath) throws IOException {
         try {
-            runCommand("/system/bin/e2fsck", "-f", filePath);
+            runCommand("/system/bin/e2fsck", "-y", "-f", filePath);
             Log.d(TAG, "e2fsck completed: " + filePath);
         } catch (IOException e) {
             Log.e(TAG, "Failed to run e2fsck", e);
@@ -312,10 +312,11 @@ public class MainActivity extends AppCompatActivity
         }
     }
 
-    private static void runCommand(String... command) throws IOException {
+    private static String runCommand(String... command) throws IOException {
         try {
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
             process.waitFor();
+            return new String(process.getInputStream().readAllBytes());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException("Command interrupted", e);
@@ -336,15 +337,6 @@ public class MainActivity extends AppCompatActivity
             throw new RuntimeException(e);
         }
         return;
-    }
-
-    private void checkAndRequestPostNotificationsPermission() {
-        if (getApplicationContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                    POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE);
-        }
     }
 
     @Override
@@ -416,8 +408,7 @@ public class MainActivity extends AppCompatActivity
     private boolean installIfNecessary() {
         // If payload from external storage exists(only for debuggable build) or there is no
         // installed image, launch installer activity.
-        if ((Build.isDebuggable() && InstallUtils.payloadFromExternalStorageExists())
-                || !InstallUtils.isImageInstalled(this)) {
+        if (!InstallUtils.isImageInstalled(this)) {
             Intent intent = new Intent(this, InstallerActivity.class);
             startActivityForResult(intent, REQUEST_CODE_INSTALLER);
             return true;
@@ -429,6 +420,9 @@ public class MainActivity extends AppCompatActivity
         if (!InstallUtils.isImageInstalled(this)) {
             return;
         }
+
+        resizeDiskIfNecessary();
+
         // TODO: implement intent for setting, close and tap to the notification
         // Currently mock a PendingIntent for notification.
         Intent intent = new Intent();
@@ -453,5 +447,58 @@ public class MainActivity extends AppCompatActivity
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this, notification);
+    }
+
+    private long roundUpDiskSize(long diskSize) {
+        // Round up every disk_size_round_up_step_size_in_mb MB
+        int disk_size_step = getResources().getInteger(
+                R.integer.disk_size_round_up_step_size_in_mb) * 1024 * 1024;
+        return (long) Math.ceil(((double) diskSize) / disk_size_step) * disk_size_step;
+    }
+
+    private long getMinFilesystemSize(File file) throws IOException, NumberFormatException {
+        try {
+            String result = runCommand("/system/bin/resize2fs", "-P", file.getAbsolutePath());
+            // The return value is the number of 4k block
+            long minSize = Long.parseLong(
+                    result.lines().toArray(String[]::new)[1].substring(42)) * 4 * 1024;
+            return roundUpDiskSize(minSize);
+        } catch (IOException | NumberFormatException e) {
+            Log.e(TAG, "Failed to get filesystem size", e);
+            throw e;
+        }
+    }
+
+    private static long getFilesystemSize(File file) throws ErrnoException {
+        return Os.stat(file.getAbsolutePath()).st_size;
+    }
+
+    private void resizeDiskIfNecessary() {
+        try {
+            File file = getPartitionFile(this, "root_part");
+            SharedPreferences sharedPref = this.getSharedPreferences(
+                    getString(R.string.preference_file_key), Context.MODE_PRIVATE);
+            SharedPreferences.Editor editor = sharedPref.edit();
+
+            long minDiskSize = getMinFilesystemSize(file);
+            editor.putLong(getString(R.string.preference_min_disk_size_key), minDiskSize);
+
+            long currentDiskSize = getFilesystemSize(file);
+            long newSizeInBytes = sharedPref.getLong(getString(R.string.preference_disk_size_key),
+                    roundUpDiskSize(currentDiskSize));
+            editor.putLong(getString(R.string.preference_disk_size_key), newSizeInBytes);
+            editor.apply();
+
+            Log.d(TAG, "Current disk size: " + currentDiskSize);
+            Log.d(TAG, "Targeting disk size: " + newSizeInBytes);
+
+            if (newSizeInBytes != currentDiskSize) {
+                diskResize(file, newSizeInBytes);
+            }
+        } catch (FileNotFoundException e) {
+            Log.d(TAG, "No partition file");
+        } catch (IOException | ErrnoException | NumberFormatException e) {
+            Log.e(TAG, "Failed to resize disk", e);
+        }
     }
 }
