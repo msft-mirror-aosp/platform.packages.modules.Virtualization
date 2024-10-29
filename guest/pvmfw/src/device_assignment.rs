@@ -69,6 +69,8 @@ pub enum DeviceAssignmentError {
     InvalidReg(u64),
     /// Token for <reg> of assigned device does not match expected value.
     InvalidRegToken(u64, u64),
+    /// Invalid virtual <reg> size of assigned device.
+    InvalidRegSize(u64, u64),
     /// Invalid <interrupts>
     InvalidInterrupts,
     /// Malformed <iommus>
@@ -124,6 +126,9 @@ impl fmt::Display for DeviceAssignmentError {
             }
             Self::InvalidReg(addr) => {
                 write!(f, "Invalid guest MMIO granule (addr: {addr:#x})")
+            }
+            Self::InvalidRegSize(size, expected) => {
+                write!(f, "Unexpected MMIO size ({size:#x}), should be {expected:#x}")
             }
             Self::InvalidRegToken(token, expected) => {
                 write!(f, "Unexpected MMIO token ({token:#x}), should be {expected:#x}")
@@ -776,13 +781,15 @@ impl AssignedDeviceInfo {
             if reg.overlaps(&PVMFW_RANGE) {
                 return Err(DeviceAssignmentError::InvalidReg(reg.addr));
             }
+            if reg.size != phys_reg.size {
+                return Err(DeviceAssignmentError::InvalidRegSize(reg.size, phys_reg.size));
+            }
             let expected_token = phys_reg.addr;
             // If this call returns successfully, hyp has mapped the MMIO region at `reg`.
             let token = hypervisor.get_phys_mmio_token(reg.addr, reg.size).map_err(|e| {
                 error!("Hypervisor error while requesting MMIO token: {e}");
                 DeviceAssignmentError::InvalidReg(reg.addr)
             })?;
-            // Only check address because hypervisor guarantees size match when success.
             if token != expected_token {
                 return Err(DeviceAssignmentError::InvalidRegToken(token, expected_token));
             }
