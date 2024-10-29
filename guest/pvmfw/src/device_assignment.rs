@@ -1196,9 +1196,18 @@ mod tests {
         iommu_tokens: BTreeMap<(u64, u64), (u64, u64)>,
     }
 
+    impl MockHypervisor {
+        // TODO(ptosi): Improve these tests to cover multi-page devices.
+        fn get_mmio_token(&self, addr: u64) -> Option<&u64> {
+            // We currently only have single (or sub-) page MMIO test data so can ignore sizes.
+            let key = self.mmio_tokens.keys().find(|(virt, _)| *virt == addr)?;
+            self.mmio_tokens.get(key)
+        }
+    }
+
     impl DeviceAssigningHypervisor for MockHypervisor {
-        fn get_phys_mmio_token(&self, base_ipa: u64, size: u64) -> MockHypervisorResult<u64> {
-            let token = self.mmio_tokens.get(&(base_ipa, size));
+        fn get_phys_mmio_token(&self, base_ipa: u64, _size: u64) -> MockHypervisorResult<u64> {
+            let token = self.get_mmio_token(base_ipa);
 
             Ok(*token.ok_or(MockHypervisorError::FailedGetPhysMmioToken)?)
         }
