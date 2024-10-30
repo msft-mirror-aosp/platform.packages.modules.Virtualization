@@ -35,3 +35,21 @@ pub unsafe fn write_volatile_u8(dst: *mut u8, src: u8) {
         }
     }
 }
+
+/// Flush `size` bytes of data cache by virtual address.
+#[inline]
+pub(crate) fn flush_region(start: usize, size: usize) {
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "aarch64")] {
+            let line_size = aarch64::min_dcache_line_size();
+            let end = start + size;
+            let start = crate::util::unchecked_align_down(start, line_size);
+
+            for line in (start..end).step_by(line_size) {
+                crate::dc!("cvau", line);
+            }
+        } else {
+            compile_error!("Unsupported target_arch")
+        }
+    }
+}

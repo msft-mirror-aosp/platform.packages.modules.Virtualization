@@ -73,6 +73,23 @@ macro_rules! dsb {
     }};
 }
 
+/// Executes a data cache operation.
+#[macro_export]
+macro_rules! dc {
+    ($option:literal, $addr:expr) => {{
+        let addr: usize = $addr;
+        #[allow(unused_unsafe)] // In case the macro is used within an unsafe block.
+        // SAFETY: Clearing cache lines shouldn't have Rust-visible side effects.
+        unsafe {
+            core::arch::asm!(
+                concat!("dc ", $option, ", {x}"),
+                x = in(reg) addr,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+    }};
+}
+
 /// Invalidates cached leaf PTE entries by virtual address.
 #[macro_export]
 macro_rules! tlbi {
@@ -110,4 +127,17 @@ pub unsafe fn strb(dst: *mut u8, src: u8) {
             options(preserves_flags),
         );
     }
+}
+
+/// Reads the number of words in the smallest cache line of all the data caches and unified caches.
+#[inline]
+pub fn min_dcache_line_size() -> usize {
+    const DMINLINE_SHIFT: usize = 16;
+    const DMINLINE_MASK: usize = 0xf;
+    let ctr_el0 = read_sysreg!("ctr_el0");
+
+    // DminLine: log2 of the number of words in the smallest cache line of all the data caches.
+    let dminline = (ctr_el0 >> DMINLINE_SHIFT) & DMINLINE_MASK;
+
+    1 << dminline
 }
