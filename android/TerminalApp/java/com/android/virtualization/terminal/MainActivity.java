@@ -128,7 +128,9 @@ public class MainActivity extends BaseActivity
                         + "&fontWeightBold="
                         + (FontStyle.FONT_WEIGHT_BOLD + config.fontWeightAdjustment)
                         + "&screenReaderMode="
-                        + mAccessibilityManager.isTouchExplorationEnabled();
+                        + mAccessibilityManager.isTouchExplorationEnabled()
+                        + "&titleFixed="
+                        + getString(R.string.app_name);
 
         try {
             return new URL("https", VM_ADDR, TTYD_PORT, "/" + query);
