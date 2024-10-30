@@ -47,7 +47,6 @@ apex_defaults {
         "android.system.virtualmachine.res",
     ] + select(release_flag("RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES"), {
         true: [
-            "VmLauncherApp",
             "VmTerminalApp",
         ],
         default: [],
@@ -167,6 +166,12 @@ apex_defaults {
         default: [],
     }) + select(release_flag("RELEASE_AVF_ENABLE_NETWORK"), {
         true: ["com.android.virt.vmnic.rc"],
+        default: [],
+    }) + select(soong_config_variable("ANDROID", "target_boots_16k"), {
+        true: [
+            "microdroid_16k.json",
+            "microdroid_kernel_16k",
+        ],
         default: [],
     }),
     host_required: [

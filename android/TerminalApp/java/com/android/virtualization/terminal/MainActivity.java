@@ -21,9 +21,9 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
-import android.content.SharedPreferences;
 import android.graphics.drawable.Icon;
 import android.graphics.fonts.FontStyle;
 import android.net.http.SslError;
@@ -45,6 +45,7 @@ import android.webkit.WebViewClient;
 import android.widget.Toast;
 
 import com.android.virtualization.vmlauncher.InstallUtils;
+import com.android.virtualization.vmlauncher.VmLauncherService;
 import com.android.virtualization.vmlauncher.VmLauncherServices;
 
 import com.google.android.material.appbar.MaterialToolbar;
@@ -127,7 +128,9 @@ public class MainActivity extends BaseActivity
                         + "&fontWeightBold="
                         + (FontStyle.FONT_WEIGHT_BOLD + config.fontWeightAdjustment)
                         + "&screenReaderMode="
-                        + mAccessibilityManager.isTouchExplorationEnabled();
+                        + mAccessibilityManager.isTouchExplorationEnabled()
+                        + "&titleFixed="
+                        + getString(R.string.app_name);
 
         try {
             return new URL("https", VM_ADDR, TTYD_PORT, "/" + query);
@@ -207,6 +210,8 @@ public class MainActivity extends BaseActivity
                                     public void onComplete(long requestId) {
                                         if (requestId == mRequestId) {
                                             android.os.Trace.endAsyncSection("executeTerminal", 0);
+                                            findViewById(R.id.boot_progress)
+                                                    .setVisibility(View.GONE);
                                             view.setVisibility(View.VISIBLE);
                                         }
                                     }
@@ -428,22 +433,46 @@ public class MainActivity extends BaseActivity
         Intent intent = new Intent();
         PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
+        Intent stopIntent = new Intent();
+        stopIntent.setClass(this, VmLauncherService.class);
+        stopIntent.setAction(VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE);
+        PendingIntent stopPendingIntent =
+                PendingIntent.getService(
+                        this,
+                        0,
+                        stopIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Icon icon = Icon.createWithResource(getResources(), R.drawable.ic_launcher_foreground);
-        Notification notification = new Notification.Builder(this, TAG)
-                .setChannelId(TAG)
-                .setSmallIcon(R.drawable.ic_launcher_foreground)
-                .setContentTitle(getResources().getString(R.string.service_notification_title))
-                .setContentText(getResources().getString(R.string.service_notification_content))
-                .setContentIntent(pendingIntent)
-                .setOngoing(true)
-                .addAction(new Notification.Action.Builder(icon,
-                        getResources().getString(R.string.service_notification_settings),
-                        pendingIntent).build())
-                .addAction(new Notification.Action.Builder(icon,
-                        getResources().getString(R.string.service_notification_quit_action),
-                        pendingIntent).build())
-                .build();
+        Notification notification =
+                new Notification.Builder(this, TAG)
+                        .setChannelId(TAG)
+                        .setSmallIcon(R.drawable.ic_launcher_foreground)
+                        .setContentTitle(
+                                getResources().getString(R.string.service_notification_title))
+                        .setContentText(
+                                getResources().getString(R.string.service_notification_content))
+                        .setContentIntent(pendingIntent)
+                        .setOngoing(true)
+                        .addAction(
+                                new Notification.Action.Builder(
+                                                icon,
+                                                getResources()
+                                                        .getString(
+                                                                R.string
+                                                                        .service_notification_settings),
+                                                pendingIntent)
+                                        .build())
+                        .addAction(
+                                new Notification.Action.Builder(
+                                                icon,
+                                                getResources()
+                                                        .getString(
+                                                                R.string
+                                                                        .service_notification_quit_action),
+                                                stopPendingIntent)
+                                        .build())
+                        .setDeleteIntent(stopPendingIntent)
+                        .build();
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this, notification);
