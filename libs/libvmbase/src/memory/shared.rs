@@ -46,8 +46,8 @@ use tinyvec::ArrayVec;
 /// A global static variable representing the system memory tracker, protected by a spin mutex.
 pub static MEMORY: SpinMutex<Option<MemoryTracker>> = SpinMutex::new(None);
 
-static SHARED_POOL: OnceBox<LockedFrameAllocator<32>> = OnceBox::new();
-static SHARED_MEMORY: SpinMutex<Option<MemorySharer>> = SpinMutex::new(None);
+pub(crate) static SHARED_POOL: OnceBox<LockedFrameAllocator<32>> = OnceBox::new();
+pub(crate) static SHARED_MEMORY: SpinMutex<Option<MemorySharer>> = SpinMutex::new(None);
 
 /// Memory range.
 pub type MemoryRange = Range<usize>;
@@ -378,13 +378,13 @@ impl Drop for MemoryTracker {
     }
 }
 
-struct MmioSharer {
+pub(crate) struct MmioSharer {
     granule: usize,
     frames: BTreeSet<usize>,
 }
 
 impl MmioSharer {
-    fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let granule = Self::get_granule()?;
         let frames = BTreeSet::new();
 
@@ -394,7 +394,7 @@ impl MmioSharer {
         Ok(Self { granule, frames })
     }
 
-    fn get_granule() -> Result<usize> {
+    pub fn get_granule() -> Result<usize> {
         let Some(mmio_guard) = get_mmio_guard() else {
             return Ok(PAGE_SIZE);
         };
@@ -405,7 +405,7 @@ impl MmioSharer {
     }
 
     /// Share the MMIO region aligned to the granule size containing addr (not validated as MMIO).
-    fn share(&mut self, addr: VirtualAddress) -> Result<VaRange> {
+    pub fn share(&mut self, addr: VirtualAddress) -> Result<VaRange> {
         // This can't use virt_to_phys() since 0x0 is a valid MMIO address and we are ID-mapped.
         let phys = addr.0;
         let base = unchecked_align_down(phys, self.granule);
@@ -426,7 +426,7 @@ impl MmioSharer {
         Ok((base_va..base_va + self.granule).into())
     }
 
-    fn unshare_all(&mut self) {
+    pub fn unshare_all(&mut self) {
         let Some(mmio_guard) = get_mmio_guard() else {
             return self.frames.clear();
         };
@@ -490,7 +490,7 @@ pub(crate) unsafe fn dealloc_shared(vaddr: NonNull<u8>, layout: Layout) -> hyp::
 /// Allocates memory on the heap and shares it with the host.
 ///
 /// Unshares all pages when dropped.
-struct MemorySharer {
+pub(crate) struct MemorySharer {
     granule: usize,
     frames: Vec<(usize, Layout)>,
 }
@@ -498,13 +498,13 @@ struct MemorySharer {
 impl MemorySharer {
     /// Constructs a new `MemorySharer` instance with the specified granule size and capacity.
     /// `granule` must be a power of 2.
-    fn new(granule: usize, capacity: usize) -> Self {
+    pub fn new(granule: usize, capacity: usize) -> Self {
         assert!(granule.is_power_of_two());
         Self { granule, frames: Vec::with_capacity(capacity) }
     }
 
     /// Gets from the global allocator a granule-aligned region that suits `hint` and share it.
-    fn refill(&mut self, pool: &mut FrameAllocator<32>, hint: Layout) {
+    pub fn refill(&mut self, pool: &mut FrameAllocator<32>, hint: Layout) {
         let layout = hint.align_to(self.granule).unwrap().pad_to_align();
         assert_ne!(layout.size(), 0);
         // SAFETY: layout has non-zero size.
