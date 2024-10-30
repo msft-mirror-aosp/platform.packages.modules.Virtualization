@@ -24,8 +24,8 @@
     <string name="installer_title_text">Install Linux terminal</string>
     <!-- Installer activity description format [CHAR LIMIT=none] -->
     <string name="installer_desc_text_format">To launch Linux terminal, you need to download roughly <xliff:g id="expected_size" example="350GB">%1$s</xliff:g> of data over network.\nWould you proceed?</string>
-    <!-- Checkbox at the installer activity to wait for Wi-Fi on metered network to prevent from paying network traffic [CHAR LIMIT=none] -->
-    <string name="installer_wait_for_wifi_checkbox_text">Wait for Wi-Fi on metered network</string>
+    <!-- Checkbox at the installer activity to download when Wi-Fi is available to prevent from paying network traffic [CHAR LIMIT=none] -->
+    <string name="installer_wait_for_wifi_checkbox_text">Download when Wi-Fi is available</string>
     <!-- Button at the installer activity to confirm installation [CHAR LIMIT=16] -->
     <string name="installer_install_button_enabled_text">Install</string>
     <!-- Button at the installer activity to when installation is already in progress [CHAR LIMIT=16] -->
