@@ -45,13 +45,14 @@ public class VmAttestationTests extends MicrodroidDeviceTestBase {
     private static final String VM_PAYLOAD_PATH = "libvm_attestation_test_payload.so";
 
     @Parameterized.Parameter(0)
-    public String mOs;
+    public String mGki;
 
-    @Parameterized.Parameters(name = "os={0}")
+    @Parameterized.Parameters(name = "gki={0}")
     public static Collection<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
-        for (String os : SUPPORTED_OSES) {
-            ret.add(new Object[] {os});
+        ret.add(new Object[] {null /* use microdroid kernel */});
+        for (String gki : SUPPORTED_GKI_VERSIONS) {
+            ret.add(new Object[] {gki});
         }
         return ret;
     }
@@ -60,7 +61,7 @@ public class VmAttestationTests extends MicrodroidDeviceTestBase {
     public void setup() throws IOException {
         grantPermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
-        prepareTestSetup(true /* protectedVm */, mOs);
+        prepareTestSetup(true /* protectedVm */, mGki);
         setMaxPerformanceTaskProfile();
     }
 
