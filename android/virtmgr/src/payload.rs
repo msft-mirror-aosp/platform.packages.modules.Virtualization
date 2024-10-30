@@ -449,6 +449,8 @@ pub fn add_microdroid_system_images(
         DebugLevel::FULL => "debuggable",
         _ => return Err(anyhow!("unsupported debug level: {:?}", config.debugLevel)),
     };
+    // TODO(ioffe): generalise this
+    let os_name = if os_name == "microdroid_16k" { "microdroid" } else { os_name };
     let initrd = format!("/apex/com.android.virt/etc/{os_name}_initrd_{debug_suffix}.img");
     vm_config.initrd = Some(open_parcel_file(Path::new(&initrd), false)?);
 
