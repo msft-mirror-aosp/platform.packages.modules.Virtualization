@@ -18,3 +18,16 @@ rust_binary {
         false: false,
     }),
 }
+
+prebuilt_etc {
+    name: "lk_trusty.elf",
+    system_ext_specific: true,
+    relative_install_path: "vm/trusty_vm",
+    filename: "lk_trusty.elf",
+    arch: {
+        x86_64: {
+            src: ":trusty-test-lk.elf",
+        },
+    },
+    src: ":empty_file",
+}
