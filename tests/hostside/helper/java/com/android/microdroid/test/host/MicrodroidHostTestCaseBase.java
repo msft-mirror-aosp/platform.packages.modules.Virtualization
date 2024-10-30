@@ -23,24 +23,21 @@ import static com.google.common.truth.Truth.assertWithMessage;
 import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
 
-import com.android.compatibility.common.tradefed.build.CompatibilityBuildHelper;
 import com.android.microdroid.test.common.DeviceProperties;
 import com.android.microdroid.test.common.MetricsProcessor;
-import com.android.tradefed.build.IBuildInfo;
 import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.device.ITestDevice;
 import com.android.tradefed.device.TestDevice;
 import com.android.tradefed.testtype.junit4.BaseHostJUnit4Test;
 import com.android.tradefed.util.CommandResult;
 import com.android.tradefed.util.CommandStatus;
-import com.android.tradefed.util.FileUtil;
 import com.android.tradefed.util.RunUtil;
+import com.android.tradefed.util.SearchArtifactUtil;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -178,28 +175,12 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
 
     public File findTestFile(String name) {
         String moduleName = getInvocationContext().getConfigurationDescriptor().getModuleName();
-        IBuildInfo buildInfo = getBuild();
-        CompatibilityBuildHelper helper = new CompatibilityBuildHelper(buildInfo);
-
-        // We're not using helper.getTestFile here because it sometimes picks a file
-        // from a different module, which may be old and/or wrong. See b/328779049.
-        try {
-            File testsDir = helper.getTestsDir().getAbsoluteFile();
-
-            for (File subDir : FileUtil.findDirsUnder(testsDir, testsDir.getParentFile())) {
-                if (!subDir.getName().equals(moduleName)) {
-                    continue;
-                }
-                File testFile = FileUtil.findFile(subDir, name);
-                if (testFile != null) {
-                    return testFile;
-                }
-            }
-        } catch (IOException e) {
+        File testFile = SearchArtifactUtil.searchFile(name, false);
+        if (testFile == null) {
             throw new AssertionError(
-                    "Failed to find test file " + name + " for module " + moduleName, e);
+                    "Failed to find test file " + name + " for module " + moduleName);
         }
-        throw new AssertionError("Failed to find test file " + name + " for module " + moduleName);
+        return testFile;
     }
 
     public String getPathForPackage(String packageName) throws DeviceNotAvailableException {
