@@ -155,10 +155,10 @@ pub struct MicrodroidConfig {
     #[arg(long)]
     devices: Vec<PathBuf>,
 
-    /// Version of OS to use. If not set, defaults to microdroid.
-    /// You can list all available OSes via `vm info` command.
+    /// Version of GKI to use. If set, use instead of microdroid kernel
+    #[cfg(vendor_modules)]
     #[arg(long)]
-    os: Option<String>,
+    gki: Option<String>,
 }
 
 impl MicrodroidConfig {
@@ -166,6 +166,16 @@ impl MicrodroidConfig {
         cfg_if::cfg_if! {
             if #[cfg(vendor_modules)] {
                 self.vendor.as_ref()
+            } else {
+                None
+            }
+        }
+    }
+
+    fn gki(&self) -> Option<&str> {
+        cfg_if::cfg_if! {
+            if #[cfg(vendor_modules)] {
+                self.gki.as_deref()
             } else {
                 None
             }
