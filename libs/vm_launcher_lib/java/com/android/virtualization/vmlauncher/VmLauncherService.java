@@ -33,6 +33,7 @@ import io.grpc.okhttp.OkHttpServerBuilder;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -62,6 +63,11 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (Objects.equals(
+                intent.getAction(), VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE)) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         if (mVirtualMachine != null) {
             Log.d(TAG, "VM instance is already started");
             return START_NOT_STICKY;
