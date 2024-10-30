@@ -18,7 +18,7 @@
 
 extern crate alloc;
 
-pub mod aarch64;
+pub mod arch;
 pub mod bionic;
 pub mod console;
 mod entry;
@@ -44,9 +44,4 @@ use power::reboot;
 fn panic(info: &PanicInfo) -> ! {
     eprintln!("{}", info);
     reboot()
-}
-
-// TODO(ptosi): Move crate::aarch64 to crate::arch::aarch64 and remove this.
-pub(crate) mod arch {
-    pub use crate::aarch64::write_volatile_u8;
 }
