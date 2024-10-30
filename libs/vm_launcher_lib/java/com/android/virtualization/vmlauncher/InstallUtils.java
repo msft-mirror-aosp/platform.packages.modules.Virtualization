@@ -49,6 +49,16 @@ public class InstallUtils {
         return Files.exists(getInstallationCompletedPath(context));
     }
 
+    public static boolean createInstalledMarker(Context context) {
+        try {
+            File file = new File(getInstallationCompletedPath(context).toString());
+            return file.createNewFile();
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to mark install completed", e);
+            return false;
+        }
+    }
+
     private static Path getPayloadPath() {
         File payloadDir = Environment.getExternalStoragePublicDirectory(PAYLOAD_DIR);
         if (payloadDir == null) {
@@ -114,14 +124,7 @@ public class InstallUtils {
         }
 
         // Create marker for installation done.
-        try {
-            File file = new File(getInstallationCompletedPath(context).toString());
-            file.createNewFile();
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to mark install completed", e);
-            return false;
-        }
-        return true;
+        return createInstalledMarker(context);
     }
 
     private static Function<String, String> getReplacer(Context context) {

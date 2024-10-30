@@ -909,7 +909,7 @@ fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
             shared_path.mask,
         );
 
-        let cfg_arg = format!("writeback=true,cache_policy=always,ugid_map='{}'", ugid_map_value);
+        let cfg_arg = format!("ugid_map='{}'", ugid_map_value);
 
         let mut command = Command::new(CROSVM_PATH);
         command
