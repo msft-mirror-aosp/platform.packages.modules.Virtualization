@@ -49,7 +49,6 @@ use vmbase::fdt::SwiotlbInfo;
 use vmbase::hyp;
 use vmbase::layout::{crosvm::MEM_START, MAX_VIRT_ADDR};
 use vmbase::memory::SIZE_4KB;
-use vmbase::util::flatten;
 use vmbase::util::RangeExt as _;
 use zerocopy::AsBytes as _;
 
@@ -726,7 +725,7 @@ fn patch_pci_info(fdt: &mut Fdt, pci_info: &PciInfo) -> libfdt::Result<()> {
 
     node.setprop_inplace(
         cstr!("ranges"),
-        flatten(&[pci_info.ranges[0].to_cells(), pci_info.ranges[1].to_cells()]),
+        [pci_info.ranges[0].to_cells(), pci_info.ranges[1].to_cells()].as_flattened(),
     )
 }
 
@@ -923,7 +922,7 @@ fn patch_gic(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
 
     let mut node =
         fdt.root_mut().next_compatible(cstr!("arm,gic-v3"))?.ok_or(FdtError::NotFound)?;
-    node.setprop_inplace(cstr!("reg"), flatten(&value))
+    node.setprop_inplace(cstr!("reg"), value.as_flattened())
 }
 
 fn patch_timer(fdt: &mut Fdt, num_cpus: usize) -> libfdt::Result<()> {
@@ -1316,7 +1315,7 @@ fn patch_dice_node(fdt: &mut Fdt, addr: usize, size: usize) -> libfdt::Result<()
 
     let addr: u64 = addr.try_into().unwrap();
     let size: u64 = size.try_into().unwrap();
-    node.setprop_inplace(cstr!("reg"), flatten(&[addr.to_be_bytes(), size.to_be_bytes()]))
+    node.setprop_inplace(cstr!("reg"), [addr.to_be_bytes(), size.to_be_bytes()].as_flattened())
 }
 
 fn empty_or_delete_prop(
