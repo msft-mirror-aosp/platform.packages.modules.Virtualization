@@ -1050,9 +1050,28 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
-    @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
-    public void testMicrodroidRamUsage(boolean protectedVm, String gki) throws Exception {
+    public void testMicrodroidRamUsage_protectedVm_true_gki_null() throws Exception {
+        checkMicrodroidRamUsage(/* protectedVm= */ true, /* gki= */ "null");
+    }
+
+    @Test
+    public void testMicrodroidRamUsage_protectedVm_false_gki_null() throws Exception {
+        checkMicrodroidRamUsage(/* protectedVm= */ false, /* gki= */ "null");
+    }
+
+    @Test
+    public void testMicrodroidRamUsage_protectedVm_true_gki_android15() throws Exception {
+        checkMicrodroidRamUsage(/* protectedVm= */ true, /* gki= */ "android15");
+    }
+
+    @Test
+    public void testMicrodroidRamUsage_protectedVm_false_gki_android15() throws Exception {
+        checkMicrodroidRamUsage(/* protectedVm= */ false, /* gki= */ "android15");
+    }
+
+    // TODO(b/209036125): Upgrade this function to a parameterized test once metrics can be
+    // collected with tradefed parameterizer.
+    void checkMicrodroidRamUsage(boolean protectedVm, String gki) throws Exception {
         // Preconditions
         assumeKernelSupported(gki);
         assumeVmTypeSupported(protectedVm);
