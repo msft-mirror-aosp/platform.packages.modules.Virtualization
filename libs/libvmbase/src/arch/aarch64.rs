@@ -92,14 +92,15 @@ macro_rules! tlbi {
     }};
 }
 
-/// Write with well-defined compiled behavior.
+/// STRB intrinsics.
 ///
 /// See https://github.com/rust-lang/rust/issues/131894
 ///
 /// # Safety
 ///
 /// `dst` must be valid for writes.
-pub unsafe fn write_volatile_u8(dst: *mut u8, src: u8) {
+#[inline]
+pub unsafe fn strb(dst: *mut u8, src: u8) {
     // SAFETY: strb only modifies *dst, which must be valid for writes.
     unsafe {
         core::arch::asm!(
