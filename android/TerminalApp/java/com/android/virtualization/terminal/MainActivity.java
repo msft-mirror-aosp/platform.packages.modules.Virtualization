@@ -21,9 +21,9 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
-import android.content.SharedPreferences;
 import android.graphics.drawable.Icon;
 import android.graphics.fonts.FontStyle;
 import android.net.http.SslError;
@@ -208,6 +208,8 @@ public class MainActivity extends BaseActivity
                                     public void onComplete(long requestId) {
                                         if (requestId == mRequestId) {
                                             android.os.Trace.endAsyncSection("executeTerminal", 0);
+                                            findViewById(R.id.boot_progress)
+                                                    .setVisibility(View.GONE);
                                             view.setVisibility(View.VISIBLE);
                                         }
                                     }
