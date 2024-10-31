@@ -21,7 +21,7 @@
     <skip />
     <!-- no translation found for installer_desc_text_format (2734224805682171826) -->
     <skip />
-    <!-- no translation found for installer_wait_for_wifi_checkbox_text (6254965309085392106) -->
+    <!-- no translation found for installer_wait_for_wifi_checkbox_text (487720664098014506) -->
     <skip />
     <!-- no translation found for installer_install_button_enabled_text (6142090640081511103) -->
     <skip />
@@ -63,10 +63,4 @@
     <string name="service_notification_title" msgid="2918088850910713393">"Тэрмінал запушчаны"</string>
     <string name="service_notification_content" msgid="8652887364784704911">"Націсніце, каб адкрыць тэрмінал."</string>
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Закрыць"</string>
-    <!-- no translation found for preference_file_key (8180395566959654170) -->
-    <skip />
-    <!-- no translation found for preference_disk_size_key (6737137552498692910) -->
-    <skip />
-    <!-- no translation found for preference_min_disk_size_key (7062997700090682730) -->
-    <skip />
 </resources>

@@ -19,7 +19,8 @@
     <string name="app_name" msgid="5597111707986572208">"Terminal"</string>
     <string name="installer_title_text" msgid="500663060973466805">"Install Linux terminal"</string>
     <string name="installer_desc_text_format" msgid="2734224805682171826">"To launch Linux terminal, you need to download roughly <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> of data over network.\nWould you proceed?"</string>
-    <string name="installer_wait_for_wifi_checkbox_text" msgid="6254965309085392106">"Wait for Wi-Fi on metered network"</string>
+    <!-- no translation found for installer_wait_for_wifi_checkbox_text (487720664098014506) -->
+    <skip />
     <string name="installer_install_button_enabled_text" msgid="6142090640081511103">"Install"</string>
     <string name="installer_install_button_disabled_text" msgid="8651445004125422467">"Installing"</string>
     <string name="installer_install_network_error_message" msgid="2450409107529774410">"Network error. Check connection and retry."</string>
@@ -53,10 +54,4 @@
     <string name="service_notification_title" msgid="2918088850910713393">"Terminal is running"</string>
     <string name="service_notification_content" msgid="8652887364784704911">"Click to open the terminal."</string>
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Close"</string>
-    <!-- no translation found for preference_file_key (8180395566959654170) -->
-    <skip />
-    <!-- no translation found for preference_disk_size_key (6737137552498692910) -->
-    <skip />
-    <!-- no translation found for preference_min_disk_size_key (7062997700090682730) -->
-    <skip />
 </resources>
