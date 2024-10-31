@@ -22,7 +22,6 @@ rust_library_rlib {
         "alloc",
     ],
     whole_static_libs: [
-        "libopen_dice_cbor",
         "libcrypto_baremetal",
     ],
     visibility: [

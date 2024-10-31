@@ -17,12 +17,11 @@ java_test_host {
     static_libs: [
         "MicrodroidHostTestHelper",
         "compatibility-host-util",
-        "cts-host-utils",
         "cts-statsd-atom-host-test-utils",
         "microdroid_payload_metadata",
     ],
     per_testcase_directory: true,
-    data: [
+    device_common_data: [
         ":MicrodroidTestApp",
         ":MicrodroidTestAppUpdated",
         ":microdroid_general_sepolicy.conf",
