@@ -33,8 +33,8 @@ use std::os::unix::io::{AsFd, RawFd};
 use std::sync::LazyLock;
 use clap::Parser;
 use nix::unistd::{write, Pid, Uid};
+use rustutils::inherited_fd::take_fd_ownership;
 use std::os::unix::raw::{pid_t, uid_t};
-use safe_ownedfd::take_fd_ownership;
 
 const LOG_TAG: &str = "virtmgr";
 
@@ -83,6 +83,11 @@ fn check_vm_support() -> Result<()> {
 }
 
 fn main() {
+    // SAFETY: This is very early in the process. Nobody has taken ownership of the inherited FDs
+    // yet.
+    unsafe { rustutils::inherited_fd::init_once() }
+        .expect("Failed to take ownership of inherited FDs");
+
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag(LOG_TAG)
@@ -102,7 +107,17 @@ fn main() {
     ProcessState::start_thread_pool();
 
     if cfg!(early) {
-        panic!("Early VM not implemented");
+        // we can't access VirtualizationServiceInternal, so directly call rlimit
+        let pid = i32::from(*PID_CURRENT);
+        let lim = libc::rlimit { rlim_cur: libc::RLIM_INFINITY, rlim_max: libc::RLIM_INFINITY };
+
+        // SAFETY: borrowing the new limit struct only. prlimit doesn't use lim outside its lifetime
+        let ret = unsafe { libc::prlimit(pid, libc::RLIMIT_MEMLOCK, &lim, std::ptr::null_mut()) };
+        if ret == -1 {
+            panic!("rlimit error: {}", std::io::Error::last_os_error());
+        } else if ret != 0 {
+            panic!("Unexpected return value from prlimit(): {ret}");
+        }
     } else {
         GLOBAL_SERVICE.removeMemlockRlimit().expect("Failed to remove memlock rlimit");
     }

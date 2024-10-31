@@ -30,8 +30,6 @@ use core::fmt;
 use core::mem::size_of;
 use core::ops::Range;
 use cstr::cstr;
-use fdtpci::PciMemoryFlags;
-use fdtpci::PciRangeType;
 use libfdt::AddressRange;
 use libfdt::CellIterator;
 use libfdt::Fdt;
@@ -45,6 +43,8 @@ use log::info;
 use log::warn;
 use static_assertions::const_assert;
 use tinyvec::ArrayVec;
+use vmbase::fdt::pci::PciMemoryFlags;
+use vmbase::fdt::pci::PciRangeType;
 use vmbase::fdt::SwiotlbInfo;
 use vmbase::hyp;
 use vmbase::layout::{crosvm::MEM_START, MAX_VIRT_ADDR};
@@ -1148,7 +1148,18 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
     let device_assignment = match vm_dtbo {
         Some(vm_dtbo) => {
             if let Some(hypervisor) = hyp::get_device_assigner() {
-                DeviceAssignmentInfo::parse(fdt, vm_dtbo, hypervisor).map_err(|e| {
+                // TODO(ptosi): Cache the (single?) granule once, in vmbase.
+                let granule = hyp::get_mem_sharer()
+                    .ok_or_else(|| {
+                        error!("No MEM_SHARE found during device assignment validation");
+                        RebootReason::InternalError
+                    })?
+                    .granule()
+                    .map_err(|e| {
+                        error!("Failed to get granule for device assignment validation: {e}");
+                        RebootReason::InternalError
+                    })?;
+                DeviceAssignmentInfo::parse(fdt, vm_dtbo, hypervisor, granule).map_err(|e| {
                     error!("Failed to parse device assignment from DT and VM DTBO: {e}");
                     RebootReason::InvalidFdt
                 })?

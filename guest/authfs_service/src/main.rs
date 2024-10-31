@@ -26,10 +26,8 @@ use anyhow::{bail, Result};
 use log::*;
 use rpcbinder::RpcServer;
 use rustutils::sockets::android_get_control_socket;
-use safe_ownedfd::take_fd_ownership;
 use std::ffi::OsString;
 use std::fs::{create_dir, read_dir, remove_dir_all, remove_file};
-use std::os::unix::io::OwnedFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use authfs_aidl_interface::aidl::com::android::virt::fs::AuthFsConfig::AuthFsConfig;
@@ -109,14 +107,12 @@ fn clean_up_working_directory() -> Result<()> {
     Ok(())
 }
 
-/// Prepares a socket file descriptor for the authfs service.
-fn prepare_authfs_service_socket() -> Result<OwnedFd> {
-    let raw_fd = android_get_control_socket(AUTHFS_SERVICE_SOCKET_NAME)?;
-    Ok(take_fd_ownership(raw_fd)?)
-}
-
 #[allow(clippy::eq_op)]
 fn try_main() -> Result<()> {
+    // SAFETY: This is very early in the process. Nobody has taken ownership of the inherited FDs
+    // yet.
+    unsafe { rustutils::inherited_fd::init_once()? };
+
     let debuggable = env!("TARGET_BUILD_VARIANT") != "user";
     let log_level = if debuggable { log::LevelFilter::Trace } else { log::LevelFilter::Info };
     android_logger::init_once(
@@ -125,7 +121,7 @@ fn try_main() -> Result<()> {
 
     clean_up_working_directory()?;
 
-    let socket_fd = prepare_authfs_service_socket()?;
+    let socket_fd = android_get_control_socket(AUTHFS_SERVICE_SOCKET_NAME)?;
     let service = AuthFsService::new_binder(debuggable).as_binder();
     debug!("{} is starting as a rpc service.", AUTHFS_SERVICE_SOCKET_NAME);
     let server = RpcServer::new_bound_socket(service, socket_fd)?;

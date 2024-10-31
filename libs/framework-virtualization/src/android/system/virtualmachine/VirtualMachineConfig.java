@@ -40,13 +40,13 @@ import android.os.PersistableBundle;
 import android.sysprop.HypervisorProperties;
 import android.system.virtualizationservice.DiskImage;
 import android.system.virtualizationservice.Partition;
+import android.system.virtualizationservice.SharedPath;
+import android.system.virtualizationservice.UsbConfig;
 import android.system.virtualizationservice.VirtualMachineAppConfig;
 import android.system.virtualizationservice.VirtualMachinePayloadConfig;
 import android.system.virtualizationservice.VirtualMachineRawConfig;
 import android.text.TextUtils;
 import android.util.Log;
-
-import com.android.system.virtualmachine.flags.Flags;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -77,7 +77,8 @@ public final class VirtualMachineConfig {
     private static final String TAG = "VirtualMachineConfig";
 
     private static String[] EMPTY_STRING_ARRAY = {};
-    private static final String U_BOOT_PREBUILT_PATH = "/apex/com.android.virt/etc/u-boot.bin";
+    private static final String U_BOOT_PREBUILT_PATH_ARM = "/apex/com.android.virt/etc/u-boot.bin";
+    private static final String U_BOOT_PREBUILT_PATH_X86 = "/apex/com.android.virt/etc/u-boot.rom";
 
     // These define the schema of the config file persisted on disk.
     // Please bump up the version number when adding a new key.
@@ -221,7 +222,6 @@ public final class VirtualMachineConfig {
      * @hide
      */
     @TestApi
-    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
     @OsName
     public static final String MICRODROID = "microdroid";
 
@@ -446,7 +446,6 @@ public final class VirtualMachineConfig {
      * @hide
      */
     @TestApi
-    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
     @NonNull
     public List<String> getExtraApks() {
         return mExtraApks;
@@ -592,7 +591,6 @@ public final class VirtualMachineConfig {
      * @hide
      */
     @TestApi
-    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
     @NonNull
     @OsName
     public String getOs() {
@@ -667,7 +665,11 @@ public final class VirtualMachineConfig {
                         .orElse(null);
 
         if (config.kernel == null && config.bootloader == null) {
-            config.bootloader = openOrNull(new File(U_BOOT_PREBUILT_PATH), MODE_READ_ONLY);
+          if (Arrays.stream(Build.SUPPORTED_ABIS).anyMatch("x86_64"::equals)) {
+            config.bootloader = openOrNull(new File(U_BOOT_PREBUILT_PATH_X86), MODE_READ_ONLY);
+          } else {
+            config.bootloader = openOrNull(new File(U_BOOT_PREBUILT_PATH_ARM), MODE_READ_ONLY);
+          }
         }
 
         config.params =
@@ -706,6 +708,15 @@ public final class VirtualMachineConfig {
             config.disks[i].partitions = partitions.toArray(new Partition[0]);
         }
 
+        config.sharedPaths =
+                new SharedPath
+                        [Optional.ofNullable(customImageConfig.getSharedPaths())
+                                .map(arr -> arr.length)
+                                .orElse(0)];
+        for (int i = 0; i < config.sharedPaths.length; i++) {
+            config.sharedPaths[i] = customImageConfig.getSharedPaths()[i].toParcelable();
+        }
+
         config.displayConfig =
                 Optional.ofNullable(customImageConfig.getDisplayConfig())
                         .map(dc -> dc.toParcelable())
@@ -725,6 +736,15 @@ public final class VirtualMachineConfig {
                         .map(ac -> ac.toParcelable())
                         .orElse(null);
         config.noBalloon = !customImageConfig.useAutoMemoryBalloon();
+        config.usbConfig =
+                Optional.ofNullable(customImageConfig.getUsbConfig())
+                        .map(
+                                uc -> {
+                                    UsbConfig usbConfig = new UsbConfig();
+                                    usbConfig.controller = uc.getUsbController();
+                                    return usbConfig;
+                                })
+                        .orElse(null);
         return config;
     }
 
@@ -998,7 +1018,6 @@ public final class VirtualMachineConfig {
          * @hide
          */
         @TestApi
-        @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
         @NonNull
         public Builder addExtraApk(@NonNull String packageName) {
             mExtraApks.add(requireNonNull(packageName, "extra APK package name must not be null"));
@@ -1251,7 +1270,6 @@ public final class VirtualMachineConfig {
          * @hide
          */
         @TestApi
-        @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
         @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
         @NonNull
         public Builder setVendorDiskImage(@NonNull File vendorDiskImage) {
@@ -1268,7 +1286,6 @@ public final class VirtualMachineConfig {
          * @hide
          */
         @TestApi
-        @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
         @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
         @NonNull
         public Builder setOs(@NonNull @OsName String os) {

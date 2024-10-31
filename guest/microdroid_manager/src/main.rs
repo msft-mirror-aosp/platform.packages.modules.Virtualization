@@ -50,7 +50,6 @@ use rpcbinder::RpcSession;
 use rustutils::sockets::android_get_control_socket;
 use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
-use safe_ownedfd::take_fd_ownership;
 use secretkeeper_comm::data_types::ID_SIZE;
 use std::borrow::Cow::{Borrowed, Owned};
 use std::env;
@@ -171,6 +170,10 @@ fn should_defer_rollback_protection() -> bool {
 }
 
 fn main() -> Result<()> {
+    // SAFETY: This is very early in the process. Nobody has taken ownership of the inherited FDs
+    // yet.
+    unsafe { rustutils::inherited_fd::init_once()? };
+
     // If debuggable, print full backtrace to console log with stdio_to_kmsg
     if is_debuggable()? {
         env::set_var("RUST_BACKTRACE", "full");
@@ -200,7 +203,7 @@ fn try_main() -> Result<()> {
     );
     info!("started.");
 
-    let vm_payload_service_fd = prepare_vm_payload_service_socket()?;
+    let vm_payload_service_fd = android_get_control_socket(VM_PAYLOAD_SERVICE_SOCKET_NAME)?;
 
     load_crashkernel_if_supported().context("Failed to load crashkernel")?;
 
@@ -265,7 +268,7 @@ fn verify_payload_with_instance_img(
     // Verify the payload before using it.
     let extracted_data = verify_payload(metadata, saved_data.as_ref())
         .context("Payload verification failed")
-        .map_err(|e| MicrodroidError::PayloadVerificationFailed(e.to_string()))?;
+        .map_err(|e| MicrodroidError::PayloadVerificationFailed(format!("{:?}", e)))?;
 
     // In case identity is ignored (by debug policy), we should reuse existing payload data, even
     // when the payload is changed. This is to keep the derived secret same as before.
@@ -481,12 +484,6 @@ fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
         .context("Could not connect to IVirtualMachineService")
 }
 
-/// Prepares a socket file descriptor for the vm payload service.
-fn prepare_vm_payload_service_socket() -> Result<OwnedFd> {
-    let raw_fd = android_get_control_socket(VM_PAYLOAD_SERVICE_SOCKET_NAME)?;
-    Ok(take_fd_ownership(raw_fd)?)
-}
-
 fn is_strict_boot() -> bool {
     Path::new(AVF_STRICT_BOOT).exists()
 }
@@ -636,7 +633,7 @@ fn load_crashkernel_if_supported() -> Result<()> {
     if requested {
         let status = Command::new("/system/bin/kexec_load").status()?;
         if !status.success() {
-            return Err(anyhow!("Failed to load crashkernel: {:?}", status));
+            return Err(anyhow!("Failed to load crashkernel: {status}"));
         }
         info!("ramdump is loaded: debuggable={debuggable}, ramdump={ramdump}");
     }
