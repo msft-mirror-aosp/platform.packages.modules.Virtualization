@@ -61,18 +61,14 @@ import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
-import java.security.Key;
 import java.security.KeyStore;
 import java.security.PrivateKey;
-import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
-import java.util.Enumeration;
 
 public class MainActivity extends BaseActivity
         implements VmLauncherServices.VmLauncherServiceCallback,
@@ -179,29 +175,11 @@ public class MainActivity extends BaseActivity
     }
 
     private void readClientCertificate() {
-        // TODO(b/363235314): instead of using the key in asset, it should be generated in runtime
-        // and then provisioned in the vm via virtio-fs
-        try (InputStream keystoreFileStream =
-                getClass().getResourceAsStream("/assets/client.p12")) {
-            KeyStore keyStore = KeyStore.getInstance("PKCS12");
-            String password = "1234";
-
-            keyStore.load(keystoreFileStream, password != null ? password.toCharArray() : null);
-            Enumeration<String> enumeration = keyStore.aliases();
-            while (enumeration.hasMoreElements()) {
-                String alias = enumeration.nextElement();
-                Key key = keyStore.getKey(alias, password.toCharArray());
-                if (key instanceof PrivateKey) {
-                    mPrivateKey = (PrivateKey) key;
-                    Certificate cert = keyStore.getCertificate(alias);
-                    mCertificates = new X509Certificate[1];
-                    mCertificates[0] = (X509Certificate) cert;
-                    return;
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, e.getMessage());
-        }
+        KeyStore.PrivateKeyEntry pke = CertificateUtils.createOrGetKey();
+        CertificateUtils.writeCertificateToFile(this, pke.getCertificate());
+        mPrivateKey = pke.getPrivateKey();
+        mCertificates = new X509Certificate[1];
+        mCertificates[0] = (X509Certificate) pke.getCertificate();
     }
 
     private void connectToTerminalService() {
