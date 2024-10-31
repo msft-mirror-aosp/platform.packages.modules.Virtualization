@@ -21,9 +21,9 @@ import android.util.Log;
 import androidx.annotation.Keep;
 
 import com.android.virtualization.vmlauncher.proto.DebianServiceGrpc;
-import com.android.virtualization.vmlauncher.proto.Empty;
 import com.android.virtualization.vmlauncher.proto.ForwardingRequestItem;
 import com.android.virtualization.vmlauncher.proto.IpAddr;
+import com.android.virtualization.vmlauncher.proto.QueueOpeningRequest;
 import com.android.virtualization.vmlauncher.proto.ReportVmIpAddrResponse;
 
 import io.grpc.stub.StreamObserver;
@@ -53,9 +53,9 @@ class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
 
     @Override
     public void openForwardingRequestQueue(
-            Empty request, StreamObserver<ForwardingRequestItem> responseObserver) {
+            QueueOpeningRequest request, StreamObserver<ForwardingRequestItem> responseObserver) {
         Log.d(DebianServiceImpl.TAG, "OpenForwardingRequestQueue");
-        runForwarderHost(new ForwarderHostCallback(responseObserver));
+        runForwarderHost(request.getCid(), new ForwarderHostCallback(responseObserver));
         responseObserver.onCompleted();
     }
 
@@ -77,7 +77,7 @@ class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
         }
     }
 
-    private static native void runForwarderHost(ForwarderHostCallback callback);
+    private static native void runForwarderHost(int cid, ForwarderHostCallback callback);
 
     protected interface DebianServiceCallback {
         void onIpAddressAvailable(String ipAddr);
