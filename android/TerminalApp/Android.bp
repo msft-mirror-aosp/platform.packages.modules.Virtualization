@@ -24,9 +24,7 @@ android_app {
     platform_apis: true,
     privileged: true,
     optimize: {
-        optimize: true,
-        proguard_flags_files: ["proguard.flags"],
-        shrink_resources: true,
+        enabled: false,
     },
     apex_available: [
         "com.android.virt",
