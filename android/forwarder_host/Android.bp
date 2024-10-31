@@ -1,0 +1,21 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_binary {
+    name: "forwarder_host",
+    edition: "2021",
+    srcs: ["src/main.rs"],
+    rustlibs: [
+        "libforwarder",
+        "liblog_rust",
+        "libnix",
+        "libvmm_sys_util",
+        "libvsock",
+    ],
+    proc_macros: [
+        "libpoll_token_derive",
+        "libremain",
+    ],
+    static_executable: true,
+}
