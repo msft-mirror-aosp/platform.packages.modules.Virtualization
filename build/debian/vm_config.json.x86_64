@@ -7,6 +7,14 @@
             "writable": true
         }
     ],
+    "sharedPath": [
+        {
+            "sharedPath": "/storage/emulated"
+        },
+        {
+            "sharedPath": "/data/data/com.google.android.virtualization.terminal/files"
+        }
+    ],
     "kernel": "$PAYLOAD_DIR/vmlinuz",
     "initrd": "$PAYLOAD_DIR/initrd.img",
     "params": "root=/dev/vda1",
