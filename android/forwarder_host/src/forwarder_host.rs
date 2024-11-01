@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use forwarder::forwarder::ForwarderSession;
 use jni::objects::{JObject, JValue};
+use jni::sys::jint;
 use jni::JNIEnv;
 use log::{debug, error, info, warn};
 use nix::sys::eventfd::EventFd;
@@ -380,13 +381,14 @@ fn create_forwarder_session(
 fn update_listening_ports(
     update_queue: &Arc<Mutex<VecDeque<TcpForwardTarget>>>,
     update_evt: &EventFd,
+    cid: i32,
 ) -> Result<()> {
     let mut update_queue = update_queue.lock().unwrap();
 
     // TODO(b/340126051): Bring listening ports from the guest.
     update_queue.push_back(TcpForwardTarget {
-        port: 12345,    /* Example value for testing */
-        vsock_cid: 157, /* Placeholder value */
+        port: 12345, /* Example value for testing */
+        vsock_cid: cid as u32,
     });
 
     update_evt.write(1).map_err(Error::UpdateEventWrite)?;
@@ -394,14 +396,13 @@ fn update_listening_ports(
 }
 
 // TODO(b/340126051): Host can receive opened ports from the guest.
-// TODO(b/340126051): Host can order executing chunnel on the guest.
-fn run_forwarder_host(jni_env: JNIEnv, jni_cb: JObject) -> Result<()> {
+fn run_forwarder_host(cid: i32, jni_env: JNIEnv, jni_cb: JObject) -> Result<()> {
     debug!("Starting forwarder_host");
     let update_evt = EventFd::new().map_err(Error::EventFdNew)?;
     let update_queue = Arc::new(Mutex::new(VecDeque::new()));
 
     // TODO(b/340126051): Instead of one-time execution, bring port info with separated thread.
-    update_listening_ports(&update_queue, &update_evt)?;
+    update_listening_ports(&update_queue, &update_evt, cid)?;
 
     let mut sessions = ForwarderSessions::new(update_evt, update_queue, jni_env, jni_cb)?;
     sessions.run()
@@ -412,9 +413,10 @@ fn run_forwarder_host(jni_env: JNIEnv, jni_cb: JObject) -> Result<()> {
 pub extern "C" fn Java_com_android_virtualization_vmlauncher_DebianServiceImpl_runForwarderHost(
     env: JNIEnv,
     _class: JObject,
+    cid: jint,
     callback: JObject,
 ) {
-    match run_forwarder_host(env, callback) {
+    match run_forwarder_host(cid, env, callback) {
         Ok(_) => {
             info!("forwarder_host is terminated");
         }
