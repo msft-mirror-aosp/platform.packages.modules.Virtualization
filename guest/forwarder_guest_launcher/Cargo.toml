@@ -2,6 +2,7 @@
 name = "forwarder_guest_launcher"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1.0.91"
