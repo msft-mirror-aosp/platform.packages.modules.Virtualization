@@ -6,3 +6,4 @@ chmod +x $target/usr/local/bin/ip_addr_reporter
 chmod +x $target/usr/local/bin/ttyd
 ln -s /etc/systemd/system/ttyd.service $target/etc/systemd/system/multi-user.target.wants/ttyd.service
 ln -s /etc/systemd/system/ip_addr_reporter.service $target/etc/systemd/system/multi-user.target.wants/ip_addr_reporter.service
+ln -s /etc/systemd/system/virtiofs.service $target/etc/systemd/system/multi-user.target.wants/virtiofs.service
