@@ -17,6 +17,10 @@ android_app {
         "com.google.android.material_material",
         "androidx.window_window",
     ],
+    jni_libs: [
+        "libforwarder_host_jni",
+    ],
+    use_embedded_native_libs: true,
     platform_apis: true,
     privileged: true,
     optimize: {

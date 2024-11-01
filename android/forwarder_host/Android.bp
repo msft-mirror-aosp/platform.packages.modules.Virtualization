@@ -2,12 +2,14 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-rust_binary {
-    name: "forwarder_host",
+rust_ffi_shared {
+    name: "libforwarder_host_jni",
+    crate_name: "forwarder_host",
     edition: "2021",
-    srcs: ["src/main.rs"],
+    srcs: ["src/forwarder_host.rs"],
     rustlibs: [
         "libforwarder",
+        "libjni",
         "liblog_rust",
         "libnix",
         "libvmm_sys_util",
@@ -17,5 +19,8 @@ rust_binary {
         "libpoll_token_derive",
         "libremain",
     ],
-    static_executable: true,
+    apex_available: [
+        "com.android.virt",
+    ],
+    prefer_rlib: true,
 }
