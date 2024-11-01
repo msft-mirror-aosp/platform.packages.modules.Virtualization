@@ -37,6 +37,8 @@ import io.grpc.ServerInterceptor;
 import io.grpc.Status;
 import io.grpc.okhttp.OkHttpServerBuilder;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
@@ -171,11 +173,9 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
                 };
         new Thread(
                         () -> {
-                            // TODO(b/372666638): gRPC for java doesn't support vsock for now.
-                            // In addition, let's consider using a dynamic port and SSL(and client
-                            // certificate)
-                            int port = 12000;
                             try {
+                                // TODO(b/372666638): gRPC for java doesn't support vsock for now.
+                                int port = 0;
                                 mServer =
                                         OkHttpServerBuilder.forPort(
                                                         port, InsecureServerCredentials.create())
@@ -183,6 +183,17 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
                                                 .addService(new DebianServiceImpl(this))
                                                 .build()
                                                 .start();
+
+                                // TODO(b/373533555): we can use mDNS for that.
+                                String debianServicePortFileName = "debian_service_port";
+                                File debianServicePortFile =
+                                        new File(getFilesDir(), debianServicePortFileName);
+                                try (FileOutputStream writer =
+                                        new FileOutputStream(debianServicePortFile)) {
+                                    writer.write(String.valueOf(mServer.getPort()).getBytes());
+                                } catch (IOException e) {
+                                    Log.d(TAG, "cannot write grpc port number", e);
+                                }
                             } catch (IOException e) {
                                 Log.d(TAG, "grpc server error", e);
                             }
