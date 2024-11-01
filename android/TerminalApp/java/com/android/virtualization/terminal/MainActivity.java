@@ -209,6 +209,7 @@ public class MainActivity extends BaseActivity
                         switch (error.getErrorCode()) {
                             case WebViewClient.ERROR_CONNECT:
                             case WebViewClient.ERROR_HOST_LOOKUP:
+                            case WebViewClient.ERROR_FAILED_SSL_HANDSHAKE:
                                 view.reload();
                                 return;
                             default:
