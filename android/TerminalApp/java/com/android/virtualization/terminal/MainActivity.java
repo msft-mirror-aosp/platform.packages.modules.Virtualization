@@ -456,11 +456,16 @@ public class MainActivity extends BaseActivity
 
         resizeDiskIfNecessary();
 
-        // TODO: implement intent for setting, close and tap to the notification
-        // Currently mock a PendingIntent for notification.
-        Intent intent = new Intent();
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Intent tapIntent = new Intent(this, MainActivity.class);
+        tapIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent tapPendingIntent = PendingIntent.getActivity(this, 0, tapIntent,
+                PendingIntent.FLAG_IMMUTABLE);
+
+        Intent settingsIntent = new Intent(this, SettingsActivity.class);
+        settingsIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent settingsPendingIntent = PendingIntent.getActivity(this, 0, settingsIntent,
+                PendingIntent.FLAG_IMMUTABLE);
+
         Intent stopIntent = new Intent();
         stopIntent.setClass(this, VmLauncherService.class);
         stopIntent.setAction(VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE);
@@ -479,7 +484,7 @@ public class MainActivity extends BaseActivity
                                 getResources().getString(R.string.service_notification_title))
                         .setContentText(
                                 getResources().getString(R.string.service_notification_content))
-                        .setContentIntent(pendingIntent)
+                        .setContentIntent(tapPendingIntent)
                         .setOngoing(true)
                         .addAction(
                                 new Notification.Action.Builder(
@@ -488,7 +493,7 @@ public class MainActivity extends BaseActivity
                                                         .getString(
                                                                 R.string
                                                                         .service_notification_settings),
-                                                pendingIntent)
+                                        settingsPendingIntent)
                                         .build())
                         .addAction(
                                 new Notification.Action.Builder(
