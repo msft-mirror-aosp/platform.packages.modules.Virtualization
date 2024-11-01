@@ -29,19 +29,154 @@ use core::mem::size_of;
 use core::num::NonZeroUsize;
 use core::ops::Range;
 use core::result;
-use hypervisor_backends::get_mmio_guard;
-use log::{debug, error};
-use spin::mutex::SpinMutex;
+use hypervisor_backends::{get_mem_sharer, get_mmio_guard};
+use log::{debug, error, info};
+use spin::mutex::{SpinMutex, SpinMutexGuard};
 use tinyvec::ArrayVec;
 
 /// A global static variable representing the system memory tracker, protected by a spin mutex.
-pub static MEMORY: SpinMutex<Option<MemoryTracker>> = SpinMutex::new(None);
+pub(crate) static MEMORY: SpinMutex<Option<MemoryTracker>> = SpinMutex::new(None);
 
 fn get_va_range(range: &MemoryRange) -> VaRange {
     VaRange::new(range.start, range.end)
 }
 
 type Result<T> = result::Result<T, MemoryTrackerError>;
+
+/// Attempts to lock `MEMORY`, returns an error if already deactivated.
+fn try_lock_memory_tracker() -> Result<SpinMutexGuard<'static, Option<MemoryTracker>>> {
+    // Being single-threaded, we only spin if `deactivate_dynamic_page_tables()` leaked the lock.
+    MEMORY.try_lock().ok_or(MemoryTrackerError::Unavailable)
+}
+
+/// Switch the MMU to the provided PageTable.
+///
+/// Panics if called more than once.
+pub fn switch_to_dynamic_page_tables(pt: PageTable) {
+    let mut locked_tracker = try_lock_memory_tracker().unwrap();
+    if locked_tracker.is_some() {
+        panic!("switch_to_dynamic_page_tables() called more than once.");
+    }
+
+    locked_tracker.replace(MemoryTracker::new(
+        pt,
+        layout::crosvm::MEM_START..layout::MAX_VIRT_ADDR,
+        layout::crosvm::MMIO_RANGE,
+    ));
+}
+
+/// Switch the MMU back to the static page tables (see `idmap` C symbol).
+///
+/// Panics if called before `switch_to_dynamic_page_tables()` or more than once.
+pub fn deactivate_dynamic_page_tables() {
+    let locked_tracker = try_lock_memory_tracker().unwrap();
+    // Force future calls to try_lock_memory_tracker() to fail by leaking this lock guard.
+    let leaked_tracker = SpinMutexGuard::leak(locked_tracker);
+    // Force deallocation/unsharing of all the resources used by the MemoryTracker.
+    drop(leaked_tracker.take())
+}
+
+/// Redefines the actual mappable range of memory.
+///
+/// Fails if a region has already been mapped beyond the new upper limit.
+pub fn resize_available_memory(memory_range: &Range<usize>) -> Result<()> {
+    let mut locked_tracker = try_lock_memory_tracker()?;
+    let tracker = locked_tracker.as_mut().ok_or(MemoryTrackerError::Unavailable)?;
+    tracker.shrink(memory_range)
+}
+
+/// Initialize the memory pool for page sharing with the host.
+pub fn init_shared_pool(static_range: Option<Range<usize>>) -> Result<()> {
+    let mut locked_tracker = try_lock_memory_tracker()?;
+    let tracker = locked_tracker.as_mut().ok_or(MemoryTrackerError::Unavailable)?;
+    if let Some(mem_sharer) = get_mem_sharer() {
+        let granule = mem_sharer.granule()?;
+        tracker.init_dynamic_shared_pool(granule)
+    } else if let Some(r) = static_range {
+        tracker.init_static_shared_pool(r)
+    } else {
+        info!("Initialized shared pool from heap memory without MEM_SHARE");
+        tracker.init_heap_shared_pool()
+    }
+}
+
+/// Unshare all MMIO that was previously shared with the host, with the exception of the UART page.
+pub fn unshare_all_mmio_except_uart() -> Result<()> {
+    let Ok(mut locked_tracker) = try_lock_memory_tracker() else { return Ok(()) };
+    let Some(tracker) = locked_tracker.as_mut() else { return Ok(()) };
+    if cfg!(feature = "compat_android_13") {
+        info!("Expecting a bug making MMIO_GUARD_UNMAP return NOT_SUPPORTED on success");
+    }
+    tracker.unshare_all_mmio()
+}
+
+/// Unshare all memory that was previously shared with the host.
+pub fn unshare_all_memory() {
+    let Ok(mut locked_tracker) = try_lock_memory_tracker() else { return };
+    let Some(tracker) = locked_tracker.as_mut() else { return };
+    tracker.unshare_all_memory()
+}
+
+/// Unshare the UART page, previously shared with the host.
+pub fn unshare_uart() -> Result<()> {
+    let Some(mmio_guard) = get_mmio_guard() else { return Ok(()) };
+    Ok(mmio_guard.unmap(layout::UART_PAGE_ADDR)?)
+}
+
+/// Map the provided range as normal memory, with R/W permissions.
+///
+/// This fails if the range has already been (partially) mapped.
+pub fn map_data(addr: usize, size: NonZeroUsize) -> Result<()> {
+    let mut locked_tracker = try_lock_memory_tracker()?;
+    let tracker = locked_tracker.as_mut().ok_or(MemoryTrackerError::Unavailable)?;
+    let _ = tracker.alloc_mut(addr, size)?;
+    Ok(())
+}
+
+/// Map the region potentially holding data appended to the image, with read-write permissions.
+///
+/// This fails if the footer has already been mapped.
+pub fn map_image_footer() -> Result<Range<usize>> {
+    let mut locked_tracker = try_lock_memory_tracker()?;
+    let tracker = locked_tracker.as_mut().ok_or(MemoryTrackerError::Unavailable)?;
+    let range = tracker.map_image_footer()?;
+    Ok(range)
+}
+
+/// Map the provided range as normal memory, with read-only permissions.
+///
+/// This fails if the range has already been (partially) mapped.
+pub fn map_rodata(addr: usize, size: NonZeroUsize) -> Result<()> {
+    let mut locked_tracker = try_lock_memory_tracker()?;
+    let tracker = locked_tracker.as_mut().ok_or(MemoryTrackerError::Unavailable)?;
+    let _ = tracker.alloc(addr, size)?;
+    Ok(())
+}
+
+// TODO(ptosi): Merge this into map_rodata.
+/// Map the provided range as normal memory, with read-only permissions.
+///
+/// # Safety
+///
+/// Callers of this method need to ensure that the `range` is valid for mapping as read-only data.
+pub unsafe fn map_rodata_outside_main_memory(addr: usize, size: NonZeroUsize) -> Result<()> {
+    let mut locked_tracker = try_lock_memory_tracker()?;
+    let tracker = locked_tracker.as_mut().ok_or(MemoryTrackerError::Unavailable)?;
+    let end = addr + usize::from(size);
+    // SAFETY: Caller has checked that it is valid to map the range.
+    let _ = unsafe { tracker.alloc_range_outside_main_memory(&(addr..end)) }?;
+    Ok(())
+}
+
+/// Map the provided range as device memory.
+///
+/// This fails if the range has already been (partially) mapped.
+pub fn map_device(addr: usize, size: NonZeroUsize) -> Result<()> {
+    let mut locked_tracker = try_lock_memory_tracker()?;
+    let tracker = locked_tracker.as_mut().ok_or(MemoryTrackerError::Unavailable)?;
+    let range = addr..(addr + usize::from(size));
+    tracker.map_mmio_range(range.clone())
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum MemoryType {
@@ -57,7 +192,7 @@ struct MemoryRegion {
 }
 
 /// Tracks non-overlapping slices of main memory.
-pub struct MemoryTracker {
+pub(crate) struct MemoryTracker {
     total: MemoryRange,
     page_table: PageTable,
     regions: ArrayVec<[MemoryRegion; MemoryTracker::CAPACITY]>,
@@ -72,7 +207,7 @@ impl MemoryTracker {
     const MMIO_CAPACITY: usize = 5;
 
     /// Creates a new instance from an active page table, covering the maximum RAM size.
-    pub fn new(mut page_table: PageTable, total: MemoryRange, mmio_range: MemoryRange) -> Self {
+    fn new(mut page_table: PageTable, total: MemoryRange, mmio_range: MemoryRange) -> Self {
         assert!(
             !total.overlaps(&mmio_range),
             "MMIO space should not overlap with the main memory region."
@@ -103,7 +238,7 @@ impl MemoryTracker {
     /// Resize the total RAM size.
     ///
     /// This function fails if it contains regions that are not included within the new size.
-    pub fn shrink(&mut self, range: &MemoryRange) -> Result<()> {
+    fn shrink(&mut self, range: &MemoryRange) -> Result<()> {
         if range.start != self.total.start {
             return Err(MemoryTrackerError::DifferentBaseAddress);
         }
@@ -119,7 +254,7 @@ impl MemoryTracker {
     }
 
     /// Allocate the address range for a const slice; returns None if failed.
-    pub fn alloc_range(&mut self, range: &MemoryRange) -> Result<MemoryRange> {
+    fn alloc_range(&mut self, range: &MemoryRange) -> Result<MemoryRange> {
         let region = MemoryRegion { range: range.clone(), mem_type: MemoryType::ReadOnly };
         self.check_allocatable(&region)?;
         self.page_table.map_rodata(&get_va_range(range)).map_err(|e| {
@@ -135,7 +270,7 @@ impl MemoryTracker {
     ///
     /// Callers of this method need to ensure that the `range` is valid for mapping as read-only
     /// data.
-    pub unsafe fn alloc_range_outside_main_memory(
+    unsafe fn alloc_range_outside_main_memory(
         &mut self,
         range: &MemoryRange,
     ) -> Result<MemoryRange> {
@@ -149,7 +284,7 @@ impl MemoryTracker {
     }
 
     /// Allocate the address range for a mutable slice; returns None if failed.
-    pub fn alloc_range_mut(&mut self, range: &MemoryRange) -> Result<MemoryRange> {
+    fn alloc_range_mut(&mut self, range: &MemoryRange) -> Result<MemoryRange> {
         let region = MemoryRegion { range: range.clone(), mem_type: MemoryType::ReadWrite };
         self.check_allocatable(&region)?;
         self.page_table.map_data_dbm(&get_va_range(range)).map_err(|e| {
@@ -160,7 +295,7 @@ impl MemoryTracker {
     }
 
     /// Maps the image footer read-write, with permissions.
-    pub fn map_image_footer(&mut self) -> Result<MemoryRange> {
+    fn map_image_footer(&mut self) -> Result<MemoryRange> {
         if self.image_footer_mapped {
             return Err(MemoryTrackerError::FooterAlreadyMapped);
         }
@@ -174,18 +309,18 @@ impl MemoryTracker {
     }
 
     /// Allocate the address range for a const slice; returns None if failed.
-    pub fn alloc(&mut self, base: usize, size: NonZeroUsize) -> Result<MemoryRange> {
+    fn alloc(&mut self, base: usize, size: NonZeroUsize) -> Result<MemoryRange> {
         self.alloc_range(&(base..(base + size.get())))
     }
 
     /// Allocate the address range for a mutable slice; returns None if failed.
-    pub fn alloc_mut(&mut self, base: usize, size: NonZeroUsize) -> Result<MemoryRange> {
+    fn alloc_mut(&mut self, base: usize, size: NonZeroUsize) -> Result<MemoryRange> {
         self.alloc_range_mut(&(base..(base + size.get())))
     }
 
     /// Checks that the given range of addresses is within the MMIO region, and then maps it
     /// appropriately.
-    pub fn map_mmio_range(&mut self, range: MemoryRange) -> Result<()> {
+    fn map_mmio_range(&mut self, range: MemoryRange) -> Result<()> {
         if !range.is_within(&self.mmio_range) {
             return Err(MemoryTrackerError::OutOfRange);
         }
@@ -247,14 +382,14 @@ impl MemoryTracker {
     }
 
     /// Unshares any MMIO region previously shared with the MMIO guard.
-    pub fn unshare_all_mmio(&mut self) -> Result<()> {
+    fn unshare_all_mmio(&mut self) -> Result<()> {
         self.mmio_sharer.unshare_all();
 
         Ok(())
     }
 
     /// Initialize the shared heap to dynamically share memory from the global allocator.
-    pub fn init_dynamic_shared_pool(&mut self, granule: usize) -> Result<()> {
+    fn init_dynamic_shared_pool(&mut self, granule: usize) -> Result<()> {
         const INIT_CAP: usize = 10;
 
         let previous = SHARED_MEMORY.lock().replace(MemorySharer::new(granule, INIT_CAP));
@@ -276,7 +411,7 @@ impl MemoryTracker {
     /// of guest memory as "shared" ahead of guest starting its execution. The
     /// shared memory region is indicated in swiotlb node. On such platforms use
     /// a separate heap to allocate buffers that can be shared with host.
-    pub fn init_static_shared_pool(&mut self, range: Range<usize>) -> Result<()> {
+    fn init_static_shared_pool(&mut self, range: Range<usize>) -> Result<()> {
         let size = NonZeroUsize::new(range.len()).unwrap();
         let range = self.alloc_mut(range.start, size)?;
         let shared_pool = LockedFrameAllocator::<32>::new();
@@ -295,7 +430,7 @@ impl MemoryTracker {
     /// When running on "non-protected" hypervisors which permit host direct accesses to guest
     /// memory, there is no need to perform any memory sharing and/or allocate buffers from a
     /// dedicated region so this function instructs the shared pool to use the global allocator.
-    pub fn init_heap_shared_pool(&mut self) -> Result<()> {
+    fn init_heap_shared_pool(&mut self) -> Result<()> {
         // As MemorySharer only calls MEM_SHARE methods if the hypervisor supports them, internally
         // using init_dynamic_shared_pool() on a non-protected platform will make use of the heap
         // without any actual "dynamic memory sharing" taking place and, as such, the granule may
