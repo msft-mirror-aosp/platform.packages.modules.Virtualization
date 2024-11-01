@@ -49,6 +49,10 @@ public class InstallUtils {
         return Files.exists(getInstallationCompletedPath(context));
     }
 
+    public static void unInstall(Context context) throws IOException {
+        Files.delete(getInstallationCompletedPath(context));
+    }
+
     public static boolean createInstalledMarker(Context context) {
         try {
             File file = new File(getInstallationCompletedPath(context).toString());
