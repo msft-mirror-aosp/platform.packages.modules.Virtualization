@@ -29,6 +29,7 @@ import android.graphics.fonts.FontStyle;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Bundle;
+import android.os.ConditionVariable;
 import android.os.Environment;
 import android.provider.Settings;
 import android.system.ErrnoException;
@@ -88,6 +89,7 @@ public class MainActivity extends BaseActivity
     private PrivateKey mPrivateKey;
     private WebView mWebView;
     private AccessibilityManager mAccessibilityManager;
+    private ConditionVariable mBootCompleted = new ConditionVariable();
     private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
     private ActivityResultLauncher<Intent> manageExternalStorageActivityResultLauncher;
 
@@ -255,6 +257,7 @@ public class MainActivity extends BaseActivity
                                             findViewById(R.id.boot_progress)
                                                     .setVisibility(View.GONE);
                                             view.setVisibility(View.VISIBLE);
+                                            mBootCompleted.open();
                                         }
                                     }
                                 });
@@ -521,6 +524,10 @@ public class MainActivity extends BaseActivity
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this, notification);
+    }
+
+    public boolean waitForBootCompleted(long timeoutMillis) {
+        return mBootCompleted.block(timeoutMillis);
     }
 
     private long roundUpDiskSize(long diskSize) {
