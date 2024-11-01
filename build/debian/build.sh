@@ -50,15 +50,21 @@ parse_options() {
 install_prerequisites() {
 	apt update
 	packages=(
+		automake
 		binfmt-support
 		build-essential
 		ca-certificates
+		cmake
 		curl
 		debsums
 		dosfstools
 		fai-server
 		fai-setup-storage
 		fdisk
+		git
+		libjson-c-dev
+		libtool
+		libwebsockets-dev
 		make
 		protobuf-compiler
 		python3
@@ -121,6 +127,23 @@ build_rust_binary_and_copy() {
 	popd > /dev/null
 }
 
+build_ttyd() {
+	local ttyd_version=1.7.7
+	local url="https://github.com/tsl0922/ttyd/archive/refs/tags/${ttyd_version}.tar.gz"
+	cp -r $(dirname $0)/ttyd ${workdir}/ttyd
+
+	pushd "${workdir}" > /dev/null
+	wget "${url}" -O - | tar xz
+	cp ttyd/* ttyd-${ttyd_version}/scripts
+	pushd "$workdir/ttyd-${ttyd_version}" > /dev/null
+	bash -c "env BUILD_TARGET=${arch} ./scripts/cross-build.sh"
+	mkdir -p "${dst}/files/usr/local/bin/ttyd"
+	cp /tmp/stage/${arch}-linux-musl/bin/ttyd "${dst}/files/usr/local/bin/ttyd/AVF"
+	chmod 777 "${dst}/files/usr/local/bin/ttyd/AVF"
+	popd > /dev/null
+	popd > /dev/null
+}
+
 copy_android_config() {
 	local src="$(dirname "$0")/fai_config"
 	local dst="${config_space}"
@@ -128,12 +151,7 @@ copy_android_config() {
 	cp -R "${src}"/* "${dst}"
 	cp "$(dirname "$0")/image.yaml" "${resources_dir}"
 
-	local ttyd_version=1.7.7
-	local url="https://github.com/tsl0922/ttyd/releases/download/${ttyd_version}/ttyd.${arch}"
-	mkdir -p "${dst}/files/usr/local/bin/ttyd"
-	wget "${url}" -O "${dst}/files/usr/local/bin/ttyd/AVF"
-	chmod 777 "${dst}/files/usr/local/bin/ttyd/AVF"
-
+	build_ttyd
 	build_rust_binary_and_copy forwarder_guest
 	build_rust_binary_and_copy forwarder_guest_launcher
 	build_rust_binary_and_copy ip_addr_reporter
