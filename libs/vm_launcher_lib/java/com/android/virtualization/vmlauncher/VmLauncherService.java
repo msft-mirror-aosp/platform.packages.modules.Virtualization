@@ -27,11 +27,18 @@ import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineException;
 import android.util.Log;
 
+import io.grpc.Grpc;
 import io.grpc.InsecureServerCredentials;
+import io.grpc.Metadata;
 import io.grpc.Server;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
+import io.grpc.Status;
 import io.grpc.okhttp.OkHttpServerBuilder;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
@@ -137,6 +144,31 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     }
 
     private void startDebianServer() {
+        ServerInterceptor interceptor =
+                new ServerInterceptor() {
+                    @Override
+                    public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+                            ServerCall<ReqT, RespT> call,
+                            Metadata headers,
+                            ServerCallHandler<ReqT, RespT> next) {
+                        // Refer to VirtualizationSystemService.TetheringService
+                        final String VM_STATIC_IP_ADDR = "192.168.0.2";
+                        InetSocketAddress remoteAddr =
+                                (InetSocketAddress)
+                                        call.getAttributes().get(Grpc.TRANSPORT_ATTR_REMOTE_ADDR);
+
+                        if (remoteAddr != null
+                                && Objects.equals(
+                                        remoteAddr.getAddress().getHostAddress(),
+                                        VM_STATIC_IP_ADDR)) {
+                            // Allow the request only if it is from VM
+                            return next.startCall(call, headers);
+                        }
+                        Log.d(TAG, "blocked grpc request from " + remoteAddr);
+                        call.close(Status.Code.PERMISSION_DENIED.toStatus(), new Metadata());
+                        return new ServerCall.Listener<ReqT>() {};
+                    }
+                };
         new Thread(
                         () -> {
                             // TODO(b/372666638): gRPC for java doesn't support vsock for now.
@@ -147,6 +179,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
                                 mServer =
                                         OkHttpServerBuilder.forPort(
                                                         port, InsecureServerCredentials.create())
+                                                .intercept(interceptor)
                                                 .addService(new DebianServiceImpl(this))
                                                 .build()
                                                 .start();
