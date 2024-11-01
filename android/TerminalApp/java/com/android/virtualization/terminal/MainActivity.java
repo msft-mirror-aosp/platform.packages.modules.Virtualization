@@ -512,7 +512,6 @@ public class MainActivity extends BaseActivity
                                                                         .service_notification_quit_action),
                                                 stopPendingIntent)
                                         .build())
-                        .setDeleteIntent(stopPendingIntent)
                         .build();
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
