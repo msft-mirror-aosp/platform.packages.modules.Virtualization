@@ -25,6 +25,9 @@ import android.content.Intent;
 import androidx.test.InstrumentationRegistry;
 import androidx.test.runner.AndroidJUnit4;
 
+import com.android.virtualization.vmlauncher.InstallUtils;
+
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -65,5 +68,10 @@ public class TerminalAppTest {
         if (mInstr.startActivitySync(intent) instanceof MainActivity activity) {
             assertTrue("Failed to boot in 30s", activity.waitForBootCompleted(BOOT_TIMEOUT_MILLIS));
         }
+    }
+
+    @After
+    public void tearDown() {
+        InstallUtils.deleteInstallation(mTargetContext);
     }
 }

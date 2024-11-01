@@ -17,6 +17,7 @@ package com.android.virtualization.vmlauncher;
 
 import android.content.Context;
 import android.os.Environment;
+import android.os.FileUtils;
 import android.util.Log;
 
 import org.apache.commons.compress.archivers.ArchiveEntry;
@@ -57,6 +58,10 @@ public class InstallUtils {
             Log.e(TAG, "Failed to mark install completed", e);
             return false;
         }
+    }
+
+    public static void deleteInstallation(Context context) {
+        FileUtils.deleteContentsAndDir(getInternalStorageDir(context));
     }
 
     private static Path getPayloadPath() {
