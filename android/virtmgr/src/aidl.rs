@@ -2237,6 +2237,14 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_os_name_from_microdroid_16k_config() -> Result<()> {
+        test_extract_os_name_from_config_path(
+            Path::new("/apex/com.android.virt/etc/microdroid_16k.json"),
+            Some("microdroid_16k"),
+        )
+    }
+
+    #[test]
     fn test_extract_os_name_from_microdroid_gki_config() -> Result<()> {
         test_extract_os_name_from_config_path(
             Path::new("/apex/com.android.virt/etc/microdroid_gki-android14-6.1.json"),
