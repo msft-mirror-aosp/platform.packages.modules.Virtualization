@@ -104,6 +104,7 @@ install_prerequisites() {
 
 	source "$HOME"/.cargo/env
 	rustup target add "${arch}"-unknown-linux-gnu
+	cargo install cargo-license
 }
 
 download_debian_cloud_image() {
@@ -124,6 +125,9 @@ build_rust_binary_and_copy() {
 	mkdir -p "${dst}/files/usr/local/bin/$1"
 	cp "${workdir}/$1/${arch}-unknown-linux-gnu/debug/$1" "${dst}/files/usr/local/bin/$1/AVF"
 	chmod 777 "${dst}/files/usr/local/bin/$1/AVF"
+
+	mkdir -p "${dst}/files/usr/share/doc/$1"
+	cargo license > "${dst}/files/usr/share/doc/$1/copyright"
 	popd > /dev/null
 }
 
@@ -140,6 +144,8 @@ build_ttyd() {
 	mkdir -p "${dst}/files/usr/local/bin/ttyd"
 	cp /tmp/stage/${arch}-linux-musl/bin/ttyd "${dst}/files/usr/local/bin/ttyd/AVF"
 	chmod 777 "${dst}/files/usr/local/bin/ttyd/AVF"
+	mkdir -p "${dst}/files/usr/share/doc/ttyd"
+	cp LICENSE "${dst}/files/usr/share/doc/ttyd/copyright"
 	popd > /dev/null
 	popd > /dev/null
 }
