@@ -33,13 +33,17 @@ pub struct Args {
     #[arg(long)]
     #[arg(alias = "host")]
     host_addr: String,
+    /// grpc port number
+    #[arg(long)]
+    #[arg(alias = "grpc_port")]
+    grpc_port: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting forwarder_guest_launcher");
     let args = Args::parse();
-    let addr = format!("https://{}:12000", args.host_addr);
+    let addr = format!("https://{}:{}", args.host_addr, args.grpc_port);
 
     let channel = Endpoint::from_shared(addr)?.connect().await?;
     let mut client = DebianServiceClient::new(channel);
