@@ -95,7 +95,6 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
         page_table,
         crosvm::MEM_START..layout::MAX_VIRT_ADDR,
         crosvm::MMIO_RANGE,
-        None, // Rialto doesn't have any payload for now.
     ));
 
     let fdt_range = MEMORY
