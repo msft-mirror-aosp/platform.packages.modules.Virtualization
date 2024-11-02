@@ -23,7 +23,7 @@ mod pci;
 
 extern crate alloc;
 
-use crate::layout::{boot_stack_range, print_addresses};
+use crate::layout::print_addresses;
 use crate::pci::check_pci;
 use aarch64_paging::MapError;
 use alloc::{vec, vec::Vec};
@@ -37,7 +37,7 @@ use vmbase::{
     generate_image_header,
     layout::{
         console_uart_page, crosvm::FDT_MAX_SIZE, data_bss_range, eh_stack_range, rodata_range,
-        text_range,
+        stack_range, text_range,
     },
     linker, logger, main,
     memory::{
@@ -60,7 +60,7 @@ fn init_page_table(page_table: &mut PageTable) -> Result<(), MapError> {
     page_table.map_rodata(&rodata_range().into())?;
     page_table.map_data(&data_bss_range().into())?;
     page_table.map_data(&eh_stack_range().into())?;
-    page_table.map_data(&boot_stack_range().into())?;
+    page_table.map_data(&stack_range().into())?;
 
     Ok(())
 }

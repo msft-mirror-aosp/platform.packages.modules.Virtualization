@@ -18,6 +18,7 @@ mod dbm;
 mod error;
 mod page_table;
 mod shared;
+mod stack;
 mod tracker;
 mod util;
 
@@ -35,5 +36,6 @@ pub use util::{
 };
 
 pub(crate) use shared::{alloc_shared, dealloc_shared};
+pub(crate) use stack::max_stack_size;
 pub(crate) use tracker::MEMORY;
 pub(crate) use util::{phys_to_virt, virt_to_phys};

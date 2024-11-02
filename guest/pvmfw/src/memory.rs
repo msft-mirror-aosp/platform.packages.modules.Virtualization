@@ -16,11 +16,8 @@
 
 use crate::entry::RebootReason;
 use crate::fdt;
-use crate::helpers::PVMFW_PAGE_SIZE;
-use aarch64_paging::paging::VirtualAddress;
 use aarch64_paging::MapError;
 use core::num::NonZeroUsize;
-use core::ops::Range;
 use core::result;
 use core::slice;
 use log::debug;
@@ -32,13 +29,6 @@ use vmbase::{
     memory::{init_shared_pool, map_data, map_rodata, resize_available_memory, PageTable},
 };
 
-/// Region allocated for the stack.
-pub fn stack_range() -> Range<VirtualAddress> {
-    const STACK_PAGES: usize = 12;
-
-    layout::stack_range(STACK_PAGES * PVMFW_PAGE_SIZE)
-}
-
 pub fn init_page_table() -> result::Result<PageTable, MapError> {
     let mut page_table = PageTable::default();
 
@@ -46,7 +36,7 @@ pub fn init_page_table() -> result::Result<PageTable, MapError> {
     // so dirty state management can be omitted.
     page_table.map_data(&layout::data_bss_range().into())?;
     page_table.map_data(&layout::eh_stack_range().into())?;
-    page_table.map_data(&stack_range().into())?;
+    page_table.map_data(&layout::stack_range().into())?;
     page_table.map_code(&layout::text_range().into())?;
     page_table.map_rodata(&layout::rodata_range().into())?;
     if let Err(e) = page_table.map_device(&layout::console_uart_page().into()) {

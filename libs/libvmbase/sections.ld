@@ -132,3 +132,10 @@ SECTIONS
 		*(.note.gnu.build-id)
 	}
 }
+
+/*
+ * Make calling the limit_stack_size!() macro optional by providing a default.
+ */
+PROVIDE(vmbase_stack_limit = DEFINED(vmbase_stack_limit_client) ?
+                                     vmbase_stack_limit_client :
+                                     vmbase_stack_limit_default);
