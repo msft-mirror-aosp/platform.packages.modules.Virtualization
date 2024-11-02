@@ -28,9 +28,8 @@ use vmbase::{
     arch::aarch64::min_dcache_line_size,
     configure_heap, console_writeln, layout, limit_stack_size, main,
     memory::{
-        deactivate_dynamic_page_tables, map_image_footer, switch_to_dynamic_page_tables,
-        unshare_all_memory, unshare_all_mmio_except_uart, unshare_uart, MemoryTrackerError,
-        SIZE_128KB, SIZE_4KB,
+        deactivate_dynamic_page_tables, map_image_footer, unshare_all_memory,
+        unshare_all_mmio_except_uart, unshare_uart, MemoryTrackerError, SIZE_128KB, SIZE_4KB,
     },
     power::reboot,
 };
@@ -108,13 +107,6 @@ fn main_wrapper(
     // - only access non-pvmfw memory once (and while) it has been mapped
 
     log::set_max_level(LevelFilter::Info);
-
-    let page_table = memory::init_page_table().map_err(|e| {
-        error!("Failed to set up the dynamic page tables: {e}");
-        RebootReason::InternalError
-    })?;
-    // Up to this point, we were using the built-in static (from .rodata) page tables.
-    switch_to_dynamic_page_tables(page_table);
 
     let appended_data = get_appended_data_slice().map_err(|e| {
         error!("Failed to map the appended data: {e}");
