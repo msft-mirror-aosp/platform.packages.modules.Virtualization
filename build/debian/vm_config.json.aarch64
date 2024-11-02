@@ -12,7 +12,7 @@
             "sharedPath": "/storage/emulated"
         },
         {
-            "sharedPath": "/data/data/com.google.android.virtualization.terminal/files"
+            "sharedPath": "/data/data/$PACKAGE_NAME/files"
         }
     ],
     "protected": false,
