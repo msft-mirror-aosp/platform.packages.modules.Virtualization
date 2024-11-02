@@ -1344,6 +1344,138 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         }
     }
 
+    @Test
+    @Parameters(method = "gkiVersions")
+    @TestCaseName("{method}_os_{0}")
+    @Ignore("b/360388014") // TODO(b/360388014): fix & re-enable
+    public void microdroidDeviceTreeCompat(String os) throws Exception {
+        assumeArm64Supported();
+        final String configPath = "assets/vm_config.json";
+        // Preconditions
+        assumeKernelSupported(os);
+        int mem_size = 256;
+        assertTrue("Memory size too small", mem_size >= minMemorySize());
+
+        // Start the VM with the dump DT option.
+        mMicrodroidDevice =
+                MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
+                        .debugLevel("full")
+                        .memoryMib(mem_size)
+                        .cpuTopology("one_cpu")
+                        .protectedVm(false)
+                        .os(SUPPORTED_OSES.get(os))
+                        .name("test_device_tree")
+                        .dumpDt("/data/local/tmp/dump_dt.dtb")
+                        .build(getAndroidDevice());
+        assertThat(mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT)).isTrue();
+
+        File goldenDt = findTestFile("dt_dump_golden.dts");
+        testGoldenDeviceTree(goldenDt.getAbsolutePath());
+    }
+
+    @Test
+    @Parameters(method = "gkiVersions")
+    @TestCaseName("{method}_os_{0}")
+    @Ignore("b/360388014") // TODO(b/360388014): fix & re-enable
+    public void microdroidProtectedDeviceTreeCompat(String os) throws Exception {
+        assumeArm64Supported();
+        final String configPath = "assets/vm_config.json";
+        // Preconditions
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(true);
+        int mem_size = 256;
+        assertTrue("Memory size too small", mem_size >= minMemorySize());
+
+        // Start the VM with the dump DT option.
+        mMicrodroidDevice =
+                MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
+                        .debugLevel("full")
+                        .memoryMib(mem_size)
+                        .cpuTopology("one_cpu")
+                        .protectedVm(true)
+                        .os(SUPPORTED_OSES.get(os))
+                        .name("test_device_tree")
+                        .dumpDt("/data/local/tmp/dump_dt.dtb")
+                        .build(getAndroidDevice());
+        assertThat(mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT)).isTrue();
+
+        File goldenDt = findTestFile("dt_dump_protected_golden.dts");
+        testGoldenDeviceTree(goldenDt.getAbsolutePath());
+    }
+
+    private void testGoldenDeviceTree(String goldenDt) throws Exception {
+        // Pull the device tree to host.
+        TestDevice device = getAndroidDevice();
+        boolean disableRoot = !device.isAdbRoot();
+        device.enableAdbRoot();
+        assumeTrue("adb root is not enabled", device.isAdbRoot());
+
+        // Pull DT from device
+        File dtb_from_device = device.pullFile("/data/local/tmp/dump_dt.dtb");
+        if (disableRoot) {
+            device.disableAdbRoot();
+        }
+
+        File dtc = findTestFile("dtc");
+
+        // Create temp file for Device tree conversion
+        File dt_dump_dts = File.createTempFile("dt_dump", "dts");
+        dt_dump_dts.delete();
+        String dt_dump_dts_path = dt_dump_dts.getAbsolutePath();
+        // Convert DT to text format.
+        CommandResult dtb_to_dts =
+                RunUtil.getDefault()
+                        .runTimedCmd(
+                                3000,
+                                dtc.getAbsolutePath(),
+                                "-I",
+                                "dtb",
+                                "-O",
+                                "dts",
+                                "-qqq",
+                                "-f",
+                                "-s",
+                                "-o",
+                                dt_dump_dts_path,
+                                dtb_from_device.getAbsolutePath());
+        assertTrue(
+                "result convert stderr: " + dtb_to_dts.getStderr(),
+                dtb_to_dts.getStderr().trim().isEmpty());
+        assertTrue(
+                "result convert stdout: " + dtb_to_dts.getStdout(),
+                dtb_to_dts.getStdout().trim().isEmpty());
+
+        // Diff device's DT with the golden DT.
+        CommandResult result_compare =
+                RunUtil.getDefault()
+                        .runTimedCmd(
+                                3000,
+                                "diff",
+                                "-u",
+                                "-w",
+                                "-I",
+                                "kaslr-seed",
+                                "-I",
+                                "instance-id",
+                                "-I",
+                                "rng-seed",
+                                "-I",
+                                "linux,initrd-end",
+                                "-I",
+                                "secretkeeper_public_key",
+                                "-I",
+                                "interrupt-map",
+                                dt_dump_dts_path,
+                                goldenDt);
+
+        assertTrue(
+                "result compare stderr: " + result_compare.getStderr(),
+                result_compare.getStderr().trim().isEmpty());
+        assertTrue(
+                "result compare stdout: " + result_compare.getStdout(),
+                result_compare.getStdout().trim().isEmpty());
+    }
+
     @Before
     public void setUp() throws Exception {
         assumeDeviceIsCapable(getDevice());
@@ -1423,5 +1555,12 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assumeTrue(
                 "Microdroid is not supported for specific VM protection type",
                 getAndroidDevice().supportsMicrodroid(protectedVm));
+    }
+
+    private void assumeArm64Supported() throws Exception {
+        CommandRunner android = new CommandRunner(getDevice());
+        String abi = android.run("getprop", "ro.product.cpu.abi");
+        assertThat(abi).isNotEmpty();
+        assumeTrue("Skipping test as the architecture is not supported", abi.startsWith("arm64"));
     }
 }
