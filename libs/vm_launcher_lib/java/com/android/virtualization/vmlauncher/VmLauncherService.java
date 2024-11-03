@@ -33,6 +33,7 @@ import io.grpc.okhttp.OkHttpServerBuilder;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -62,8 +63,13 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (isVmRunning()) {
-            Log.d(TAG, "there is already the running VM instance");
+        if (Objects.equals(
+                intent.getAction(), VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE)) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (mVirtualMachine != null) {
+            Log.d(TAG, "VM instance is already started");
             return START_NOT_STICKY;
         }
         mExecutorService = Executors.newCachedThreadPool();
@@ -114,23 +120,20 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     @Override
     public void onDestroy() {
         super.onDestroy();
-        if (isVmRunning()) {
-            try {
-                mVirtualMachine.stop();
-                stopForeground(STOP_FOREGROUND_REMOVE);
-            } catch (VirtualMachineException e) {
-                Log.e(TAG, "failed to stop a VM instance", e);
+        if (mVirtualMachine != null) {
+            if (mVirtualMachine.getStatus() == VirtualMachine.STATUS_RUNNING) {
+                try {
+                    mVirtualMachine.stop();
+                    stopForeground(STOP_FOREGROUND_REMOVE);
+                } catch (VirtualMachineException e) {
+                    Log.e(TAG, "failed to stop a VM instance", e);
+                }
             }
             mExecutorService.shutdownNow();
             mExecutorService = null;
             mVirtualMachine = null;
         }
         stopDebianServer();
-    }
-
-    private boolean isVmRunning() {
-        return mVirtualMachine != null
-                && mVirtualMachine.getStatus() == VirtualMachine.STATUS_RUNNING;
     }
 
     private void startDebianServer() {

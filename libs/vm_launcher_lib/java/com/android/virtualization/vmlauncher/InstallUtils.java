@@ -38,17 +38,25 @@ public class InstallUtils {
 
     private static final String VM_CONFIG_FILENAME = "vm_config.json";
     private static final String COMPRESSED_PAYLOAD_FILENAME = "images.tar.gz";
+    private static final String INSTALLATION_COMPLETED_FILENAME = "completed";
     private static final String PAYLOAD_DIR = "linux";
 
     public static String getVmConfigPath(Context context) {
-        return new File(context.getFilesDir(), PAYLOAD_DIR)
-                .toPath()
-                .resolve(VM_CONFIG_FILENAME)
-                .toString();
+        return getInternalStorageDir(context).toPath().resolve(VM_CONFIG_FILENAME).toString();
     }
 
     public static boolean isImageInstalled(Context context) {
-        return Files.exists(Path.of(getVmConfigPath(context)));
+        return Files.exists(getInstallationCompletedPath(context));
+    }
+
+    public static boolean createInstalledMarker(Context context) {
+        try {
+            File file = new File(getInstallationCompletedPath(context).toString());
+            return file.createNewFile();
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to mark install completed", e);
+            return false;
+        }
     }
 
     private static Path getPayloadPath() {
@@ -65,9 +73,18 @@ public class InstallUtils {
         return Files.exists(getPayloadPath());
     }
 
+    public static File getInternalStorageDir(Context context) {
+        return new File(context.getFilesDir(), PAYLOAD_DIR);
+    }
+
+    private static Path getInstallationCompletedPath(Context context) {
+        return getInternalStorageDir(context).toPath().resolve(INSTALLATION_COMPLETED_FILENAME);
+    }
+
     public static boolean installImageFromExternalStorage(Context context) {
         if (!payloadFromExternalStorageExists()) {
             Log.d(TAG, "no artifact file from external storage");
+            return false;
         }
         Path payloadPath = getPayloadPath();
         try (BufferedInputStream inputStream =
@@ -89,10 +106,6 @@ public class InstallUtils {
             Log.e(TAG, "installation failed", e);
             return false;
         }
-        if (!isImageInstalled(context)) {
-            return false;
-        }
-
         if (!resolvePathInVmConfig(context)) {
             Log.d(TAG, "resolving path failed");
             try {
@@ -110,7 +123,8 @@ public class InstallUtils {
             Log.d(TAG, "failed to remove installed payload", e);
         }
 
-        return true;
+        // Create marker for installation done.
+        return createInstalledMarker(context);
     }
 
     private static Function<String, String> getReplacer(Context context) {
@@ -124,7 +138,7 @@ public class InstallUtils {
         };
     }
 
-    private static boolean resolvePathInVmConfig(Context context) {
+    public static boolean resolvePathInVmConfig(Context context) {
         try {
             String replacedVmConfig =
                     String.join(
