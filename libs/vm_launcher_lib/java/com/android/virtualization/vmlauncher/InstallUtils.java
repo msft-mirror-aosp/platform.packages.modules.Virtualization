@@ -139,6 +139,7 @@ public class InstallUtils {
     private static Function<String, String> getReplacer(Context context) {
         Map<String, String> rules = new HashMap<>();
         rules.put("\\$PAYLOAD_DIR", new File(context.getFilesDir(), PAYLOAD_DIR).toString());
+        rules.put("\\$USER_ID", String.valueOf(context.getUserId()));
         rules.put("\\$PACKAGE_NAME", context.getPackageName());
         return (s) -> {
             for (Map.Entry<String, String> rule : rules.entrySet()) {
