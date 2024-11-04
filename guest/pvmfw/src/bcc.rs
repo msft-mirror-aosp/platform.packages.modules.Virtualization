@@ -109,10 +109,14 @@ impl Bcc {
             Value::Array(v) if v.len() >= 2 => v,
             _ => return Err(BccError::MalformedBcc("Invalid top level value")),
         };
-        // Decode all the entries to make sure they are well-formed.
-        let entries: Vec<_> = bcc.into_iter().skip(1).map(BccEntry::new).collect();
+        // Decode all the DICE payloads to make sure they are well-formed.
+        let payloads = bcc
+            .into_iter()
+            .skip(1)
+            .map(|v| BccEntry::new(v).payload())
+            .collect::<Result<Vec<_>>>()?;
 
-        let is_debug_mode = is_any_entry_debug_mode(entries.as_slice())?;
+        let is_debug_mode = is_any_payload_debug_mode(&payloads)?;
         Ok(Self { is_debug_mode })
     }
 
@@ -121,13 +125,13 @@ impl Bcc {
     }
 }
 
-fn is_any_entry_debug_mode(entries: &[BccEntry]) -> Result<bool> {
-    // Check if any entry in the chain is marked as Debug mode, which means the device is not
+fn is_any_payload_debug_mode(payloads: &[BccPayload]) -> Result<bool> {
+    // Check if any payload in the chain is marked as Debug mode, which means the device is not
     // secure. (Normal means it is a secure boot, for that stage at least; we ignore recovery
     // & not configured /invalid values, since it's not clear what they would mean in this
     // context.)
-    for entry in entries {
-        if entry.payload()?.is_debug_mode()? {
+    for payload in payloads {
+        if payload.is_debug_mode()? {
             return Ok(true);
         }
     }
