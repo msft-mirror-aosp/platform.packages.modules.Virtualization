@@ -30,14 +30,6 @@
         <option name="script-file" value="TerminalAppTests-preparer.sh" />
     </target_preparer>
 
-    <target_preparer class="com.android.tradefed.targetprep.RunCommandTargetPreparer">
-        <option name="throw-if-cmd-fail" value="true" />
-        <option name="run-command"
-            value="pm enable com.google.android.virtualization.terminal/com.android.virtualization.terminal.MainActivity" />
-        <option name="teardown-command"
-            value="pm disable com.google.android.virtualization.terminal/com.android.virtualization.terminal.MainActivity" />
-    </target_preparer>
-
     <test class="com.android.tradefed.testtype.AndroidJUnitTest">
         <option name="package" value="com.android.virtualization.terminal.test"/>
         <option name="runner" value="androidx.test.runner.AndroidJUnitRunner"/>
