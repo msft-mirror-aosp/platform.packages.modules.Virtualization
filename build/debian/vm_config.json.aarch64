@@ -12,7 +12,7 @@
             "sharedPath": "/storage/emulated"
         },
         {
-            "sharedPath": "/data/data/$PACKAGE_NAME/files"
+            "sharedPath": "/data/user/$USER_ID/$PACKAGE_NAME/files"
         }
     ],
     "protected": false,
