@@ -16,6 +16,7 @@
 
 package com.android.virtualization.vmlauncher;
 
+import android.app.Notification;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -35,6 +36,8 @@ public class VmLauncherServices {
     private static final String ACTION_START_VM_LAUNCHER_SERVICE =
             "android.virtualization.START_VM_LAUNCHER_SERVICE";
 
+    public static final String ACTION_STOP_VM_LAUNCHER_SERVICE =
+            "android.virtualization.STOP_VM_LAUNCHER_SERVICE";
     private static final int RESULT_START = 0;
     private static final int RESULT_STOP = 1;
     private static final int RESULT_ERROR = 2;
@@ -64,7 +67,8 @@ public class VmLauncherServices {
         context.stopService(i);
     }
 
-    public static void startVmLauncherService(Context context, VmLauncherServiceCallback callback) {
+    public static void startVmLauncherService(Context context, VmLauncherServiceCallback callback,
+            Notification notification) {
         Intent i = buildVmLauncherServiceIntent(context);
         if (i == null) {
             return;
@@ -93,6 +97,7 @@ public class VmLauncherServices {
                     }
                 };
         i.putExtra(Intent.EXTRA_RESULT_RECEIVER, getResultReceiverForIntent(resultReceiver));
+        i.putExtra(VmLauncherService.EXTRA_NOTIFICATION, notification);
         context.startForegroundService(i);
     }
 

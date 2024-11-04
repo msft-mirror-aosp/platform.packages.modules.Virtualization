@@ -17,17 +17,17 @@ java_test_host {
     static_libs: [
         "MicrodroidHostTestHelper",
         "compatibility-host-util",
-        "cts-host-utils",
         "cts-statsd-atom-host-test-utils",
         "microdroid_payload_metadata",
     ],
     per_testcase_directory: true,
-    data: [
+    device_common_data: [
         ":MicrodroidTestApp",
         ":MicrodroidTestAppUpdated",
         ":microdroid_general_sepolicy.conf",
         ":test.com.android.virt.pem",
         ":test2.com.android.virt.pem",
+        "java/**/goldens/dt_dump_*",
     ],
     data_native_bins: [
         "sepolicy-analyze",
@@ -40,6 +40,7 @@ java_test_host {
         "lz4",
         "sign_virt_apex",
         "simg2img",
+        "dtc",
     ],
     // java_test_host doesn't have data_native_libs but jni_libs can be used to put
     // native modules under ./lib directory.
@@ -50,6 +51,7 @@ java_test_host {
         "libcrypto_utils",
         "libcrypto",
         "libext4_utils",
+        "libfdt",
         "liblog",
         "liblp",
         "libsparse",
