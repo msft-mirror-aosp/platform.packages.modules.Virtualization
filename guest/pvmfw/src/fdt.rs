@@ -52,6 +52,9 @@ use vmbase::memory::SIZE_4KB;
 use vmbase::util::RangeExt as _;
 use zerocopy::AsBytes as _;
 
+// SAFETY: The template DT is automatically generated through DTC, which should produce valid DTBs.
+const FDT_TEMPLATE: &Fdt = unsafe { Fdt::unchecked_from_slice(pvmfw_fdt_template::RAW) };
+
 /// An enumeration of errors that can occur during the FDT validation.
 #[derive(Clone, Debug)]
 pub enum FdtValidationError {
@@ -1030,9 +1033,7 @@ pub fn sanitize_device_tree(
 
     let info = parse_device_tree(fdt, vm_dtbo.as_deref())?;
 
-    // SAFETY: We trust that the template (hardcoded in our RO data) is a valid DT.
-    let fdt_template = unsafe { Fdt::unchecked_from_slice(pvmfw_fdt_template::RAW) };
-    fdt.clone_from(fdt_template).map_err(|e| {
+    fdt.clone_from(FDT_TEMPLATE).map_err(|e| {
         error!("Failed to instantiate FDT from the template DT: {e}");
         RebootReason::InvalidFdt
     })?;
