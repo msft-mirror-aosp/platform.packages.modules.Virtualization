@@ -26,11 +26,12 @@ use log::warn;
 use log::LevelFilter;
 use vmbase::util::RangeExt as _;
 use vmbase::{
+    arch::aarch64::min_dcache_line_size,
     configure_heap, console_writeln,
     hyp::get_mmio_guard,
     layout::{self, crosvm, UART_PAGE_ADDR},
     main,
-    memory::{min_dcache_line_size, MemoryTracker, MEMORY, SIZE_128KB, SIZE_4KB},
+    memory::{MemoryTracker, MEMORY, SIZE_128KB, SIZE_4KB},
     power::reboot,
 };
 use zeroize::Zeroize;
