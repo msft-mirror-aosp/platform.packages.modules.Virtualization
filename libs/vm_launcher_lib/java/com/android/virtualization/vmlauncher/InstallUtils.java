@@ -20,6 +20,8 @@ import android.os.Environment;
 import android.os.FileUtils;
 import android.util.Log;
 
+import com.android.internal.annotations.VisibleForTesting;
+
 import org.apache.commons.compress.archivers.ArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
@@ -64,6 +66,7 @@ public class InstallUtils {
         }
     }
 
+    @VisibleForTesting
     public static void deleteInstallation(Context context) {
         FileUtils.deleteContentsAndDir(getInternalStorageDir(context));
     }
