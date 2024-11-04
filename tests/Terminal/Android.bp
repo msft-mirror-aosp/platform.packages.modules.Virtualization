@@ -18,6 +18,6 @@ android_test {
         "MicrodroidTestHelper",
     ],
     platform_apis: true,
-    test_suites: ["device-tests"],
+    test_suites: ["general-tests"],
     instrumentation_for: "VmTerminalApp",
 }
