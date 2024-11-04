@@ -20,4 +20,5 @@ android_test {
     platform_apis: true,
     test_suites: ["general-tests"],
     instrumentation_for: "VmTerminalApp",
+    data: ["TerminalAppTests-preparer.sh"],
 }
