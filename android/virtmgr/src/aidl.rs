@@ -1154,6 +1154,13 @@ fn load_app_config(
         }
     }
 
+    // Unfortunately specifying page_shift = 14 in bootconfig doesn't enable 16k pages emulation,
+    // so we need to provide it in the kernel cmdline.
+    // TODO(b/376901009): remove this after passing page_shift in bootconfig is supported.
+    if os_name.ends_with("_16k") && cfg!(target_arch = "x86_64") {
+        append_kernel_param("page_shift=14", &mut vm_config);
+    }
+
     if config.memoryMib > 0 {
         vm_config.memoryMib = config.memoryMib;
     }
@@ -2233,6 +2240,14 @@ mod tests {
         test_extract_os_name_from_config_path(
             Path::new("/apex/com.android.virt/etc/microdroid.json"),
             Some("microdroid"),
+        )
+    }
+
+    #[test]
+    fn test_extract_os_name_from_microdroid_16k_config() -> Result<()> {
+        test_extract_os_name_from_config_path(
+            Path::new("/apex/com.android.virt/etc/microdroid_16k.json"),
+            Some("microdroid_16k"),
         )
     }
 
