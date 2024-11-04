@@ -449,7 +449,7 @@ impl VirtualizationService {
 
         // Start VM service listening for connections from the new CID on port=CID.
         let port = cid;
-        let vm_server = RpcServer::new_vsock(service, cid, port)
+        let (vm_server, _) = RpcServer::new_vsock(service, cid, port)
             .context(format!("Could not start RpcServer on port {port}"))
             .or_service_specific_exception(-1)?;
         vm_server.start();
@@ -471,7 +471,7 @@ impl VirtualizationService {
             // Start VM service listening for connections from the new CID on port=CID.
             let port = cid;
             match RpcServer::new_vsock(service, cid, port) {
-                Ok(vm_server) => {
+                Ok((vm_server, _)) => {
                     vm_server.start();
                     return Ok((VmContext::new(vm_context, vm_server), cid, temp_dir));
                 }
@@ -1152,6 +1152,13 @@ fn load_app_config(
         for param in custom_config.extraKernelCmdlineParams.iter() {
             append_kernel_param(param, &mut vm_config);
         }
+    }
+
+    // Unfortunately specifying page_shift = 14 in bootconfig doesn't enable 16k pages emulation,
+    // so we need to provide it in the kernel cmdline.
+    // TODO(b/376901009): remove this after passing page_shift in bootconfig is supported.
+    if os_name.ends_with("_16k") && cfg!(target_arch = "x86_64") {
+        append_kernel_param("page_shift=14", &mut vm_config);
     }
 
     if config.memoryMib > 0 {
@@ -2233,6 +2240,14 @@ mod tests {
         test_extract_os_name_from_config_path(
             Path::new("/apex/com.android.virt/etc/microdroid.json"),
             Some("microdroid"),
+        )
+    }
+
+    #[test]
+    fn test_extract_os_name_from_microdroid_16k_config() -> Result<()> {
+        test_extract_os_name_from_config_path(
+            Path::new("/apex/com.android.virt/etc/microdroid_16k.json"),
+            Some("microdroid_16k"),
         )
     }
 

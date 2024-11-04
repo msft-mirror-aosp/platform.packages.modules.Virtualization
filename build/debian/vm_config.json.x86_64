@@ -12,7 +12,7 @@
             "sharedPath": "/storage/emulated"
         },
         {
-            "sharedPath": "/data/data/com.google.android.virtualization.terminal/files"
+            "sharedPath": "/data/user/$USER_ID/$PACKAGE_NAME/files"
         }
     ],
     "kernel": "$PAYLOAD_DIR/vmlinuz",

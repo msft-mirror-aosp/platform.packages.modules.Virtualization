@@ -415,7 +415,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     @VsrTest(requirements = {"VSR-7.1-001.008"})
     public void UpgradedPackageIsAcceptedWithSecretkeeper() throws Exception {
         // Preconditions
-        assumeVmTypeSupported(true); // Non-protected VMs may not support upgrades
+        assumeVmTypeSupported("microdroid", true); // Non-protected VMs may not support upgrades
         ensureUpdatableVmSupported();
         getDevice().uninstallPackage(PACKAGE_NAME);
         getDevice().installPackage(findTestFile(APK_NAME), /* reinstall= */ true);
@@ -433,7 +433,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     @VsrTest(requirements = {"VSR-7.1-001.008"})
     public void DowngradedPackageIsRejectedProtectedVm() throws Exception {
         // Preconditions: Rollback protection is provided only for protected VM.
-        assumeVmTypeSupported(true);
+        assumeVmTypeSupported("microdroid", true);
 
         // Install the upgraded version (v6)
         getDevice().uninstallPackage(PACKAGE_NAME);
@@ -483,7 +483,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     public void protectedVmRunsPvmfw(String os) throws Exception {
         // Arrange
         assumeKernelSupported(os);
-        assumeVmTypeSupported(true);
+        assumeVmTypeSupported(os, true);
         final String configPath = "assets/vm_config_apex.json";
 
         // Act
@@ -516,7 +516,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     public void protectedVmWithImageSignedWithDifferentKeyFailsToVerifyPayload(String os)
             throws Exception {
         assumeKernelSupported(os);
-        assumeVmTypeSupported(true);
+        assumeVmTypeSupported(os, true);
         File key = findTestFile("test.com.android.virt.pem");
 
         // Act
@@ -664,7 +664,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
             throws Exception {
         // Preconditions
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
         assertThat(
@@ -685,7 +685,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
             boolean protectedVm, String os) throws Exception {
         // Preconditions
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
         assertThat(
@@ -707,7 +707,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
             throws Exception {
         // Preconditions
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
         assumeFalse("Cuttlefish is not supported", isCuttlefish());
         assumeFalse("Skipping test because ramdump is disabled on user build", isUserBuild());
 
@@ -784,7 +784,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
 
         // Act
         assertThat(isTombstoneGeneratedWithCrashPayload(protectedVm, os, /* debuggable= */ true))
@@ -800,7 +800,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
 
         // Act
         assertThat(isTombstoneGeneratedWithCrashPayload(protectedVm, os, /* debuggable= */ false))
@@ -822,7 +822,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
 
         // Act
         assertThat(isTombstoneGeneratedWithCrashConfig(protectedVm, os, /* debuggable= */ true))
@@ -837,7 +837,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
         assertThat(isTombstoneGeneratedWithCrashConfig(protectedVm, os, /* debuggable= */ false))
                 .isFalse();
     }
@@ -847,7 +847,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     @TestCaseName("{method}_protectedVm_{0}_os_{1}")
     public void testTelemetryPushedAtoms(boolean protectedVm, String os) throws Exception {
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
         // Reset statsd config and report before the test
         ConfigUtils.removeConfig(getDevice());
         ReportUtils.clearReports(getDevice());
@@ -1011,7 +1011,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     public void testMicrodroidBoots(boolean protectedVm, String os) throws Exception {
         // Preconditions
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
 
         final String configPath = "assets/vm_config.json"; // path inside the APK
         testMicrodroidBootsWithBuilder(
@@ -1049,7 +1049,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     void checkMicrodroidRamUsage(boolean protectedVm, String os) throws Exception {
         // Preconditions
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
 
         final String configPath = "assets/vm_config.json";
         mMicrodroidDevice =
@@ -1245,7 +1245,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     public void testDeviceAssignment(boolean protectedVm, String os) throws Exception {
         // Preconditions
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
         assumeVfioPlatformSupported();
 
         List<AssignableDevice> devices = getAssignableDevices();
@@ -1309,7 +1309,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     public void testHugePages(boolean protectedVm, String os) throws Exception {
         // Preconditions
         assumeKernelSupported(os);
-        assumeVmTypeSupported(protectedVm);
+        assumeVmTypeSupported(os, protectedVm);
 
         ITestDevice device = getDevice();
         boolean disableRoot = !device.isAdbRoot();
@@ -1342,6 +1342,138 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         if (disableRoot) {
             device.disableAdbRoot();
         }
+    }
+
+    @Test
+    @Parameters(method = "gkiVersions")
+    @TestCaseName("{method}_os_{0}")
+    @Ignore("b/360388014") // TODO(b/360388014): fix & re-enable
+    public void microdroidDeviceTreeCompat(String os) throws Exception {
+        assumeArm64Supported();
+        final String configPath = "assets/vm_config.json";
+        // Preconditions
+        assumeKernelSupported(os);
+        int mem_size = 256;
+        assertTrue("Memory size too small", mem_size >= minMemorySize());
+
+        // Start the VM with the dump DT option.
+        mMicrodroidDevice =
+                MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
+                        .debugLevel("full")
+                        .memoryMib(mem_size)
+                        .cpuTopology("one_cpu")
+                        .protectedVm(false)
+                        .os(SUPPORTED_OSES.get(os))
+                        .name("test_device_tree")
+                        .dumpDt("/data/local/tmp/dump_dt.dtb")
+                        .build(getAndroidDevice());
+        assertThat(mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT)).isTrue();
+
+        File goldenDt = findTestFile("dt_dump_golden.dts");
+        testGoldenDeviceTree(goldenDt.getAbsolutePath());
+    }
+
+    @Test
+    @Parameters(method = "gkiVersions")
+    @TestCaseName("{method}_os_{0}")
+    @Ignore("b/360388014") // TODO(b/360388014): fix & re-enable
+    public void microdroidProtectedDeviceTreeCompat(String os) throws Exception {
+        assumeArm64Supported();
+        final String configPath = "assets/vm_config.json";
+        // Preconditions
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, true);
+        int mem_size = 256;
+        assertTrue("Memory size too small", mem_size >= minMemorySize());
+
+        // Start the VM with the dump DT option.
+        mMicrodroidDevice =
+                MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
+                        .debugLevel("full")
+                        .memoryMib(mem_size)
+                        .cpuTopology("one_cpu")
+                        .protectedVm(true)
+                        .os(SUPPORTED_OSES.get(os))
+                        .name("test_device_tree")
+                        .dumpDt("/data/local/tmp/dump_dt.dtb")
+                        .build(getAndroidDevice());
+        assertThat(mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT)).isTrue();
+
+        File goldenDt = findTestFile("dt_dump_protected_golden.dts");
+        testGoldenDeviceTree(goldenDt.getAbsolutePath());
+    }
+
+    private void testGoldenDeviceTree(String goldenDt) throws Exception {
+        // Pull the device tree to host.
+        TestDevice device = getAndroidDevice();
+        boolean disableRoot = !device.isAdbRoot();
+        device.enableAdbRoot();
+        assumeTrue("adb root is not enabled", device.isAdbRoot());
+
+        // Pull DT from device
+        File dtb_from_device = device.pullFile("/data/local/tmp/dump_dt.dtb");
+        if (disableRoot) {
+            device.disableAdbRoot();
+        }
+
+        File dtc = findTestFile("dtc");
+
+        // Create temp file for Device tree conversion
+        File dt_dump_dts = File.createTempFile("dt_dump", "dts");
+        dt_dump_dts.delete();
+        String dt_dump_dts_path = dt_dump_dts.getAbsolutePath();
+        // Convert DT to text format.
+        CommandResult dtb_to_dts =
+                RunUtil.getDefault()
+                        .runTimedCmd(
+                                3000,
+                                dtc.getAbsolutePath(),
+                                "-I",
+                                "dtb",
+                                "-O",
+                                "dts",
+                                "-qqq",
+                                "-f",
+                                "-s",
+                                "-o",
+                                dt_dump_dts_path,
+                                dtb_from_device.getAbsolutePath());
+        assertTrue(
+                "result convert stderr: " + dtb_to_dts.getStderr(),
+                dtb_to_dts.getStderr().trim().isEmpty());
+        assertTrue(
+                "result convert stdout: " + dtb_to_dts.getStdout(),
+                dtb_to_dts.getStdout().trim().isEmpty());
+
+        // Diff device's DT with the golden DT.
+        CommandResult result_compare =
+                RunUtil.getDefault()
+                        .runTimedCmd(
+                                3000,
+                                "diff",
+                                "-u",
+                                "-w",
+                                "-I",
+                                "kaslr-seed",
+                                "-I",
+                                "instance-id",
+                                "-I",
+                                "rng-seed",
+                                "-I",
+                                "linux,initrd-end",
+                                "-I",
+                                "secretkeeper_public_key",
+                                "-I",
+                                "interrupt-map",
+                                dt_dump_dts_path,
+                                goldenDt);
+
+        assertTrue(
+                "result compare stderr: " + result_compare.getStderr(),
+                result_compare.getStderr().trim().isEmpty());
+        assertTrue(
+                "result compare stdout: " + result_compare.getStdout(),
+                result_compare.getStdout().trim().isEmpty());
     }
 
     @Before
@@ -1419,9 +1551,20 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                 getSupportedOSList().contains(os));
     }
 
-    private void assumeVmTypeSupported(boolean protectedVm) throws Exception {
+    private void assumeVmTypeSupported(String os, boolean protectedVm) throws Exception {
+        // TODO(b/376870129): remove this check
+        if (protectedVm) {
+            assumeFalse("pVMs with 16k kernel are not supported yet :(", os.endsWith("_16k"));
+        }
         assumeTrue(
                 "Microdroid is not supported for specific VM protection type",
                 getAndroidDevice().supportsMicrodroid(protectedVm));
+    }
+
+    private void assumeArm64Supported() throws Exception {
+        CommandRunner android = new CommandRunner(getDevice());
+        String abi = android.run("getprop", "ro.product.cpu.abi");
+        assertThat(abi).isNotEmpty();
+        assumeTrue("Skipping test as the architecture is not supported", abi.startsWith("arm64"));
     }
 }
