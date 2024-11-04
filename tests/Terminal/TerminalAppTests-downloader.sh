@@ -19,10 +19,6 @@ set -e
 serial=${ANDROID_SERIAL}
 user=$(adb -s ${serial} shell am get-current-user)
 
-# Enable the terminal app
-package_name=$(adb -s ${serial} shell pm list package virtualization.terminal | cut -d ':' -f 2)
-adb -s ${serial} shell pm enable --user ${user} ${package_name}
-
 # Identify file to download
 arch=$(adb -s ${serial} shell getprop ro.bionic.arch)
 if [ ${arch} == "arm64" ]; then
