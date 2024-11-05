@@ -17,6 +17,7 @@
 set -e
 
 serial=${ANDROID_SERIAL}
+user=$(adb -s ${serial} shell am get-current-user)
 
 # Identify file to download
 arch=$(adb -s ${serial} shell getprop ro.bionic.arch)
@@ -31,7 +32,6 @@ downloaded=$(tempfile)
 wget ${src} -O ${downloaded}
 
 # Push the file to the device
-user=$(adb -s ${serial} shell am get-current-user)
 dst=/data/media/${user}/linux
 adb -s ${serial} shell mkdir -p ${dst}
 adb -s ${serial} push ${downloaded} ${dst}/images.tar.gz
