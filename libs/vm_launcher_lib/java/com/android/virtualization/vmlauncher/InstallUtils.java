@@ -141,6 +141,12 @@ public class InstallUtils {
         rules.put("\\$PAYLOAD_DIR", new File(context.getFilesDir(), PAYLOAD_DIR).toString());
         rules.put("\\$USER_ID", String.valueOf(context.getUserId()));
         rules.put("\\$PACKAGE_NAME", context.getPackageName());
+        String appDataDir = context.getDataDir().toString();
+        // TODO: remove this hack
+        if (context.getUserId() == 0) {
+            appDataDir = "/data/data/" + context.getPackageName();
+        }
+        rules.put("\\$APP_DATA_DIR", appDataDir);
         return (s) -> {
             for (Map.Entry<String, String> rule : rules.entrySet()) {
                 s = s.replaceAll(rule.getKey(), rule.getValue());
