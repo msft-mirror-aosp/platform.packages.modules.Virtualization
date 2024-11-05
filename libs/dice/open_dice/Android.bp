@@ -14,6 +14,7 @@ rust_library_rlib {
     name: "libdiced_open_dice_nostd",
     defaults: ["libdiced_open_dice_defaults"],
     rustlibs: [
+        "libcoset_nostd",
         "libopen_dice_android_bindgen_nostd",
         "libopen_dice_cbor_bindgen_nostd",
         "libzeroize_nostd",
@@ -35,6 +36,7 @@ rust_library {
     host_supported: true,
     vendor_available: true,
     rustlibs: [
+        "libcoset",
         "libopen_dice_android_bindgen",
         "libopen_dice_cbor_bindgen",
         "libserde",
@@ -157,7 +159,6 @@ rust_defaults {
         "--allowlist-var=DICE_PUBLIC_KEY_SIZE",
         "--allowlist-var=DICE_PRIVATE_KEY_SIZE",
         "--allowlist-var=DICE_SIGNATURE_SIZE",
-        "--allowlist-var=DICE_COSE_KEY_ALG_VALUE",
     ],
 }
 

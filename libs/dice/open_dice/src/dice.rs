@@ -16,6 +16,7 @@
 //! This module mirrors the content in open-dice/include/dice/dice.h
 
 use crate::error::{check_result, Result};
+use coset::iana;
 pub use open_dice_cbor_bindgen::DiceMode;
 use open_dice_cbor_bindgen::{
     DiceConfigType, DiceDeriveCdiCertificateId, DiceDeriveCdiPrivateKeySeed, DiceInputValues,
@@ -61,6 +62,37 @@ pub type PublicKey = [u8; PUBLIC_KEY_SIZE];
 pub type Signature = [u8; SIGNATURE_SIZE];
 /// Array type of DICE ID.
 pub type DiceId = [u8; ID_SIZE];
+
+/// Key algorithm used for DICE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAlgorithm {
+    /// Ed25519.
+    Ed25519,
+    /// ECDSA using P-256 curve.
+    EcdsaP256,
+    /// ECDSA using P-384 curve.
+    EcdsaP384,
+}
+
+impl From<KeyAlgorithm> for iana::Algorithm {
+    fn from(alg: KeyAlgorithm) -> Self {
+        match alg {
+            KeyAlgorithm::Ed25519 => iana::Algorithm::EdDSA,
+            KeyAlgorithm::EcdsaP256 => iana::Algorithm::ES256,
+            KeyAlgorithm::EcdsaP384 => iana::Algorithm::ES384,
+        }
+    }
+}
+
+/// Key algorithm used within different components in VMs.
+///
+/// This algorithm serves two primary purposes:
+///
+/// * **pvmfw Handover:** In pvmfw, a vendor DICE chain, potentially using various algorithms, is
+///   transitioned to this specific algorithm.
+/// * **Post-Handover Consistency:** In components following pvmfw (e.g., the Microdroid OS), this
+///   algorithm is used consistently for both the authority and subject keys in DICE derivation.
+pub const VM_KEY_ALGORITHM: KeyAlgorithm = KeyAlgorithm::Ed25519;
 
 /// A trait for types that represent Dice artifacts, which include:
 ///
