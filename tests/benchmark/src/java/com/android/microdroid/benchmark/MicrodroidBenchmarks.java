@@ -94,14 +94,12 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     private static final String MICRODROID_IMG_PREFIX = "microdroid_";
     private static final String MICRODROID_IMG_SUFFIX = ".img";
 
-    @Parameterized.Parameters(name = "protectedVm={0},gki={1}")
+    @Parameterized.Parameters(name = "protectedVm={0},os={1}")
     public static Collection<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
-        ret.add(new Object[] {true /* protectedVm */, null /* use microdroid kernel */});
-        ret.add(new Object[] {false /* protectedVm */, null /* use microdroid kernel */});
-        for (String gki : SUPPORTED_GKI_VERSIONS) {
-            ret.add(new Object[] {true /* protectedVm */, gki});
-            ret.add(new Object[] {false /* protectedVm */, gki});
+        for (String os : SUPPORTED_OSES) {
+            ret.add(new Object[] {true /* protectedVm */, os});
+            ret.add(new Object[] {false /* protectedVm */, os});
         }
         return ret;
     }
@@ -110,7 +108,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     public boolean mProtectedVm;
 
     @Parameterized.Parameter(1)
-    public String mGki;
+    public String mOs;
 
     private final MetricsProcessor mMetricsProcessor = new MetricsProcessor(METRIC_NAME_PREFIX);
 
@@ -143,7 +141,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     public void setup() throws IOException {
         grantPermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
-        prepareTestSetup(mProtectedVm, mGki);
+        prepareTestSetup(mProtectedVm, mOs);
         mInstrumentation = getInstrumentation();
     }
 
@@ -596,7 +594,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         @Override
         public void onPayloadReady(VirtualMachine vm, IBenchmarkService service)
                 throws RemoteException {
-            int vmPid = ProcessUtil.getCrosvmPid(Os.getpid(), mShellExecutor);
+            int vmPid = ProcessUtil.getCrosvmPid(Os.getpid(), "test_vm_mem_usage", mShellExecutor);
 
             mMemTotal = service.getMemInfoEntry("MemTotal");
             mMemFree = service.getMemInfoEntry("MemFree");
@@ -670,7 +668,8 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         @SuppressWarnings("ReturnValueIgnored")
         public void onPayloadReady(VirtualMachine vm, IBenchmarkService service)
                 throws RemoteException {
-            int vmPid = ProcessUtil.getCrosvmPid(Os.getpid(), mShellExecutor);
+            int vmPid =
+                    ProcessUtil.getCrosvmPid(Os.getpid(), "test_vm_mem_reclaim", mShellExecutor);
 
             // Allocate 256MB of anonymous memory. This will fill all guest
             // memory and cause swapping to start.

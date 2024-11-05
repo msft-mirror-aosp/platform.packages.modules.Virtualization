@@ -17,33 +17,38 @@
 package com.android.virtualization.vmlauncher;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
 import android.os.Bundle;
-import android.os.Handler;
 import android.os.IBinder;
-import android.os.Looper;
-import android.os.ParcelFileDescriptor;
 import android.os.ResultReceiver;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineException;
 import android.util.Log;
 
-import java.io.BufferedReader;
-import java.io.FileInputStream;
+import io.grpc.Grpc;
+import io.grpc.InsecureServerCredentials;
+import io.grpc.Metadata;
+import io.grpc.Server;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
+import io.grpc.Status;
+import io.grpc.okhttp.OkHttpServerBuilder;
+
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.net.InetSocketAddress;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class VmLauncherService extends Service {
+public class VmLauncherService extends Service implements DebianServiceImpl.DebianServiceCallback {
+    public static final String EXTRA_NOTIFICATION = "EXTRA_NOTIFICATION";
     private static final String TAG = "VmLauncherService";
-    // TODO: this path should be from outside of this service
-    private static final String VM_CONFIG_PATH = "/data/local/tmp/vm_config.json";
 
     private static final int RESULT_START = 0;
     private static final int RESULT_STOP = 1;
@@ -54,40 +59,39 @@ public class VmLauncherService extends Service {
     private ExecutorService mExecutorService;
     private VirtualMachine mVirtualMachine;
     private ResultReceiver mResultReceiver;
+    private Server mServer;
 
     @Override
     public IBinder onBind(Intent intent) {
         return null;
     }
 
-    private void startForeground() {
-        NotificationManager notificationManager = getSystemService(NotificationManager.class);
-        NotificationChannel notificationChannel =
-                new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
-        notificationManager.createNotificationChannel(notificationChannel);
-        startForeground(
-                this.hashCode(),
-                new Notification.Builder(this, TAG)
-                        .setChannelId(TAG)
-                        .setSmallIcon(android.R.drawable.ic_dialog_info)
-                        .setContentText("A VM " + mVirtualMachine.getName() + " is running")
-                        .build());
+    private void startForeground(Notification notification) {
+        startForeground(this.hashCode(), notification);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (isVmRunning()) {
-            Log.d(TAG, "there is already the running VM instance");
+        if (Objects.equals(
+                intent.getAction(), VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE)) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (mVirtualMachine != null) {
+            Log.d(TAG, "VM instance is already started");
             return START_NOT_STICKY;
         }
         mExecutorService = Executors.newCachedThreadPool();
 
-        ConfigJson json = ConfigJson.from(VM_CONFIG_PATH);
+        ConfigJson json = ConfigJson.from(InstallUtils.getVmConfigPath(this));
         VirtualMachineConfig config = json.toConfig(this);
 
         Runner runner;
         try {
+            android.os.Trace.beginSection("vmCreate");
             runner = Runner.create(this, config);
+            android.os.Trace.endSection();
+            android.os.Trace.beginAsyncSection("debianBoot", 0);
         } catch (VirtualMachineException e) {
             Log.e(TAG, "cannot create runner", e);
             stopSelf();
@@ -110,65 +114,104 @@ public class VmLauncherService extends Service {
         Path logPath = getFileStreamPath(mVirtualMachine.getName() + ".log").toPath();
         Logger.setup(mVirtualMachine, logPath, mExecutorService);
 
-        startForeground();
+        Notification notification = intent.getParcelableExtra(EXTRA_NOTIFICATION,
+                Notification.class);
+
+        startForeground(notification);
 
         mResultReceiver.send(RESULT_START, null);
-        if (config.getCustomImageConfig().useNetwork()) {
-            Handler handler = new Handler(Looper.getMainLooper());
-            gatherIpAddrFromVm(handler);
-        }
+
+        startDebianServer();
+
         return START_NOT_STICKY;
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
-        if (isVmRunning()) {
-            try {
-                mVirtualMachine.stop();
-                stopForeground(STOP_FOREGROUND_REMOVE);
-            } catch (VirtualMachineException e) {
-                Log.e(TAG, "failed to stop a VM instance", e);
+        if (mVirtualMachine != null) {
+            if (mVirtualMachine.getStatus() == VirtualMachine.STATUS_RUNNING) {
+                try {
+                    mVirtualMachine.stop();
+                    stopForeground(STOP_FOREGROUND_REMOVE);
+                } catch (VirtualMachineException e) {
+                    Log.e(TAG, "failed to stop a VM instance", e);
+                }
             }
             mExecutorService.shutdownNow();
             mExecutorService = null;
             mVirtualMachine = null;
         }
+        stopDebianServer();
     }
 
-    private boolean isVmRunning() {
-        return mVirtualMachine != null
-                && mVirtualMachine.getStatus() == VirtualMachine.STATUS_RUNNING;
-    }
+    private void startDebianServer() {
+        ServerInterceptor interceptor =
+                new ServerInterceptor() {
+                    @Override
+                    public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+                            ServerCall<ReqT, RespT> call,
+                            Metadata headers,
+                            ServerCallHandler<ReqT, RespT> next) {
+                        // Refer to VirtualizationSystemService.TetheringService
+                        final String VM_STATIC_IP_ADDR = "192.168.0.2";
+                        InetSocketAddress remoteAddr =
+                                (InetSocketAddress)
+                                        call.getAttributes().get(Grpc.TRANSPORT_ATTR_REMOTE_ADDR);
 
-    // TODO(b/359523803): Use AVF API to get ip addr when it exists
-    private void gatherIpAddrFromVm(Handler handler) {
-        handler.postDelayed(
-                () -> {
-                    if (!isVmRunning()) {
-                        Log.d(TAG, "A virtual machine instance isn't running");
-                        return;
-                    }
-                    int INTERNAL_VSOCK_SERVER_PORT = 1024;
-                    try (ParcelFileDescriptor pfd =
-                            mVirtualMachine.connectVsock(INTERNAL_VSOCK_SERVER_PORT)) {
-                        try (BufferedReader input =
-                                new BufferedReader(
-                                        new InputStreamReader(
-                                                new FileInputStream(pfd.getFileDescriptor())))) {
-                            String vmIpAddr = input.readLine().strip();
-                            Bundle b = new Bundle();
-                            b.putString(KEY_VM_IP_ADDR, vmIpAddr);
-                            mResultReceiver.send(RESULT_IPADDR, b);
-                            return;
-                        } catch (IOException e) {
-                            Log.e(TAG, e.toString());
+                        if (remoteAddr != null
+                                && Objects.equals(
+                                        remoteAddr.getAddress().getHostAddress(),
+                                        VM_STATIC_IP_ADDR)) {
+                            // Allow the request only if it is from VM
+                            return next.startCall(call, headers);
                         }
-                    } catch (Exception e) {
-                        Log.e(TAG, e.toString());
+                        Log.d(TAG, "blocked grpc request from " + remoteAddr);
+                        call.close(Status.Code.PERMISSION_DENIED.toStatus(), new Metadata());
+                        return new ServerCall.Listener<ReqT>() {};
                     }
-                    gatherIpAddrFromVm(handler);
-                },
-                1000);
+                };
+        new Thread(
+                        () -> {
+                            try {
+                                // TODO(b/372666638): gRPC for java doesn't support vsock for now.
+                                int port = 0;
+                                mServer =
+                                        OkHttpServerBuilder.forPort(
+                                                        port, InsecureServerCredentials.create())
+                                                .intercept(interceptor)
+                                                .addService(new DebianServiceImpl(this))
+                                                .build()
+                                                .start();
+
+                                // TODO(b/373533555): we can use mDNS for that.
+                                String debianServicePortFileName = "debian_service_port";
+                                File debianServicePortFile =
+                                        new File(getFilesDir(), debianServicePortFileName);
+                                try (FileOutputStream writer =
+                                        new FileOutputStream(debianServicePortFile)) {
+                                    writer.write(String.valueOf(mServer.getPort()).getBytes());
+                                } catch (IOException e) {
+                                    Log.d(TAG, "cannot write grpc port number", e);
+                                }
+                            } catch (IOException e) {
+                                Log.d(TAG, "grpc server error", e);
+                            }
+                        })
+                .start();
+    }
+
+    private void stopDebianServer() {
+        if (mServer != null) {
+            mServer.shutdown();
+        }
+    }
+
+    @Override
+    public void onIpAddressAvailable(String ipAddr) {
+        android.os.Trace.endAsyncSection("debianBoot", 0);
+        Bundle b = new Bundle();
+        b.putString(VmLauncherService.KEY_VM_IP_ADDR, ipAddr);
+        mResultReceiver.send(VmLauncherService.RESULT_IPADDR, b);
     }
 }

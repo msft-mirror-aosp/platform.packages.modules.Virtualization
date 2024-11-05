@@ -12,8 +12,11 @@ java_library {
     platform_apis: true,
     static_libs: [
         "gson",
+        "debian-service-grpclib-lite",
+        "apache-commons-compress",
     ],
     libs: [
+        "androidx.annotation_annotation",
         "framework-virtualization.impl",
         "framework-annotations-lib",
     ],

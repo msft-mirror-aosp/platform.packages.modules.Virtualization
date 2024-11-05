@@ -17,7 +17,9 @@
 package com.android.virtualization.vmlauncher;
 
 import android.content.Context;
+import android.content.pm.PackageManager.NameNotFoundException;
 import android.graphics.Rect;
+import android.os.Environment;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.AudioConfig;
@@ -25,6 +27,7 @@ import android.system.virtualmachine.VirtualMachineCustomImageConfig.Disk;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.DisplayConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.GpuConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.Partition;
+import android.system.virtualmachine.VirtualMachineCustomImageConfig.SharedPath;
 import android.util.DisplayMetrics;
 import android.view.WindowManager;
 import android.view.WindowMetrics;
@@ -34,6 +37,7 @@ import com.google.gson.annotations.SerializedName;
 
 import java.io.FileReader;
 import java.util.Arrays;
+import java.util.Objects;
 
 /** This class and its inner classes model vm_config.json. */
 class ConfigJson {
@@ -60,6 +64,7 @@ class ConfigJson {
     private InputJson input;
     private AudioJson audio;
     private DiskJson[] disks;
+    private SharedPathJson[] sharedPath;
     private DisplayJson display;
     private GpuJson gpu;
 
@@ -141,7 +146,52 @@ class ConfigJson {
             Arrays.stream(disks).map(d -> d.toConfig()).forEach(builder::addDisk);
         }
 
+        if (sharedPath != null) {
+            Arrays.stream(sharedPath)
+                    .map(d -> d.toConfig(context))
+                    .filter(Objects::nonNull)
+                    .forEach(builder::addSharedPath);
+        }
         return builder.build();
+    }
+
+    private static class SharedPathJson {
+        private SharedPathJson() {}
+
+        private String sharedPath;
+        private static final int GUEST_UID = 1000;
+        private static final int GUEST_GID = 100;
+
+        private SharedPath toConfig(Context context) {
+            try {
+                int terminalUid = getTerminalUid(context);
+                if (sharedPath.contains("emulated")) {
+                    if (Environment.isExternalStorageManager()) {
+                        int currentUserId = context.getUserId();
+                        String path = sharedPath + "/" + currentUserId + "/Download";
+                        return new SharedPath(
+                                path,
+                                terminalUid,
+                                terminalUid,
+                                GUEST_UID,
+                                GUEST_GID,
+                                0007,
+                                "android",
+                                "android");
+                    }
+                    return null;
+                }
+                return new SharedPath(
+                        sharedPath, terminalUid, terminalUid, 0, 0, 0007, "internal", "internal");
+            } catch (NameNotFoundException e) {
+                return null;
+            }
+        }
+
+        private int getTerminalUid(Context context) throws NameNotFoundException {
+            return context.getPackageManager()
+                    .getPackageUidAsUser(context.getPackageName(), context.getUserId());
+        }
     }
 
     private static class InputJson {
