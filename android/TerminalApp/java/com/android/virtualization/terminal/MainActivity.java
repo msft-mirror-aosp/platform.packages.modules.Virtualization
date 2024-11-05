@@ -52,6 +52,7 @@ import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.virtualization.vmlauncher.InstallUtils;
 import com.android.virtualization.vmlauncher.VmLauncherService;
 import com.android.virtualization.vmlauncher.VmLauncherServices;
@@ -510,6 +511,7 @@ public class MainActivity extends BaseActivity
         VmLauncherServices.startVmLauncherService(this, this, notification);
     }
 
+    @VisibleForTesting
     public boolean waitForBootCompleted(long timeoutMillis) {
         return mBootCompleted.block(timeoutMillis);
     }
