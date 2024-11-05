@@ -16,8 +16,92 @@
 
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+
+    <!-- Application name of this terminal app shown in the launcher. This app provides computer terminal to connect to virtual machine. [CHAR LIMIT=16] -->
     <string name="app_name">Terminal</string>
-    <string name="vm_creation_message">Virtual machine is booting. Please wait.</string>
-    <string name="vm_stop_message">Virtual machine is stopped. Exiting.</string>
-    <string name="vm_error_message">Virtual machine crashed. Exiting.</string>
+
+    <!-- Installer activity title [CHAR LIMIT=none] -->
+    <string name="installer_title_text">Install Linux terminal</string>
+    <!-- Installer activity description format [CHAR LIMIT=none] -->
+    <string name="installer_desc_text_format">To launch Linux terminal, you need to download roughly <xliff:g id="expected_size" example="350GB">%1$s</xliff:g> of data over network.\nWould you proceed?</string>
+    <!-- Checkbox at the installer activity to download when Wi-Fi is available to prevent from paying network traffic [CHAR LIMIT=none] -->
+    <string name="installer_wait_for_wifi_checkbox_text">Download when Wi-Fi is available</string>
+    <!-- Button at the installer activity to confirm installation [CHAR LIMIT=16] -->
+    <string name="installer_install_button_enabled_text">Install</string>
+    <!-- Button at the installer activity to when installation is already in progress [CHAR LIMIT=16] -->
+    <string name="installer_install_button_disabled_text">Installing</string>
+    <!-- Toast message at installer activity when network doesn't meet[CHAR LIMIT=none] -->
+    <string name="installer_install_network_error_message">Network error. Check connection and retry.</string>
+    <!-- Notification title for installer [CHAR LIMIT=64] -->
+    <string name="installer_notif_title_text">Installing Linux terminal</string>
+    <!-- Notification description for installer [CHAR LIMIT=none] -->
+    <string name="installer_notif_desc_text">Linux terminal will be started after finish</string>
+    <!-- Toast error message for install failure due to the network issue [CHAR LIMIT=none] -->
+    <string name="installer_error_network">Failed to install due to the network issue</string>
+    <!-- Toast error message for install failure due to the unidentified issue [CHAR LIMIT=none] -->
+    <string name="installer_error_unknown">Failed to install. Try again.</string>
+
+    <!-- Action bar icon name for the settings view CHAR LIMIT=none] -->
+    <string name="action_settings">Settings</string>
+
+    <!-- Toast message to notify that preparing terminal to start [CHAR LIMIT=none] -->
+    <string name="vm_creation_message">Preparing terminal</string>
+    <!-- Toast message to notify that terminal is stopping [CHAR LIMIT=none] -->
+    <string name="vm_stop_message">Stopping terminal</string>
+    <!-- Toast message to notify that terminal is crashed [CHAR LIMIT=none] -->
+    <string name="vm_error_message">Terminal crashed</string>
+
+    <!-- Settings memu title for resizing disk of the virtual machine. [CHAR LIMIT=none] -->
+    <string name="settings_disk_resize_title">Disk Resize</string>
+    <!-- Settings memu subtitle for resizing disk of the virtual machine. [CHAR LIMIT=none] -->
+    <string name="settings_disk_resize_sub_title">Resize / Rootfs</string>
+    <!-- Toast message after new disk size is set. [CHAR LIMIT=none] -->
+    <string name="settings_disk_resize_resize_message">Disk size set</string>
+    <!-- Settings menu option description format of the current disk size. [CHAR LIMIT=none] -->
+    <string name="settings_disk_resize_resize_gb_assigned_format"><xliff:g id="assigned_size" example="10GB">%1$s</xliff:g> assigned</string>
+    <!-- Settings menu option description format of the maximum resizable disk size. [CHAR LIMIT=none] -->
+    <string name="settings_disk_resize_resize_gb_max_format"><xliff:g id="max_size" example="256GB">%1$s</xliff:g> max</string>
+    <!-- Settings menu button to cancel disk resize. [CHAR LIMIT=32] -->
+    <string name="settings_disk_resize_resize_cancel">Cancel</string>
+    <!-- Settings menu button to apply change that requires to restart VM (abbrev of virtual machine). [CHAR LIMIT=64] -->
+    <string name="settings_disk_resize_resize_restart_vm_to_apply">Restart VM to apply</string>
+
+    <!-- Settings menu title for 'port forwarding' [CHAR LIMIT=none] -->
+    <string name="settings_port_forwarding_title">Port Forwarding</string>
+    <!-- Settings menu subtitle for 'port forwarding' [CHAR LIMIT=none] -->
+    <string name="settings_port_forwarding_sub_title">Configure port forwarding</string>
+    <!-- Notification title for new port forwarding [CHAR LIMIT=none] -->
+    <string name="settings_port_forwarding_notification_title">Terminal is trying to open a new port</string>
+    <!-- Notification content for new port forwarding [CHAR LIMIT=none] -->
+    <string name="settings_port_forwarding_notification_content">Port requested to be open: <xliff:g id="port_number" example="8080">%d</xliff:g></string>
+    <!-- Notification action accept [CHAR LIMIT=none] -->
+    <string name="settings_port_forwarding_notification_accept">Accept</string>
+    <!-- Notification action deny [CHAR LIMIT=none] -->
+    <string name="settings_port_forwarding_notification_deny">Deny</string>
+
+    <!-- Settings menu title for recoverying image [CHAR LIMIT=none] -->
+    <string name="settings_recovery_title">Recovery</string>
+    <!-- Settings menu subtitle for recoverying image [CHAR LIMIT=none] -->
+    <string name="settings_recovery_sub_title">Partition Recovery options</string>
+    <!-- Settings menu title for resetting the virtual machine image [CHAR LIMIT=none] -->
+    <string name="settings_recovery_reset_title">Change to Initial version</string>
+    <!-- Settings menu subtitle for resetting the virtual machine image [CHAR LIMIT=none] -->
+    <string name="settings_recovery_reset_sub_title">Remove all</string>
+    <!-- Dialog title for restarting the terminal [CHAR LIMIT=none] -->
+    <string name="settings_recovery_reset_dialog_title">Reset the virtual machine</string>
+    <!-- Dialog message for restarting the terminal [CHAR LIMIT=none] -->
+    <string name="settings_recovery_reset_dialog_message">Data will be deleted.</string>
+    <!-- Dialog button confirm for restarting the terminal [CHAR LIMIT=16] -->
+    <string name="settings_recovery_reset_dialog_confirm">Confirm</string>
+    <!-- Dialog button cancel for restarting the terminal [CHAR LIMIT=16] -->
+    <string name="settings_recovery_reset_dialog_cancel">Cancel</string>
+
+    <!-- Notification action button for settings [CHAR LIMIT=none] -->
+    <string name="service_notification_settings">Settings</string>
+    <!-- Notification title for foreground service notification [CHAR LIMIT=none] -->
+    <string name="service_notification_title">Terminal is running</string>
+    <!-- Notification content for foreground service notification [CHAR LIMIT=none] -->
+    <string name="service_notification_content">Click to open the terminal.</string>
+    <!-- Notification action button for closing the virtual machine [CHAR LIMIT=none] -->
+    <string name="service_notification_quit_action">Close</string>
 </resources>
