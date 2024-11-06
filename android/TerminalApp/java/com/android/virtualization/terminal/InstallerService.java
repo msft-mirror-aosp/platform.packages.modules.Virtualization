@@ -57,11 +57,10 @@ public class InstallerService extends Service {
     private static final String NOTIFICATION_CHANNEL_ID = "installer";
     private static final int NOTIFICATION_ID = 1313; // any unique number among notifications
 
-    // TODO(b/369740847): Replace this URL with dl.google.com
     private static final String IMAGE_URL =
             Arrays.asList(Build.SUPPORTED_ABIS).contains("x86_64")
-                    ? "https://github.com/ikicha/debian_ci/releases/download/release_x86_64/images.tar.gz"
-                    : "https://github.com/ikicha/debian_ci/releases/download/release_aarch64/images.tar.gz";
+                    ? "https://dl.google.com/android/ferrochrome/latest/x86_64/images.tar.gz"
+                    : "https://dl.google.com/android/ferrochrome/latest/aarch64/images.tar.gz";
 
     private static final String SELINUX_FILE_CONTEXT =
             "u:object_r:virtualizationservice_data_file:";

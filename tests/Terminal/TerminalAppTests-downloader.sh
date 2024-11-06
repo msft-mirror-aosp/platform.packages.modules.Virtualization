@@ -22,9 +22,9 @@ user=$(adb -s ${serial} shell am get-current-user)
 # Identify file to download
 arch=$(adb -s ${serial} shell getprop ro.bionic.arch)
 if [ ${arch} == "arm64" ]; then
-  src=https://github.com/ikicha/debian_ci/releases/download/release_aarch64/images.tar.gz
+  src=https://dl.google.com/android/ferrochrome/latest/aarch64/images.tar.gz
 else
-  src=https://github.com/ikicha/debian_ci/releases/download/release_x86_64/images.tar.gz
+  src=https://dl.google.com/android/ferrochrome/latest/x86_64/images.tar.gz
 fi
 
 # Download
