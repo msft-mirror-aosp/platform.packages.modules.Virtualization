@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use ciborium::value::Value;
 use core::fmt;
 use core::mem::size_of;
+use coset::{iana, Algorithm, CborSerializable, CoseKey};
 use diced_open_dice::{BccHandover, Cdi, DiceArtifacts, DiceMode};
 use log::trace;
 
@@ -29,9 +30,16 @@ type Result<T> = core::result::Result<T, BccError>;
 pub enum BccError {
     CborDecodeError,
     CborEncodeError,
+    CosetError(coset::CoseError),
     DiceError(diced_open_dice::DiceError),
     MalformedBcc(&'static str),
     MissingBcc,
+}
+
+impl From<coset::CoseError> for BccError {
+    fn from(e: coset::CoseError) -> Self {
+        Self::CosetError(e)
+    }
 }
 
 impl fmt::Display for BccError {
@@ -39,6 +47,7 @@ impl fmt::Display for BccError {
         match self {
             Self::CborDecodeError => write!(f, "Error parsing BCC CBOR"),
             Self::CborEncodeError => write!(f, "Error encoding BCC CBOR"),
+            Self::CosetError(e) => write!(f, "Encountered an error with coset: {e}"),
             Self::DiceError(e) => write!(f, "Dice error: {e:?}"),
             Self::MalformedBcc(s) => {
                 write!(f, "BCC does not have the expected CBOR structure: {s}")
@@ -84,6 +93,7 @@ fn taint_cdi(cdi: &Cdi, info: &str) -> Result<Cdi> {
 /// Represents a (partially) decoded BCC DICE chain.
 pub struct Bcc {
     is_debug_mode: bool,
+    leaf_subject_pubkey: PublicKey,
 }
 
 impl Bcc {
@@ -117,11 +127,17 @@ impl Bcc {
             .collect::<Result<Vec<_>>>()?;
 
         let is_debug_mode = is_any_payload_debug_mode(&payloads)?;
-        Ok(Self { is_debug_mode })
+        // Safe to unwrap because we checked the length above.
+        let leaf_subject_pubkey = payloads.last().unwrap().subject_public_key()?;
+        Ok(Self { is_debug_mode, leaf_subject_pubkey })
     }
 
     pub fn is_debug_mode(&self) -> bool {
         self.is_debug_mode
+    }
+
+    pub fn leaf_subject_pubkey(&self) -> &PublicKey {
+        &self.leaf_subject_pubkey
     }
 }
 
@@ -143,6 +159,13 @@ struct BccEntry(Value);
 
 #[repr(transparent)]
 struct BccPayload(Value);
+
+#[derive(Debug, Clone)]
+pub struct PublicKey {
+    /// The COSE key algorithm for the public key, representing the value of the `alg`
+    /// field in the COSE key format of the public key. See RFC 8152, section 7 for details.
+    pub cose_alg: iana::Algorithm,
+}
 
 impl BccEntry {
     pub fn new(entry: Value) -> Self {
@@ -178,6 +201,7 @@ impl BccEntry {
 
 const KEY_MODE: i32 = -4670551;
 const MODE_DEBUG: u8 = DiceMode::kDiceModeDebug as u8;
+const SUBJECT_PUBLIC_KEY: i32 = -4670552;
 
 impl BccPayload {
     pub fn is_debug_mode(&self) -> Result<bool> {
@@ -204,6 +228,21 @@ impl BccPayload {
         Ok(mode == MODE_DEBUG.into())
     }
 
+    fn subject_public_key(&self) -> Result<PublicKey> {
+        // BccPayload = {                             ; CWT [RFC8392]
+        // ...
+        //   -4670552 : bstr .cbor PubKeyEd25519 /
+        //              bstr .cbor PubKeyECDSA256 /
+        //              bstr .cbor PubKeyECDSA384,    ; Subject Public Key
+        // ...
+        // }
+        self.value_from_key(SUBJECT_PUBLIC_KEY)
+            .ok_or(BccError::MalformedBcc("Subject public key missing"))?
+            .as_bytes()
+            .ok_or(BccError::MalformedBcc("Subject public key is not a byte string"))
+            .and_then(|v| PublicKey::from_slice(v))
+    }
+
     fn value_from_key(&self, key: i32) -> Option<&Value> {
         // BccPayload is just a map; we only use integral keys, but in general it's legitimate
         // for other things to be present, or for the key we care about not to be present.
@@ -216,5 +255,15 @@ impl BccPayload {
             }
         }
         None
+    }
+}
+
+impl PublicKey {
+    fn from_slice(slice: &[u8]) -> Result<Self> {
+        let key = CoseKey::from_slice(slice)?;
+        let Some(Algorithm::Assigned(cose_alg)) = key.alg else {
+            return Err(BccError::MalformedBcc("Invalid algorithm in public key"));
+        };
+        Ok(Self { cose_alg })
     }
 }
