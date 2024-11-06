@@ -17,7 +17,10 @@ package com.android.virtualization.vmlauncher;
 
 import android.content.Context;
 import android.os.Environment;
+import android.os.FileUtils;
 import android.util.Log;
+
+import com.android.internal.annotations.VisibleForTesting;
 
 import org.apache.commons.compress.archivers.ArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
@@ -49,6 +52,10 @@ public class InstallUtils {
         return Files.exists(getInstallationCompletedPath(context));
     }
 
+    public static void unInstall(Context context) throws IOException {
+        Files.delete(getInstallationCompletedPath(context));
+    }
+
     public static boolean createInstalledMarker(Context context) {
         try {
             File file = new File(getInstallationCompletedPath(context).toString());
@@ -57,6 +64,11 @@ public class InstallUtils {
             Log.e(TAG, "Failed to mark install completed", e);
             return false;
         }
+    }
+
+    @VisibleForTesting
+    public static void deleteInstallation(Context context) {
+        FileUtils.deleteContentsAndDir(getInternalStorageDir(context));
     }
 
     private static Path getPayloadPath() {
@@ -130,6 +142,14 @@ public class InstallUtils {
     private static Function<String, String> getReplacer(Context context) {
         Map<String, String> rules = new HashMap<>();
         rules.put("\\$PAYLOAD_DIR", new File(context.getFilesDir(), PAYLOAD_DIR).toString());
+        rules.put("\\$USER_ID", String.valueOf(context.getUserId()));
+        rules.put("\\$PACKAGE_NAME", context.getPackageName());
+        String appDataDir = context.getDataDir().toString();
+        // TODO: remove this hack
+        if (context.getUserId() == 0) {
+            appDataDir = "/data/data/" + context.getPackageName();
+        }
+        rules.put("\\$APP_DATA_DIR", appDataDir);
         return (s) -> {
             for (Map.Entry<String, String> rule : rules.entrySet()) {
                 s = s.replaceAll(rule.getKey(), rule.getValue());

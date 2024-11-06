@@ -17,10 +17,15 @@ android_app {
         "com.google.android.material_material",
         "androidx.window_window",
     ],
+    jni_libs: [
+        "libforwarder_host_jni",
+    ],
+    use_embedded_native_libs: true,
     platform_apis: true,
     privileged: true,
     optimize: {
-        optimize: true,
+        // TODO(b/377100096): enable bytecode optimization again
+        //optimize: true,
         proguard_flags_files: ["proguard.flags"],
         shrink_resources: true,
     },
