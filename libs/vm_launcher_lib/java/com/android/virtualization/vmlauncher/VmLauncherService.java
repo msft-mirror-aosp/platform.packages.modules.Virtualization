@@ -60,6 +60,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     private VirtualMachine mVirtualMachine;
     private ResultReceiver mResultReceiver;
     private Server mServer;
+    private DebianServiceImpl mDebianService;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -129,6 +130,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     @Override
     public void onDestroy() {
         super.onDestroy();
+        stopDebianServer();
         if (mVirtualMachine != null) {
             if (mVirtualMachine.getStatus() == VirtualMachine.STATUS_RUNNING) {
                 try {
@@ -142,7 +144,6 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
             mExecutorService = null;
             mVirtualMachine = null;
         }
-        stopDebianServer();
     }
 
     private void startDebianServer() {
@@ -174,10 +175,11 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         try {
             // TODO(b/372666638): gRPC for java doesn't support vsock for now.
             int port = 0;
+            mDebianService = new DebianServiceImpl(this, this);
             mServer =
                     OkHttpServerBuilder.forPort(port, InsecureServerCredentials.create())
                             .intercept(interceptor)
-                            .addService(new DebianServiceImpl(this))
+                            .addService(mDebianService)
                             .build()
                             .start();
         } catch (IOException e) {
@@ -199,8 +201,10 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     }
 
     private void stopDebianServer() {
+        if (mDebianService != null) {
+            mDebianService.killForwarderHost();
+        }
         if (mServer != null) {
-            DebianServiceImpl.terminateForwarderHost();
             mServer.shutdown();
         }
     }
