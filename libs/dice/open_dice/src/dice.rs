@@ -22,7 +22,6 @@ use open_dice_cbor_bindgen::{
     DiceConfigType, DiceDeriveCdiCertificateId, DiceDeriveCdiPrivateKeySeed, DiceInputValues,
     DiceMainFlow, DICE_CDI_SIZE, DICE_HASH_SIZE, DICE_HIDDEN_SIZE, DICE_ID_SIZE,
     DICE_INLINE_CONFIG_SIZE, DICE_PRIVATE_KEY_SEED_SIZE, DICE_PRIVATE_KEY_SIZE,
-    DICE_PUBLIC_KEY_SIZE, DICE_SIGNATURE_SIZE,
 };
 #[cfg(feature = "serde_derive")]
 use serde_derive::{Deserialize, Serialize};
@@ -41,10 +40,6 @@ pub const CDI_SIZE: usize = DICE_CDI_SIZE as usize;
 pub const PRIVATE_KEY_SEED_SIZE: usize = DICE_PRIVATE_KEY_SEED_SIZE as usize;
 /// The size of a private key.
 pub const PRIVATE_KEY_SIZE: usize = DICE_PRIVATE_KEY_SIZE as usize;
-/// The size of a public key.
-pub const PUBLIC_KEY_SIZE: usize = DICE_PUBLIC_KEY_SIZE as usize;
-/// The size of a signature.
-pub const SIGNATURE_SIZE: usize = DICE_SIGNATURE_SIZE as usize;
 /// The size of an ID.
 pub const ID_SIZE: usize = DICE_ID_SIZE as usize;
 
@@ -56,10 +51,6 @@ pub type Hidden = [u8; HIDDEN_SIZE];
 pub type InlineConfig = [u8; INLINE_CONFIG_SIZE];
 /// Array type of CDIs.
 pub type Cdi = [u8; CDI_SIZE];
-/// Array type of the public key.
-pub type PublicKey = [u8; PUBLIC_KEY_SIZE];
-/// Array type of the signature.
-pub type Signature = [u8; SIGNATURE_SIZE];
 /// Array type of DICE ID.
 pub type DiceId = [u8; ID_SIZE];
 
@@ -93,6 +84,35 @@ impl From<KeyAlgorithm> for iana::Algorithm {
 /// * **Post-Handover Consistency:** In components following pvmfw (e.g., the Microdroid OS), this
 ///   algorithm is used consistently for both the authority and subject keys in DICE derivation.
 pub const VM_KEY_ALGORITHM: KeyAlgorithm = KeyAlgorithm::Ed25519;
+
+impl KeyAlgorithm {
+    /// Returns the size of the public key.
+    pub fn public_key_size(&self) -> usize {
+        match self {
+            KeyAlgorithm::Ed25519 => 32,
+            KeyAlgorithm::EcdsaP256 => 64,
+            KeyAlgorithm::EcdsaP384 => 96,
+        }
+    }
+
+    /// Returns the size of the signature.
+    pub fn signature_size(&self) -> usize {
+        match self {
+            KeyAlgorithm::Ed25519 => 64,
+            KeyAlgorithm::EcdsaP256 => 64,
+            KeyAlgorithm::EcdsaP384 => 96,
+        }
+    }
+
+    /// Returns the size of the private key.
+    pub fn private_key_size(&self) -> usize {
+        match self {
+            KeyAlgorithm::Ed25519 => 64,
+            KeyAlgorithm::EcdsaP256 => 32,
+            KeyAlgorithm::EcdsaP384 => 48,
+        }
+    }
+}
 
 /// A trait for types that represent Dice artifacts, which include:
 ///
