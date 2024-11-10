@@ -26,8 +26,12 @@ import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Icon;
 import android.graphics.fonts.FontStyle;
+import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Bundle;
+import android.os.ConditionVariable;
+import android.os.Environment;
+import android.provider.Settings;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
@@ -44,6 +48,11 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResult;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.virtualization.vmlauncher.InstallUtils;
 import com.android.virtualization.vmlauncher.VmLauncherService;
 import com.android.virtualization.vmlauncher.VmLauncherServices;
@@ -54,16 +63,13 @@ import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
-import java.security.Key;
 import java.security.KeyStore;
 import java.security.PrivateKey;
-import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 
 public class MainActivity extends BaseActivity
@@ -80,7 +86,10 @@ public class MainActivity extends BaseActivity
     private PrivateKey mPrivateKey;
     private WebView mWebView;
     private AccessibilityManager mAccessibilityManager;
+    private ConditionVariable mBootCompleted = new ConditionVariable();
     private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
+    private ActivityResultLauncher<Intent> manageExternalStorageActivityResultLauncher;
+    private static int diskSizeStep;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -96,6 +105,8 @@ public class MainActivity extends BaseActivity
         }
 
         setContentView(R.layout.activity_headless);
+        diskSizeStep = getResources().getInteger(
+                R.integer.disk_size_round_up_step_size_in_mb) << 20;
 
         MaterialToolbar toolbar = (MaterialToolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
@@ -108,13 +119,42 @@ public class MainActivity extends BaseActivity
         mAccessibilityManager = getSystemService(AccessibilityManager.class);
         mAccessibilityManager.addTouchExplorationStateChangeListener(this);
 
-        connectToTerminalService();
         readClientCertificate();
+        connectToTerminalService();
+
+        manageExternalStorageActivityResultLauncher =
+                registerForActivityResult(
+                        new ActivityResultContracts.StartActivityForResult(),
+                        (ActivityResult result) -> {
+                            if (Environment.isExternalStorageManager()) {
+                                Toast.makeText(this, "Storage permission set!", Toast.LENGTH_SHORT)
+                                        .show();
+                            } else {
+                                Toast.makeText(
+                                                this,
+                                                "Storage permission not set",
+                                                Toast.LENGTH_SHORT)
+                                        .show();
+                            }
+                            startVm();
+                        });
 
         // if installer is launched, it will be handled in onActivityResult
         if (!launchInstaller) {
-            startVm();
+            if (!Environment.isExternalStorageManager()) {
+                requestStoragePermissions(this, manageExternalStorageActivityResultLauncher);
+            } else {
+                startVm();
+            }
         }
+    }
+
+    private void requestStoragePermissions(
+            Context context, ActivityResultLauncher<Intent> activityResultLauncher) {
+        Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+        Uri uri = Uri.fromParts("package", context.getPackageName(), null);
+        intent.setData(uri);
+        activityResultLauncher.launch(intent);
     }
 
     private URL getTerminalServiceUrl() {
@@ -141,25 +181,11 @@ public class MainActivity extends BaseActivity
     }
 
     private void readClientCertificate() {
-        // TODO(b/363235314): instead of using the key in asset, it should be generated in runtime
-        // and then provisioned in the vm via virtio-fs
-        try (InputStream keystoreFileStream =
-                getClass().getResourceAsStream("/assets/client.p12")) {
-            KeyStore keyStore = KeyStore.getInstance("PKCS12");
-            String password = "1234";
-            String alias = "1";
-
-            keyStore.load(keystoreFileStream, password != null ? password.toCharArray() : null);
-            Key key = keyStore.getKey(alias, password.toCharArray());
-            if (key instanceof PrivateKey) {
-                mPrivateKey = (PrivateKey) key;
-                Certificate cert = keyStore.getCertificate(alias);
-                mCertificates = new X509Certificate[1];
-                mCertificates[0] = (X509Certificate) cert;
-            }
-        } catch (Exception e) {
-            Log.e(TAG, e.getMessage());
-        }
+        KeyStore.PrivateKeyEntry pke = CertificateUtils.createOrGetKey();
+        CertificateUtils.writeCertificateToFile(this, pke.getCertificate());
+        mPrivateKey = pke.getPrivateKey();
+        mCertificates = new X509Certificate[1];
+        mCertificates[0] = (X509Certificate) pke.getCertificate();
     }
 
     private void connectToTerminalService() {
@@ -187,6 +213,7 @@ public class MainActivity extends BaseActivity
                         switch (error.getErrorCode()) {
                             case WebViewClient.ERROR_CONNECT:
                             case WebViewClient.ERROR_HOST_LOOKUP:
+                            case WebViewClient.ERROR_FAILED_SSL_HANDSHAKE:
                                 view.reload();
                                 return;
                             default:
@@ -213,6 +240,7 @@ public class MainActivity extends BaseActivity
                                             findViewById(R.id.boot_progress)
                                                     .setVisibility(View.GONE);
                                             view.setVisibility(View.VISIBLE);
+                                            mBootCompleted.open();
                                         }
                                     }
                                 });
@@ -268,9 +296,9 @@ public class MainActivity extends BaseActivity
         }
     }
 
-    private static File getPartitionFile(Context context, String fileName)
+    public static File getPartitionFile(Context context, String fileName)
             throws FileNotFoundException {
-        File file = new File(context.getFilesDir(), fileName);
+        File file = new File(InstallUtils.getInternalStorageDir(context), fileName);
         if (!file.exists()) {
             Log.d(TAG, file.getAbsolutePath() + " - file not found");
             throw new FileNotFoundException("File not found: " + fileName);
@@ -406,7 +434,11 @@ public class MainActivity extends BaseActivity
                 Log.e(TAG, "Failed to start VM. Installer returned error.");
                 finish();
             }
-            startVm();
+            if (!Environment.isExternalStorageManager()) {
+                requestStoragePermissions(this, manageExternalStorageActivityResultLauncher);
+            } else {
+                startVm();
+            }
         }
     }
 
@@ -428,11 +460,16 @@ public class MainActivity extends BaseActivity
 
         resizeDiskIfNecessary();
 
-        // TODO: implement intent for setting, close and tap to the notification
-        // Currently mock a PendingIntent for notification.
-        Intent intent = new Intent();
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Intent tapIntent = new Intent(this, MainActivity.class);
+        tapIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent tapPendingIntent = PendingIntent.getActivity(this, 0, tapIntent,
+                PendingIntent.FLAG_IMMUTABLE);
+
+        Intent settingsIntent = new Intent(this, SettingsActivity.class);
+        settingsIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent settingsPendingIntent = PendingIntent.getActivity(this, 0, settingsIntent,
+                PendingIntent.FLAG_IMMUTABLE);
+
         Intent stopIntent = new Intent();
         stopIntent.setClass(this, VmLauncherService.class);
         stopIntent.setAction(VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE);
@@ -451,7 +488,7 @@ public class MainActivity extends BaseActivity
                                 getResources().getString(R.string.service_notification_title))
                         .setContentText(
                                 getResources().getString(R.string.service_notification_content))
-                        .setContentIntent(pendingIntent)
+                        .setContentIntent(tapPendingIntent)
                         .setOngoing(true)
                         .addAction(
                                 new Notification.Action.Builder(
@@ -460,7 +497,7 @@ public class MainActivity extends BaseActivity
                                                         .getString(
                                                                 R.string
                                                                         .service_notification_settings),
-                                                pendingIntent)
+                                        settingsPendingIntent)
                                         .build())
                         .addAction(
                                 new Notification.Action.Builder(
@@ -471,22 +508,25 @@ public class MainActivity extends BaseActivity
                                                                         .service_notification_quit_action),
                                                 stopPendingIntent)
                                         .build())
-                        .setDeleteIntent(stopPendingIntent)
                         .build();
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this, notification);
     }
 
-    private long roundUpDiskSize(long diskSize) {
-        // Round up every disk_size_round_up_step_size_in_mb MB
-        int disk_size_step = getResources().getInteger(
-                R.integer.disk_size_round_up_step_size_in_mb) * 1024 * 1024;
-        return (long) Math.ceil(((double) diskSize) / disk_size_step) * disk_size_step;
+    @VisibleForTesting
+    public boolean waitForBootCompleted(long timeoutMillis) {
+        return mBootCompleted.block(timeoutMillis);
     }
 
-    private long getMinFilesystemSize(File file) throws IOException, NumberFormatException {
+    private static long roundUpDiskSize(long diskSize) {
+        // Round up every diskSizeStep MB
+        return (long) Math.ceil(((double) diskSize) / diskSizeStep) * diskSizeStep;
+    }
+
+    public static long getMinFilesystemSize(File file) throws IOException, NumberFormatException {
         try {
+            runE2fsck(file.getAbsolutePath());
             String result = runCommand("/system/bin/resize2fs", "-P", file.getAbsolutePath());
             // The return value is the number of 4k block
             long minSize = Long.parseLong(
@@ -509,12 +549,10 @@ public class MainActivity extends BaseActivity
                     getString(R.string.preference_file_key), Context.MODE_PRIVATE);
             SharedPreferences.Editor editor = sharedPref.edit();
 
-            long minDiskSize = getMinFilesystemSize(file);
-            editor.putLong(getString(R.string.preference_min_disk_size_key), minDiskSize);
-
             long currentDiskSize = getFilesystemSize(file);
+            // The default partition size is 6G
             long newSizeInBytes = sharedPref.getLong(getString(R.string.preference_disk_size_key),
-                    roundUpDiskSize(currentDiskSize));
+                    6L << 30);
             editor.putLong(getString(R.string.preference_disk_size_key), newSizeInBytes);
             editor.apply();
 
