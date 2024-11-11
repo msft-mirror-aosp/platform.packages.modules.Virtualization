@@ -107,9 +107,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
                             if (mResultReceiver != null) {
                                 mResultReceiver.send(success ? RESULT_STOP : RESULT_ERROR, null);
                             }
-                            if (!success) {
-                                stopSelf();
-                            }
+                            stopSelf();
                         });
         Path logPath = getFileStreamPath(mVirtualMachine.getName() + ".log").toPath();
         Logger.setup(mVirtualMachine, logPath, mExecutorService);
