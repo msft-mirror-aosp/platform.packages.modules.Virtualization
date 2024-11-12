@@ -80,7 +80,7 @@ public class MainActivity extends BaseActivity
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
     private static final int REQUEST_CODE_INSTALLER = 0x33;
-    private static final int FONT_SIZE_DEFAULT = 12;
+    private static final int FONT_SIZE_DEFAULT = 13;
 
     private X509Certificate[] mCertificates;
     private PrivateKey mPrivateKey;
