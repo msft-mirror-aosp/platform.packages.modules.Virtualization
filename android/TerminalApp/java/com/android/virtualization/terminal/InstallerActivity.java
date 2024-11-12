@@ -29,11 +29,14 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.text.format.Formatter;
 import android.util.Log;
+import android.view.View;
 import android.widget.CheckBox;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import com.android.internal.annotations.VisibleForTesting;
+
+import com.google.android.material.progressindicator.LinearProgressIndicator;
 
 import java.lang.ref.WeakReference;
 import java.util.concurrent.ExecutorService;
@@ -128,6 +131,12 @@ public class InstallerActivity extends BaseActivity {
     private void setInstallEnabled(boolean enable) {
         mInstallButton.setEnabled(enable);
         mWaitForWifiCheckbox.setEnabled(enable);
+        LinearProgressIndicator progressBar = findViewById(R.id.installer_progress);
+        if (enable) {
+            progressBar.setVisibility(View.INVISIBLE);
+        } else {
+            progressBar.setVisibility(View.VISIBLE);
+        }
 
         int resId =
                 enable
