@@ -133,7 +133,7 @@ build_rust_binary_and_copy() {
 		--target "${arch}-unknown-linux-gnu" \
 		--target-dir "${workdir}/$1" ${release_flag}
 	mkdir -p "${dst}/files/usr/local/bin/$1"
-	cp "${workdir}/$1/${arch}-unknown-linux-gnu/${artifact_mode/$1" "${dst}/files/usr/local/bin/$1/AVF"
+	cp "${workdir}/$1/${arch}-unknown-linux-gnu/${artifact_mode}/$1" "${dst}/files/usr/local/bin/$1/AVF"
 	chmod 777 "${dst}/files/usr/local/bin/$1/AVF"
 
 	mkdir -p "${dst}/files/usr/share/doc/$1"
