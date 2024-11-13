@@ -139,7 +139,7 @@ android_system_image {
             ],
         },
     },
-    linkerconfig: {
+    linker_config: {
         gen_linker_config: true,
         linker_config_srcs: ["linker.config.json"],
     },
