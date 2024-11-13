@@ -17,10 +17,7 @@
 use core::fmt::{self, Display, Formatter};
 
 use super::{DeviceAssigningHypervisor, Hypervisor, MemSharingHypervisor, MmioGuardedHypervisor};
-use crate::{
-    hyp::{Error, Result},
-    memory::page_4kb_of,
-};
+use crate::{mem::page_4kb_of, Error, Result};
 
 use smccc::{
     error::{positive_or_error_64, success_or_error_32, success_or_error_64},
@@ -173,10 +170,9 @@ impl MemSharingHypervisor for ProtectedKvmHypervisor {
 }
 
 impl DeviceAssigningHypervisor for ProtectedKvmHypervisor {
-    fn get_phys_mmio_token(&self, base_ipa: u64, size: u64) -> Result<u64> {
+    fn get_phys_mmio_token(&self, base_ipa: u64) -> Result<u64> {
         let mut args = [0u64; 17];
         args[0] = base_ipa;
-        args[1] = size;
 
         let ret = checked_hvc64_expect_results(VENDOR_HYP_KVM_DEV_REQ_MMIO_FUNC_ID, args)?;
         Ok(ret[0])
