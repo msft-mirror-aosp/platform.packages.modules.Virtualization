@@ -18,6 +18,7 @@ use anyhow::Context;
 use clap::Parser;
 use debian_service::debian_service_client::DebianServiceClient;
 use debian_service::QueueOpeningRequest;
+use log::debug;
 use tokio::process::Command;
 use tonic::transport::Endpoint;
 use tonic::Request;
@@ -41,7 +42,8 @@ pub struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting forwarder_guest_launcher");
+    env_logger::init();
+    debug!("Starting forwarder_guest_launcher");
     let args = Args::parse();
     let addr = format!("https://{}:{}", args.host_addr, args.grpc_port);
 
@@ -58,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .context("Failed to convert guest_tcp_port as i16")?;
         let vsock_port = response.vsock_port as u32;
 
-        println!(
+        debug!(
             "executing forwarder_guest with guest_tcp_port: {:?}, vsock_port: {:?}",
             &tcp_port, &vsock_port
         );
