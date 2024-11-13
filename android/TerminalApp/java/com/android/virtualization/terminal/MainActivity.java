@@ -540,9 +540,8 @@ public class MainActivity extends BaseActivity
             SharedPreferences.Editor editor = sharedPref.edit();
 
             long currentDiskSize = getFilesystemSize(file);
-            // The default partition size is 6G
             long newSizeInBytes = sharedPref.getLong(getString(R.string.preference_disk_size_key),
-                    6L << 30);
+                    roundUpDiskSize(currentDiskSize));
             editor.putLong(getString(R.string.preference_disk_size_key), newSizeInBytes);
             editor.apply();
 
