@@ -95,14 +95,17 @@ public class MainActivity extends BaseActivity
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        boolean launchInstaller = installIfNecessary();
-
         NotificationManager notificationManager = getSystemService(NotificationManager.class);
-        if (notificationManager.getNotificationChannel(TAG) == null) {
-            NotificationChannel notificationChannel =
-                    new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
-            notificationManager.createNotificationChannel(notificationChannel);
+        if (notificationManager.getNotificationChannel(this.getPackageName()) == null) {
+            NotificationChannel channel =
+                    new NotificationChannel(
+                            this.getPackageName(),
+                            getString(R.string.app_name),
+                            NotificationManager.IMPORTANCE_DEFAULT);
+            notificationManager.createNotificationChannel(channel);
         }
+
+        boolean launchInstaller = installIfNecessary();
 
         setContentView(R.layout.activity_headless);
         diskSizeStep = getResources().getInteger(
@@ -471,8 +474,7 @@ public class MainActivity extends BaseActivity
                         PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Icon icon = Icon.createWithResource(getResources(), R.drawable.ic_launcher_foreground);
         Notification notification =
-                new Notification.Builder(this, TAG)
-                        .setChannelId(TAG)
+                new Notification.Builder(this, this.getPackageName())
                         .setSmallIcon(R.drawable.ic_launcher_foreground)
                         .setContentTitle(
                                 getResources().getString(R.string.service_notification_title))
