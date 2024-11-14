@@ -59,20 +59,6 @@ final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
         mCallback = callback;
         mContext = context;
         mSharedPref = mContext.getSharedPreferences(PREFERENCE_FILE_KEY, Context.MODE_PRIVATE);
-        // TODO(b/340126051): Instead of putting fixed value, receive active port list info from the
-        // guest.
-        if (!mSharedPref.contains(PREFERENCE_FORWARDING_PORTS)) {
-            SharedPreferences.Editor editor = mSharedPref.edit();
-            Set<String> ports = new HashSet<>();
-            for (int port = 8080; port < 8090; port++) {
-                ports.add(Integer.toString(port));
-                editor.putBoolean(
-                        PREFERENCE_FORWARDING_PORT_IS_ENABLED_PREFIX + Integer.toString(port),
-                        false);
-            }
-            editor.putStringSet(PREFERENCE_FORWARDING_PORTS, ports);
-            editor.apply();
-        }
     }
 
     @Override
@@ -80,7 +66,21 @@ final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
             ReportVmActivePortsRequest request,
             StreamObserver<ReportVmActivePortsResponse> responseObserver) {
         Log.d(DebianServiceImpl.TAG, "reportVmActivePorts: " + request.toString());
-        // TODO(b/340126051): Modify shared preference based on information in the request.
+
+        SharedPreferences.Editor editor = mSharedPref.edit();
+        Set<String> ports = new HashSet<>();
+        for (int port : request.getPortsList()) {
+            ports.add(Integer.toString(port));
+            if (!mSharedPref.contains(
+                    PREFERENCE_FORWARDING_PORT_IS_ENABLED_PREFIX + Integer.toString(port))) {
+                editor.putBoolean(
+                        PREFERENCE_FORWARDING_PORT_IS_ENABLED_PREFIX + Integer.toString(port),
+                        false);
+            }
+        }
+        editor.putStringSet(PREFERENCE_FORWARDING_PORTS, ports);
+        editor.apply();
+
         ReportVmActivePortsResponse reply =
                 ReportVmActivePortsResponse.newBuilder().setSuccess(true).build();
         responseObserver.onNext(reply);
