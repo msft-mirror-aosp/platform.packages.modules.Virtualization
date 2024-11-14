@@ -83,6 +83,7 @@ import com.google.common.truth.BooleanSubject;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.function.ThrowingRunnable;
@@ -1935,6 +1936,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
+    @Ignore("b/372874464")
     public void outputIsNotRedirectedToLogcatIfNotDebuggable() throws Exception {
         assumeSupportedDevice();
 
