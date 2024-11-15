@@ -112,7 +112,8 @@ async fn report_active_ports(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::new("python3")
         .arg("-u")
-        .arg("/usr/sbin/tcpstates-bpfcc -s")
+        .arg("/usr/sbin/tcpstates-bpfcc")
+        .arg("-s")
         .stdout(Stdio::piped())
         .spawn()?;
     let stdout = cmd.stdout.take().context("Failed to get stdout of tcpstates")?;
