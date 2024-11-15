@@ -110,8 +110,11 @@ async fn send_active_ports_report(
 async fn report_active_ports(
     mut client: DebianServiceClient<Channel>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd =
-        Command::new("/usr/sbin/tcpstates-bpfcc").arg("-s").stdout(Stdio::piped()).spawn()?;
+    let mut cmd = Command::new("python3")
+        .arg("-u")
+        .arg("/usr/sbin/tcpstates-bpfcc -s")
+        .stdout(Stdio::piped())
+        .spawn()?;
     let stdout = cmd.stdout.take().context("Failed to get stdout of tcpstates")?;
     let mut csv_reader = AsyncReader::from_reader(BufReader::new(stdout));
     let header = csv_reader.headers().await?.clone();
