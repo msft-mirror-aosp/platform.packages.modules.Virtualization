@@ -29,11 +29,13 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.text.format.Formatter;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.View;
 import android.widget.CheckBox;
 import android.widget.TextView;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.virtualization.vmlauncher.InstallUtils;
 
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.android.material.snackbar.Snackbar;
@@ -45,7 +47,6 @@ public class InstallerActivity extends BaseActivity {
     private static final String TAG = "LinuxInstaller";
 
     private static final long ESTIMATED_IMG_SIZE_BYTES = FileUtils.parseSize("350MB");
-    static final String EXTRA_AUTO_DOWNLOAD = "auto_download";
 
     private ExecutorService mExecutorService;
     private CheckBox mWaitForWifiCheckbox;
@@ -80,17 +81,25 @@ public class InstallerActivity extends BaseActivity {
                     requestInstall();
                 });
 
-        if (getIntent().getBooleanExtra(EXTRA_AUTO_DOWNLOAD, false)) {
-            Log.i(TAG, "Auto downloading");
-            requestInstall();
-        }
-
         Intent intent = new Intent(this, InstallerService.class);
         mInstallerServiceConnection = new InstallerServiceConnection(this);
         if (!bindService(intent, mInstallerServiceConnection, Context.BIND_AUTO_CREATE)) {
             handleCriticalError(new Exception("Failed to connect to installer service"));
         }
+    }
 
+    @Override
+    public void onResume() {
+        super.onResume();
+
+        if (Build.isDebuggable() && InstallUtils.payloadFromExternalStorageExists()) {
+            Snackbar.make(
+                            findViewById(android.R.id.content),
+                            "Auto installing",
+                            Snackbar.LENGTH_LONG)
+                    .show();
+            requestInstall();
+        }
     }
 
     @Override
@@ -101,6 +110,15 @@ public class InstallerActivity extends BaseActivity {
         }
 
         super.onDestroy();
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_START) {
+            requestInstall();
+            return true;
+        }
+        return super.onKeyUp(keyCode, event);
     }
 
     @VisibleForTesting
