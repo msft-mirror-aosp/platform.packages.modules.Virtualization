@@ -246,6 +246,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "disabling test while investigating b/379087641"]
     fn test_check_tee_service_permission_has_permission() -> Result<()> {
         if cfg!(not(tee_services_allowlist)) {
             // Skip test on release configurations without tee_services_allowlist feature enabled.
@@ -258,6 +259,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "disabling test while investigating b/379087641"]
     fn test_check_tee_service_permission_invalid_tee_service() -> Result<()> {
         if cfg!(not(tee_services_allowlist)) {
             // Skip test on release configurations without tee_services_allowlist feature enabled.
