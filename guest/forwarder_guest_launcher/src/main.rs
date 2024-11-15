@@ -138,6 +138,9 @@ async fn report_active_ports(
         if row.ip != TCPSTATES_IP_4 {
             continue;
         }
+        if row.lport < NON_PREVILEGED_PORT_RANGE_START {
+            continue;
+        }
         match (row.oldstate.as_str(), row.newstate.as_str()) {
             (_, TCPSTATES_STATE_LISTEN) => {
                 listening_ports.insert(row.lport);
