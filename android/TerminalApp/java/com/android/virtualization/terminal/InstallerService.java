@@ -17,8 +17,6 @@
 package com.android.virtualization.terminal;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
@@ -122,16 +120,21 @@ public class InstallerService extends Service {
     }
 
     private void requestInstall() {
-        Log.i(TAG, "Installing..");
+        synchronized (mLock) {
+            if (mIsInstalling) {
+                Log.i(TAG, "already installing..");
+                return;
+            } else {
+                Log.i(TAG, "installing..");
+                mIsInstalling = true;
+            }
+        }
 
         // Make service to be long running, even after unbind() when InstallerActivity is destroyed
         // The service will still be destroyed if task is remove.
         startService(new Intent(this, InstallerService.class));
         startForeground(
                 NOTIFICATION_ID, mNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        synchronized (mLock) {
-            mIsInstalling = true;
-        }
 
         mExecutorService.execute(
                 () -> {
