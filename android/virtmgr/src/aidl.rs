@@ -567,9 +567,11 @@ impl VirtualizationService {
         let config = config.as_ref();
         *is_protected = config.protectedVm;
 
-        check_tee_service_permission(&caller_secontext, &config.teeServices)
-            .with_log()
-            .or_binder_exception(ExceptionCode::SECURITY)?;
+        if !config.teeServices.is_empty() {
+            check_tee_service_permission(&caller_secontext, &config.teeServices)
+                .with_log()
+                .or_binder_exception(ExceptionCode::SECURITY)?;
+        }
 
         // Check if partition images are labeled incorrectly. This is to prevent random images
         // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from

@@ -670,7 +670,9 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
         });
     }
 
-    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    if !is_debuggable()? {
+        command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    }
 
     info!("notifying payload started");
     service.notifyPayloadStarted()?;
