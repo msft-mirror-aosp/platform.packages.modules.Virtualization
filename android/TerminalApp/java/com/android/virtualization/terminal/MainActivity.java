@@ -80,7 +80,7 @@ public class MainActivity extends BaseActivity
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
     private static final int REQUEST_CODE_INSTALLER = 0x33;
-    private static final int FONT_SIZE_DEFAULT = 12;
+    private static final int FONT_SIZE_DEFAULT = 13;
 
     private X509Certificate[] mCertificates;
     private PrivateKey mPrivateKey;
@@ -88,7 +88,7 @@ public class MainActivity extends BaseActivity
     private AccessibilityManager mAccessibilityManager;
     private ConditionVariable mBootCompleted = new ConditionVariable();
     private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
-    private ActivityResultLauncher<Intent> manageExternalStorageActivityResultLauncher;
+    private ActivityResultLauncher<Intent> mManageExternalStorageActivityResultLauncher;
     private static int diskSizeStep;
 
     @Override
@@ -122,27 +122,17 @@ public class MainActivity extends BaseActivity
         readClientCertificate();
         connectToTerminalService();
 
-        manageExternalStorageActivityResultLauncher =
+        mManageExternalStorageActivityResultLauncher =
                 registerForActivityResult(
                         new ActivityResultContracts.StartActivityForResult(),
                         (ActivityResult result) -> {
-                            if (Environment.isExternalStorageManager()) {
-                                Toast.makeText(this, "Storage permission set!", Toast.LENGTH_SHORT)
-                                        .show();
-                            } else {
-                                Toast.makeText(
-                                                this,
-                                                "Storage permission not set",
-                                                Toast.LENGTH_SHORT)
-                                        .show();
-                            }
                             startVm();
                         });
 
         // if installer is launched, it will be handled in onActivityResult
         if (!launchInstaller) {
             if (!Environment.isExternalStorageManager()) {
-                requestStoragePermissions(this, manageExternalStorageActivityResultLauncher);
+                requestStoragePermissions(this, mManageExternalStorageActivityResultLauncher);
             } else {
                 startVm();
             }
@@ -435,7 +425,7 @@ public class MainActivity extends BaseActivity
                 finish();
             }
             if (!Environment.isExternalStorageManager()) {
-                requestStoragePermissions(this, manageExternalStorageActivityResultLauncher);
+                requestStoragePermissions(this, mManageExternalStorageActivityResultLauncher);
             } else {
                 startVm();
             }

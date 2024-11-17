@@ -83,17 +83,17 @@
     <string name="settings_recovery_title">Recovery</string>
     <!-- Settings menu subtitle for recoverying image [CHAR LIMIT=none] -->
     <string name="settings_recovery_sub_title">Partition Recovery options</string>
-    <!-- Settings menu title for resetting the virtual machine image [CHAR LIMIT=none] -->
+    <!-- Settings menu title for resetting the terminal [CHAR LIMIT=none] -->
     <string name="settings_recovery_reset_title">Change to Initial version</string>
-    <!-- Settings menu subtitle for resetting the virtual machine image [CHAR LIMIT=none] -->
+    <!-- Settings menu subtitle for resetting the terminal [CHAR LIMIT=none] -->
     <string name="settings_recovery_reset_sub_title">Remove all</string>
-    <!-- Dialog title for restarting the terminal [CHAR LIMIT=none] -->
-    <string name="settings_recovery_reset_dialog_title">Reset the virtual machine</string>
-    <!-- Dialog message for restarting the terminal [CHAR LIMIT=none] -->
-    <string name="settings_recovery_reset_dialog_message">Data will be deleted.</string>
-    <!-- Dialog button confirm for restarting the terminal [CHAR LIMIT=16] -->
+    <!-- Dialog title for resetting the terminal [CHAR LIMIT=none] -->
+    <string name="settings_recovery_reset_dialog_title">Reset terminal</string>
+    <!-- Dialog message for resetting the terminal [CHAR LIMIT=none] -->
+    <string name="settings_recovery_reset_dialog_message">Data will be deleted</string>
+    <!-- Dialog button confirm for resetting the terminal [CHAR LIMIT=16] -->
     <string name="settings_recovery_reset_dialog_confirm">Confirm</string>
-    <!-- Dialog button cancel for restarting the terminal [CHAR LIMIT=16] -->
+    <!-- Dialog button cancel for resetting the terminal [CHAR LIMIT=16] -->
     <string name="settings_recovery_reset_dialog_cancel">Cancel</string>
 
     <!-- Notification action button for settings [CHAR LIMIT=none] -->
@@ -101,7 +101,7 @@
     <!-- Notification title for foreground service notification [CHAR LIMIT=none] -->
     <string name="service_notification_title">Terminal is running</string>
     <!-- Notification content for foreground service notification [CHAR LIMIT=none] -->
-    <string name="service_notification_content">Click to open the terminal.</string>
+    <string name="service_notification_content">Click to open the terminal</string>
     <!-- Notification action button for closing the virtual machine [CHAR LIMIT=none] -->
     <string name="service_notification_quit_action">Close</string>
 </resources>

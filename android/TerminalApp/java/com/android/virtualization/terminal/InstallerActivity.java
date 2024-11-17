@@ -29,11 +29,14 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.text.format.Formatter;
 import android.util.Log;
+import android.view.View;
 import android.widget.CheckBox;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import com.android.internal.annotations.VisibleForTesting;
+
+import com.google.android.material.progressindicator.LinearProgressIndicator;
+import com.google.android.material.snackbar.Snackbar;
 
 import java.lang.ref.WeakReference;
 import java.util.concurrent.ExecutorService;
@@ -107,10 +110,10 @@ public class InstallerActivity extends BaseActivity {
 
     public void handleCriticalError(Exception e) {
         if (Build.isDebuggable()) {
-            Toast.makeText(
-                            this,
+            Snackbar.make(
+                            findViewById(android.R.id.content),
                             e.getMessage() + ". File a bugreport to go/ferrochrome-bug",
-                            Toast.LENGTH_LONG)
+                            Snackbar.LENGTH_INDEFINITE)
                     .show();
         }
         Log.e(TAG, "Internal error", e);
@@ -128,6 +131,12 @@ public class InstallerActivity extends BaseActivity {
     private void setInstallEnabled(boolean enable) {
         mInstallButton.setEnabled(enable);
         mWaitForWifiCheckbox.setEnabled(enable);
+        LinearProgressIndicator progressBar = findViewById(R.id.installer_progress);
+        if (enable) {
+            progressBar.setVisibility(View.INVISIBLE);
+        } else {
+            progressBar.setVisibility(View.VISIBLE);
+        }
 
         int resId =
                 enable
@@ -180,9 +189,9 @@ public class InstallerActivity extends BaseActivity {
 
     @MainThread
     private void handleError(String displayText) {
-        // TODO(b/375542145): Display error with snackbar.
         if (Build.isDebuggable()) {
-            Toast.makeText(this, displayText, Toast.LENGTH_LONG).show();
+            Snackbar.make(findViewById(android.R.id.content), displayText, Snackbar.LENGTH_LONG)
+                    .show();
         }
         setInstallEnabled(true);
     }
