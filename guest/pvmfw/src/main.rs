@@ -46,11 +46,9 @@ use log::{debug, error, info, trace, warn};
 use pvmfw_avb::verify_payload;
 use pvmfw_avb::DebugLevel;
 use pvmfw_embedded_key::PUBLIC_KEY;
-use vmbase::fdt::pci::{PciError, PciInfo};
 use vmbase::heap;
-use vmbase::memory::{flush, init_shared_pool, SIZE_4KB};
+use vmbase::memory::{flush, SIZE_4KB};
 use vmbase::rand;
-use vmbase::virtio::pci;
 
 fn main<'a>(
     untrusted_fdt: &mut Fdt,
@@ -77,8 +75,6 @@ fn main<'a>(
     })?;
     trace!("BCC: {bcc_handover:x?}");
 
-    let cdi_seal = bcc_handover.cdi_seal();
-
     let bcc = Bcc::new(bcc_handover.bcc()).map_err(|e| {
         error!("{e}");
         RebootReason::InvalidBcc
@@ -102,19 +98,8 @@ fn main<'a>(
     }
 
     let guest_page_size = verified_boot_data.page_size.unwrap_or(SIZE_4KB);
-    let fdt_info = sanitize_device_tree(untrusted_fdt, vm_dtbo, vm_ref_dt, guest_page_size)?;
+    let _ = sanitize_device_tree(untrusted_fdt, vm_dtbo, vm_ref_dt, guest_page_size)?;
     let fdt = untrusted_fdt; // DT has now been sanitized.
-    let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;
-    debug!("PCI: {:#x?}", pci_info);
-    // Set up PCI bus for VirtIO devices.
-    let mut pci_root = pci::initialize(pci_info).map_err(|e| {
-        error!("Failed to initialize PCI: {e}");
-        RebootReason::InternalError
-    })?;
-    init_shared_pool(fdt_info.swiotlb_info.fixed_range()).map_err(|e| {
-        error!("Failed to initialize shared pool: {e}");
-        RebootReason::InternalError
-    })?;
 
     let next_bcc_size = guest_page_size;
     let next_bcc = heap::aligned_boxed_slice(next_bcc_size, guest_page_size).ok_or_else(|| {
@@ -134,8 +119,7 @@ fn main<'a>(
         fdt,
         &verified_boot_data,
         &dice_inputs,
-        &mut pci_root,
-        cdi_seal,
+        bcc_handover.cdi_seal(),
         instance_hash,
     )?;
     trace!("Got salt for instance: {salt:x?}");
@@ -221,22 +205,4 @@ fn salt_from_instance_id(fdt: &Fdt) -> Result<Option<Hidden>, RebootReason> {
         .try_into()
         .map_err(|_| RebootReason::InternalError)?;
     Ok(Some(salt))
-}
-
-/// Logs the given PCI error and returns the appropriate `RebootReason`.
-fn handle_pci_error(e: PciError) -> RebootReason {
-    error!("{}", e);
-    match e {
-        PciError::FdtErrorPci(_)
-        | PciError::FdtNoPci
-        | PciError::FdtErrorReg(_)
-        | PciError::FdtMissingReg
-        | PciError::FdtRegEmpty
-        | PciError::FdtRegMissingSize
-        | PciError::CamWrongSize(_)
-        | PciError::FdtErrorRanges(_)
-        | PciError::FdtMissingRanges
-        | PciError::RangeAddressMismatch { .. }
-        | PciError::NoSuitableRange => RebootReason::InvalidFdt,
-    }
 }
