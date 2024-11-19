@@ -121,6 +121,7 @@ rust_test {
         "libzerocopy_nostd",
         "libhex",
     ],
+    static_libs: ["libopen_dice_clear_memory"],
 }
 
 genrule {
