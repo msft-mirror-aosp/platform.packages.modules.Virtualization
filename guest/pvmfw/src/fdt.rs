@@ -83,7 +83,7 @@ impl fmt::Display for FdtValidationError {
 
 /// Extract from /config the address range containing the pre-loaded kernel. Absence of /config is
 /// not an error.
-fn read_kernel_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
+pub fn read_kernel_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
     let addr = cstr!("kernel-address");
     let size = cstr!("kernel-size");
 
@@ -101,7 +101,7 @@ fn read_kernel_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
 
 /// Extract from /chosen the address range containing the pre-loaded ramdisk. Absence is not an
 /// error as there can be initrd-less VM.
-fn read_initrd_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
+pub fn read_initrd_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
     let start = cstr!("linux,initrd-start");
     let end = cstr!("linux,initrd-end");
 
@@ -989,7 +989,6 @@ fn patch_vcpufreq(fdt: &mut Fdt, vcpufreq_info: &Option<VcpufreqInfo>) -> libfdt
 
 #[derive(Debug)]
 pub struct DeviceTreeInfo {
-    pub kernel_range: Option<Range<usize>>,
     pub initrd_range: Option<Range<usize>>,
     pub memory_range: Range<usize>,
     bootargs: Option<CString>,
@@ -1015,15 +1014,10 @@ impl DeviceTreeInfo {
 }
 
 pub fn sanitize_device_tree(
-    fdt: &mut [u8],
+    fdt: &mut Fdt,
     vm_dtbo: Option<&mut [u8]>,
     vm_ref_dt: Option<&[u8]>,
 ) -> Result<DeviceTreeInfo, RebootReason> {
-    let fdt = Fdt::from_mut_slice(fdt).map_err(|e| {
-        error!("Failed to load FDT: {e}");
-        RebootReason::InvalidFdt
-    })?;
-
     let vm_dtbo = match vm_dtbo {
         Some(vm_dtbo) => Some(VmDtbo::from_mut_slice(vm_dtbo).map_err(|e| {
             error!("Failed to load VM DTBO: {e}");
@@ -1086,11 +1080,6 @@ pub fn sanitize_device_tree(
 }
 
 fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeInfo, RebootReason> {
-    let kernel_range = read_kernel_range_from(fdt).map_err(|e| {
-        error!("Failed to read kernel range from DT: {e}");
-        RebootReason::InvalidFdt
-    })?;
-
     let initrd_range = read_initrd_range_from(fdt).map_err(|e| {
         error!("Failed to read initrd range from DT: {e}");
         RebootReason::InvalidFdt
@@ -1194,7 +1183,6 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
     })?;
 
     Ok(DeviceTreeInfo {
-        kernel_range,
         initrd_range,
         memory_range,
         bootargs,
