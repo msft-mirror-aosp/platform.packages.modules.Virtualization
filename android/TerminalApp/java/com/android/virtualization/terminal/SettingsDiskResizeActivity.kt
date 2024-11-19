@@ -27,6 +27,7 @@ import android.text.style.RelativeSizeSpan
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
+import com.android.virtualization.vmlauncher.InstallUtils
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.slider.Slider
 import java.util.regex.Pattern
@@ -55,7 +56,7 @@ class SettingsDiskResizeActivity : AppCompatActivity() {
                     0
                 )
             ).toFloat();
-        val partition = MainActivity.getPartitionFile(this, "root_part")
+        val partition = InstallUtils.getRootfsFile(this)
         val minDiskSizeMb =
             bytesToMb(MainActivity.getMinFilesystemSize(partition)).toFloat()
                 .coerceAtMost(diskSizeMb)

@@ -289,16 +289,6 @@ public class MainActivity extends BaseActivity
         }
     }
 
-    public static File getPartitionFile(Context context, String fileName)
-            throws FileNotFoundException {
-        File file = new File(InstallUtils.getInternalStorageDir(context), fileName);
-        if (!file.exists()) {
-            Log.d(TAG, file.getAbsolutePath() + " - file not found");
-            throw new FileNotFoundException("File not found: " + fileName);
-        }
-        return file;
-    }
-
     private static void allocateSpace(File file, long sizeInBytes) throws IOException {
         try {
             RandomAccessFile raf = new RandomAccessFile(file, "rw");
@@ -536,7 +526,7 @@ public class MainActivity extends BaseActivity
 
     private void resizeDiskIfNecessary() {
         try {
-            File file = getPartitionFile(this, "root_part");
+            File file = InstallUtils.getRootfsFile(this);
             SharedPreferences sharedPref = this.getSharedPreferences(
                     getString(R.string.preference_file_key), Context.MODE_PRIVATE);
             SharedPreferences.Editor editor = sharedPref.edit();
