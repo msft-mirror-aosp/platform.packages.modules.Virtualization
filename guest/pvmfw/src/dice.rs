@@ -192,6 +192,20 @@ unsafe extern "C" fn DiceClearMemory(
     flushed_zeroize(region)
 }
 
+/// Flushes data caches over the provided address range in open-dice.
+///
+/// This function allows the tests below to go through the same nostd open-dice library as pvmfw.
+#[no_mangle]
+#[cfg(test)]
+unsafe extern "C" fn DiceClearMemory(
+    _ctx: *mut core::ffi::c_void,
+    size: usize,
+    addr: *mut core::ffi::c_void,
+) {
+    // SAFETY: The caller ensures that the address and size are valid for write.
+    unsafe { core::ptr::write_bytes(addr as *mut u8, 0, size) };
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
