@@ -55,6 +55,17 @@ fn latest_normal_payload_passes_verification() -> Result<()> {
 }
 
 #[test]
+fn latest_trusty_security_vm_kernel_passes_verification() -> Result<()> {
+    let salt = b"trusty_security_vm_salt";
+    let expected_rollback_index = 1;
+    assert_payload_without_initrd_passes_verification(
+        &load_latest_trusty_security_vm_signed_kernel()?,
+        salt,
+        expected_rollback_index,
+    )
+}
+
+#[test]
 fn latest_debug_payload_passes_verification() -> Result<()> {
     assert_latest_payload_verification_passes(
         &load_latest_initrd_debug()?,
