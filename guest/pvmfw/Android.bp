@@ -277,6 +277,7 @@ cc_binary {
     ],
     static_libs: [
         "libpvmfw",
+        "libvmbase_dice_clear_memory",
     ],
     linker_scripts: [
         "image.ld",
