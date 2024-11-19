@@ -16,11 +16,12 @@
 
 use crate::dice::PartialInputs;
 use crate::entry::RebootReason;
+use crate::fdt::read_defer_rollback_protection;
 use crate::instance::EntryBody;
 use crate::instance::Error as InstanceError;
 use crate::instance::{get_recorded_entry, record_instance_entry};
 use diced_open_dice::Hidden;
-use libfdt::{Fdt, FdtNode};
+use libfdt::Fdt;
 use log::{error, info};
 use pvmfw_avb::Capability;
 use pvmfw_avb::VerifiedBootData;
@@ -155,21 +156,9 @@ fn ensure_dice_measurements_match_entry(
 }
 
 fn should_defer_rollback_protection(fdt: &Fdt) -> Result<bool, RebootReason> {
-    let Some(node) = avf_untrusted_node(fdt)? else { return Ok(false) };
-    let defer_rbp = node
-        .getprop(c"defer-rollback-protection")
-        .map_err(|e| {
-            error!("Failed to get defer-rollback-protection property in DT: {e}");
-            RebootReason::InvalidFdt
-        })?
-        .is_some();
-    Ok(defer_rbp)
-}
-
-fn avf_untrusted_node(fdt: &Fdt) -> Result<Option<FdtNode>, RebootReason> {
-    let node = fdt.node(c"/avf/untrusted").map_err(|e| {
-        error!("Failed to get /avf/untrusted node: {e}");
+    let defer_rbp = read_defer_rollback_protection(fdt).map_err(|e| {
+        error!("Failed to get defer-rollback-protection property in DT: {e}");
         RebootReason::InvalidFdt
     })?;
-    Ok(node)
+    Ok(defer_rbp.is_some())
 }

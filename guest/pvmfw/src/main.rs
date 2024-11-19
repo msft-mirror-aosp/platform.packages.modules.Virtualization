@@ -35,13 +35,13 @@ mod rollback;
 use crate::bcc::Bcc;
 use crate::dice::PartialInputs;
 use crate::entry::RebootReason;
-use crate::fdt::{modify_for_next_stage, sanitize_device_tree};
+use crate::fdt::{modify_for_next_stage, read_instance_id, sanitize_device_tree};
 use crate::rollback::perform_rollback_protection;
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use bssl_avf::Digester;
 use diced_open_dice::{bcc_handover_parse, DiceArtifacts, DiceContext, Hidden, VM_KEY_ALGORITHM};
-use libfdt::{Fdt, FdtNode};
+use libfdt::Fdt;
 use log::{debug, error, info, trace, warn};
 use pvmfw_avb::verify_payload;
 use pvmfw_avb::DebugLevel;
@@ -205,7 +205,13 @@ fn main<'a>(
 // Get the "salt" which is one of the input for DICE derivation.
 // This provides differentiation of secrets for different VM instances with same payloads.
 fn salt_from_instance_id(fdt: &Fdt) -> Result<Option<Hidden>, RebootReason> {
-    let Some(id) = instance_id(fdt)? else { return Ok(None) };
+    let Some(id) = read_instance_id(fdt).map_err(|e| {
+        error!("Failed to get instance-id in DT: {e}");
+        RebootReason::InvalidFdt
+    })?
+    else {
+        return Ok(None);
+    };
     let salt = Digester::sha512()
         .digest(&[&b"InstanceId:"[..], id].concat())
         .map_err(|e| {
@@ -215,23 +221,6 @@ fn salt_from_instance_id(fdt: &Fdt) -> Result<Option<Hidden>, RebootReason> {
         .try_into()
         .map_err(|_| RebootReason::InternalError)?;
     Ok(Some(salt))
-}
-
-fn instance_id(fdt: &Fdt) -> Result<Option<&[u8]>, RebootReason> {
-    let Some(node) = avf_untrusted_node(fdt)? else { return Ok(None) };
-    let id = node.getprop(c"instance-id").map_err(|e| {
-        error!("Failed to get instance-id in DT: {e}");
-        RebootReason::InvalidFdt
-    })?;
-    Ok(id)
-}
-
-fn avf_untrusted_node(fdt: &Fdt) -> Result<Option<FdtNode>, RebootReason> {
-    let node = fdt.node(c"/avf/untrusted").map_err(|e| {
-        error!("Failed to get /avf/untrusted node: {e}");
-        RebootReason::InvalidFdt
-    })?;
-    Ok(node)
 }
 
 /// Logs the given PCI error and returns the appropriate `RebootReason`.
