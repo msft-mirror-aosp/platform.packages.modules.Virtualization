@@ -28,6 +28,7 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 
 import java.io.BufferedInputStream;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -41,6 +42,7 @@ public class InstallUtils {
 
     private static final String VM_CONFIG_FILENAME = "vm_config.json";
     private static final String COMPRESSED_PAYLOAD_FILENAME = "images.tar.gz";
+    private static final String ROOTFS_FILENAME = "root_part";
     private static final String INSTALLATION_COMPLETED_FILENAME = "completed";
     private static final String PAYLOAD_DIR = "linux";
 
@@ -171,5 +173,14 @@ public class InstallUtils {
         } catch (IOException e) {
             return false;
         }
+    }
+
+    public static File getRootfsFile(Context context) throws FileNotFoundException {
+        File file = new File(getInternalStorageDir(context), ROOTFS_FILENAME);
+        if (!file.exists()) {
+            Log.d(TAG, file.getAbsolutePath() + " - file not found");
+            throw new FileNotFoundException("File not found: " + ROOTFS_FILENAME);
+        }
+        return file;
     }
 }
