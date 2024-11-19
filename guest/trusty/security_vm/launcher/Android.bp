@@ -28,6 +28,10 @@ prebuilt_etc {
         x86_64: {
             src: ":trusty_security_vm_signed",
         },
+        arm64: {
+            src: ":trusty-test-lk.elf",
+            enabled: true,
+        },
     },
     src: ":empty_file",
 }
@@ -53,6 +57,10 @@ avb_add_hash_footer {
     enabled: false,
     arch: {
         x86_64: {
+            src: ":trusty-lk.elf",
+            enabled: true,
+        },
+        arm64: {
             src: ":trusty-test-lk.elf",
             enabled: true,
         },
