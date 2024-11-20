@@ -28,6 +28,7 @@
         android:layout_width="wrap_content"
         android:text="@string/settings_recovery_title"
         android:textSize="48sp"
+        android:hyphenationFrequency="normal"
         android:layout_marginStart="24dp"
         android:layout_marginBottom="24dp"/>
     <FrameLayout
