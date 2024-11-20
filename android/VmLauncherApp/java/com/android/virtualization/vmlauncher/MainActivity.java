@@ -62,7 +62,7 @@ public class MainActivity extends Activity {
         mExecutorService = Executors.newCachedThreadPool();
 
         ConfigJson json = ConfigJson.from(VM_CONFIG_PATH);
-        VirtualMachineConfig config = json.toConfig(this);
+        VirtualMachineConfig config = json.toConfigBuilder(this).build();
 
         Runner runner;
         try {
