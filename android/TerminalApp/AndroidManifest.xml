@@ -34,6 +34,7 @@
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.Material3.DayNight.NoActionBar"
         android:usesCleartextTraffic="true"
+        android:supportsRtl="true"
         android:enabled="false">
         <activity android:name=".MainActivity"
                   android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
