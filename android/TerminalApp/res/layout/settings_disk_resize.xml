@@ -29,6 +29,7 @@
         android:layout_width="wrap_content"
         android:text="@string/settings_disk_resize_title"
         android:textSize="48sp"
+        android:hyphenationFrequency="normal"
         android:layout_marginBottom="24dp"/>
 
     <androidx.constraintlayout.widget.ConstraintLayout
