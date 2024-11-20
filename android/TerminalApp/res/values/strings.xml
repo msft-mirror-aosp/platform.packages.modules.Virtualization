@@ -96,6 +96,13 @@
     <!-- Dialog button cancel for resetting the terminal [CHAR LIMIT=16] -->
     <string name="settings_recovery_reset_dialog_cancel">Cancel</string>
 
+    <!-- Error page that shows error page [CHAR LIMIT=none] -->
+    <string name="error_title">Unrecoverable Error</string>
+    <!-- Error page that shows error page [CHAR LIMIT=none] -->
+    <string name="error_desc">Failed to recover from an error.\nYou can try restart the app, or try one of recovery option.</string>
+    <!-- Error page that shows detailed error code (error reason) for bugreport. [CHAR LIMIT=none] -->
+    <string name="error_code">Error code: <xliff:g id="error_code" example="ACCESS_DENIED">%s</xliff:g></string>
+
     <!-- Notification action button for settings [CHAR LIMIT=20] -->
     <string name="service_notification_settings">Settings</string>
     <!-- Notification title for foreground service notification [CHAR LIMIT=none] -->
