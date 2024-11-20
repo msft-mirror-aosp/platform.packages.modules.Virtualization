@@ -46,7 +46,7 @@ import java.util.concurrent.ExecutorService;
 public class InstallerActivity extends BaseActivity {
     private static final String TAG = "LinuxInstaller";
 
-    private static final long ESTIMATED_IMG_SIZE_BYTES = FileUtils.parseSize("350MB");
+    private static final long ESTIMATED_IMG_SIZE_BYTES = FileUtils.parseSize("550MB");
 
     private ExecutorService mExecutorService;
     private CheckBox mWaitForWifiCheckbox;
