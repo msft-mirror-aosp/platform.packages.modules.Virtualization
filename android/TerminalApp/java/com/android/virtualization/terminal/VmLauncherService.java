@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.android.virtualization.vmlauncher;
+package com.android.virtualization.terminal;
 
 import android.app.Notification;
 import android.app.Service;
@@ -123,8 +123,8 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         Path logPath = getFileStreamPath(mVirtualMachine.getName() + ".log").toPath();
         Logger.setup(mVirtualMachine, logPath, mExecutorService);
 
-        Notification notification = intent.getParcelableExtra(EXTRA_NOTIFICATION,
-                Notification.class);
+        Notification notification =
+                intent.getParcelableExtra(EXTRA_NOTIFICATION, Notification.class);
 
         startForeground(notification);
 
