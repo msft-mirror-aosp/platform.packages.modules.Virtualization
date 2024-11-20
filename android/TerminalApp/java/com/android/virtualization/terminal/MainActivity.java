@@ -54,9 +54,6 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.virtualization.vmlauncher.InstallUtils;
-import com.android.virtualization.vmlauncher.VmLauncherService;
-import com.android.virtualization.vmlauncher.VmLauncherServices;
 
 import com.google.android.material.appbar.MaterialToolbar;
 

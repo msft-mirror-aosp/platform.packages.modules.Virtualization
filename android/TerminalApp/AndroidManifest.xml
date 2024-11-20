@@ -76,7 +76,7 @@
             android:stopWithTask="true" />
 
         <service
-            android:name="com.android.virtualization.vmlauncher.VmLauncherService"
+            android:name=".VmLauncherService"
             android:exported="false"
             android:foregroundServiceType="specialUse"
             android:stopWithTask="true" >

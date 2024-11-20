@@ -35,7 +35,6 @@ import android.widget.CheckBox;
 import android.widget.TextView;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.virtualization.vmlauncher.InstallUtils;
 
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.android.material.snackbar.Snackbar;
