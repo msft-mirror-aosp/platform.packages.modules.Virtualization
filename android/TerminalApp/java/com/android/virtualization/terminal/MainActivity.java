@@ -28,6 +28,7 @@ import android.graphics.drawable.Icon;
 import android.graphics.fonts.FontStyle;
 import android.net.Uri;
 import android.net.http.SslError;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.ConditionVariable;
 import android.os.Environment;
@@ -35,6 +36,7 @@ import android.provider.Settings;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
@@ -46,7 +48,6 @@ import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Toast;
 
 import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
@@ -140,6 +141,17 @@ public class MainActivity extends BaseActivity
                 startVm();
             }
         }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (Build.isDebuggable() && event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN) {
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                launchErrorActivity(new Exception("Debug: KeyEvent.KEYCODE_UNKNOWN"));
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     private void requestStoragePermissions(
@@ -369,16 +381,13 @@ public class MainActivity extends BaseActivity
 
     @Override
     public void onVmStop() {
-        Toast.makeText(this, R.string.vm_stop_message, Toast.LENGTH_SHORT).show();
         Log.i(TAG, "onVmStop()");
-        finish();
     }
 
     @Override
     public void onVmError() {
-        Toast.makeText(this, R.string.vm_error_message, Toast.LENGTH_SHORT).show();
         Log.i(TAG, "onVmError()");
-        finish();
+        launchErrorActivity(new Exception("onVmError"));
     }
 
     @Override
@@ -423,6 +432,13 @@ public class MainActivity extends BaseActivity
                 startVm();
             }
         }
+    }
+
+    private void launchErrorActivity(Exception e) {
+        Intent intent = new Intent(this, ErrorActivity.class);
+        intent.putExtra(ErrorActivity.EXTRA_CAUSE, e);
+        intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
+        this.startActivity(intent);
     }
 
     private boolean installIfNecessary() {
