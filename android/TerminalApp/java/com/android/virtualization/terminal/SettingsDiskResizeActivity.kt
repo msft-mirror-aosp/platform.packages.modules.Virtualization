@@ -27,7 +27,6 @@ import android.text.style.RelativeSizeSpan
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
-import com.android.virtualization.vmlauncher.InstallUtils
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.slider.Slider
 import java.util.regex.Pattern
