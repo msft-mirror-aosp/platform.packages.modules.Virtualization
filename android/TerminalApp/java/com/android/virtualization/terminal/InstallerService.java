@@ -29,7 +29,6 @@ import android.util.Log;
 import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.GuardedBy;
-import com.android.virtualization.vmlauncher.InstallUtils;
 
 import org.apache.commons.compress.archivers.ArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;

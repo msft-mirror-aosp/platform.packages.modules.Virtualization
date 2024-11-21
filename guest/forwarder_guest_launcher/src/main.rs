@@ -31,7 +31,7 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 
 mod debian_service {
-    tonic::include_proto!("com.android.virtualization.vmlauncher.proto");
+    tonic::include_proto!("com.android.virtualization.terminal.proto");
 }
 
 const NON_PREVILEGED_PORT_RANGE_START: i32 = 1024;
