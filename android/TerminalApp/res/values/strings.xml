@@ -61,10 +61,10 @@
     <string name="settings_disk_resize_resize_gb_assigned_format"><xliff:g id="assigned_size" example="10GB">%1$s</xliff:g> assigned</string>
     <!-- Settings menu option description format of the maximum resizable disk size. [CHAR LIMIT=none] -->
     <string name="settings_disk_resize_resize_gb_max_format"><xliff:g id="max_size" example="256GB">%1$s</xliff:g> max</string>
-    <!-- Settings menu button to cancel disk resize. [CHAR LIMIT=32] -->
+    <!-- Settings menu button to cancel disk resize. [CHAR LIMIT=16] -->
     <string name="settings_disk_resize_resize_cancel">Cancel</string>
-    <!-- Settings menu button to apply change that requires to restart VM (abbrev of virtual machine). [CHAR LIMIT=64] -->
-    <string name="settings_disk_resize_resize_restart_vm_to_apply">Restart VM to apply</string>
+    <!-- Settings menu button to apply change that requires to restart Terminal app. [CHAR LIMIT=20] -->
+    <string name="settings_disk_resize_resize_restart_vm_to_apply">Restart to apply</string>
 
     <!-- Settings menu title for 'port forwarding' [CHAR LIMIT=none] -->
     <string name="settings_port_forwarding_title">Port Forwarding</string>
@@ -95,13 +95,32 @@
     <string name="settings_recovery_reset_dialog_confirm">Confirm</string>
     <!-- Dialog button cancel for resetting the terminal [CHAR LIMIT=16] -->
     <string name="settings_recovery_reset_dialog_cancel">Cancel</string>
+    <!-- Dialog option to back up previous image(/mnt/backup is the path which is supposed not to be translated) [CHAR LIMIT=none] -->
+    <string name="settings_recovery_reset_dialog_backup_option">Back up data to <xliff:g id="path" example="/mnt/backup">/mnt/backup</xliff:g></string>
+    <!-- Snankbar to indicate recovery error due to backup [CHAR LIMIT=none] -->
+    <string name="settings_recovery_error_due_to_backup">Recovery failed because backup failed</string>
+    <!-- Snankbar to indicate recovery error [CHAR LIMIT=none] -->
+    <string name="settings_recovery_error">Recovery failed</string>
+    <!-- Snankbar to indicate recovery error during removing backup [CHAR LIMIT=none] -->
+    <string name="settings_recovery_error_during_removing_backup">Cannot remove backup file</string>
+    <!-- Settings menu title for removing backup data [CHAR LIMIT=none] -->
+    <string name="settings_recovery_remove_backup_title">Remove backup data</string>
+    <!-- Settings menu sub title for removing backup data(/mnt/backup is the path which is supposed not to be translated) [CHAR LIMIT=none] -->
+    <string name="settings_recovery_remove_backup_sub_title">Clean up <xliff:g id="path" example="/mnt/backup">/mnt/backup</xliff:g></string>
 
-    <!-- Notification action button for settings [CHAR LIMIT=none] -->
+    <!-- Error page that shows error page [CHAR LIMIT=none] -->
+    <string name="error_title">Unrecoverable Error</string>
+    <!-- Error page that shows error page [CHAR LIMIT=none] -->
+    <string name="error_desc">Failed to recover from an error.\nYou can try restart the app, or try one of recovery option.</string>
+    <!-- Error page that shows detailed error code (error reason) for bugreport. [CHAR LIMIT=none] -->
+    <string name="error_code">Error code: <xliff:g id="error_code" example="ACCESS_DENIED">%s</xliff:g></string>
+
+    <!-- Notification action button for settings [CHAR LIMIT=20] -->
     <string name="service_notification_settings">Settings</string>
     <!-- Notification title for foreground service notification [CHAR LIMIT=none] -->
     <string name="service_notification_title">Terminal is running</string>
     <!-- Notification content for foreground service notification [CHAR LIMIT=none] -->
     <string name="service_notification_content">Click to open the terminal</string>
-    <!-- Notification action button for closing the virtual machine [CHAR LIMIT=none] -->
+    <!-- Notification action button for closing the virtual machine [CHAR LIMIT=20] -->
     <string name="service_notification_quit_action">Close</string>
 </resources>
