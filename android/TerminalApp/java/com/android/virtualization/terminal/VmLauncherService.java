@@ -17,8 +17,15 @@
 package com.android.virtualization.terminal;
 
 import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.graphics.drawable.Icon;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.ResultReceiver;
@@ -44,13 +51,15 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class VmLauncherService extends Service implements DebianServiceImpl.DebianServiceCallback {
     public static final String EXTRA_NOTIFICATION = "EXTRA_NOTIFICATION";
-    private static final String TAG = "VmLauncherService";
+    static final String TAG = "VmLauncherService";
 
     private static final int RESULT_START = 0;
     private static final int RESULT_STOP = 1;
@@ -63,6 +72,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     private ResultReceiver mResultReceiver;
     private Server mServer;
     private DebianServiceImpl mDebianService;
+    private PortForwardingRequestReceiver mPortForwardingReceiver;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -130,6 +140,10 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
 
         mResultReceiver.send(RESULT_START, null);
 
+        IntentFilter intentFilter =
+                new IntentFilter(PortForwardingRequestReceiver.ACTION_PORT_FORWARDING);
+        mPortForwardingReceiver = new PortForwardingRequestReceiver();
+        registerReceiver(mPortForwardingReceiver, intentFilter, RECEIVER_NOT_EXPORTED);
         startDebianServer();
 
         return START_NOT_STICKY;
@@ -137,7 +151,8 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
 
     @Override
     public void onDestroy() {
-        super.onDestroy();
+        unregisterReceiver(mPortForwardingReceiver);
+        getSystemService(NotificationManager.class).cancelAll();
         stopDebianServer();
         if (mVirtualMachine != null) {
             if (mVirtualMachine.getStatus() == VirtualMachine.STATUS_RUNNING) {
@@ -152,6 +167,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
             mExecutorService = null;
             mVirtualMachine = null;
         }
+        super.onDestroy();
     }
 
     private void startDebianServer() {
@@ -223,5 +239,103 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         Bundle b = new Bundle();
         b.putString(VmLauncherService.KEY_VM_IP_ADDR, ipAddr);
         mResultReceiver.send(VmLauncherService.RESULT_IPADDR, b);
+    }
+
+    @Override
+    public void onActivePortsChanged(Set<String> oldPorts, Set<String> newPorts) {
+        Set<String> union = new HashSet<>(oldPorts);
+        union.addAll(newPorts);
+        for (String portStr : union) {
+            try {
+                if (!oldPorts.contains(portStr)) {
+                    showPortForwardingNotification(Integer.parseInt(portStr));
+                } else if (!newPorts.contains(portStr)) {
+                    discardPortForwardingNotification(Integer.parseInt(portStr));
+                }
+            } catch (NumberFormatException e) {
+                Log.e(TAG, "Failed to parse port: " + portStr);
+                throw e;
+            }
+        }
+    }
+
+    private PendingIntent getPortForwardingPendingIntent(int port, boolean enabled) {
+        Intent intent = new Intent(PortForwardingRequestReceiver.ACTION_PORT_FORWARDING);
+        intent.setPackage(getPackageName());
+        intent.setIdentifier(String.format("%d_%b", port, enabled));
+        intent.putExtra(PortForwardingRequestReceiver.KEY_PORT, port);
+        intent.putExtra(PortForwardingRequestReceiver.KEY_ENABLED, enabled);
+        return PendingIntent.getBroadcast(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    private void showPortForwardingNotification(int port) {
+        Intent tapIntent = new Intent(this, SettingsPortForwardingActivity.class);
+        tapIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent tapPendingIntent =
+                PendingIntent.getActivity(this, 0, tapIntent, PendingIntent.FLAG_IMMUTABLE);
+
+        String title = getString(R.string.settings_port_forwarding_notification_title);
+        String content = getString(R.string.settings_port_forwarding_notification_content, port);
+        String acceptText = getString(R.string.settings_port_forwarding_notification_accept);
+        String denyText = getString(R.string.settings_port_forwarding_notification_deny);
+        Icon icon = Icon.createWithResource(this, R.drawable.ic_launcher_foreground);
+
+        Notification notification =
+                new Notification.Builder(this, this.getPackageName())
+                        .setSmallIcon(R.drawable.ic_launcher_foreground)
+                        .setContentTitle(title)
+                        .setContentText(content)
+                        .setContentIntent(tapPendingIntent)
+                        .addAction(
+                                new Notification.Action.Builder(
+                                                icon,
+                                                acceptText,
+                                                getPortForwardingPendingIntent(
+                                                        port, true /* enabled */))
+                                        .build())
+                        .addAction(
+                                new Notification.Action.Builder(
+                                                icon,
+                                                denyText,
+                                                getPortForwardingPendingIntent(
+                                                        port, false /* enabled */))
+                                        .build())
+                        .build();
+        getSystemService(NotificationManager.class).notify(TAG, port, notification);
+    }
+
+    private void discardPortForwardingNotification(int port) {
+        getSystemService(NotificationManager.class).cancel(TAG, port);
+    }
+
+    private final class PortForwardingRequestReceiver extends BroadcastReceiver {
+        private static final String ACTION_PORT_FORWARDING =
+                "android.virtualization.PORT_FORWARDING";
+        private static final String KEY_PORT = "port";
+        private static final String KEY_ENABLED = "enabled";
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (ACTION_PORT_FORWARDING.equals(intent.getAction())) {
+                performActionPortForwarding(context, intent);
+            }
+        }
+
+        private void performActionPortForwarding(Context context, Intent intent) {
+            int port = intent.getIntExtra(KEY_PORT, 0);
+            boolean enabled = intent.getBooleanExtra(KEY_ENABLED, false);
+
+            SharedPreferences sharedPref =
+                    context.getSharedPreferences(
+                            context.getString(R.string.preference_file_key), Context.MODE_PRIVATE);
+            SharedPreferences.Editor editor = sharedPref.edit();
+            editor.putBoolean(
+                    context.getString(R.string.preference_forwarding_port_is_enabled)
+                            + Integer.toString(port),
+                    enabled);
+            editor.apply();
+
+            context.getSystemService(NotificationManager.class).cancel(VmLauncherService.TAG, port);
+        }
     }
 }
