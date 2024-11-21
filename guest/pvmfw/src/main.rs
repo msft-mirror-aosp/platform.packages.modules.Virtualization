@@ -154,6 +154,11 @@ fn main(
             return Err(RebootReason::InvalidPayload);
         }
         (false, instance_hash.unwrap())
+    } else if verified_boot_data.has_capability(Capability::TrustySecurityVm) {
+        // The rollback protection of Trusty VMs are handled by AuthMgr, so we don't need to
+        // handle it here.
+        info!("Trusty Security VM detected");
+        (false, instance_hash.unwrap())
     } else {
         info!("Fallback to instance.img based rollback checks");
         let (recorded_entry, mut instance_img, header_index) =

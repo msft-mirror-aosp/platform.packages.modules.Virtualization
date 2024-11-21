@@ -230,7 +230,7 @@ avb_add_hash_footer {
     props: [
         {
             name: "com.android.virt.cap",
-            value: "remote_attest|secretkeeper_protection|supports_uefi_boot",
+            value: "remote_attest|trusty_security_vm|secretkeeper_protection|supports_uefi_boot",
         },
     ],
 }
