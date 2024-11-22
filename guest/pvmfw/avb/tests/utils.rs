@@ -143,6 +143,7 @@ pub fn assert_payload_without_initrd_passes_verification(
     kernel: &[u8],
     salt: &[u8],
     expected_rollback_index: u64,
+    capabilities: Vec<Capability>,
 ) -> Result<()> {
     let public_key = load_trusted_public_key()?;
     let verified_boot_data = verify_payload(
@@ -160,7 +161,7 @@ pub fn assert_payload_without_initrd_passes_verification(
         kernel_digest,
         initrd_digest: None,
         public_key: &public_key,
-        capabilities: vec![],
+        capabilities,
         rollback_index: expected_rollback_index,
     };
     assert_eq!(expected_boot_data, verified_boot_data);
