@@ -45,7 +45,7 @@ use alloc::boxed::Box;
 use bssl_avf::Digester;
 use core::ops::Range;
 use cstr::cstr;
-use diced_open_dice::{bcc_handover_parse, DiceArtifacts, Hidden};
+use diced_open_dice::{bcc_handover_parse, DiceArtifacts, DiceContext, Hidden, VM_KEY_ALGORITHM};
 use libfdt::{Fdt, FdtNode};
 use log::{debug, error, info, trace, warn};
 use pvmfw_avb::verify_payload;
@@ -202,6 +202,13 @@ fn main(
 
     trace!("BCC leaf subject public key algorithm: {:?}", bcc.leaf_subject_pubkey().cose_alg);
 
+    let dice_context = DiceContext {
+        authority_algorithm: bcc.leaf_subject_pubkey().cose_alg.try_into().map_err(|e| {
+            error!("{e}");
+            RebootReason::InternalError
+        })?,
+        subject_algorithm: VM_KEY_ALGORITHM,
+    };
     dice_inputs
         .write_next_bcc(
             new_bcc_handover.as_ref(),
@@ -209,6 +216,7 @@ fn main(
             instance_hash,
             defer_rollback_protection,
             next_bcc,
+            dice_context,
         )
         .map_err(|e| {
             error!("Failed to derive next-stage DICE secrets: {e:?}");
