@@ -41,6 +41,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.accessibility.AccessibilityManager;
+import android.view.accessibility.AccessibilityManager.AccessibilityStateChangeListener;
 import android.webkit.ClientCertRequest;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
@@ -71,10 +72,8 @@ import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 
 public class MainActivity extends BaseActivity
-        implements VmLauncherServices.VmLauncherServiceCallback,
-                AccessibilityManager.TouchExplorationStateChangeListener {
-
-    private static final String TAG = "VmTerminalApp";
+        implements VmLauncherServices.VmLauncherServiceCallback, AccessibilityStateChangeListener {
+    static final String TAG = "VmTerminalApp";
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
     private static final int REQUEST_CODE_INSTALLER = 0x33;
@@ -118,7 +117,7 @@ public class MainActivity extends BaseActivity
         mWebView.setWebChromeClient(new WebChromeClient());
 
         mAccessibilityManager = getSystemService(AccessibilityManager.class);
-        mAccessibilityManager.addTouchExplorationStateChangeListener(this);
+        mAccessibilityManager.addAccessibilityStateChangeListener(this);
 
         readClientCertificate();
         connectToTerminalService();
@@ -170,7 +169,7 @@ public class MainActivity extends BaseActivity
                         + "&fontWeightBold="
                         + (FontStyle.FONT_WEIGHT_BOLD + config.fontWeightAdjustment)
                         + "&screenReaderMode="
-                        + mAccessibilityManager.isTouchExplorationEnabled()
+                        + mAccessibilityManager.isEnabled()
                         + "&titleFixed="
                         + getString(R.string.app_name);
 
@@ -366,7 +365,7 @@ public class MainActivity extends BaseActivity
 
     @Override
     protected void onDestroy() {
-        getSystemService(AccessibilityManager.class).removeTouchExplorationStateChangeListener(this);
+        getSystemService(AccessibilityManager.class).removeAccessibilityStateChangeListener(this);
         VmLauncherServices.stopVmLauncherService(this);
         super.onDestroy();
     }
@@ -411,7 +410,7 @@ public class MainActivity extends BaseActivity
     }
 
     @Override
-    public void onTouchExplorationStateChanged(boolean enabled) {
+    public void onAccessibilityStateChanged(boolean enabled) {
         connectToTerminalService();
     }
 
