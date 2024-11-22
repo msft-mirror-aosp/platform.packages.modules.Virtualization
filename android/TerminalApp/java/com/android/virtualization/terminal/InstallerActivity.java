@@ -81,7 +81,7 @@ public class InstallerActivity extends BaseActivity {
         Intent intent = new Intent(this, InstallerService.class);
         mInstallerServiceConnection = new InstallerServiceConnection(this);
         if (!bindService(intent, mInstallerServiceConnection, Context.BIND_AUTO_CREATE)) {
-            handleCriticalError(new Exception("Failed to connect to installer service"));
+            handleInternalError(new Exception("Failed to connect to installer service"));
         }
     }
 
@@ -125,7 +125,7 @@ public class InstallerActivity extends BaseActivity {
         snackbar.show();
     }
 
-    public void handleCriticalError(Exception e) {
+    public void handleInternalError(Exception e) {
         if (Build.isDebuggable()) {
             showSnackbar(
                     e.getMessage() + ". File a bugreport to go/ferrochrome-bug",
@@ -168,7 +168,7 @@ public class InstallerActivity extends BaseActivity {
             try {
                 mService.requestInstall();
             } catch (RemoteException e) {
-                handleCriticalError(e);
+                handleInternalError(e);
             }
         } else {
             Log.d(TAG, "requestInstall() is called, but not yet connected");
@@ -193,20 +193,18 @@ public class InstallerActivity extends BaseActivity {
                 setInstallEnabled(false);
             }
         } catch (RemoteException e) {
-            handleCriticalError(e);
+            handleInternalError(e);
         }
     }
 
     @MainThread
     public void handleInstallerServiceDisconnected() {
-        handleCriticalError(new Exception("InstallerService is destroyed while in use"));
+        handleInternalError(new Exception("InstallerService is destroyed while in use"));
     }
 
     @MainThread
-    private void handleError(String displayText) {
-        if (Build.isDebuggable()) {
-            showSnackbar(displayText, Snackbar.LENGTH_LONG);
-        }
+    private void handleInstallError(String displayText) {
+        showSnackbar(displayText, Snackbar.LENGTH_LONG);
         setInstallEnabled(true);
     }
 
@@ -246,7 +244,7 @@ public class InstallerActivity extends BaseActivity {
                             return;
                         }
 
-                        activity.handleError(displayText);
+                        activity.handleInstallError(displayText);
                     });
         }
     }
@@ -267,7 +265,7 @@ public class InstallerActivity extends BaseActivity {
                 return;
             }
             if (service == null) {
-                activity.handleCriticalError(new Exception("service shouldn't be null"));
+                activity.handleInternalError(new Exception("service shouldn't be null"));
             }
 
             activity.mService = IInstallerService.Stub.asInterface(service);
