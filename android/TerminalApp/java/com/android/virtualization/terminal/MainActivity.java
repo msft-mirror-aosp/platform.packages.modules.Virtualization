@@ -379,6 +379,7 @@ public class MainActivity extends BaseActivity
     @Override
     public void onVmStop() {
         Log.i(TAG, "onVmStop()");
+        finish();
     }
 
     @Override
