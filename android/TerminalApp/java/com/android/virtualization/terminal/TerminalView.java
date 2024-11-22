@@ -20,6 +20,7 @@ import static com.android.virtualization.terminal.MainActivity.TAG;
 import android.content.Context;
 import android.graphics.Rect;
 import android.os.Bundle;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.util.Log;
@@ -33,6 +34,8 @@ import android.view.accessibility.AccessibilityManager.TouchExplorationStateChan
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction;
 import android.view.accessibility.AccessibilityNodeProvider;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
 import android.webkit.WebView;
 
 import java.util.List;
@@ -260,5 +263,17 @@ public class TerminalView extends WebView
             return mA11yNodeProvider;
         }
         return p;
+    }
+
+    @Override
+    public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+        InputConnection inputConnection = super.onCreateInputConnection(outAttrs);
+        if (outAttrs != null) {
+            // TODO(b/378642568): consider using InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            // here..
+            outAttrs.inputType =
+                    InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        }
+        return inputConnection;
     }
 }
