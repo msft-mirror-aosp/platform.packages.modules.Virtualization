@@ -132,6 +132,7 @@ rust_defaults {
         "--rustified-enum DiceConfigType",
         "--rustified-enum DiceMode",
         "--rustified-enum DiceResult",
+        "--rustified-enum DicePrincipal",
 
         // By generating only essential functions, we can make bindings concise and
         // optimize compilation time.

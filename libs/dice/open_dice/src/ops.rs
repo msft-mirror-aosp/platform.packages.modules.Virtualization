@@ -23,7 +23,8 @@ use crate::dice::{
 use crate::error::{check_result, DiceError, Result};
 use alloc::{vec, vec::Vec};
 use open_dice_cbor_bindgen::{
-    DiceGenerateCertificate, DiceHash, DiceKdf, DiceKeypairFromSeed, DiceSign, DiceVerify,
+    DiceGenerateCertificate, DiceHash, DiceKdf, DiceKeypairFromSeed, DicePrincipal, DiceSign,
+    DiceVerify,
 };
 use std::ptr;
 
@@ -75,6 +76,11 @@ pub fn kdf(ikm: &[u8], salt: &[u8], info: &[u8], derived_key: &mut [u8]) -> Resu
 pub fn keypair_from_seed(seed: &[u8; PRIVATE_KEY_SEED_SIZE]) -> Result<(Vec<u8>, PrivateKey)> {
     let mut public_key = vec![0u8; VM_KEY_ALGORITHM.public_key_size()];
     let mut private_key = PrivateKey::default();
+    // This function is used with an open-dice config that uses the same algorithms for the
+    // subject and authority. Therefore, the principal is irrelevant in this context as this
+    // function only derives the key pair cryptographically without caring about which
+    // principal it is for. Hence, we arbitrarily set it to `DicePrincipal::kDicePrincipalSubject`.
+    let principal = DicePrincipal::kDicePrincipalSubject;
     check_result(
         // SAFETY: The function writes to the `public_key` and `private_key` within the given
         // bounds, and only reads the `seed`. The first argument context is not used in this
@@ -82,6 +88,7 @@ pub fn keypair_from_seed(seed: &[u8; PRIVATE_KEY_SEED_SIZE]) -> Result<(Vec<u8>,
         unsafe {
             DiceKeypairFromSeed(
                 ptr::null_mut(), // context
+                principal,
                 seed.as_ptr(),
                 public_key.as_mut_ptr(),
                 private_key.as_mut_ptr(),
