@@ -53,6 +53,12 @@ avb_add_hash_footer {
     private_key: ":trusty_vm_sign_key",
     salt: trusty_security_vm_salt,
     rollback_index: TRUSTY_SECURITY_VM_VERSION,
+    props: [
+        {
+            name: "com.android.virt.cap",
+            value: "trusty_security_vm",
+        },
+    ],
     src: ":empty_file",
     enabled: false,
     arch: {
