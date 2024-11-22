@@ -168,7 +168,7 @@ public class InstallerActivity extends BaseActivity {
 
         if (mService != null) {
             try {
-                mService.requestInstall();
+                mService.requestInstall(mWaitForWifiCheckbox.isChecked());
             } catch (RemoteException e) {
                 handleCriticalError(e);
             }
