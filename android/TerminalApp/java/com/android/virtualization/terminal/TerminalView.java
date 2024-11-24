@@ -46,6 +46,39 @@ public class TerminalView extends WebView
     // arbitrarily set. We may want to adjust this in the future.
     private static final int TEXT_TOO_LONG_TO_ANNOUNCE = 200;
 
+    // keyCode 229 means composing text, so get the last character in e.target.value.
+    // keycode 64(@)-95(_) is mapped to a ctrl code
+    // keycode 97(A)-122(Z) is converted to a small letter, and mapped to ctrl code
+    public static final String CTRL_KEY_HANDLER =
+            """
+javascript: (function() {
+  window.term.attachCustomKeyEventHandler((e) => {
+      if (window.ctrl) {
+          keyCode = e.keyCode;
+          if (keyCode === 229) {
+              keyCode = e.target.value.charAt(e.target.selectionStart - 1).charCodeAt();
+          }
+          if (64 <= keyCode && keyCode <= 95) {
+              input = String.fromCharCode(keyCode - 64);
+          } else if (97 <= keyCode && keyCode <= 122) {
+              input = String.fromCharCode(keyCode - 96);
+          } else {
+              return true;
+          }
+          if (e.type === 'keyup') {
+              window.term.input(input);
+              e.target.value = e.target.value.slice(0, -1);
+              window.ctrl = false;
+          }
+          return false;
+      } else {
+          return true;
+      }
+  });
+})();
+""";
+    public static final String ENABLE_CTRL_KEY = "javascript:(function(){window.ctrl=true;})();";
+
     private final AccessibilityManager mA11yManager;
 
     public TerminalView(Context context, AttributeSet attrs) {
