@@ -17,8 +17,6 @@
 package com.android.virtualization.terminal;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
@@ -31,7 +29,6 @@ import android.util.Log;
 import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.GuardedBy;
-import com.android.virtualization.vmlauncher.InstallUtils;
 
 import org.apache.commons.compress.archivers.ArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
@@ -54,7 +51,6 @@ import java.util.concurrent.Executors;
 public class InstallerService extends Service {
     private static final String TAG = "InstallerService";
 
-    private static final String NOTIFICATION_CHANNEL_ID = "installer";
     private static final int NOTIFICATION_ID = 1313; // any unique number among notifications
 
     private static final String IMAGE_URL =
@@ -81,23 +77,12 @@ public class InstallerService extends Service {
     public void onCreate() {
         super.onCreate();
 
-        // Create mandatory notification
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
-            NotificationChannel channel =
-                    new NotificationChannel(
-                            NOTIFICATION_CHANNEL_ID,
-                            getString(R.string.installer_notif_title_text),
-                            NotificationManager.IMPORTANCE_DEFAULT);
-            manager.createNotificationChannel(channel);
-        }
-
         Intent intent = new Intent(this, MainActivity.class);
         PendingIntent pendingIntent =
                 PendingIntent.getActivity(
                         this, /* requestCode= */ 0, intent, PendingIntent.FLAG_IMMUTABLE);
         mNotification =
-                new Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
+                new Notification.Builder(this, this.getPackageName())
                         .setSmallIcon(R.drawable.ic_launcher_foreground)
                         .setContentTitle(getString(R.string.installer_notif_title_text))
                         .setContentText(getString(R.string.installer_notif_desc_text))
@@ -134,16 +119,21 @@ public class InstallerService extends Service {
     }
 
     private void requestInstall() {
-        Log.i(TAG, "Installing..");
+        synchronized (mLock) {
+            if (mIsInstalling) {
+                Log.i(TAG, "already installing..");
+                return;
+            } else {
+                Log.i(TAG, "installing..");
+                mIsInstalling = true;
+            }
+        }
 
         // Make service to be long running, even after unbind() when InstallerActivity is destroyed
         // The service will still be destroyed if task is remove.
         startService(new Intent(this, InstallerService.class));
         startForeground(
                 NOTIFICATION_ID, mNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        synchronized (mLock) {
-            mIsInstalling = true;
-        }
 
         mExecutorService.execute(
                 () -> {
