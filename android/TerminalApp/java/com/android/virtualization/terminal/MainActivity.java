@@ -70,6 +70,7 @@ import java.net.UnknownHostException;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
+import java.util.Map;
 
 public class MainActivity extends BaseActivity
         implements VmLauncherServices.VmLauncherServiceCallback, AccessibilityStateChangeListener {
@@ -87,6 +88,20 @@ public class MainActivity extends BaseActivity
     private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
     private ActivityResultLauncher<Intent> mManageExternalStorageActivityResultLauncher;
     private static int diskSizeStep;
+    private static final Map<Integer, Integer> BTN_KEY_CODE_MAP =
+            Map.ofEntries(
+                    Map.entry(R.id.btn_tab, KeyEvent.KEYCODE_TAB),
+                    // Alt key sends ESC keycode
+                    Map.entry(R.id.btn_alt, KeyEvent.KEYCODE_ESCAPE),
+                    Map.entry(R.id.btn_esc, KeyEvent.KEYCODE_ESCAPE),
+                    Map.entry(R.id.btn_left, KeyEvent.KEYCODE_DPAD_LEFT),
+                    Map.entry(R.id.btn_right, KeyEvent.KEYCODE_DPAD_RIGHT),
+                    Map.entry(R.id.btn_up, KeyEvent.KEYCODE_DPAD_UP),
+                    Map.entry(R.id.btn_down, KeyEvent.KEYCODE_DPAD_DOWN),
+                    Map.entry(R.id.btn_home, KeyEvent.KEYCODE_MOVE_HOME),
+                    Map.entry(R.id.btn_end, KeyEvent.KEYCODE_MOVE_END),
+                    Map.entry(R.id.btn_pgup, KeyEvent.KEYCODE_PAGE_UP),
+                    Map.entry(R.id.btn_pgdn, KeyEvent.KEYCODE_PAGE_DOWN));
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -116,6 +131,8 @@ public class MainActivity extends BaseActivity
         mWebView.getSettings().setJavaScriptEnabled(true);
         mWebView.setWebChromeClient(new WebChromeClient());
 
+        setupModifierKeys();
+
         mAccessibilityManager = getSystemService(AccessibilityManager.class);
         mAccessibilityManager.addAccessibilityStateChangeListener(this);
 
@@ -135,6 +152,32 @@ public class MainActivity extends BaseActivity
                 requestStoragePermissions(this, mManageExternalStorageActivityResultLauncher);
             } else {
                 startVm();
+            }
+        }
+    }
+
+    private void setupModifierKeys() {
+        // Only ctrl key is special, it communicates with xtermjs to modify key event with ctrl key
+        findViewById(R.id.btn_ctrl)
+                .setOnClickListener(
+                        (v) -> {
+                            mWebView.loadUrl(TerminalView.CTRL_KEY_HANDLER);
+                            mWebView.loadUrl(TerminalView.ENABLE_CTRL_KEY);
+                        });
+
+        View.OnClickListener modifierButtonClickListener =
+                v -> {
+                    if (BTN_KEY_CODE_MAP.containsKey(v.getId())) {
+                        int keyCode = BTN_KEY_CODE_MAP.get(v.getId());
+                        mWebView.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, keyCode));
+                        mWebView.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, keyCode));
+                    }
+                };
+
+        for (int btn : BTN_KEY_CODE_MAP.keySet()) {
+            View v = findViewById(btn);
+            if (v != null) {
+                v.setOnClickListener(modifierButtonClickListener);
             }
         }
     }
@@ -240,8 +283,16 @@ public class MainActivity extends BaseActivity
                                             android.os.Trace.endAsyncSection("executeTerminal", 0);
                                             findViewById(R.id.boot_progress)
                                                     .setVisibility(View.GONE);
-                                            view.setVisibility(View.VISIBLE);
+                                            findViewById(R.id.webview_container)
+                                                    .setVisibility(View.VISIBLE);
                                             mBootCompleted.open();
+                                            // TODO(b/376813452): support talkback as well
+                                            int keyVisibility =
+                                                    mAccessibilityManager.isEnabled()
+                                                            ? View.GONE
+                                                            : View.VISIBLE;
+                                            findViewById(R.id.keyboard_container)
+                                                    .setVisibility(keyVisibility);
                                         }
                                     }
                                 });
@@ -411,6 +462,7 @@ public class MainActivity extends BaseActivity
 
     @Override
     public void onAccessibilityStateChanged(boolean enabled) {
+        findViewById(R.id.keyboard_container).setVisibility(enabled ? View.GONE : View.VISIBLE);
         connectToTerminalService();
     }
 
