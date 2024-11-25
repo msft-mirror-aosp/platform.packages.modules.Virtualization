@@ -28,9 +28,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.android.virtualization.terminal.MainActivity.TAG
 
 class SettingsPortForwardingActivity : AppCompatActivity() {
-    val TAG: String = "VmTerminalApp"
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.settings_port_forwarding)

@@ -16,6 +16,8 @@
 
 package com.android.virtualization.terminal;
 
+import static com.android.virtualization.terminal.MainActivity.TAG;
+
 import android.app.Notification;
 import android.content.Context;
 import android.content.Intent;
@@ -31,8 +33,6 @@ import android.util.Log;
 import java.util.List;
 
 public class VmLauncherServices {
-    private static final String TAG = "VmLauncherServices";
-
     private static final String ACTION_START_VM_LAUNCHER_SERVICE =
             "android.virtualization.START_VM_LAUNCHER_SERVICE";
 
