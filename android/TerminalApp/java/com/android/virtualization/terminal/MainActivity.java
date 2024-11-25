@@ -427,7 +427,7 @@ public class MainActivity extends BaseActivity
     @Override
     protected void onDestroy() {
         getSystemService(AccessibilityManager.class).removeAccessibilityStateChangeListener(this);
-        VmLauncherService.stopVmLauncherService(this);
+        VmLauncherService.stop(this);
         super.onDestroy();
     }
 
@@ -580,7 +580,7 @@ public class MainActivity extends BaseActivity
                         .build();
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
-        VmLauncherService.startVmLauncherService(this, this, notification);
+        VmLauncherService.run(this, this, notification);
         connectToTerminalService();
     }
 

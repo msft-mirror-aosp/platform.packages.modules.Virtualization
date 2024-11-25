@@ -98,7 +98,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         void onIpAddrAvailable(String ipAddr);
     }
 
-    public static void startVmLauncherService(
+    public static void run(
             Context context, VmLauncherServiceCallback callback, Notification notification) {
         Intent i = getMyIntent(context);
         if (i == null) {
@@ -273,7 +273,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         mResultReceiver.send(VmLauncherService.RESULT_IPADDR, b);
     }
 
-    public static void stopVmLauncherService(Context context) {
+    public static void stop(Context context) {
         Intent i = getMyIntent(context);
         context.stopService(i);
     }
