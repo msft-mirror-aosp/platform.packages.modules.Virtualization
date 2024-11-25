@@ -88,9 +88,14 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         return new Intent(context.getApplicationContext(), VmLauncherService.class);
     }
 
-    public static void stopVmLauncherService(Context context) {
-        Intent i = getMyIntent(context);
-        context.stopService(i);
+    public interface VmLauncherServiceCallback {
+        void onVmStart();
+
+        void onVmStop();
+
+        void onVmError();
+
+        void onIpAddrAvailable(String ipAddr);
     }
 
     public static void startVmLauncherService(
@@ -127,16 +132,6 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         context.startForegroundService(i);
     }
 
-    public interface VmLauncherServiceCallback {
-        void onVmStart();
-
-        void onVmStop();
-
-        void onVmError();
-
-        void onIpAddrAvailable(String ipAddr);
-    }
-
     private static ResultReceiver getResultReceiverForIntent(ResultReceiver r) {
         Parcel parcel = Parcel.obtain();
         r.writeToParcel(parcel, 0);
@@ -149,10 +144,6 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     @Override
     public IBinder onBind(Intent intent) {
         return null;
-    }
-
-    private void startForeground(Notification notification) {
-        startForeground(this.hashCode(), notification);
     }
 
     @Override
@@ -220,25 +211,8 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         return START_NOT_STICKY;
     }
 
-    @Override
-    public void onDestroy() {
-        unregisterReceiver(mPortForwardingReceiver);
-        getSystemService(NotificationManager.class).cancelAll();
-        stopDebianServer();
-        if (mVirtualMachine != null) {
-            if (mVirtualMachine.getStatus() == VirtualMachine.STATUS_RUNNING) {
-                try {
-                    mVirtualMachine.stop();
-                    stopForeground(STOP_FOREGROUND_REMOVE);
-                } catch (VirtualMachineException e) {
-                    Log.e(TAG, "failed to stop a VM instance", e);
-                }
-            }
-            mExecutorService.shutdownNow();
-            mExecutorService = null;
-            mVirtualMachine = null;
-        }
-        super.onDestroy();
+    private void startForeground(Notification notification) {
+        startForeground(this.hashCode(), notification);
     }
 
     private void startDebianServer() {
@@ -295,6 +269,40 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
                 });
     }
 
+    @Override
+    public void onIpAddressAvailable(String ipAddr) {
+        android.os.Trace.endAsyncSection("debianBoot", 0);
+        Bundle b = new Bundle();
+        b.putString(VmLauncherService.KEY_VM_IP_ADDR, ipAddr);
+        mResultReceiver.send(VmLauncherService.RESULT_IPADDR, b);
+    }
+
+    public static void stopVmLauncherService(Context context) {
+        Intent i = getMyIntent(context);
+        context.stopService(i);
+    }
+
+    @Override
+    public void onDestroy() {
+        unregisterReceiver(mPortForwardingReceiver);
+        getSystemService(NotificationManager.class).cancelAll();
+        stopDebianServer();
+        if (mVirtualMachine != null) {
+            if (mVirtualMachine.getStatus() == VirtualMachine.STATUS_RUNNING) {
+                try {
+                    mVirtualMachine.stop();
+                    stopForeground(STOP_FOREGROUND_REMOVE);
+                } catch (VirtualMachineException e) {
+                    Log.e(TAG, "failed to stop a VM instance", e);
+                }
+            }
+            mExecutorService.shutdownNow();
+            mExecutorService = null;
+            mVirtualMachine = null;
+        }
+        super.onDestroy();
+    }
+
     private void stopDebianServer() {
         if (mDebianService != null) {
             mDebianService.killForwarderHost();
@@ -302,14 +310,6 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         if (mServer != null) {
             mServer.shutdown();
         }
-    }
-
-    @Override
-    public void onIpAddressAvailable(String ipAddr) {
-        android.os.Trace.endAsyncSection("debianBoot", 0);
-        Bundle b = new Bundle();
-        b.putString(VmLauncherService.KEY_VM_IP_ADDR, ipAddr);
-        mResultReceiver.send(VmLauncherService.RESULT_IPADDR, b);
     }
 
     @Override
