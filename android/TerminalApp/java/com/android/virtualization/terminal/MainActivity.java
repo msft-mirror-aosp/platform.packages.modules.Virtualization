@@ -140,7 +140,6 @@ public class MainActivity extends BaseActivity
         mAccessibilityManager.addAccessibilityStateChangeListener(this);
 
         readClientCertificate();
-        connectToTerminalService();
 
         mManageExternalStorageActivityResultLauncher =
                 registerForActivityResult(
@@ -563,6 +562,7 @@ public class MainActivity extends BaseActivity
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
         VmLauncherServices.startVmLauncherService(this, this, notification);
+        connectToTerminalService();
     }
 
     @VisibleForTesting
