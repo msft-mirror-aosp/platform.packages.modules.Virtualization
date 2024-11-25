@@ -76,7 +76,7 @@ import java.security.cert.X509Certificate;
 import java.util.Map;
 
 public class MainActivity extends BaseActivity
-        implements VmLauncherServices.VmLauncherServiceCallback, AccessibilityStateChangeListener {
+        implements VmLauncherService.VmLauncherServiceCallback, AccessibilityStateChangeListener {
     static final String TAG = "VmTerminalApp";
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
@@ -427,7 +427,7 @@ public class MainActivity extends BaseActivity
     @Override
     protected void onDestroy() {
         getSystemService(AccessibilityManager.class).removeAccessibilityStateChangeListener(this);
-        VmLauncherServices.stopVmLauncherService(this);
+        VmLauncherService.stopVmLauncherService(this);
         super.onDestroy();
     }
 
@@ -542,7 +542,7 @@ public class MainActivity extends BaseActivity
 
         Intent stopIntent = new Intent();
         stopIntent.setClass(this, VmLauncherService.class);
-        stopIntent.setAction(VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE);
+        stopIntent.setAction(VmLauncherService.ACTION_STOP_VM_LAUNCHER_SERVICE);
         PendingIntent stopPendingIntent =
                 PendingIntent.getService(
                         this,
@@ -580,7 +580,7 @@ public class MainActivity extends BaseActivity
                         .build();
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
-        VmLauncherServices.startVmLauncherService(this, this, notification);
+        VmLauncherService.startVmLauncherService(this, this, notification);
         connectToTerminalService();
     }
 
