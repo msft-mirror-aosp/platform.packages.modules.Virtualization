@@ -177,7 +177,7 @@ public class InstallerService extends Service {
     }
 
     private void reLabelImagesSELinuxContext() {
-        File payloadFolder = InstallUtils.getInternalStorageDir(this);
+        File payloadFolder = InstallUtils.getInternalStorageDir(this).toFile();
 
         // The context should be u:object_r:privapp_data_file:s0:c35,c257,c512,c768
         // and we want to get s0:c35,c257,c512,c768 part
@@ -236,7 +236,7 @@ public class InstallerService extends Service {
                 TarArchiveInputStream tar =
                         new TarArchiveInputStream(new GzipCompressorInputStream(wifiInputStream))) {
             ArchiveEntry entry;
-            Path baseDir = InstallUtils.getInternalStorageDir(this).toPath();
+            Path baseDir = InstallUtils.getInternalStorageDir(this);
             Files.createDirectories(baseDir);
             while ((entry = tar.getNextEntry()) != null) {
                 Path extractTo = baseDir.resolve(entry.getName());

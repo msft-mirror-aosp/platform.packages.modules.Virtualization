@@ -36,6 +36,7 @@ import com.google.gson.Gson;
 import com.google.gson.annotations.SerializedName;
 
 import java.io.FileReader;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Objects;
 
@@ -69,8 +70,8 @@ class ConfigJson {
     private GpuJson gpu;
 
     /** Parses JSON file at jsonPath */
-    static ConfigJson from(String jsonPath) {
-        try (FileReader r = new FileReader(jsonPath)) {
+    static ConfigJson from(Path jsonPath) {
+        try (FileReader r = new FileReader(jsonPath.toFile())) {
             return new Gson().fromJson(r, ConfigJson.class);
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse " + jsonPath, e);
