@@ -19,8 +19,7 @@
     <string name="app_name" msgid="5597111707986572208">"Terminal"</string>
     <string name="installer_title_text" msgid="500663060973466805">"Instalirajte Linux terminal"</string>
     <string name="installer_desc_text_format" msgid="2734224805682171826">"Da biste pokrenuli Linux terminal, treba da preuzmete oko <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> podataka preko mreže.\nŽelite da nastavite?"</string>
-    <!-- no translation found for installer_wait_for_wifi_checkbox_text (487720664098014506) -->
-    <skip />
+    <string name="installer_wait_for_wifi_checkbox_text" msgid="487720664098014506">"Preuzmi kada WiFi bude dostupan"</string>
     <string name="installer_install_button_enabled_text" msgid="6142090640081511103">"Instaliraj"</string>
     <string name="installer_install_button_disabled_text" msgid="8651445004125422467">"Instalira se"</string>
     <string name="installer_install_network_error_message" msgid="2450409107529774410">"Greška na mreži. Proverite vezu i probajte ponovo."</string>
@@ -38,7 +37,7 @@
     <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"Dodeljeno <xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_gb_max_format" msgid="6221210151688630371">"Maks. <xliff:g id="MAX_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_cancel" msgid="2182388126941686562">"Otkaži"</string>
-    <string name="settings_disk_resize_resize_restart_vm_to_apply" msgid="8122668558537714453">"Restartuj virtuelnu mašinu radi primene"</string>
+    <string name="settings_disk_resize_resize_restart_vm_to_apply" msgid="83303619015991908">"Restartuj i primeni"</string>
     <string name="settings_port_forwarding_title" msgid="4867439149919324784">"Prosleđivanje porta"</string>
     <string name="settings_port_forwarding_sub_title" msgid="6848040752531535488">"Konfigurišite prosleđivanje porta"</string>
     <string name="settings_port_forwarding_notification_title" msgid="2822798067500254704">"Terminal pokušava da otvori novi port"</string>
@@ -47,11 +46,26 @@
     <string name="settings_port_forwarding_notification_deny" msgid="636848749634710403">"Odbij"</string>
     <string name="settings_recovery_title" msgid="6586840079226383285">"Oporavak"</string>
     <string name="settings_recovery_sub_title" msgid="1067782421529340576">"Opcije oporavka particija"</string>
-    <string name="settings_recovery_reset_title" msgid="8785305518694186025">"Promenite na početnu verziju"</string>
+    <string name="settings_recovery_reset_title" msgid="8785305518694186025">"Promeni na početnu verziju"</string>
     <string name="settings_recovery_reset_sub_title" msgid="5656572074090728544">"Uklonite sve"</string>
-    <string name="settings_recovery_reset_message" msgid="3450358289168768830">"Virtuelna mašina je resetovana"</string>
+    <string name="settings_recovery_reset_dialog_title" msgid="874946981716251094">"Resetujte terminal"</string>
+    <string name="settings_recovery_reset_dialog_message" msgid="6392681199895696206">"Podaci će biti izbrisani"</string>
+    <string name="settings_recovery_reset_dialog_confirm" msgid="431718610013947861">"Potvrdi"</string>
+    <string name="settings_recovery_reset_dialog_cancel" msgid="1666264288208459725">"Otkaži"</string>
+    <string name="settings_recovery_reset_dialog_backup_option" msgid="2079431035205584614">"Napravi rezervnu kopiju podataka na <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
+    <string name="settings_recovery_error_due_to_backup" msgid="2129959464075410607">"Oporavak nije uspeo jer pravljenje rezervne kopije nije uspelo"</string>
+    <string name="settings_recovery_error" msgid="2451912941535666379">"Oporavak nije uspeo"</string>
+    <string name="settings_recovery_error_during_removing_backup" msgid="6515615177661212463">"Uklanjanje fajla rezervne kopije nije uspelo"</string>
+    <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"Uklonite rezervnu kopiju"</string>
+    <string name="settings_recovery_remove_backup_sub_title" msgid="212161719832573475">"Obrišite <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
+    <!-- no translation found for error_title (7196464038692913778) -->
+    <skip />
+    <!-- no translation found for error_desc (1939028888570920661) -->
+    <skip />
+    <!-- no translation found for error_code (3585291676855383649) -->
+    <skip />
     <string name="service_notification_settings" msgid="1437365721184401135">"Podešavanja"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"Terminal je aktivan"</string>
-    <string name="service_notification_content" msgid="8652887364784704911">"Kliknite da biste otvorili terminal."</string>
+    <string name="service_notification_content" msgid="3579923802797824545">"Kliknite da biste otvorili terminal"</string>
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Zatvori"</string>
 </resources>

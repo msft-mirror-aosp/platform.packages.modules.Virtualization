@@ -22,7 +22,6 @@ import static android.os.ParcelFileDescriptor.MODE_READ_WRITE;
 
 import static java.util.Objects.requireNonNull;
 
-import android.annotation.FlaggedApi;
 import android.annotation.IntDef;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
@@ -745,6 +744,7 @@ public final class VirtualMachineConfig {
                                     return usbConfig;
                                 })
                         .orElse(null);
+        config.teeServices = EMPTY_STRING_ARRAY;
         return config;
     }
 
@@ -799,6 +799,7 @@ public final class VirtualMachineConfig {
                     new VirtualMachineAppConfig.CustomConfig();
             customConfig.devices = EMPTY_STRING_ARRAY;
             customConfig.extraKernelCmdlineParams = EMPTY_STRING_ARRAY;
+            customConfig.teeServices = EMPTY_STRING_ARRAY;
             try {
                 customConfig.vendorImage =
                         ParcelFileDescriptor.open(mVendorDiskImage, MODE_READ_ONLY);

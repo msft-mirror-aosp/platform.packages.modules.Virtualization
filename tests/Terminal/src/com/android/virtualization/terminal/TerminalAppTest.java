@@ -27,7 +27,6 @@ import androidx.test.InstrumentationRegistry;
 import androidx.test.runner.AndroidJUnit4;
 
 import com.android.microdroid.test.common.MetricsProcessor;
-import com.android.virtualization.vmlauncher.InstallUtils;
 
 import org.junit.After;
 import org.junit.Before;
@@ -56,7 +55,6 @@ public class TerminalAppTest {
 
         Intent intent = new Intent(mTargetContext, InstallerActivity.class);
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        intent.putExtra(InstallerActivity.EXTRA_AUTO_DOWNLOAD, true);
 
         if (mInstr.startActivitySync(intent) instanceof InstallerActivity activity) {
             assertTrue(

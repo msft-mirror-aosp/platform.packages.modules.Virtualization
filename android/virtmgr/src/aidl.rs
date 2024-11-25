@@ -21,7 +21,7 @@ use crate::crosvm::{AudioConfig, CrosvmConfig, DiskFile, SharedPathConfig, Displ
 use crate::debug_config::DebugConfig;
 use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
-use crate::selinux::{getfilecon, SeContext};
+use crate::selinux::{check_tee_service_permission, getfilecon, getprevcon, SeContext};
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::{
     Certificate::Certificate,
@@ -59,7 +59,7 @@ use android_hardware_security_authgraph::aidl::android::hardware::security::auth
     Key::Key, PubKey::PubKey, SessionIdSignature::SessionIdSignature, SessionInfo::SessionInfo,
     SessionInitiationInfo::SessionInitiationInfo,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use apkverify::{HashAlgorithm, V4Signature};
 use avflog::LogResult;
 use binder::{
@@ -76,7 +76,7 @@ use rpcbinder::RpcServer;
 use rustutils::system_properties;
 use semver::VersionReq;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::convert::TryInto;
 use std::fs;
 use std::ffi::CStr;
@@ -502,6 +502,9 @@ impl VirtualizationService {
             check_config_allowed_for_early_vms(config)?;
         }
 
+        let caller_secontext = getprevcon().or_service_specific_exception(-1)?;
+        info!("callers secontext: {}", caller_secontext);
+
         // Allocating VM context checks the MANAGE_VIRTUAL_MACHINE permission.
         let (vm_context, cid, temporary_directory) = if cfg!(early) {
             self.create_early_vm_context(config)?
@@ -534,7 +537,13 @@ impl VirtualizationService {
             clone_or_prepare_logger_fd(console_out_fd, format!("Console({})", cid))?;
         let console_in_fd = console_in_fd.map(clone_file).transpose()?;
         let log_fd = clone_or_prepare_logger_fd(log_fd, format!("Log({})", cid))?;
-        let dump_dt_fd = dump_dt_fd.map(clone_file).transpose()?;
+        let dump_dt_fd = if let Some(fd) = dump_dt_fd {
+            Some(clone_file(fd)?)
+        } else if debug_config.dump_device_tree {
+            Some(prepare_dump_dt_file(&temporary_directory)?)
+        } else {
+            None
+        };
 
         // Counter to generate unique IDs for temporary image files.
         let mut next_temporary_image_id = 0;
@@ -557,6 +566,12 @@ impl VirtualizationService {
         };
         let config = config.as_ref();
         *is_protected = config.protectedVm;
+
+        if !config.teeServices.is_empty() {
+            check_tee_service_permission(&caller_secontext, &config.teeServices)
+                .with_log()
+                .or_binder_exception(ExceptionCode::SECURITY)?;
+        }
 
         // Check if partition images are labeled incorrectly. This is to prevent random images
         // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
@@ -1152,6 +1167,8 @@ fn load_app_config(
         for param in custom_config.extraKernelCmdlineParams.iter() {
             append_kernel_param(param, &mut vm_config);
         }
+
+        vm_config.teeServices.clone_from(&custom_config.teeServices);
     }
 
     // Unfortunately specifying page_shift = 14 in bootconfig doesn't enable 16k pages emulation,
@@ -1669,6 +1686,16 @@ fn prepare_ramdump_file(temporary_directory: &Path) -> binder::Result<File> {
     Ok(ramdump)
 }
 
+/// Create the empty device tree dump file
+fn prepare_dump_dt_file(temporary_directory: &Path) -> binder::Result<File> {
+    let path = temporary_directory.join("device_tree.dtb");
+    let file = File::create(path)
+        .context("Failed to prepare device tree dump file")
+        .with_log()
+        .or_service_specific_exception(-1)?;
+    Ok(file)
+}
+
 fn is_protected(config: &VirtualMachineConfig) -> bool {
     match config {
         VirtualMachineConfig::RawConfig(config) => config.protectedVm,
@@ -1759,6 +1786,26 @@ fn check_no_extra_kernel_cmdline_params(config: &VirtualMachineConfig) -> binder
     Ok(())
 }
 
+fn check_no_tee_services(config: &VirtualMachineConfig) -> binder::Result<()> {
+    match config {
+        VirtualMachineConfig::RawConfig(config) => {
+            if !config.teeServices.is_empty() {
+                return Err(anyhow!("tee_services_allowlist feature is disabled"))
+                    .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION);
+            }
+        }
+        VirtualMachineConfig::AppConfig(config) => {
+            if let Some(custom_config) = &config.customConfig {
+                if !custom_config.teeServices.is_empty() {
+                    return Err(anyhow!("tee_services_allowlist feature is disabled"))
+                        .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION);
+                }
+            }
+        }
+    };
+    Ok(())
+}
+
 fn check_protected_vm_is_supported() -> binder::Result<()> {
     let is_pvm_supported =
         hypervisor_props::is_protected_vm_supported().or_service_specific_exception(-1)?;
@@ -1782,6 +1829,9 @@ fn check_config_features(config: &VirtualMachineConfig) -> binder::Result<()> {
     }
     if !cfg!(debuggable_vms_improvements) {
         check_no_extra_kernel_cmdline_params(config)?;
+    }
+    if !cfg!(tee_services_allowlist) {
+        check_no_tee_services(config)?;
     }
     Ok(())
 }
@@ -2007,21 +2057,20 @@ impl IAuthGraphKeyExchange for AuthGraphKeyExchangeProxy {
 }
 
 // KEEP IN SYNC WITH early_vms.xsd
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct EarlyVm {
-    #[allow(dead_code)]
     name: String,
-    #[allow(dead_code)]
     cid: i32,
-    #[allow(dead_code)]
     path: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct EarlyVms {
-    #[allow(dead_code)]
     early_vm: Vec<EarlyVm>,
 }
+
+static EARLY_VMS_CACHE: LazyLock<Mutex<HashMap<String, Vec<EarlyVm>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn range_for_partition(partition: &str) -> Result<Range<Cid>> {
     match partition {
@@ -2031,7 +2080,7 @@ fn range_for_partition(partition: &str) -> Result<Range<Cid>> {
     }
 }
 
-fn find_early_vm(xml_path: &Path, cid_range: &Range<Cid>, name: &str) -> Result<EarlyVm> {
+fn get_early_vms_in_path(xml_path: &Path) -> Result<Vec<EarlyVm>> {
     if !xml_path.exists() {
         bail!("{} doesn't exist", xml_path.display());
     }
@@ -2043,35 +2092,74 @@ fn find_early_vm(xml_path: &Path, cid_range: &Range<Cid>, name: &str) -> Result<
     let early_vms: EarlyVms = serde_xml_rs::from_str(&xml)
         .with_context(|| format!("Can't parse {}", xml_path.display()))?;
 
-    let mut found_vm: Option<EarlyVm> = None;
+    Ok(early_vms.early_vm)
+}
 
-    for early_vm in early_vms.early_vm {
+fn validate_cid_range(early_vms: &[EarlyVm], cid_range: &Range<Cid>) -> Result<()> {
+    for early_vm in early_vms {
+        let cid = early_vm
+            .cid
+            .try_into()
+            .with_context(|| format!("VM '{}' uses Invalid CID {}", early_vm.name, early_vm.cid))?;
+
+        ensure!(
+            cid_range.contains(&cid),
+            "VM '{}' uses CID {cid} which is out of range. Available CIDs: {cid_range:?}",
+            early_vm.name
+        );
+    }
+    Ok(())
+}
+
+fn get_early_vms_in_partition(partition: &str) -> Result<Vec<EarlyVm>> {
+    let mut cache = EARLY_VMS_CACHE.lock().unwrap();
+
+    if let Some(result) = cache.get(partition) {
+        return Ok(result.clone());
+    }
+
+    let pattern = format!("/{partition}/etc/avf/early_vms*.xml");
+    let mut early_vms = Vec::new();
+    for entry in glob::glob(&pattern).with_context(|| format!("Failed to glob {}", &pattern))? {
+        match entry {
+            Ok(path) => early_vms.extend(get_early_vms_in_path(&path)?),
+            Err(e) => error!("Error while globbing (but continuing) {}: {}", &pattern, e),
+        }
+    }
+
+    validate_cid_range(&early_vms, &range_for_partition(partition)?)
+        .with_context(|| format!("CID validation for {partition} failed"))?;
+
+    cache.insert(partition.to_owned(), early_vms.clone());
+
+    Ok(early_vms)
+}
+
+fn find_early_vm<'a>(early_vms: &'a [EarlyVm], name: &str) -> Result<&'a EarlyVm> {
+    let mut found_vm: Option<&EarlyVm> = None;
+
+    for early_vm in early_vms {
         if early_vm.name != name {
             continue;
         }
 
-        let cid = early_vm
-            .cid
-            .try_into()
-            .with_context(|| format!("Invalid CID value {}", early_vm.cid))?;
-
-        if !cid_range.contains(&cid) {
-            bail!("VM '{}' uses CID {cid} which is out of range. Available CIDs for '{}': {cid_range:?}", xml_path.display(), early_vm.name);
-        }
-
         if found_vm.is_some() {
-            bail!("Multiple VMs named {name} are found in {}", xml_path.display());
+            bail!("Multiple VMs named '{name}' are found");
         }
 
         found_vm = Some(early_vm);
     }
 
-    found_vm.ok_or_else(|| anyhow!("Can't find {name} in {}", xml_path.display()))
+    found_vm.ok_or_else(|| anyhow!("Can't find a VM named '{name}'"))
 }
 
 fn find_early_vm_for_partition(partition: &str, name: &str) -> Result<EarlyVm> {
-    let cid_range = range_for_partition(partition)?;
-    find_early_vm(Path::new(&format!("/{partition}/etc/avf/early_vms.xml")), &cid_range, name)
+    let early_vms = get_early_vms_in_partition(partition)
+        .with_context(|| format!("Failed to get early VMs from {partition}"))?;
+
+    Ok(find_early_vm(&early_vms, name)
+        .with_context(|| format!("Failed to find early VM '{name}' in {partition}"))?
+        .clone())
 }
 
 #[cfg(test)]
@@ -2314,6 +2402,87 @@ mod tests {
                 <path>/system/bin/vm_demo_native_early</path>
             </early_vm>
             <early_vm>
+                <name>vm_demo_native_early_2</name>
+                <cid>456</cid>
+                <path>/system/bin/vm_demo_native_early_2</path>
+            </early_vm>
+        </early_vms>
+        "#,
+        )?;
+
+        let cid_range = 100..1000;
+
+        let early_vms = get_early_vms_in_path(&xml_path)?;
+        validate_cid_range(&early_vms, &cid_range)?;
+
+        let test_cases = [
+            (
+                "vm_demo_native_early",
+                EarlyVm {
+                    name: "vm_demo_native_early".to_owned(),
+                    cid: 123,
+                    path: "/system/bin/vm_demo_native_early".to_owned(),
+                },
+            ),
+            (
+                "vm_demo_native_early_2",
+                EarlyVm {
+                    name: "vm_demo_native_early_2".to_owned(),
+                    cid: 456,
+                    path: "/system/bin/vm_demo_native_early_2".to_owned(),
+                },
+            ),
+        ];
+
+        for (name, expected) in test_cases {
+            let result = find_early_vm(&early_vms, name)?;
+            assert_eq!(result, &expected);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_invalid_cid_validation() -> Result<()> {
+        let tmp_dir = tempfile::TempDir::new()?;
+        let xml_path = tmp_dir.path().join("early_vms.xml");
+
+        let cid_range = 100..1000;
+
+        for cid in [-1, 999999] {
+            std::fs::write(
+                &xml_path,
+                format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?>
+        <early_vms>
+            <early_vm>
+                <name>vm_demo_invalid_cid</name>
+                <cid>{cid}</cid>
+                <path>/system/bin/vm_demo_invalid_cid</path>
+            </early_vm>
+        </early_vms>
+        "#
+                ),
+            )?;
+
+            let early_vms = get_early_vms_in_path(&xml_path)?;
+            assert!(validate_cid_range(&early_vms, &cid_range).is_err(), "should fail");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_duplicated_early_vms() -> Result<()> {
+        let tmp_dir = tempfile::TempDir::new()?;
+        let tmp_dir_path = tmp_dir.path().to_owned();
+        let xml_path = tmp_dir_path.join("early_vms.xml");
+
+        std::fs::write(
+            &xml_path,
+            br#"<?xml version="1.0" encoding="utf-8"?>
+        <early_vms>
+            <early_vm>
                 <name>vm_demo_duplicated_name</name>
                 <cid>456</cid>
                 <path>/system/bin/vm_demo_duplicated_name_1</path>
@@ -2323,42 +2492,16 @@ mod tests {
                 <cid>789</cid>
                 <path>/system/bin/vm_demo_duplicated_name_2</path>
             </early_vm>
-            <early_vm>
-                <name>vm_demo_invalid_cid_1</name>
-                <cid>-1</cid>
-                <path>/system/bin/vm_demo_invalid_cid_1</path>
-            </early_vm>
-            <early_vm>
-                <name>vm_demo_invalid_cid_2</name>
-                <cid>999999</cid>
-                <path>/system/bin/vm_demo_invalid_cid_2</path>
-            </early_vm>
         </early_vms>
         "#,
         )?;
 
         let cid_range = 100..1000;
 
-        let result = find_early_vm(&xml_path, &cid_range, "vm_demo_native_early")?;
-        let expected = EarlyVm {
-            name: "vm_demo_native_early".to_owned(),
-            cid: 123,
-            path: "/system/bin/vm_demo_native_early".to_owned(),
-        };
-        assert_eq!(result, expected);
+        let early_vms = get_early_vms_in_path(&xml_path)?;
+        validate_cid_range(&early_vms, &cid_range)?;
 
-        assert!(
-            find_early_vm(&xml_path, &cid_range, "vm_demo_duplicated_name").is_err(),
-            "should fail"
-        );
-        assert!(
-            find_early_vm(&xml_path, &cid_range, "vm_demo_invalid_cid_1").is_err(),
-            "should fail"
-        );
-        assert!(
-            find_early_vm(&xml_path, &cid_range, "vm_demo_invalid_cid_2").is_err(),
-            "should fail"
-        );
+        assert!(find_early_vm(&early_vms, "vm_demo_duplicated_name").is_err(), "should fail");
 
         Ok(())
     }
