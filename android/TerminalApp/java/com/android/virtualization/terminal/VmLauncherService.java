@@ -29,7 +29,10 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.drawable.Icon;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.Parcel;
 import android.os.ResultReceiver;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
@@ -62,6 +65,11 @@ import java.util.concurrent.Executors;
 
 public class VmLauncherService extends Service implements DebianServiceImpl.DebianServiceCallback {
     public static final String EXTRA_NOTIFICATION = "EXTRA_NOTIFICATION";
+    private static final String ACTION_START_VM_LAUNCHER_SERVICE =
+            "android.virtualization.START_VM_LAUNCHER_SERVICE";
+
+    public static final String ACTION_STOP_VM_LAUNCHER_SERVICE =
+            "android.virtualization.STOP_VM_LAUNCHER_SERVICE";
 
     private static final int RESULT_START = 0;
     private static final int RESULT_STOP = 1;
@@ -76,6 +84,82 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     private DebianServiceImpl mDebianService;
     private PortForwardingRequestReceiver mPortForwardingReceiver;
 
+    private static Intent buildVmLauncherServiceIntent(Context context) {
+        Intent i = new Intent();
+        i.setAction(ACTION_START_VM_LAUNCHER_SERVICE);
+
+        Intent intent = new Intent(ACTION_START_VM_LAUNCHER_SERVICE);
+        PackageManager pm = context.getPackageManager();
+        List<ResolveInfo> resolveInfos =
+                pm.queryIntentServices(intent, PackageManager.MATCH_DEFAULT_ONLY);
+        if (resolveInfos == null || resolveInfos.size() != 1) {
+            Log.e(TAG, "cannot find a service to handle ACTION_START_VM_LAUNCHER_SERVICE");
+            return null;
+        }
+        String packageName = resolveInfos.get(0).serviceInfo.packageName;
+
+        i.setPackage(packageName);
+        return i;
+    }
+
+    public static void stopVmLauncherService(Context context) {
+        Intent i = buildVmLauncherServiceIntent(context);
+        context.stopService(i);
+    }
+
+    public static void startVmLauncherService(
+            Context context, VmLauncherServiceCallback callback, Notification notification) {
+        Intent i = buildVmLauncherServiceIntent(context);
+        if (i == null) {
+            return;
+        }
+        ResultReceiver resultReceiver =
+                new ResultReceiver(new Handler(Looper.myLooper())) {
+                    @Override
+                    protected void onReceiveResult(int resultCode, Bundle resultData) {
+                        if (callback == null) {
+                            return;
+                        }
+                        switch (resultCode) {
+                            case RESULT_START:
+                                callback.onVmStart();
+                                return;
+                            case RESULT_STOP:
+                                callback.onVmStop();
+                                return;
+                            case RESULT_ERROR:
+                                callback.onVmError();
+                                return;
+                            case RESULT_IPADDR:
+                                callback.onIpAddrAvailable(resultData.getString(KEY_VM_IP_ADDR));
+                                return;
+                        }
+                    }
+                };
+        i.putExtra(Intent.EXTRA_RESULT_RECEIVER, getResultReceiverForIntent(resultReceiver));
+        i.putExtra(VmLauncherService.EXTRA_NOTIFICATION, notification);
+        context.startForegroundService(i);
+    }
+
+    public interface VmLauncherServiceCallback {
+        void onVmStart();
+
+        void onVmStop();
+
+        void onVmError();
+
+        void onIpAddrAvailable(String ipAddr);
+    }
+
+    private static ResultReceiver getResultReceiverForIntent(ResultReceiver r) {
+        Parcel parcel = Parcel.obtain();
+        r.writeToParcel(parcel, 0);
+        parcel.setDataPosition(0);
+        r = ResultReceiver.CREATOR.createFromParcel(parcel);
+        parcel.recycle();
+        return r;
+    }
+
     @Override
     public IBinder onBind(Intent intent) {
         return null;
@@ -87,8 +171,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (Objects.equals(
-                intent.getAction(), VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE)) {
+        if (Objects.equals(intent.getAction(), ACTION_STOP_VM_LAUNCHER_SERVICE)) {
             stopSelf();
             return START_NOT_STICKY;
         }
