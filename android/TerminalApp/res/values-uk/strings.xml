@@ -47,17 +47,32 @@
     <string name="settings_port_forwarding_notification_deny" msgid="636848749634710403">"Відхилити"</string>
     <string name="settings_recovery_title" msgid="6586840079226383285">"Відновлення"</string>
     <string name="settings_recovery_sub_title" msgid="1067782421529340576">"Способи відновлення розділів"</string>
-    <string name="settings_recovery_reset_title" msgid="8785305518694186025">"Зміна на початкову версію"</string>
-    <string name="settings_recovery_reset_sub_title" msgid="5656572074090728544">"Видалити всі"</string>
-    <!-- no translation found for settings_recovery_reset_dialog_title (874946981716251094) -->
-    <skip />
-    <!-- no translation found for settings_recovery_reset_dialog_message (6392681199895696206) -->
-    <skip />
+    <string name="settings_recovery_reset_title" msgid="8785305518694186025">"Змінити на початкову версію"</string>
+    <string name="settings_recovery_reset_sub_title" msgid="5656572074090728544">"Видалити все"</string>
+    <string name="settings_recovery_reset_dialog_title" msgid="874946981716251094">"Скинути налаштування термінала"</string>
+    <string name="settings_recovery_reset_dialog_message" msgid="6392681199895696206">"Дані буде видалено"</string>
     <string name="settings_recovery_reset_dialog_confirm" msgid="431718610013947861">"Підтвердити"</string>
     <string name="settings_recovery_reset_dialog_cancel" msgid="1666264288208459725">"Скасувати"</string>
+    <!-- no translation found for settings_recovery_reset_dialog_backup_option (2079431035205584614) -->
+    <skip />
+    <!-- no translation found for settings_recovery_error_due_to_backup (2129959464075410607) -->
+    <skip />
+    <!-- no translation found for settings_recovery_error (2451912941535666379) -->
+    <skip />
+    <!-- no translation found for settings_recovery_error_during_removing_backup (6515615177661212463) -->
+    <skip />
+    <!-- no translation found for settings_recovery_remove_backup_title (1540850288876158899) -->
+    <skip />
+    <!-- no translation found for settings_recovery_remove_backup_sub_title (212161719832573475) -->
+    <skip />
+    <!-- no translation found for error_title (7196464038692913778) -->
+    <skip />
+    <!-- no translation found for error_desc (1939028888570920661) -->
+    <skip />
+    <!-- no translation found for error_code (3585291676855383649) -->
+    <skip />
     <string name="service_notification_settings" msgid="1437365721184401135">"Налаштування"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"Термінал запущено"</string>
-    <!-- no translation found for service_notification_content (3579923802797824545) -->
-    <skip />
+    <string name="service_notification_content" msgid="3579923802797824545">"Натисніть, щоб відкрити термінал"</string>
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Закрити"</string>
 </resources>
