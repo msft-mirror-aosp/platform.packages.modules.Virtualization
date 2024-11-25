@@ -472,20 +472,17 @@ public class MainActivity extends BaseActivity
 
     @Override
     public void onAccessibilityStateChanged(boolean enabled) {
-        updateKeyboardContainerVisibility();
         connectToTerminalService();
     }
 
     private void updateKeyboardContainerVisibility() {
-        boolean accessibilityEnabled = mAccessibilityManager.isEnabled();
         boolean imeVisible =
                 this.getWindow()
                         .getDecorView()
                         .getRootWindowInsets()
                         .isVisible(WindowInsets.Type.ime());
         View keyboardContainer = findViewById(R.id.keyboard_container);
-        keyboardContainer.setVisibility(
-                accessibilityEnabled || !imeVisible ? View.GONE : View.VISIBLE);
+        keyboardContainer.setVisibility(!imeVisible ? View.GONE : View.VISIBLE);
     }
 
     @Override
