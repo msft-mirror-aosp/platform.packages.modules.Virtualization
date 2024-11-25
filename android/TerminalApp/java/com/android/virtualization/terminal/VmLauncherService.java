@@ -16,6 +16,8 @@
 
 package com.android.virtualization.terminal;
 
+import static com.android.virtualization.terminal.MainActivity.TAG;
+
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -60,7 +62,6 @@ import java.util.concurrent.Executors;
 
 public class VmLauncherService extends Service implements DebianServiceImpl.DebianServiceCallback {
     public static final String EXTRA_NOTIFICATION = "EXTRA_NOTIFICATION";
-    static final String TAG = "VmLauncherService";
 
     private static final int RESULT_START = 0;
     private static final int RESULT_STOP = 1;
@@ -336,7 +337,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
                     enabled);
             editor.apply();
 
-            context.getSystemService(NotificationManager.class).cancel(VmLauncherService.TAG, port);
+            context.getSystemService(NotificationManager.class).cancel(TAG, port);
         }
     }
 }

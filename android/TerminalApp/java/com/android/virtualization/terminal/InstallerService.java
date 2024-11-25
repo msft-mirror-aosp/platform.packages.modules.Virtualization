@@ -16,6 +16,8 @@
 
 package com.android.virtualization.terminal;
 
+import static com.android.virtualization.terminal.MainActivity.TAG;
+
 import android.app.Notification;
 import android.app.PendingIntent;
 import android.app.Service;
@@ -55,8 +57,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class InstallerService extends Service {
-    private static final String TAG = "InstallerService";
-
     private static final int NOTIFICATION_ID = 1313; // any unique number among notifications
 
     private static final String IMAGE_URL =
