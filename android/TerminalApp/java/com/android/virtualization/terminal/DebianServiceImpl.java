@@ -16,6 +16,8 @@
 
 package com.android.virtualization.terminal;
 
+import static com.android.virtualization.terminal.MainActivity.TAG;
+
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Log;
@@ -37,7 +39,11 @@ import java.util.HashSet;
 import java.util.Set;
 
 final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
-    public static final String TAG = "DebianService";
+    private static final String PREFERENCE_FILE_KEY =
+            "com.android.virtualization.terminal.PREFERENCE_FILE_KEY";
+    private static final String PREFERENCE_FORWARDING_PORTS = "PREFERENCE_FORWARDING_PORTS";
+    private static final String PREFERENCE_FORWARDING_PORT_IS_ENABLED_PREFIX =
+            "PREFERENCE_FORWARDING_PORT_IS_ENABLED_";
 
     private final Context mContext;
     private final SharedPreferences mSharedPref;
@@ -66,7 +72,7 @@ final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
     public void reportVmActivePorts(
             ReportVmActivePortsRequest request,
             StreamObserver<ReportVmActivePortsResponse> responseObserver) {
-        Log.d(DebianServiceImpl.TAG, "reportVmActivePorts: " + request.toString());
+        Log.d(TAG, "reportVmActivePorts: " + request.toString());
 
         Set<String> prevPorts =
                 mSharedPref.getStringSet(mPreferenceForwardingPorts, Collections.emptySet());
@@ -93,7 +99,7 @@ final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
     @Override
     public void reportVmIpAddr(
             IpAddr request, StreamObserver<ReportVmIpAddrResponse> responseObserver) {
-        Log.d(DebianServiceImpl.TAG, "reportVmIpAddr: " + request.toString());
+        Log.d(TAG, "reportVmIpAddr: " + request.toString());
         mCallback.onIpAddressAvailable(request.getAddr());
         ReportVmIpAddrResponse reply = ReportVmIpAddrResponse.newBuilder().setSuccess(true).build();
         responseObserver.onNext(reply);
@@ -103,7 +109,7 @@ final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
     @Override
     public void openForwardingRequestQueue(
             QueueOpeningRequest request, StreamObserver<ForwardingRequestItem> responseObserver) {
-        Log.d(DebianServiceImpl.TAG, "OpenForwardingRequestQueue");
+        Log.d(TAG, "OpenForwardingRequestQueue");
         mPortForwardingListener =
                 new SharedPreferences.OnSharedPreferenceChangeListener() {
                     @Override
@@ -144,7 +150,7 @@ final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
     private static native void terminateForwarderHost();
 
     void killForwarderHost() {
-        Log.d(DebianServiceImpl.TAG, "Stopping port forwarding");
+        Log.d(TAG, "Stopping port forwarding");
         if (mPortForwardingListener != null) {
             mSharedPref.unregisterOnSharedPreferenceChangeListener(mPortForwardingListener);
             terminateForwarderHost();
