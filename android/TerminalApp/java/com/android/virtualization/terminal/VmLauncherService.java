@@ -64,7 +64,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class VmLauncherService extends Service implements DebianServiceImpl.DebianServiceCallback {
-    public static final String EXTRA_NOTIFICATION = "EXTRA_NOTIFICATION";
+    private static final String EXTRA_NOTIFICATION = "EXTRA_NOTIFICATION";
     private static final String ACTION_START_VM_LAUNCHER_SERVICE =
             "android.virtualization.START_VM_LAUNCHER_SERVICE";
 
@@ -198,7 +198,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         Notification notification =
                 intent.getParcelableExtra(EXTRA_NOTIFICATION, Notification.class);
 
-        startForeground(notification);
+        startForeground(this.hashCode(), notification);
 
         mResultReceiver.send(RESULT_START, null);
 
@@ -209,10 +209,6 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         startDebianServer();
 
         return START_NOT_STICKY;
-    }
-
-    private void startForeground(Notification notification) {
-        startForeground(this.hashCode(), notification);
     }
 
     private void startDebianServer() {
