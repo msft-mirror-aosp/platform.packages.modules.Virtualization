@@ -52,6 +52,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -262,7 +263,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     private PendingIntent getPortForwardingPendingIntent(int port, boolean enabled) {
         Intent intent = new Intent(PortForwardingRequestReceiver.ACTION_PORT_FORWARDING);
         intent.setPackage(getPackageName());
-        intent.setIdentifier(String.format("%d_%b", port, enabled));
+        intent.setIdentifier(String.format(Locale.ROOT, "%d_%b", port, enabled));
         intent.putExtra(PortForwardingRequestReceiver.KEY_PORT, port);
         intent.putExtra(PortForwardingRequestReceiver.KEY_ENABLED, enabled);
         return PendingIntent.getBroadcast(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);
@@ -308,7 +309,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         getSystemService(NotificationManager.class).cancel(TAG, port);
     }
 
-    private final class PortForwardingRequestReceiver extends BroadcastReceiver {
+    private static final class PortForwardingRequestReceiver extends BroadcastReceiver {
         private static final String ACTION_PORT_FORWARDING =
                 "android.virtualization.PORT_FORWARDING";
         private static final String KEY_PORT = "port";
