@@ -84,32 +84,18 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     private DebianServiceImpl mDebianService;
     private PortForwardingRequestReceiver mPortForwardingReceiver;
 
-    private static Intent buildVmLauncherServiceIntent(Context context) {
-        Intent i = new Intent();
-        i.setAction(ACTION_START_VM_LAUNCHER_SERVICE);
-
-        Intent intent = new Intent(ACTION_START_VM_LAUNCHER_SERVICE);
-        PackageManager pm = context.getPackageManager();
-        List<ResolveInfo> resolveInfos =
-                pm.queryIntentServices(intent, PackageManager.MATCH_DEFAULT_ONLY);
-        if (resolveInfos == null || resolveInfos.size() != 1) {
-            Log.e(TAG, "cannot find a service to handle ACTION_START_VM_LAUNCHER_SERVICE");
-            return null;
-        }
-        String packageName = resolveInfos.get(0).serviceInfo.packageName;
-
-        i.setPackage(packageName);
-        return i;
+    private static Intent getMyIntent(Context context) {
+        return new Intent(context.getApplicationContext(), VmLauncherService.class);
     }
 
     public static void stopVmLauncherService(Context context) {
-        Intent i = buildVmLauncherServiceIntent(context);
+        Intent i = getMyIntent(context);
         context.stopService(i);
     }
 
     public static void startVmLauncherService(
             Context context, VmLauncherServiceCallback callback, Notification notification) {
-        Intent i = buildVmLauncherServiceIntent(context);
+        Intent i = getMyIntent(context);
         if (i == null) {
             return;
         }
