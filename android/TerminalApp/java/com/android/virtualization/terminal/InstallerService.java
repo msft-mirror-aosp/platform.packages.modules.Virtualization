@@ -261,10 +261,6 @@ public class InstallerService extends Service {
             return false;
         }
 
-        if (!InstallUtils.resolvePathInVmConfig(this)) {
-            notifyError(getString(R.string.installer_error_unknown));
-            return false;
-        }
         return InstallUtils.createInstalledMarker(this);
     }
 

@@ -152,7 +152,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         }
         mExecutorService = Executors.newCachedThreadPool();
 
-        ConfigJson json = ConfigJson.from(InstallUtils.getVmConfigPath(this));
+        ConfigJson json = ConfigJson.from(this, InstallUtils.getVmConfigPath(this));
         VirtualMachineConfig.Builder configBuilder = json.toConfigBuilder(this);
         VirtualMachineCustomImageConfig.Builder customImageConfigBuilder =
                 json.toCustomImageConfigBuilder(this);

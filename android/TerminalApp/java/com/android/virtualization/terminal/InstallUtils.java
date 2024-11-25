@@ -35,9 +35,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.function.Function;
 
 public class InstallUtils {
     private static final String VM_CONFIG_FILENAME = "vm_config.json";
@@ -129,15 +126,6 @@ public class InstallUtils {
             Log.e(TAG, "installation failed", e);
             return false;
         }
-        if (!resolvePathInVmConfig(context)) {
-            Log.d(TAG, "resolving path failed");
-            try {
-                Files.deleteIfExists(getVmConfigPath(context));
-            } catch (IOException e) {
-                return false;
-            }
-            return false;
-        }
 
         // remove payload if installation is done.
         try {
@@ -148,41 +136,6 @@ public class InstallUtils {
 
         // Create marker for installation done.
         return createInstalledMarker(context);
-    }
-
-    private static Function<String, String> getReplacer(Context context) {
-        Map<String, String> rules = new HashMap<>();
-        rules.put("\\$PAYLOAD_DIR", new File(context.getFilesDir(), PAYLOAD_DIR).toString());
-        rules.put("\\$USER_ID", String.valueOf(context.getUserId()));
-        rules.put("\\$PACKAGE_NAME", context.getPackageName());
-        String appDataDir = context.getDataDir().toString();
-        // TODO: remove this hack
-        if (context.getUserId() == 0) {
-            appDataDir = "/data/data/" + context.getPackageName();
-        }
-        rules.put("\\$APP_DATA_DIR", appDataDir);
-        return (s) -> {
-            for (Map.Entry<String, String> rule : rules.entrySet()) {
-                s = s.replaceAll(rule.getKey(), rule.getValue());
-            }
-            return s;
-        };
-    }
-
-    public static boolean resolvePathInVmConfig(Context context) {
-        try {
-            Path configPath = getVmConfigPath(context);
-            String replacedVmConfig =
-                    String.join(
-                            "\n",
-                            Files.readAllLines(configPath).stream()
-                                    .map(getReplacer(context))
-                                    .toList());
-            Files.write(configPath, replacedVmConfig.getBytes());
-            return true;
-        } catch (IOException e) {
-            return false;
-        }
     }
 
     public static Path getRootfsFile(Context context) throws FileNotFoundException {
