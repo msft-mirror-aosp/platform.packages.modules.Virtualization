@@ -42,6 +42,7 @@ import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.accessibility.AccessibilityManager;
 import android.view.accessibility.AccessibilityManager.AccessibilityStateChangeListener;
 import android.webkit.ClientCertRequest;
@@ -147,7 +148,14 @@ public class MainActivity extends BaseActivity
                         (ActivityResult result) -> {
                             startVm();
                         });
-
+        getWindow()
+                .getDecorView()
+                .getRootView()
+                .setOnApplyWindowInsetsListener(
+                        (v, insets) -> {
+                            updateKeyboardContainerVisibility();
+                            return insets;
+                        });
         // if installer is launched, it will be handled in onActivityResult
         if (!launchInstaller) {
             if (!Environment.isExternalStorageManager()) {
@@ -294,8 +302,7 @@ public class MainActivity extends BaseActivity
                                                     mAccessibilityManager.isEnabled()
                                                             ? View.GONE
                                                             : View.VISIBLE;
-                                            findViewById(R.id.keyboard_container)
-                                                    .setVisibility(keyVisibility);
+                                            updateKeyboardContainerVisibility();
                                         }
                                     }
                                 });
@@ -465,8 +472,20 @@ public class MainActivity extends BaseActivity
 
     @Override
     public void onAccessibilityStateChanged(boolean enabled) {
-        findViewById(R.id.keyboard_container).setVisibility(enabled ? View.GONE : View.VISIBLE);
+        updateKeyboardContainerVisibility();
         connectToTerminalService();
+    }
+
+    private void updateKeyboardContainerVisibility() {
+        boolean accessibilityEnabled = mAccessibilityManager.isEnabled();
+        boolean imeVisible =
+                this.getWindow()
+                        .getDecorView()
+                        .getRootWindowInsets()
+                        .isVisible(WindowInsets.Type.ime());
+        View keyboardContainer = findViewById(R.id.keyboard_container);
+        keyboardContainer.setVisibility(
+                accessibilityEnabled || !imeVisible ? View.GONE : View.VISIBLE);
     }
 
     @Override
@@ -547,7 +566,7 @@ public class MainActivity extends BaseActivity
                                                         .getString(
                                                                 R.string
                                                                         .service_notification_settings),
-                                        settingsPendingIntent)
+                                                settingsPendingIntent)
                                         .build())
                         .addAction(
                                 new Notification.Action.Builder(
