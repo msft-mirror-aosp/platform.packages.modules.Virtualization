@@ -28,7 +28,6 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.IBinder;
-import android.os.SELinux;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -36,23 +35,13 @@ import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.GuardedBy;
 
-import org.apache.commons.compress.archivers.ArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
-
-import java.io.BufferedInputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.net.SocketException;
-import java.net.URL;
 import java.net.UnknownHostException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
-import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -171,15 +160,20 @@ public class InstallerService extends Service {
     }
 
     private boolean downloadFromSdcard() {
+        ImageArchive archive = ImageArchive.fromSdCard();
+
         // Installing from sdcard is preferred, but only supported only in debuggable build.
-        if (Build.isDebuggable()) {
+        if (Build.isDebuggable() && archive.exists()) {
             Log.i(TAG, "trying to install /sdcard/linux/images.tar.gz");
 
-            if (InstallUtils.installImageFromExternalStorage(this)) {
+            Path dest = InstalledImage.getDefault(this).getInstallDir();
+            try {
+                archive.installTo(dest, null);
                 Log.i(TAG, "image is installed from /sdcard/linux/images.tar.gz");
                 return true;
+            } catch (IOException e) {
+                Log.i(TAG, "Failed to install /sdcard/linux/images.tar.gz", e);
             }
-            Log.i(TAG, "Failed to install /sdcard/linux/images.tar.gz");
         } else {
             Log.i(TAG, "Non-debuggable build doesn't support installation from /sdcard/linux");
         }
@@ -205,23 +199,16 @@ public class InstallerService extends Service {
             return false;
         }
 
-        try (BufferedInputStream inputStream =
-                        new BufferedInputStream(new URL(IMAGE_URL).openStream());
-                WifiCheckInputStream wifiInputStream =
-                        new WifiCheckInputStream(inputStream, isWifiOnly);
-                TarArchiveInputStream tar =
-                        new TarArchiveInputStream(new GzipCompressorInputStream(wifiInputStream))) {
-            ArchiveEntry entry;
-            Path baseDir = InstallUtils.getInternalStorageDir(this);
-            Files.createDirectories(baseDir);
-            while ((entry = tar.getNextEntry()) != null) {
-                Path extractTo = baseDir.resolve(entry.getName());
-                if (entry.isDirectory()) {
-                    Files.createDirectories(extractTo);
-                } else {
-                    Files.copy(tar, extractTo, StandardCopyOption.REPLACE_EXISTING);
-                }
-            }
+        Path dest = InstalledImage.getDefault(this).getInstallDir();
+        try {
+            ImageArchive.fromInternet()
+                    .installTo(
+                            dest,
+                            is -> {
+                                WifiCheckInputStream filter = new WifiCheckInputStream(is);
+                                filter.setWifiOnly(isWifiOnly);
+                                return filter;
+                            });
         } catch (WifiCheckInputStream.NoWifiException e) {
             Log.e(TAG, "Install failed because of Wi-Fi is gone");
             notifyError(getString(R.string.installer_error_no_wifi));
@@ -236,8 +223,7 @@ public class InstallerService extends Service {
             notifyError(getString(R.string.installer_error_unknown));
             return false;
         }
-
-        return InstallUtils.createInstalledMarker(this);
+        return true;
     }
 
     private void notifyError(String displayText) {
@@ -311,7 +297,7 @@ public class InstallerService extends Service {
         public boolean isInstalled() {
             InstallerService service = ensureServiceConnected();
             synchronized (service.mLock) {
-                return !service.mIsInstalling && InstallUtils.isImageInstalled(service);
+                return !service.mIsInstalling && InstalledImage.getDefault(service).isInstalled();
             }
         }
     }
@@ -320,11 +306,14 @@ public class InstallerService extends Service {
         private static final int READ_BYTES = 1024;
 
         private final InputStream mInputStream;
-        private final boolean mIsWifiOnly;
+        private boolean mIsWifiOnly;
 
-        public WifiCheckInputStream(InputStream is, boolean isWifiOnly) {
+        public WifiCheckInputStream(InputStream is) {
             super();
             mInputStream = is;
+        }
+
+        public void setWifiOnly(boolean isWifiOnly) {
             mIsWifiOnly = isWifiOnly;
         }
 
