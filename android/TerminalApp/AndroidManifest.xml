@@ -83,10 +83,6 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Run VM instances" />
-            <intent-filter>
-                <action android:name="android.virtualization.START_VM_LAUNCHER_SERVICE" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
         </service>
     </application>
 
