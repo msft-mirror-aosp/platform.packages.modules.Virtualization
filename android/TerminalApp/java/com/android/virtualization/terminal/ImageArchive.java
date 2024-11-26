@@ -27,6 +27,7 @@ import java.io.BufferedInputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.file.Files;
@@ -74,6 +75,51 @@ class ImageArchive {
         } catch (MalformedURLException e) {
             // cannot happen
             throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Creates ImageArchive from either SdCard or Internet. SdCard is used only when the build is
+     * debuggable and the file actually exists.
+     */
+    public static ImageArchive getDefault() {
+        ImageArchive archive = fromSdCard();
+        if (Build.isDebuggable() && archive.exists()) {
+            return archive;
+        } else {
+            return fromInternet();
+        }
+    }
+
+    /** Tests if ImageArchive exists on the medium. */
+    public boolean exists() {
+        if (mPath != null) {
+            return Files.exists(mPath);
+        } else {
+            // TODO
+            return true;
+        }
+    }
+
+    /** Returns size of the archive in bytes */
+    public long getSize() throws IOException {
+        if (!exists()) {
+            throw new IllegalStateException("Cannot get size of non existing archive");
+        }
+        if (mPath != null) {
+            return Files.size(mPath);
+        } else {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) mUrl.openConnection();
+                conn.setRequestMethod("HEAD");
+                conn.getInputStream();
+                return conn.getContentLength();
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
         }
     }
 
