@@ -28,6 +28,14 @@ use std::{
 use utils::*;
 
 const TEST_IMG_WITH_ONE_HASHDESC_PATH: &str = "test_image_with_one_hashdesc.img";
+const TEST_IMG_WITH_INVALID_PAGE_SIZE_PATH: &str = "test_image_with_invalid_page_size.img";
+const TEST_IMG_WITH_NEGATIVE_PAGE_SIZE_PATH: &str = "test_image_with_negative_page_size.img";
+const TEST_IMG_WITH_OVERFLOW_PAGE_SIZE_PATH: &str = "test_image_with_overflow_page_size.img";
+const TEST_IMG_WITH_0K_PAGE_SIZE_PATH: &str = "test_image_with_0k_page_size.img";
+const TEST_IMG_WITH_1K_PAGE_SIZE_PATH: &str = "test_image_with_1k_page_size.img";
+const TEST_IMG_WITH_4K_PAGE_SIZE_PATH: &str = "test_image_with_4k_page_size.img";
+const TEST_IMG_WITH_9K_PAGE_SIZE_PATH: &str = "test_image_with_9k_page_size.img";
+const TEST_IMG_WITH_16K_PAGE_SIZE_PATH: &str = "test_image_with_16k_page_size.img";
 const TEST_IMG_WITH_ROLLBACK_INDEX_5: &str = "test_image_with_rollback_index_5.img";
 const TEST_IMG_WITH_SERVICE_VM_PROP_PATH: &str = "test_image_with_service_vm_prop.img";
 const TEST_IMG_WITH_UNKNOWN_VM_TYPE_PROP_PATH: &str = "test_image_with_unknown_vm_type_prop.img";
@@ -237,6 +245,60 @@ fn tampered_kernel_fails_verification() -> Result<()> {
         &load_trusted_public_key()?,
         SlotVerifyError::Verification(None).into(),
     )
+}
+
+#[test]
+fn kernel_has_expected_page_size_invalid() {
+    let kernel = fs::read(TEST_IMG_WITH_INVALID_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_negative() {
+    let kernel = fs::read(TEST_IMG_WITH_NEGATIVE_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_overflow() {
+    let kernel = fs::read(TEST_IMG_WITH_OVERFLOW_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_none() {
+    let kernel = fs::read(TEST_IMG_WITH_ONE_HASHDESC_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Ok(None));
+}
+
+#[test]
+fn kernel_has_expected_page_size_0k() {
+    let kernel = fs::read(TEST_IMG_WITH_0K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_1k() {
+    let kernel = fs::read(TEST_IMG_WITH_1K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_4k() {
+    let kernel = fs::read(TEST_IMG_WITH_4K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Ok(Some(4usize << 10)));
+}
+
+#[test]
+fn kernel_has_expected_page_size_9k() {
+    let kernel = fs::read(TEST_IMG_WITH_9K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_16k() {
+    let kernel = fs::read(TEST_IMG_WITH_16K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Ok(Some(16usize << 10)));
 }
 
 #[test]

@@ -22,6 +22,7 @@ use avb::{
     Descriptor, DescriptorError, DescriptorResult, HashDescriptor, PartitionData, SlotVerifyError,
     SlotVerifyNoDataResult, VbmetaData,
 };
+use core::str;
 
 // We use this for the rollback_index field if SlotVerifyData has empty rollback_indexes
 const DEFAULT_ROLLBACK_INDEX: u64 = 0;
@@ -220,6 +221,23 @@ fn copy_digest(descriptor: &HashDescriptor) -> SlotVerifyNoDataResult<Digest> {
     Ok(digest)
 }
 
+/// Returns the indicated payload page size, if present.
+fn read_page_size(vbmeta_data: &VbmetaData) -> Result<Option<usize>, PvmfwVerifyError> {
+    let Some(property) = vbmeta_data.get_property_value("com.android.virt.page_size") else {
+        return Ok(None);
+    };
+    let size = str::from_utf8(property)
+        .or(Err(PvmfwVerifyError::InvalidPageSize))?
+        .parse::<usize>()
+        .or(Err(PvmfwVerifyError::InvalidPageSize))?
+        .checked_mul(1024)
+        // TODO(stable(unsigned_is_multiple_of)): use .is_multiple_of()
+        .filter(|sz| sz % (4 << 10) == 0 && *sz != 0)
+        .ok_or(PvmfwVerifyError::InvalidPageSize)?;
+
+    Ok(Some(size))
+}
+
 /// Verifies the given initrd partition, and checks that the resulting contents looks like expected.
 fn verify_initrd(
     ops: &mut Ops,
@@ -256,7 +274,7 @@ pub fn verify_payload<'a>(
     let descriptors = vbmeta_image.descriptors()?;
     let hash_descriptors = HashDescriptors::get(&descriptors)?;
     let capabilities = Capability::get_capabilities(vbmeta_image)?;
-    let page_size = None; // TODO(ptosi): Read from payload.
+    let page_size = read_page_size(vbmeta_image)?;
 
     if initrd.is_none() {
         hash_descriptors.verify_no_initrd()?;
