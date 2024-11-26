@@ -137,15 +137,15 @@ class ImageArchive {
      * Installs this ImageArchive to a directory pointed by path. filter can be supplied to provide
      * an additional input stream which will be used during the installation.
      */
-    public void installTo(Path path, Function<InputStream, InputStream> filter) throws IOException {
+    public void installTo(Path dir, Function<InputStream, InputStream> filter) throws IOException {
         try (InputStream stream = getInputStream(filter);
                 GzipCompressorInputStream gzStream = new GzipCompressorInputStream(stream);
                 TarArchiveInputStream tarStream = new TarArchiveInputStream(gzStream)) {
 
-            Files.createDirectories(path);
+            Files.createDirectories(dir);
             ArchiveEntry entry;
             while ((entry = tarStream.getNextEntry()) != null) {
-                Path to = path.resolve(entry.getName());
+                Path to = dir.resolve(entry.getName());
                 if (Files.isDirectory(to)) {
                     Files.createDirectories(to);
                 } else {
@@ -153,13 +153,17 @@ class ImageArchive {
                 }
             }
         }
-        postInstall();
+        commitInstallationAt(dir);
     }
 
-    // To save storage, delete the source archive on the disk.
-    private void postInstall() throws IOException {
+    private void commitInstallationAt(Path dir) throws IOException {
+        // To save storage, delete the source archive on the disk.
         if (mPath != null) {
             Files.deleteIfExists(mPath);
         }
+
+        // Mark the completion
+        Path marker = dir.resolve(InstalledImage.MARKER_FILENAME);
+        Files.createFile(marker);
     }
 }
