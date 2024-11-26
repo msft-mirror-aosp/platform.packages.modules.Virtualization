@@ -59,7 +59,6 @@ import com.android.internal.annotations.VisibleForTesting;
 
 import com.google.android.material.appbar.MaterialToolbar;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
@@ -445,8 +444,8 @@ public class MainActivity extends BaseActivity
 
         Intent tapIntent = new Intent(this, MainActivity.class);
         tapIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent tapPendingIntent = PendingIntent.getActivity(this, 0, tapIntent,
-                PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent tapPendingIntent =
+                PendingIntent.getActivity(this, 0, tapIntent, PendingIntent.FLAG_IMMUTABLE);
 
         Intent settingsIntent = new Intent(this, SettingsActivity.class);
         settingsIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);

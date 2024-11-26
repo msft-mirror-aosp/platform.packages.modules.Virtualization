@@ -85,7 +85,7 @@ class InstalledImage {
         return mBackup;
     }
 
-    public Path backupFile() {
+    public Path getBackupFile() {
         return mBackup;
     }
 

@@ -113,7 +113,7 @@ public class InstallerActivity extends BaseActivity {
     public void onResume() {
         super.onResume();
 
-        if (Build.isDebuggable() && InstallUtils.payloadFromExternalStorageExists()) {
+        if (Build.isDebuggable() && ImageArchive.fromSdCard().exists()) {
             showSnackbar("Auto installing", Snackbar.LENGTH_LONG);
             requestInstall();
         }
