@@ -35,9 +35,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.function.Function;
 
 public class InstallUtils {
     private static final String VM_CONFIG_FILENAME = "vm_config.json";
@@ -47,8 +44,8 @@ public class InstallUtils {
     private static final String INSTALLATION_COMPLETED_FILENAME = "completed";
     private static final String PAYLOAD_DIR = "linux";
 
-    public static String getVmConfigPath(Context context) {
-        return getInternalStorageDir(context).toPath().resolve(VM_CONFIG_FILENAME).toString();
+    public static Path getVmConfigPath(Context context) {
+        return getInternalStorageDir(context).resolve(VM_CONFIG_FILENAME);
     }
 
     public static boolean isImageInstalled(Context context) {
@@ -57,15 +54,16 @@ public class InstallUtils {
 
     public static void backupRootFs(Context context) throws IOException {
         Files.move(
-                getRootfsFile(context).toPath(),
-                getBackupFile(context).toPath(),
+                getRootfsFile(context),
+                getBackupFile(context),
                 StandardCopyOption.REPLACE_EXISTING);
     }
 
     public static boolean createInstalledMarker(Context context) {
         try {
-            File file = new File(getInstallationCompletedPath(context).toString());
-            return file.createNewFile();
+            Path path = getInstallationCompletedPath(context);
+            Files.createFile(path);
+            return true;
         } catch (IOException e) {
             Log.e(TAG, "Failed to mark install completed", e);
             return false;
@@ -74,7 +72,7 @@ public class InstallUtils {
 
     @VisibleForTesting
     public static void deleteInstallation(Context context) {
-        FileUtils.deleteContentsAndDir(getInternalStorageDir(context));
+        FileUtils.deleteContentsAndDir(getInternalStorageDir(context).toFile());
     }
 
     private static Path getPayloadPath() {
@@ -91,16 +89,16 @@ public class InstallUtils {
         return Files.exists(getPayloadPath());
     }
 
-    public static File getInternalStorageDir(Context context) {
-        return new File(context.getFilesDir(), PAYLOAD_DIR);
+    public static Path getInternalStorageDir(Context context) {
+        return context.getFilesDir().toPath().resolve(PAYLOAD_DIR);
     }
 
-    public static File getBackupFile(Context context) {
-        return new File(context.getFilesDir(), BACKUP_FILENAME);
+    public static Path getBackupFile(Context context) {
+        return context.getFilesDir().toPath().resolve(BACKUP_FILENAME);
     }
 
     private static Path getInstallationCompletedPath(Context context) {
-        return getInternalStorageDir(context).toPath().resolve(INSTALLATION_COMPLETED_FILENAME);
+        return getInternalStorageDir(context).resolve(INSTALLATION_COMPLETED_FILENAME);
     }
 
     public static boolean installImageFromExternalStorage(Context context) {
@@ -128,15 +126,6 @@ public class InstallUtils {
             Log.e(TAG, "installation failed", e);
             return false;
         }
-        if (!resolvePathInVmConfig(context)) {
-            Log.d(TAG, "resolving path failed");
-            try {
-                Files.deleteIfExists(Path.of(getVmConfigPath(context)));
-            } catch (IOException e) {
-                return false;
-            }
-            return false;
-        }
 
         // remove payload if installation is done.
         try {
@@ -149,46 +138,12 @@ public class InstallUtils {
         return createInstalledMarker(context);
     }
 
-    private static Function<String, String> getReplacer(Context context) {
-        Map<String, String> rules = new HashMap<>();
-        rules.put("\\$PAYLOAD_DIR", new File(context.getFilesDir(), PAYLOAD_DIR).toString());
-        rules.put("\\$USER_ID", String.valueOf(context.getUserId()));
-        rules.put("\\$PACKAGE_NAME", context.getPackageName());
-        String appDataDir = context.getDataDir().toString();
-        // TODO: remove this hack
-        if (context.getUserId() == 0) {
-            appDataDir = "/data/data/" + context.getPackageName();
-        }
-        rules.put("\\$APP_DATA_DIR", appDataDir);
-        return (s) -> {
-            for (Map.Entry<String, String> rule : rules.entrySet()) {
-                s = s.replaceAll(rule.getKey(), rule.getValue());
-            }
-            return s;
-        };
-    }
-
-    public static boolean resolvePathInVmConfig(Context context) {
-        try {
-            String replacedVmConfig =
-                    String.join(
-                            "\n",
-                            Files.readAllLines(Path.of(getVmConfigPath(context))).stream()
-                                    .map(getReplacer(context))
-                                    .toList());
-            Files.write(Path.of(getVmConfigPath(context)), replacedVmConfig.getBytes());
-            return true;
-        } catch (IOException e) {
-            return false;
-        }
-    }
-
-    public static File getRootfsFile(Context context) throws FileNotFoundException {
-        File file = new File(getInternalStorageDir(context), ROOTFS_FILENAME);
-        if (!file.exists()) {
-            Log.d(TAG, file.getAbsolutePath() + " - file not found");
+    public static Path getRootfsFile(Context context) throws FileNotFoundException {
+        Path path = getInternalStorageDir(context).resolve(ROOTFS_FILENAME);
+        if (!Files.exists(path)) {
+            Log.d(TAG, path.toString() + " - file not found");
             throw new FileNotFoundException("File not found: " + ROOTFS_FILENAME);
         }
-        return file;
+        return path;
     }
 }
