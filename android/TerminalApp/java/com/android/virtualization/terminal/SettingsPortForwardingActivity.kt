@@ -47,7 +47,7 @@ class SettingsPortForwardingActivity : AppCompatActivity() {
                 HashSet<String>()
             )
 
-        for (port in ports!!) {
+        for (port in ports!!.sortedWith(compareBy( { it.toInt() } ))) {
             val enabled =
                 sharedPref.getBoolean(
                     getString(R.string.preference_forwarding_port_is_enabled) + port,
