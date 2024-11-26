@@ -38,14 +38,13 @@ import com.google.gson.annotations.SerializedName;
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
-import java.io.PipedReader;
-import java.io.PipedWriter;
 import java.io.Reader;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 /** This class and its inner classes model vm_config.json. */
 class ConfigJson {
@@ -78,19 +77,15 @@ class ConfigJson {
 
     /** Parses JSON file at jsonPath */
     static ConfigJson from(Context context, Path jsonPath) {
-        try (FileReader fileReader = new FileReader(jsonPath.toFile());
-                Reader r = replaceKeywords(fileReader, context)) {
-            return new Gson().fromJson(r, ConfigJson.class);
+        try (FileReader fileReader = new FileReader(jsonPath.toFile())) {
+            String content = replaceKeywords(fileReader, context);
+            return new Gson().fromJson(content, ConfigJson.class);
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse " + jsonPath, e);
         }
     }
 
-    private static Reader replaceKeywords(Reader r, Context context) throws IOException {
-        PipedWriter pipeIn = new PipedWriter();
-        PipedReader pipeOut = new PipedReader();
-        pipeOut.connect(pipeIn);
-
+    private static String replaceKeywords(Reader r, Context context) throws IOException {
         Map<String, String> rules = new HashMap<>();
         rules.put("\\$PAYLOAD_DIR", InstallUtils.getInternalStorageDir(context).toString());
         rules.put("\\$USER_ID", String.valueOf(context.getUserId()));
@@ -103,7 +98,7 @@ class ConfigJson {
         rules.put("\\$APP_DATA_DIR", appDataDir);
 
         try (BufferedReader br = new BufferedReader(r)) {
-            br.lines()
+            return br.lines()
                     .map(
                             line -> {
                                 for (Map.Entry<String, String> rule : rules.entrySet()) {
@@ -111,18 +106,8 @@ class ConfigJson {
                                 }
                                 return line;
                             })
-                    .forEach(
-                            line -> {
-                                try {
-                                    pipeIn.write(line);
-                                    pipeIn.write('\n');
-                                } catch (IOException e) {
-                                    // this cannot happen as it is connected to a pipe.
-                                    throw new RuntimeException(e);
-                                }
-                            });
+                    .collect(Collectors.joining("\n"));
         }
-        return pipeOut;
     }
 
     private int getCpuTopology() {
