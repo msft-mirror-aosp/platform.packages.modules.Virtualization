@@ -61,7 +61,6 @@ import com.android.internal.annotations.VisibleForTesting;
 
 import com.google.android.material.appbar.MaterialToolbar;
 
-import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -70,6 +69,8 @@ import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
@@ -334,33 +335,29 @@ public class MainActivity extends BaseActivity
                 .start();
     }
 
-    private void diskResize(File file, long sizeInBytes) throws IOException {
+    private void diskResize(Path path, long sizeInBytes) throws IOException {
         try {
             if (sizeInBytes == 0) {
                 return;
             }
-            String filePath = file.getAbsolutePath();
-            Log.d(TAG, "Disk-resize in progress for partition: " + filePath);
+            Log.d(TAG, "Disk-resize in progress for partition: " + path);
 
-            long currentSize = Os.stat(filePath).st_size;
-            runE2fsck(filePath);
+            long currentSize = Files.size(path);
+            runE2fsck(path);
             if (sizeInBytes > currentSize) {
-                allocateSpace(file, sizeInBytes);
+                allocateSpace(path, sizeInBytes);
             }
 
-            resizeFilesystem(filePath, sizeInBytes);
-        } catch (ErrnoException e) {
-            Log.e(TAG, "ErrnoException during disk resize", e);
-            throw new IOException("ErrnoException during disk resize", e);
+            resizeFilesystem(path, sizeInBytes);
         } catch (IOException e) {
             Log.e(TAG, "Failed to resize disk", e);
             throw e;
         }
     }
 
-    private static void allocateSpace(File file, long sizeInBytes) throws IOException {
+    private static void allocateSpace(Path path, long sizeInBytes) throws IOException {
         try {
-            RandomAccessFile raf = new RandomAccessFile(file, "rw");
+            RandomAccessFile raf = new RandomAccessFile(path.toFile(), "rw");
             FileDescriptor fd = raf.getFD();
             Os.posix_fallocate(fd, 0, sizeInBytes);
             raf.close();
@@ -371,17 +368,18 @@ public class MainActivity extends BaseActivity
         }
     }
 
-    private static void runE2fsck(String filePath) throws IOException {
+    private static void runE2fsck(Path path) throws IOException {
         try {
-            runCommand("/system/bin/e2fsck", "-y", "-f", filePath);
-            Log.d(TAG, "e2fsck completed: " + filePath);
+            String p = path.toAbsolutePath().toString();
+            runCommand("/system/bin/e2fsck", "-y", "-f", p);
+            Log.d(TAG, "e2fsck completed: " + path);
         } catch (IOException e) {
             Log.e(TAG, "Failed to run e2fsck", e);
             throw e;
         }
     }
 
-    private static void resizeFilesystem(String filePath, long sizeInBytes) throws IOException {
+    private static void resizeFilesystem(Path path, long sizeInBytes) throws IOException {
         long sizeInMB = sizeInBytes / (1024 * 1024);
         if (sizeInMB == 0) {
             Log.e(TAG, "Invalid size: " + sizeInBytes + " bytes");
@@ -389,8 +387,9 @@ public class MainActivity extends BaseActivity
         }
         String sizeArg = sizeInMB + "M";
         try {
-            runCommand("/system/bin/resize2fs", filePath, sizeArg);
-            Log.d(TAG, "resize2fs completed: " + filePath + ", size: " + sizeArg);
+            String p = path.toAbsolutePath().toString();
+            runCommand("/system/bin/resize2fs", p, sizeArg);
+            Log.d(TAG, "resize2fs completed: " + path + ", size: " + sizeArg);
         } catch (IOException e) {
             Log.e(TAG, "Failed to run resize2fs", e);
             throw e;
@@ -591,10 +590,11 @@ public class MainActivity extends BaseActivity
         return (long) Math.ceil(((double) diskSize) / diskSizeStep) * diskSizeStep;
     }
 
-    public static long getMinFilesystemSize(File file) throws IOException, NumberFormatException {
+    public static long getMinFilesystemSize(Path path) throws IOException, NumberFormatException {
         try {
-            runE2fsck(file.getAbsolutePath());
-            String result = runCommand("/system/bin/resize2fs", "-P", file.getAbsolutePath());
+            runE2fsck(path);
+            String p = path.toAbsolutePath().toString();
+            String result = runCommand("/system/bin/resize2fs", "-P", p);
             // The return value is the number of 4k block
             long minSize = Long.parseLong(
                     result.lines().toArray(String[]::new)[1].substring(42)) * 4 * 1024;
@@ -605,13 +605,13 @@ public class MainActivity extends BaseActivity
         }
     }
 
-    private static long getFilesystemSize(File file) throws ErrnoException {
-        return Os.stat(file.getAbsolutePath()).st_size;
+    private static long getFilesystemSize(Path fsPath) throws ErrnoException {
+        return Os.stat(fsPath.toAbsolutePath().toString()).st_size;
     }
 
     private void resizeDiskIfNecessary() {
         try {
-            File file = InstallUtils.getRootfsFile(this);
+            Path file = InstallUtils.getRootfsFile(this);
             SharedPreferences sharedPref = this.getSharedPreferences(
                     getString(R.string.preference_file_key), Context.MODE_PRIVATE);
             SharedPreferences.Editor editor = sharedPref.edit();
