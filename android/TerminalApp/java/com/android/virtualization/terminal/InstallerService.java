@@ -64,9 +64,6 @@ public class InstallerService extends Service {
                     ? "https://dl.google.com/android/ferrochrome/latest/x86_64/images.tar.gz"
                     : "https://dl.google.com/android/ferrochrome/latest/aarch64/images.tar.gz";
 
-    private static final String SELINUX_FILE_CONTEXT =
-            "u:object_r:virtualizationservice_data_file:";
-
     private final Object mLock = new Object();
 
     private Notification mNotification;
@@ -162,9 +159,6 @@ public class InstallerService extends Service {
         mExecutorService.execute(
                 () -> {
                     boolean success = downloadFromSdcard() || downloadFromUrl(isWifiOnly);
-                    if (success) {
-                        reLabelImagesSELinuxContext();
-                    }
                     stopForeground(STOP_FOREGROUND_REMOVE);
 
                     synchronized (mLock) {
@@ -174,24 +168,6 @@ public class InstallerService extends Service {
                         notifyCompleted();
                     }
                 });
-    }
-
-    private void reLabelImagesSELinuxContext() {
-        File payloadFolder = InstallUtils.getInternalStorageDir(this).toFile();
-
-        // The context should be u:object_r:privapp_data_file:s0:c35,c257,c512,c768
-        // and we want to get s0:c35,c257,c512,c768 part
-        String level = SELinux.getFileContext(payloadFolder.toString()).split(":", 4)[3];
-        String targetContext = SELINUX_FILE_CONTEXT + level;
-
-        File[] files = payloadFolder.listFiles();
-        for (File file : files) {
-            if (file.isFile() &&
-                    !Objects.equals(SELinux.getFileContext(file.toString()),
-                            targetContext)) {
-                SELinux.setFileContext(file.toString(), targetContext);
-            }
-        }
     }
 
     private boolean downloadFromSdcard() {
