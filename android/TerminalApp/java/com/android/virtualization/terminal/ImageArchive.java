@@ -59,10 +59,13 @@ class ImageArchive {
         mPath = path;
     }
 
+    public static Path getSdcardPathForTesting() {
+        return Environment.getExternalStoragePublicDirectory(DIR_IN_SDCARD).toPath();
+    }
+
     /** Creates ImageArchive which is located in the sdcard. This archive is for testing only. */
     public static ImageArchive fromSdCard() {
-        Path dir = Environment.getExternalStoragePublicDirectory(DIR_IN_SDCARD).toPath();
-        Path file = dir.resolve(ARCHIVE_NAME);
+        Path file = getSdcardPathForTesting().resolve(ARCHIVE_NAME);
         return new ImageArchive(file);
     }
 
