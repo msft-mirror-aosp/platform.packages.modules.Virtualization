@@ -31,7 +31,7 @@
     <string name="vm_creation_message" msgid="6594953532721367502">"הטרמינל בהכנה"</string>
     <string name="vm_stop_message" msgid="3978349856095529255">"המערכת עוצרת את הטרמינל"</string>
     <string name="vm_error_message" msgid="5231867246177661525">"הטרמינל קרס"</string>
-    <string name="settings_disk_resize_title" msgid="1545791169419914600">"שינוי הגודל של הדיסק"</string>
+    <string name="settings_disk_resize_title" msgid="1545791169419914600">"שינוי גודל הדיסק"</string>
     <string name="settings_disk_resize_sub_title" msgid="149418971610906138">"שינוי הגודל / Rootfs"</string>
     <string name="settings_disk_resize_resize_message" msgid="5990475712303845087">"גודל הדיסק הוגדר"</string>
     <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"הוקצו <xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g>"</string>
@@ -49,15 +49,30 @@
     <string name="settings_recovery_sub_title" msgid="1067782421529340576">"אפשרויות שחזור של המחיצה"</string>
     <string name="settings_recovery_reset_title" msgid="8785305518694186025">"שינוי לגרסה הראשונית"</string>
     <string name="settings_recovery_reset_sub_title" msgid="5656572074090728544">"הסרת הכול"</string>
-    <!-- no translation found for settings_recovery_reset_dialog_title (874946981716251094) -->
-    <skip />
-    <!-- no translation found for settings_recovery_reset_dialog_message (6392681199895696206) -->
-    <skip />
+    <string name="settings_recovery_reset_dialog_title" msgid="874946981716251094">"אתחול הטרמינל"</string>
+    <string name="settings_recovery_reset_dialog_message" msgid="6392681199895696206">"הנתונים יימחקו"</string>
     <string name="settings_recovery_reset_dialog_confirm" msgid="431718610013947861">"אישור"</string>
     <string name="settings_recovery_reset_dialog_cancel" msgid="1666264288208459725">"ביטול"</string>
+    <!-- no translation found for settings_recovery_reset_dialog_backup_option (2079431035205584614) -->
+    <skip />
+    <!-- no translation found for settings_recovery_error_due_to_backup (2129959464075410607) -->
+    <skip />
+    <!-- no translation found for settings_recovery_error (2451912941535666379) -->
+    <skip />
+    <!-- no translation found for settings_recovery_error_during_removing_backup (6515615177661212463) -->
+    <skip />
+    <!-- no translation found for settings_recovery_remove_backup_title (1540850288876158899) -->
+    <skip />
+    <!-- no translation found for settings_recovery_remove_backup_sub_title (212161719832573475) -->
+    <skip />
+    <!-- no translation found for error_title (7196464038692913778) -->
+    <skip />
+    <!-- no translation found for error_desc (1939028888570920661) -->
+    <skip />
+    <!-- no translation found for error_code (3585291676855383649) -->
+    <skip />
     <string name="service_notification_settings" msgid="1437365721184401135">"הגדרות"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"הטרמינל פועל"</string>
-    <!-- no translation found for service_notification_content (3579923802797824545) -->
-    <skip />
+    <string name="service_notification_content" msgid="3579923802797824545">"צריך ללחוץ כדי לפתוח את הטרמינל"</string>
     <string name="service_notification_quit_action" msgid="4888327875869277455">"סגירה"</string>
 </resources>

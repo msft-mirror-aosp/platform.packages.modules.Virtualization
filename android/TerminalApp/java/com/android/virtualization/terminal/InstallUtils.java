@@ -15,6 +15,8 @@
  */
 package com.android.virtualization.terminal;
 
+import static com.android.virtualization.terminal.MainActivity.TAG;
+
 import android.content.Context;
 import android.os.Environment;
 import android.os.FileUtils;
@@ -38,8 +40,6 @@ import java.util.Map;
 import java.util.function.Function;
 
 public class InstallUtils {
-    private static final String TAG = InstallUtils.class.getSimpleName();
-
     private static final String VM_CONFIG_FILENAME = "vm_config.json";
     private static final String COMPRESSED_PAYLOAD_FILENAME = "images.tar.gz";
     private static final String ROOTFS_FILENAME = "root_part";

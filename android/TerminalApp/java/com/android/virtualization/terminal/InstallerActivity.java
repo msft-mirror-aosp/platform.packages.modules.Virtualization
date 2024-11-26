@@ -16,6 +16,8 @@
 
 package com.android.virtualization.terminal;
 
+import static com.android.virtualization.terminal.MainActivity.TAG;
+
 import android.annotation.MainThread;
 import android.content.ComponentName;
 import android.content.Context;
@@ -42,8 +44,6 @@ import com.google.android.material.snackbar.Snackbar;
 import java.lang.ref.WeakReference;
 
 public class InstallerActivity extends BaseActivity {
-    private static final String TAG = "LinuxInstaller";
-
     private static final long ESTIMATED_IMG_SIZE_BYTES = FileUtils.parseSize("550MB");
 
     private CheckBox mWaitForWifiCheckbox;
