@@ -15,6 +15,8 @@
  */
 package com.android.virtualization.terminal;
 
+import static android.webkit.WebSettings.LOAD_NO_CACHE;
+
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -40,6 +42,7 @@ import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.accessibility.AccessibilityManager;
 import android.view.accessibility.AccessibilityManager.AccessibilityStateChangeListener;
 import android.webkit.ClientCertRequest;
@@ -73,7 +76,7 @@ import java.security.cert.X509Certificate;
 import java.util.Map;
 
 public class MainActivity extends BaseActivity
-        implements VmLauncherServices.VmLauncherServiceCallback, AccessibilityStateChangeListener {
+        implements VmLauncherService.VmLauncherServiceCallback, AccessibilityStateChangeListener {
     static final String TAG = "VmTerminalApp";
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
@@ -129,6 +132,7 @@ public class MainActivity extends BaseActivity
         mWebView.getSettings().setDatabaseEnabled(true);
         mWebView.getSettings().setDomStorageEnabled(true);
         mWebView.getSettings().setJavaScriptEnabled(true);
+        mWebView.getSettings().setCacheMode(LOAD_NO_CACHE);
         mWebView.setWebChromeClient(new WebChromeClient());
 
         setupModifierKeys();
@@ -137,7 +141,6 @@ public class MainActivity extends BaseActivity
         mAccessibilityManager.addAccessibilityStateChangeListener(this);
 
         readClientCertificate();
-        connectToTerminalService();
 
         mManageExternalStorageActivityResultLauncher =
                 registerForActivityResult(
@@ -145,7 +148,14 @@ public class MainActivity extends BaseActivity
                         (ActivityResult result) -> {
                             startVm();
                         });
-
+        getWindow()
+                .getDecorView()
+                .getRootView()
+                .setOnApplyWindowInsetsListener(
+                        (v, insets) -> {
+                            updateKeyboardContainerVisibility();
+                            return insets;
+                        });
         // if installer is launched, it will be handled in onActivityResult
         if (!launchInstaller) {
             if (!Environment.isExternalStorageManager()) {
@@ -258,6 +268,7 @@ public class MainActivity extends BaseActivity
                             case WebViewClient.ERROR_CONNECT:
                             case WebViewClient.ERROR_HOST_LOOKUP:
                             case WebViewClient.ERROR_FAILED_SSL_HANDSHAKE:
+                            case WebViewClient.ERROR_TIMEOUT:
                                 view.reload();
                                 return;
                             default:
@@ -291,8 +302,7 @@ public class MainActivity extends BaseActivity
                                                     mAccessibilityManager.isEnabled()
                                                             ? View.GONE
                                                             : View.VISIBLE;
-                                            findViewById(R.id.keyboard_container)
-                                                    .setVisibility(keyVisibility);
+                                            updateKeyboardContainerVisibility();
                                         }
                                     }
                                 });
@@ -417,7 +427,7 @@ public class MainActivity extends BaseActivity
     @Override
     protected void onDestroy() {
         getSystemService(AccessibilityManager.class).removeAccessibilityStateChangeListener(this);
-        VmLauncherServices.stopVmLauncherService(this);
+        VmLauncherService.stop(this);
         super.onDestroy();
     }
 
@@ -462,8 +472,17 @@ public class MainActivity extends BaseActivity
 
     @Override
     public void onAccessibilityStateChanged(boolean enabled) {
-        findViewById(R.id.keyboard_container).setVisibility(enabled ? View.GONE : View.VISIBLE);
         connectToTerminalService();
+    }
+
+    private void updateKeyboardContainerVisibility() {
+        boolean imeVisible =
+                this.getWindow()
+                        .getDecorView()
+                        .getRootWindowInsets()
+                        .isVisible(WindowInsets.Type.ime());
+        View keyboardContainer = findViewById(R.id.keyboard_container);
+        keyboardContainer.setVisibility(!imeVisible ? View.GONE : View.VISIBLE);
     }
 
     @Override
@@ -520,7 +539,7 @@ public class MainActivity extends BaseActivity
 
         Intent stopIntent = new Intent();
         stopIntent.setClass(this, VmLauncherService.class);
-        stopIntent.setAction(VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE);
+        stopIntent.setAction(VmLauncherService.ACTION_STOP_VM_LAUNCHER_SERVICE);
         PendingIntent stopPendingIntent =
                 PendingIntent.getService(
                         this,
@@ -544,7 +563,7 @@ public class MainActivity extends BaseActivity
                                                         .getString(
                                                                 R.string
                                                                         .service_notification_settings),
-                                        settingsPendingIntent)
+                                                settingsPendingIntent)
                                         .build())
                         .addAction(
                                 new Notification.Action.Builder(
@@ -558,7 +577,8 @@ public class MainActivity extends BaseActivity
                         .build();
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
-        VmLauncherServices.startVmLauncherService(this, this, notification);
+        VmLauncherService.run(this, this, notification);
+        connectToTerminalService();
     }
 
     @VisibleForTesting

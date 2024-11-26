@@ -37,8 +37,7 @@
     <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"‫<xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g> اختصاص یافته است"</string>
     <string name="settings_disk_resize_resize_gb_max_format" msgid="6221210151688630371">"حداکثر <xliff:g id="MAX_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_cancel" msgid="2182388126941686562">"لغو"</string>
-    <!-- no translation found for settings_disk_resize_resize_restart_vm_to_apply (83303619015991908) -->
-    <skip />
+    <string name="settings_disk_resize_resize_restart_vm_to_apply" msgid="83303619015991908">"بازراه‌اندازی برای اعمال"</string>
     <string name="settings_port_forwarding_title" msgid="4867439149919324784">"بازارسال درگاه"</string>
     <string name="settings_port_forwarding_sub_title" msgid="6848040752531535488">"پیکربندی بازارسال درگاه"</string>
     <string name="settings_port_forwarding_notification_title" msgid="2822798067500254704">"پایانه می‌خواهد درگاه جدیدی باز کند"</string>
@@ -53,6 +52,18 @@
     <string name="settings_recovery_reset_dialog_message" msgid="6392681199895696206">"داده‌ها حذف خواهد شد"</string>
     <string name="settings_recovery_reset_dialog_confirm" msgid="431718610013947861">"تأیید کردن"</string>
     <string name="settings_recovery_reset_dialog_cancel" msgid="1666264288208459725">"لغو کردن"</string>
+    <string name="settings_recovery_reset_dialog_backup_option" msgid="2079431035205584614">"پشتیبان‌گیری از داده‌ها در <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
+    <string name="settings_recovery_error_due_to_backup" msgid="2129959464075410607">"بازیابی انجام نشد چون فایل پشتیبان مشکل داشت"</string>
+    <string name="settings_recovery_error" msgid="2451912941535666379">"بازیابی انجام نشد"</string>
+    <string name="settings_recovery_error_during_removing_backup" msgid="6515615177661212463">"فایل پشتیبان حذف نشد"</string>
+    <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"حذف داده‌های پشتیبان"</string>
+    <string name="settings_recovery_remove_backup_sub_title" msgid="212161719832573475">"پاک‌سازی <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
+    <!-- no translation found for error_title (7196464038692913778) -->
+    <skip />
+    <!-- no translation found for error_desc (1939028888570920661) -->
+    <skip />
+    <!-- no translation found for error_code (3585291676855383649) -->
+    <skip />
     <string name="service_notification_settings" msgid="1437365721184401135">"تنظیمات"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"پایانه درحال اجرا است"</string>
     <string name="service_notification_content" msgid="3579923802797824545">"برای باز کردن پایانه، کلیک کنید"</string>
