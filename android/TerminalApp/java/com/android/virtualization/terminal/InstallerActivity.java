@@ -41,6 +41,7 @@ import com.android.internal.annotations.VisibleForTesting;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.android.material.snackbar.Snackbar;
 
+import java.io.IOException;
 import java.lang.ref.WeakReference;
 
 public class InstallerActivity extends BaseActivity {
@@ -63,12 +64,8 @@ public class InstallerActivity extends BaseActivity {
         mInstallProgressListener = new InstallProgressListener(this);
 
         setContentView(R.layout.activity_installer);
-
-        TextView desc = (TextView) findViewById(R.id.installer_desc);
-        desc.setText(
-                getString(
-                        R.string.installer_desc_text_format,
-                        Formatter.formatShortFileSize(this, ESTIMATED_IMG_SIZE_BYTES)));
+        updateSizeEstimation(ESTIMATED_IMG_SIZE_BYTES);
+        measureImageSizeAndUpdateDescription();
 
         mWaitForWifiCheckbox = (CheckBox) findViewById(R.id.installer_wait_for_wifi_checkbox);
         mInstallButton = (TextView) findViewById(R.id.installer_install_button);
@@ -83,6 +80,33 @@ public class InstallerActivity extends BaseActivity {
         if (!bindService(intent, mInstallerServiceConnection, Context.BIND_AUTO_CREATE)) {
             handleInternalError(new Exception("Failed to connect to installer service"));
         }
+    }
+
+    private void updateSizeEstimation(long est) {
+        String desc =
+                getString(
+                        R.string.installer_desc_text_format,
+                        Formatter.formatShortFileSize(this, est));
+        runOnUiThread(
+                () -> {
+                    TextView view = (TextView) findViewById(R.id.installer_desc);
+                    view.setText(desc);
+                });
+    }
+
+    private void measureImageSizeAndUpdateDescription() {
+        new Thread(
+                        () -> {
+                            long est;
+                            try {
+                                est = ImageArchive.getDefault().getSize();
+                            } catch (IOException e) {
+                                Log.w(TAG, "Failed to measure image size.", e);
+                                return;
+                            }
+                            updateSizeEstimation(est);
+                        })
+                .start();
     }
 
     @Override
