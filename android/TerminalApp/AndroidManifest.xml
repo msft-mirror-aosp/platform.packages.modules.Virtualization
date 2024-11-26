@@ -1,4 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--  Copyright 2024 The Android Open Source Project
+
+     Licensed under the Apache License, Version 2.0 (the "License");
+     you may not use this file except in compliance with the License.
+     You may obtain a copy of the License at
+
+          http://www.apache.org/licenses/LICENSE-2.0
+
+     Unless required by applicable law or agreed to in writing, software
+     distributed under the License is distributed on an "AS IS" BASIS,
+     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     See the License for the specific language governing permissions and
+     limitations under the License.
+ -->
+
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     package="com.android.virtualization.terminal">
@@ -19,6 +34,7 @@
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.Material3.DayNight.NoActionBar"
         android:usesCleartextTraffic="true"
+        android:supportsRtl="true"
         android:enabled="false">
         <activity android:name=".MainActivity"
                   android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize"
@@ -30,14 +46,11 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
-        <activity android:name=".SettingsActivity">
-        </activity>
-        <activity android:name=".SettingsDiskResizeActivity">
-        </activity>
-        <activity android:name=".SettingsPortForwardingActivity">
-        </activity>
-        <activity android:name=".SettingsRecoveryActivity">
-        </activity>
+        <activity android:name=".SettingsActivity" />
+        <activity android:name=".SettingsDiskResizeActivity" />
+        <activity android:name=".SettingsPortForwardingActivity" />
+        <activity android:name=".SettingsRecoveryActivity" />
+        <activity android:name=".ErrorActivity" />
         <property
             android:name="android.window.PROPERTY_ACTIVITY_EMBEDDING_SPLITS_ENABLED"
             android:value="true" />
@@ -63,16 +76,13 @@
             android:stopWithTask="true" />
 
         <service
-            android:name="com.android.virtualization.vmlauncher.VmLauncherService"
+            android:name=".VmLauncherService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="true" >
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Run VM instances" />
-            <intent-filter>
-                <action android:name="android.virtualization.START_VM_LAUNCHER_SERVICE" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
         </service>
     </application>
 
