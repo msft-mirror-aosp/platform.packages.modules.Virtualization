@@ -132,4 +132,7 @@
     <string name="service_notification_content">Click to open the terminal</string>
     <!-- Notification action button for closing the virtual machine [CHAR LIMIT=20] -->
     <string name="service_notification_quit_action">Close</string>
+
+    <!-- VirGL is the name of hardware acceleration for VM, the name is supposed not to be translated. [CHAR LIMIT=20] -->
+    <string name="virgl_enabled">VirGL is enabled</string>
 </resources>
