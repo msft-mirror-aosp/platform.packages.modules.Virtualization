@@ -46,11 +46,12 @@ impl InstanceManager {
         self.start_instance(CURRENT_INSTANCE_DIR, vm_parameters)
     }
 
-    pub fn start_test_instance(&self, prefer_staged: bool) -> Result<CompOsInstance> {
+    pub fn start_test_instance(&self, prefer_staged: bool, os: &str) -> Result<CompOsInstance> {
         let mut vm_parameters = new_vm_parameters()?;
         vm_parameters.name = String::from("ComposdTest");
         vm_parameters.debug_mode = true;
         vm_parameters.prefer_staged = prefer_staged;
+        vm_parameters.os = os.to_owned();
         self.start_instance(TEST_INSTANCE_DIR, vm_parameters)
     }
 
