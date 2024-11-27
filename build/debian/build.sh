@@ -144,7 +144,7 @@ build_rust_binary_and_copy() {
 build_ttyd() {
 	local ttyd_version=1.7.7
 	local url="https://github.com/tsl0922/ttyd/archive/refs/tags/${ttyd_version}.tar.gz"
-	cp -r $(dirname $0)/ttyd ${workdir}/ttyd
+	cp -r "$(dirname "$0")/ttyd" "${workdir}/ttyd"
 
 	pushd "${workdir}" > /dev/null
 	wget "${url}" -O - | tar xz
@@ -152,7 +152,7 @@ build_ttyd() {
 	pushd "$workdir/ttyd-${ttyd_version}" > /dev/null
 	bash -c "env BUILD_TARGET=${arch} ./scripts/cross-build.sh"
 	mkdir -p "${dst}/files/usr/local/bin/ttyd"
-	cp /tmp/stage/${arch}-linux-musl/bin/ttyd "${dst}/files/usr/local/bin/ttyd/AVF"
+	cp "/tmp/stage/${arch}-linux-musl/bin/ttyd" "${dst}/files/usr/local/bin/ttyd/AVF"
 	chmod 777 "${dst}/files/usr/local/bin/ttyd/AVF"
 	mkdir -p "${dst}/files/usr/share/doc/ttyd"
 	cp LICENSE "${dst}/files/usr/share/doc/ttyd/copyright"
@@ -161,8 +161,10 @@ build_ttyd() {
 }
 
 copy_android_config() {
-	local src="$(dirname "$0")/fai_config"
-	local dst="${config_space}"
+	local src
+	local dst
+	src="$(dirname "$0")/fai_config"
+	dst="${config_space}"
 
 	cp -R "${src}"/* "${dst}"
 	cp "$(dirname "$0")/image.yaml" "${resources_dir}"
@@ -181,14 +183,21 @@ run_fai() {
 
 extract_partitions() {
 	root_partition_num=1
+	bios_partition_num=14
 	efi_partition_num=15
 
 	loop=$(losetup -f --show --partscan $built_image)
-	dd if=${loop}p$root_partition_num of=root_part
-	dd if=${loop}p$efi_partition_num of=efi_part
-	losetup -d ${loop}
+	dd if="${loop}p$root_partition_num" of=root_part
+	if [[ "$arch" == "x86_64" ]]; then
+		dd if="${loop}p$bios_partition_num" of=bios_part
+	fi
+	dd if="${loop}p$efi_partition_num" of=efi_part
+	losetup -d "${loop}"
 
 	sed -i "s/{root_part_guid}/$(sfdisk --part-uuid $built_image $root_partition_num)/g" vm_config.json
+	if [[ "$arch" == "x86_64" ]]; then
+		sed -i "s/{bios_part_guid}/$(sfdisk --part-uuid $built_image $bios_partition_num)/g" vm_config.json
+	fi
 	sed -i "s/{efi_part_guid}/$(sfdisk --part-uuid $built_image $efi_partition_num)/g" vm_config.json
 }
 
@@ -217,27 +226,28 @@ run_fai
 fdisk -l "${built_image}"
 images=()
 
-cp $(dirname $0)/vm_config.json.${arch} vm_config.json
+cp "$(dirname "$0")/vm_config.json.${arch}" vm_config.json
+
+extract_partitions
 
 if [[ "$arch" == "aarch64" ]]; then
-	extract_partitions
 	images+=(
 		root_part
 		efi_part
 	)
-fi
-
 # TODO(b/365955006): remove these lines when uboot supports x86_64 EFI application
-if [[ "$arch" == "x86_64" ]]; then
+elif [[ "$arch" == "x86_64" ]]; then
 	virt-get-kernel -a "${built_image}"
 	mv vmlinuz* vmlinuz
 	mv initrd.img* initrd.img
 	images+=(
-		"${built_image}"
+		boot_part
+		root_part
+		efi_part
 		vmlinuz
 		initrd.img
 	)
 fi
 
 # --sparse option isn't supported in apache-commons-compress
-tar czv -f images.tar.gz ${images[@]} vm_config.json
+tar czv -f images.tar.gz "${images[@]}" vm_config.json
