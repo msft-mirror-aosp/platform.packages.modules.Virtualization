@@ -244,6 +244,7 @@ javascript: (function() {
                             info.getBoundsInScreen(rect);
                             if (rect.width() == 0) {
                                 info.setText(null);
+                                info.setContentDescription(getString(R.string.empty_line));
                             }
                             info.setScreenReaderFocusable(false);
                             break;
