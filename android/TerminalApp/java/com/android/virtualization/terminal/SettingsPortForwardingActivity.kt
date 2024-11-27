@@ -15,52 +15,38 @@
  */
 package com.android.virtualization.terminal
 
-import android.Manifest
-import android.app.Notification
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.drawable.Icon
+import android.content.SharedPreferences
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.android.virtualization.terminal.MainActivity.TAG
 
 class SettingsPortForwardingActivity : AppCompatActivity() {
+    private lateinit var mSharedPref: SharedPreferences
+    private lateinit var mAdapter: SettingsPortForwardingAdapter
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.settings_port_forwarding)
 
-        val settingsPortForwardingItems = ArrayList<SettingsPortForwardingItem>()
+        mSharedPref =
+            this.getSharedPreferences(getString(R.string.preference_file_key), Context.MODE_PRIVATE)
 
-        val sharedPref = this.getSharedPreferences(
-            getString(R.string.preference_file_key), Context.MODE_PRIVATE
-        )
-
-        val ports =
-            sharedPref.getStringSet(
-                getString(R.string.preference_forwarding_ports),
-                HashSet<String>()
-            )
-
-        for (port in ports!!.sortedWith(compareBy( { it.toInt() } ))) {
-            val enabled =
-                sharedPref.getBoolean(
-                    getString(R.string.preference_forwarding_port_is_enabled) + port,
-                    false
-                )
-            settingsPortForwardingItems.add(SettingsPortForwardingItem(port.toInt(), enabled));
-        }
-
-        val settingsPortForwardingAdapter =
-            SettingsPortForwardingAdapter(settingsPortForwardingItems, this)
+        mAdapter = SettingsPortForwardingAdapter(mSharedPref, this)
 
         val recyclerView: RecyclerView = findViewById(R.id.settings_port_forwarding_recycler_view)
         recyclerView.layoutManager = LinearLayoutManager(this)
-        recyclerView.adapter = settingsPortForwardingAdapter
+        recyclerView.adapter = mAdapter
+    }
+
+    override fun onResume() {
+        super.onResume()
+        mSharedPref.registerOnSharedPreferenceChangeListener(mAdapter)
+    }
+
+    override fun onPause() {
+        mSharedPref.unregisterOnSharedPreferenceChangeListener(mAdapter)
+        super.onPause()
     }
 }
