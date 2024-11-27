@@ -97,6 +97,7 @@ install_prerequisites() {
 	if [[ "$arch" == "x86_64" ]]; then
 		packages+=(
 			libguestfs-tools
+			linux-image-generic
 		)
 	fi
 	DEBIAN_FRONTEND=noninteractive \
