@@ -97,6 +97,7 @@ class SettingsPortForwardingAdapter(
 
     override fun onBindViewHolder(viewHolder: ViewHolder, position: Int) {
         viewHolder.port.text = mItems[position].port.toString()
+        viewHolder.enabledSwitch.contentDescription = viewHolder.port.text
         viewHolder.enabledSwitch.isChecked = mItems[position].enabled
         viewHolder.enabledSwitch.setOnCheckedChangeListener { _, isChecked ->
             val sharedPref: SharedPreferences = context.getSharedPreferences(
