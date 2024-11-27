@@ -69,6 +69,5 @@
     <string name="service_notification_title" msgid="2918088850910713393">"Терминалът работи"</string>
     <string name="service_notification_content" msgid="3579923802797824545">"Кликнете, за да отворите терминала"</string>
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Затваряне"</string>
-    <!-- no translation found for virgl_enabled (5466273280705345122) -->
-    <skip />
+    <string name="virgl_enabled" msgid="5466273280705345122">"VirGL е активирано"</string>
 </resources>

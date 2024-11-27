@@ -17,12 +17,9 @@
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="5597111707986572208">"ടെർമിനൽ"</string>
-    <!-- no translation found for terminal_display (4810127497644015237) -->
-    <skip />
-    <!-- no translation found for terminal_input (4602512831433433551) -->
-    <skip />
-    <!-- no translation found for empty_line (5012067143408427178) -->
-    <skip />
+    <string name="terminal_display" msgid="4810127497644015237">"ടെർമിനൽ ഡിസ്‌പ്ലേ"</string>
+    <string name="terminal_input" msgid="4602512831433433551">"കഴ്‌സർ"</string>
+    <string name="empty_line" msgid="5012067143408427178">"ശൂന്യമായ ലൈൻ"</string>
     <string name="installer_title_text" msgid="500663060973466805">"Linux ടെർമിനൽ ഇൻസ്റ്റാൾ ചെയ്യുക"</string>
     <string name="installer_desc_text_format" msgid="2734224805682171826">"Linux ടെർമിനൽ ലോഞ്ച് ചെയ്യാൻ, നിങ്ങൾക്ക് നെറ്റ്‌വർക്കിലൂടെ ഏകദേശം <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> ഡാറ്റ ഡൗൺലോഡ് ചെയ്യേണ്ടതുണ്ട്.\nനിങ്ങൾക്ക് തുടരണോ?"</string>
     <string name="installer_wait_for_wifi_checkbox_text" msgid="487720664098014506">"വൈഫൈ ലഭ്യമാകുമ്പോൾ ഡൗൺലോഡ് ചെയ്യുക"</string>
@@ -32,8 +29,7 @@
     <string name="installer_notif_title_text" msgid="471160690081159042">"Linux ടെർമിനൽ ഇൻസ്റ്റാൾ ചെയ്യുന്നു"</string>
     <string name="installer_notif_desc_text" msgid="6746098106305899060">"പൂർത്തിയായിക്കഴിഞ്ഞാൽ, Linux ടെർമിനൽ ഇൻസ്റ്റാൾ ചെയ്യാൻ ആരംഭിക്കും"</string>
     <string name="installer_error_network" msgid="3265100678310833813">"നെറ്റ്‌വർക്കുമായി ബന്ധപ്പെട്ട് പ്രശ്‌നമുണ്ടായതിനാൽ ഇൻസ്റ്റാൾ ചെയ്യാനായില്ല"</string>
-    <!-- no translation found for installer_error_no_wifi (8631584648989718121) -->
-    <skip />
+    <string name="installer_error_no_wifi" msgid="8631584648989718121">"വൈഫൈ ലഭ്യമല്ലാത്തതിനാൽ ഇൻസ്‌റ്റാൾ ചെയ്യാനായില്ല"</string>
     <string name="installer_error_unknown" msgid="1991780204241177455">"ഇൻസ്റ്റാൾ ചെയ്യാനായില്ല. വീണ്ടും ശ്രമിക്കുക."</string>
     <string name="action_settings" msgid="5729342767795123227">"ക്രമീകരണം"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"ടെർമിനൽ തയ്യാറാക്കുന്നു"</string>

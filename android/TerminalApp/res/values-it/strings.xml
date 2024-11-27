@@ -62,16 +62,12 @@
     <string name="settings_recovery_error_during_removing_backup" msgid="6515615177661212463">"Impossibile rimuovere il file di backup"</string>
     <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"Rimuovi i dati di backup"</string>
     <string name="settings_recovery_remove_backup_sub_title" msgid="212161719832573475">"Pulisci <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
-    <!-- no translation found for error_title (7196464038692913778) -->
-    <skip />
-    <!-- no translation found for error_desc (1939028888570920661) -->
-    <skip />
-    <!-- no translation found for error_code (3585291676855383649) -->
-    <skip />
+    <string name="error_title" msgid="7196464038692913778">"Errore irreversibile"</string>
+    <string name="error_desc" msgid="1939028888570920661">"Impossibile recuperare da un errore.\nPuoi provare a riavviare l\'app o a utilizzare un\'opzione di recupero."</string>
+    <string name="error_code" msgid="3585291676855383649">"Codice di errore: <xliff:g id="ERROR_CODE">%s</xliff:g>"</string>
     <string name="service_notification_settings" msgid="1437365721184401135">"Impostazioni"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"Il terminale è in esecuzione"</string>
     <string name="service_notification_content" msgid="3579923802797824545">"Tocca per aprire il terminale"</string>
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Chiudi"</string>
-    <!-- no translation found for virgl_enabled (5466273280705345122) -->
-    <skip />
+    <string name="virgl_enabled" msgid="5466273280705345122">"VirGL è abilitata"</string>
 </resources>

@@ -17,12 +17,9 @@
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="5597111707986572208">"ტერმინალი"</string>
-    <!-- no translation found for terminal_display (4810127497644015237) -->
-    <skip />
-    <!-- no translation found for terminal_input (4602512831433433551) -->
-    <skip />
-    <!-- no translation found for empty_line (5012067143408427178) -->
-    <skip />
+    <string name="terminal_display" msgid="4810127497644015237">"ტერმინალის წარმოჩენა"</string>
+    <string name="terminal_input" msgid="4602512831433433551">"კურსორი"</string>
+    <string name="empty_line" msgid="5012067143408427178">"ცარიელი სტრიქონი"</string>
     <string name="installer_title_text" msgid="500663060973466805">"Linux ტერმინალის ინსტალაცია"</string>
     <string name="installer_desc_text_format" msgid="2734224805682171826">"Linux ტერმინალის გაშვებისთვის საჭიროა ქსელიდან ჩამოტვირთოთ დაახლოებით <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> ზომის მონაცემები.\nგსურთ გაგრძელება?"</string>
     <string name="installer_wait_for_wifi_checkbox_text" msgid="487720664098014506">"ჩამოტვირთვა Wi-Fi კავშირის ხელმისაწვდომობისას"</string>
@@ -32,8 +29,7 @@
     <string name="installer_notif_title_text" msgid="471160690081159042">"მიმდინარეობს Linux ტერმინალის ინსტალაცია"</string>
     <string name="installer_notif_desc_text" msgid="6746098106305899060">"დასრულების შემდეგ დაიწყება Linux ტერმინალის ინსტალაცია"</string>
     <string name="installer_error_network" msgid="3265100678310833813">"ქსელის შეცდომის გამო ვერ მოხერხდა ინსტალაცია"</string>
-    <!-- no translation found for installer_error_no_wifi (8631584648989718121) -->
-    <skip />
+    <string name="installer_error_no_wifi" msgid="8631584648989718121">"Wi-Fi მიუწვდომელია, ამიტომ ინსტალაცია ვერ მოხერხდა"</string>
     <string name="installer_error_unknown" msgid="1991780204241177455">"ვერ მოახერხდა ინსტალაცია. ცადეთ ხელახლა."</string>
     <string name="action_settings" msgid="5729342767795123227">"პარამეტრები"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"მიმდინარეობს ტერმინალის მომზადება"</string>

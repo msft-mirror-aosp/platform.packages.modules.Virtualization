@@ -17,12 +17,9 @@
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="5597111707986572208">"Тэрмінал"</string>
-    <!-- no translation found for terminal_display (4810127497644015237) -->
-    <skip />
-    <!-- no translation found for terminal_input (4602512831433433551) -->
-    <skip />
-    <!-- no translation found for empty_line (5012067143408427178) -->
-    <skip />
+    <string name="terminal_display" msgid="4810127497644015237">"Дысплэй тэрмінала"</string>
+    <string name="terminal_input" msgid="4602512831433433551">"Курсор"</string>
+    <string name="empty_line" msgid="5012067143408427178">"Пусты радок"</string>
     <string name="installer_title_text" msgid="500663060973466805">"Усталяванне тэрмінала Linux"</string>
     <string name="installer_desc_text_format" msgid="2734224805682171826">"Каб запусціць тэрмінал Linux, трэба спампаваць каля <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> даных па сетцы.\nПрацягнуць?"</string>
     <string name="installer_wait_for_wifi_checkbox_text" msgid="487720664098014506">"Спампаваць, калі будзе даступная сетка Wi-Fi"</string>
@@ -32,8 +29,7 @@
     <string name="installer_notif_title_text" msgid="471160690081159042">"Ідзе ўсталяванне тэрмінала Linux"</string>
     <string name="installer_notif_desc_text" msgid="6746098106305899060">"Тэрмінал Linux будзе запушчаны пасля завяршэння"</string>
     <string name="installer_error_network" msgid="3265100678310833813">"Не ўдалося ўсталяваць з-за праблемы з сеткай"</string>
-    <!-- no translation found for installer_error_no_wifi (8631584648989718121) -->
-    <skip />
+    <string name="installer_error_no_wifi" msgid="8631584648989718121">"Не ўдалося ўсталяваць, бо сетка Wi-Fi недаступная"</string>
     <string name="installer_error_unknown" msgid="1991780204241177455">"Не ўдалося ўсталяваць. Паўтарыце спробу."</string>
     <string name="action_settings" msgid="5729342767795123227">"Налады"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Ідзе падрыхтоўка тэрмінала"</string>
