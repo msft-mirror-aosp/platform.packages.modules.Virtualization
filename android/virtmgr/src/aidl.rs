@@ -573,40 +573,41 @@ impl VirtualizationService {
                 .or_binder_exception(ExceptionCode::SECURITY)?;
         }
 
-        // Check if partition images are labeled incorrectly. This is to prevent random images
-        // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps) from
-        // being loaded in a pVM. This applies to everything but the instance image in the raw
-        // config, and everything but the non-executable, generated partitions in the app
-        // config.
-        config
-            .disks
-            .iter()
-            .flat_map(|disk| disk.partitions.iter())
-            .filter(|partition| {
-                if is_app_config {
-                    !is_safe_app_partition(&partition.label)
-                } else {
-                    !is_safe_raw_partition(&partition.label)
-                }
-            })
-            .try_for_each(check_label_for_partition)
-            .or_service_specific_exception(-1)?;
+        let kernel = maybe_clone_file(&config.kernel)?;
+        let initrd = maybe_clone_file(&config.initrd)?;
+
+        if config.protectedVm {
+            // Fail fast with a meaningful error message in case device doesn't support pVMs.
+            check_protected_vm_is_supported()?;
+
+            // In a protected VM, we require custom kernels to come from a trusted source
+            // (b/237054515).
+            check_label_for_kernel_files(&kernel, &initrd).or_service_specific_exception(-1)?;
+
+            // Check if partition images are labeled incorrectly. This is to prevent random images
+            // which are not protected by the Android Verified Boot (e.g. bits downloaded by apps)
+            // from being loaded in a pVM. This applies to everything but the instance image in the
+            // raw config, and everything but the non-executable, generated partitions in the app
+            // config.
+            config
+                .disks
+                .iter()
+                .flat_map(|disk| disk.partitions.iter())
+                .filter(|partition| {
+                    if is_app_config {
+                        !is_safe_app_partition(&partition.label)
+                    } else {
+                        !is_safe_raw_partition(&partition.label)
+                    }
+                })
+                .try_for_each(check_label_for_partition)
+                .or_service_specific_exception(-1)?;
+        }
 
         // Check if files for payloads and bases are NOT coming from /vendor and /odm, as they may
         // have unstable interfaces.
         // TODO(b/316431494): remove once Treble interfaces are stabilized.
         check_partitions_for_files(config).or_service_specific_exception(-1)?;
-
-        let kernel = maybe_clone_file(&config.kernel)?;
-        let initrd = maybe_clone_file(&config.initrd)?;
-
-        if config.protectedVm {
-            // In a protected VM, we require custom kernels to come from a trusted source
-            // (b/237054515).
-            check_label_for_kernel_files(&kernel, &initrd).or_service_specific_exception(-1)?;
-            // Fail fast with a meaningful error message in case device doesn't support pVMs.
-            check_protected_vm_is_supported()?;
-        }
 
         let zero_filler_path = temporary_directory.join("zero.img");
         write_zero_filler(&zero_filler_path)
