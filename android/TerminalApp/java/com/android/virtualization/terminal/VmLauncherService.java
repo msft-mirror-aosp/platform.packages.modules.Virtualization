@@ -35,6 +35,7 @@ import android.system.virtualmachine.VirtualMachineCustomImageConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig.Disk;
 import android.system.virtualmachine.VirtualMachineException;
 import android.util.Log;
+import android.widget.Toast;
 
 import io.grpc.Grpc;
 import io.grpc.InsecureServerCredentials;
@@ -50,6 +51,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Set;
@@ -151,13 +153,12 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         }
         mExecutorService = Executors.newCachedThreadPool();
 
-        ConfigJson json = ConfigJson.from(InstallUtils.getVmConfigPath(this));
+        InstalledImage image = InstalledImage.getDefault(this);
+        ConfigJson json = ConfigJson.from(this, image.getConfigPath());
         VirtualMachineConfig.Builder configBuilder = json.toConfigBuilder(this);
         VirtualMachineCustomImageConfig.Builder customImageConfigBuilder =
                 json.toCustomImageConfigBuilder(this);
-        File backupFile = InstallUtils.getBackupFile(this);
-        if (backupFile.exists()) {
-            customImageConfigBuilder.addDisk(Disk.RWDisk(backupFile.getPath()));
+        if (overrideConfigIfNecessary(customImageConfigBuilder)) {
             configBuilder.setCustomImageConfig(customImageConfigBuilder.build());
         }
         VirtualMachineConfig config = configBuilder.build();
@@ -199,6 +200,33 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         startDebianServer();
 
         return START_NOT_STICKY;
+    }
+
+    private boolean overrideConfigIfNecessary(VirtualMachineCustomImageConfig.Builder builder) {
+        boolean changed = false;
+        // TODO: check if ANGLE is enabled for the app.
+        if (Files.exists(ImageArchive.getSdcardPathForTesting().resolve("virglrenderer"))) {
+            builder.setGpuConfig(
+                    new VirtualMachineCustomImageConfig.GpuConfig.Builder()
+                            .setBackend("virglrenderer")
+                            .setRendererUseEgl(true)
+                            .setRendererUseGles(true)
+                            .setRendererUseGlx(false)
+                            .setRendererUseSurfaceless(true)
+                            .setRendererUseVulkan(false)
+                            .setContextTypes(new String[] {"virgl2"})
+                            .build());
+            Toast.makeText(this, R.string.virgl_enabled, Toast.LENGTH_SHORT).show();
+            changed = true;
+        }
+
+        InstalledImage image = InstalledImage.getDefault(this);
+        if (image.hasBackup()) {
+            Path backup = image.getBackupFile();
+            builder.addDisk(Disk.RWDisk(backup.toString()));
+            changed = true;
+        }
+        return changed;
     }
 
     private void startDebianServer() {
