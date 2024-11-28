@@ -17,25 +17,36 @@ package com.android.virtualization.terminal
 
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
+import android.view.Window
+import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
+import com.android.virtualization.terminal.MainActivity.TAG
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import java.io.IOException
+import java.nio.file.Files
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-
-const val TAG: String = "VmTerminalApp"
 
 class SettingsRecoveryActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.settings_recovery)
+
+        Handler(Looper.getMainLooper()).post {
+            val lp: WindowManager.LayoutParams = getWindow().getAttributes()
+            lp.accessibilityTitle = getString(R.string.settings_recovery_title)
+            getWindow().setAttributes(lp)
+        }
+
         val resetCard = findViewById<MaterialCardView>(R.id.settings_recovery_reset_card)
         resetCard.setOnClickListener {
             var backupRootfs = false
@@ -56,7 +67,8 @@ class SettingsRecoveryActivity : AppCompatActivity() {
             dialog.show()
         }
         val resetBackupCard = findViewById<View>(R.id.settings_recovery_reset_backup_card)
-        resetBackupCard.isVisible = InstallUtils.getBackupFile(this).exists()
+
+        resetBackupCard.isVisible = InstalledImage.getDefault(this).hasBackup()
 
         resetBackupCard.setOnClickListener {
             val dialog = MaterialAlertDialogBuilder(this)
@@ -74,7 +86,9 @@ class SettingsRecoveryActivity : AppCompatActivity() {
     }
 
     private fun removeBackup(): Unit {
-        if (!InstallUtils.getBackupFile(this@SettingsRecoveryActivity).delete()) {
+        try {
+            InstalledImage.getDefault(this).deleteBackup()
+        } catch (e: IOException) {
             Snackbar.make(
                 findViewById(android.R.id.content),
                 R.string.settings_recovery_error_during_removing_backup,
@@ -86,12 +100,14 @@ class SettingsRecoveryActivity : AppCompatActivity() {
 
     private fun uninstall(backupRootfs: Boolean): Unit {
         var backupDone = false
+        val image = InstalledImage.getDefault(this)
         try {
             if (backupRootfs) {
-                InstallUtils.backupRootFs(this@SettingsRecoveryActivity)
+                image.uninstallAndBackup()
                 backupDone = true
+            } else {
+                image.uninstallFully()
             }
-            InstallUtils.deleteInstallation(this@SettingsRecoveryActivity)
         } catch (e: IOException) {
             val errorMsgId = if (backupRootfs && !backupDone) R.string.settings_recovery_error_due_to_backup
                     else R.string.settings_recovery_error;

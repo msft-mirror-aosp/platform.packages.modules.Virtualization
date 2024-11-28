@@ -20,11 +20,11 @@
     <!-- Application name of this terminal app shown in the launcher. This app provides computer terminal to connect to virtual machine. [CHAR LIMIT=16] -->
     <string name="app_name">Terminal</string>
 
-    <!-- Description of the entire terminal display showing texts. This is read by talkback. -->
+    <!-- Description of the entire terminal display showing texts. This is read by talkback. [CHAR LIMIT=none] -->
     <string name="terminal_display">Terminal display</string>
-    <!-- Description of the edit box accepting user input. This is read by talkback. -->
+    <!-- Description of the edit box accepting user input. This is read by talkback. [CHAR LIMIT=none] -->
     <string name="terminal_input">Cursor</string>
-    <!-- Description of an empty line in the terminal. This is read by talkback. -->
+    <!-- Description of an empty line in the terminal. This is read by talkback. [CHAR LIMIT=none] -->
     <string name="empty_line">Empty line</string>
 
     <!-- Installer activity title [CHAR LIMIT=none] -->
@@ -132,4 +132,7 @@
     <string name="service_notification_content">Click to open the terminal</string>
     <!-- Notification action button for closing the virtual machine [CHAR LIMIT=20] -->
     <string name="service_notification_quit_action">Close</string>
+
+    <!-- VirGL is the name of hardware acceleration for VM, the name is supposed not to be translated. [CHAR LIMIT=20] -->
+    <string name="virgl_enabled">VirGL is enabled</string>
 </resources>

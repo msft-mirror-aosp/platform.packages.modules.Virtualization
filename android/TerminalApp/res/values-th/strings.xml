@@ -37,8 +37,7 @@
     <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"กำหนดขนาด <xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g> แล้ว"</string>
     <string name="settings_disk_resize_resize_gb_max_format" msgid="6221210151688630371">"สูงสุด <xliff:g id="MAX_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_cancel" msgid="2182388126941686562">"ยกเลิก"</string>
-    <!-- no translation found for settings_disk_resize_resize_restart_vm_to_apply (83303619015991908) -->
-    <skip />
+    <string name="settings_disk_resize_resize_restart_vm_to_apply" msgid="83303619015991908">"รีสตาร์ทเพื่อใช้"</string>
     <string name="settings_port_forwarding_title" msgid="4867439149919324784">"การส่งต่อพอร์ต"</string>
     <string name="settings_port_forwarding_sub_title" msgid="6848040752531535488">"กำหนดค่าการส่งต่อพอร์ต"</string>
     <string name="settings_port_forwarding_notification_title" msgid="2822798067500254704">"เทอร์มินัลกำลังพยายามเปิดพอร์ตใหม่"</string>
@@ -53,6 +52,18 @@
     <string name="settings_recovery_reset_dialog_message" msgid="6392681199895696206">"ระบบจะลบข้อมูล"</string>
     <string name="settings_recovery_reset_dialog_confirm" msgid="431718610013947861">"ยืนยัน"</string>
     <string name="settings_recovery_reset_dialog_cancel" msgid="1666264288208459725">"ยกเลิก"</string>
+    <string name="settings_recovery_reset_dialog_backup_option" msgid="2079431035205584614">"สำรองข้อมูลไปยัง <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
+    <string name="settings_recovery_error_due_to_backup" msgid="2129959464075410607">"กู้คืนไม่สำเร็จเนื่องจากสำรองข้อมูลไม่สำเร็จ"</string>
+    <string name="settings_recovery_error" msgid="2451912941535666379">"การกู้คืนไม่สำเร็จ"</string>
+    <string name="settings_recovery_error_during_removing_backup" msgid="6515615177661212463">"นำไฟล์ข้อมูลสำรองออกไม่ได้"</string>
+    <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"นําข้อมูลสํารองออก"</string>
+    <string name="settings_recovery_remove_backup_sub_title" msgid="212161719832573475">"ล้าง <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
+    <!-- no translation found for error_title (7196464038692913778) -->
+    <skip />
+    <!-- no translation found for error_desc (1939028888570920661) -->
+    <skip />
+    <!-- no translation found for error_code (3585291676855383649) -->
+    <skip />
     <string name="service_notification_settings" msgid="1437365721184401135">"การตั้งค่า"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"เทอร์มินัลกำลังทำงาน"</string>
     <string name="service_notification_content" msgid="3579923802797824545">"คลิกเพื่อเปิดเทอร์มินัล"</string>
