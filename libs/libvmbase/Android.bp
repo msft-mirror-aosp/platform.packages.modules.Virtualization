@@ -113,11 +113,16 @@ rust_library_rlib {
 cc_library_static {
     name: "libvmbase_entry",
     defaults: ["vmbase_cc_defaults"],
-    srcs: [
-        "entry.S",
-        "exceptions.S",
-        "exceptions_panic.S",
-    ],
+    srcs: [],
+    target: {
+        android_arm64: {
+            srcs: [
+                "asm/aarch64/entry.S",
+                "asm/aarch64/exceptions.S",
+                "asm/aarch64/exceptions_panic.S",
+            ],
+        },
+    },
 }
 
 filegroup {
