@@ -30,17 +30,8 @@ use log::info;
 use log::warn;
 use vmbase::{
     layout::{self, crosvm},
-    memory::{PageTable, MEMORY, SIZE_2MB, SIZE_4KB},
-    util::align_up,
+    memory::{PageTable, MEMORY},
 };
-
-/// Returns memory range reserved for the appended payload.
-pub fn appended_payload_range() -> Range<VirtualAddress> {
-    let start = align_up(layout::binary_end().0, SIZE_4KB).unwrap();
-    // pvmfw is contained in a 2MiB region so the payload can't be larger than the 2MiB alignment.
-    let end = align_up(start, SIZE_2MB).unwrap();
-    VirtualAddress(start)..VirtualAddress(end)
-}
 
 /// Region allocated for the stack.
 pub fn stack_range() -> Range<VirtualAddress> {
@@ -59,7 +50,7 @@ pub fn init_page_table() -> result::Result<PageTable, MapError> {
     page_table.map_data(&stack_range().into())?;
     page_table.map_code(&layout::text_range().into())?;
     page_table.map_rodata(&layout::rodata_range().into())?;
-    page_table.map_data_dbm(&appended_payload_range().into())?;
+    page_table.map_data_dbm(&layout::image_footer_range().into())?;
     if let Err(e) = page_table.map_device(&layout::console_uart_page().into()) {
         error!("Failed to remap the UART as a dynamic page table entry: {e}");
         return Err(e);

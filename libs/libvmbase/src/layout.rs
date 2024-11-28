@@ -70,6 +70,11 @@ pub fn rodata_range() -> Range<VirtualAddress> {
     linker_region!(rodata_begin, rodata_end)
 }
 
+/// Region which may contain a footer appended to the binary at load time.
+pub fn image_footer_range() -> Range<VirtualAddress> {
+    linker_region!(image_footer_begin, image_footer_end)
+}
+
 /// Initialised writable data.
 pub fn data_range() -> Range<VirtualAddress> {
     linker_region!(data_begin, data_end)
