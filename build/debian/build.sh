@@ -97,6 +97,7 @@ install_prerequisites() {
 	if [[ "$arch" == "x86_64" ]]; then
 		packages+=(
 			libguestfs-tools
+			linux-image-generic
 		)
 	fi
 	DEBIAN_FRONTEND=noninteractive \
@@ -241,7 +242,7 @@ elif [[ "$arch" == "x86_64" ]]; then
 	mv vmlinuz* vmlinuz
 	mv initrd.img* initrd.img
 	images+=(
-		boot_part
+		bios_part
 		root_part
 		efi_part
 		vmlinuz
