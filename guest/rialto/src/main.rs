@@ -73,7 +73,8 @@ fn vm_type(fdt: &libfdt::Fdt) -> Result<VmType> {
 fn new_page_table() -> Result<PageTable> {
     let mut page_table = PageTable::default();
 
-    page_table.map_data(&layout::scratch_range().into())?;
+    page_table.map_data(&layout::data_bss_range().into())?;
+    page_table.map_data(&layout::eh_stack_range().into())?;
     page_table.map_data(&layout::stack_range(40 * PAGE_SIZE).into())?;
     page_table.map_code(&layout::text_range().into())?;
     page_table.map_rodata(&layout::rodata_range().into())?;
