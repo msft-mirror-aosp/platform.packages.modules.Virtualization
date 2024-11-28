@@ -98,7 +98,7 @@ class InstalledImage {
     }
 
     public long getSize() throws IOException {
-        return roundUp(Files.size(mRootPartition));
+        return Files.size(mRootPartition);
     }
 
     public long getSmallestSizePossible() throws IOException {
