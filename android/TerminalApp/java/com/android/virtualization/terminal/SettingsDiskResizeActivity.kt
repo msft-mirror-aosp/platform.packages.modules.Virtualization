@@ -23,15 +23,11 @@ import android.icu.util.Measure
 import android.icu.util.MeasureUnit
 import android.os.Bundle
 import android.os.FileUtils
-import android.os.Handler
-import android.os.Looper
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.TextUtils
 import android.text.style.RelativeSizeSpan
 import android.widget.SeekBar
-import android.view.Window
-import android.view.WindowManager
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
@@ -67,12 +63,6 @@ class SettingsDiskResizeActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.settings_disk_resize)
-
-        Handler(Looper.getMainLooper()).post {
-            val lp: WindowManager.LayoutParams = getWindow().getAttributes()
-            lp.accessibilityTitle = getString(R.string.settings_disk_resize_title)
-            getWindow().setAttributes(lp)
-        }
 
         diskSizeStepMb = 1L shl resources.getInteger(R.integer.disk_size_round_up_step_size_in_mb)
 
