@@ -15,27 +15,34 @@
  */
 package com.android.virtualization.terminal;
 
-import android.Manifest;
+import static android.webkit.WebSettings.LOAD_NO_CACHE;
+
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
+import android.content.SharedPreferences;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.drawable.Icon;
 import android.graphics.fonts.FontStyle;
+import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
-import android.system.ErrnoException;
-import android.system.Os;
+import android.os.ConditionVariable;
+import android.os.Environment;
+import android.provider.Settings;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.accessibility.AccessibilityManager;
+import android.view.accessibility.AccessibilityManager.AccessibilityStateChangeListener;
 import android.webkit.ClientCertRequest;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
@@ -43,69 +50,73 @@ import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Toast;
 
-import androidx.appcompat.app.AppCompatActivity;
+import androidx.activity.result.ActivityResult;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 
-import com.android.virtualization.vmlauncher.InstallUtils;
-import com.android.virtualization.vmlauncher.VmLauncherServices;
+import com.android.internal.annotations.VisibleForTesting;
 
 import com.google.android.material.appbar.MaterialToolbar;
 
-import java.io.File;
-import java.io.FileDescriptor;
-import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.RandomAccessFile;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
-import java.security.Key;
 import java.security.KeyStore;
 import java.security.PrivateKey;
-import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
+import java.util.Map;
 
-public class MainActivity extends AppCompatActivity
-        implements VmLauncherServices.VmLauncherServiceCallback,
-                AccessibilityManager.TouchExplorationStateChangeListener {
-
-    private static final String TAG = "VmTerminalApp";
+public class MainActivity extends BaseActivity
+        implements VmLauncherService.VmLauncherServiceCallback, AccessibilityStateChangeListener {
+    static final String TAG = "VmTerminalApp";
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
     private static final int REQUEST_CODE_INSTALLER = 0x33;
-    private static final int FONT_SIZE_DEFAULT = 12;
+    private static final int FONT_SIZE_DEFAULT = 13;
 
+    private InstalledImage mImage;
     private X509Certificate[] mCertificates;
     private PrivateKey mPrivateKey;
     private WebView mWebView;
     private AccessibilityManager mAccessibilityManager;
+    private ConditionVariable mBootCompleted = new ConditionVariable();
     private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
+    private ActivityResultLauncher<Intent> mManageExternalStorageActivityResultLauncher;
+    private static final Map<Integer, Integer> BTN_KEY_CODE_MAP =
+            Map.ofEntries(
+                    Map.entry(R.id.btn_tab, KeyEvent.KEYCODE_TAB),
+                    // Alt key sends ESC keycode
+                    Map.entry(R.id.btn_alt, KeyEvent.KEYCODE_ESCAPE),
+                    Map.entry(R.id.btn_esc, KeyEvent.KEYCODE_ESCAPE),
+                    Map.entry(R.id.btn_left, KeyEvent.KEYCODE_DPAD_LEFT),
+                    Map.entry(R.id.btn_right, KeyEvent.KEYCODE_DPAD_RIGHT),
+                    Map.entry(R.id.btn_up, KeyEvent.KEYCODE_DPAD_UP),
+                    Map.entry(R.id.btn_down, KeyEvent.KEYCODE_DPAD_DOWN),
+                    Map.entry(R.id.btn_home, KeyEvent.KEYCODE_MOVE_HOME),
+                    Map.entry(R.id.btn_end, KeyEvent.KEYCODE_MOVE_END),
+                    Map.entry(R.id.btn_pgup, KeyEvent.KEYCODE_PAGE_UP),
+                    Map.entry(R.id.btn_pgdn, KeyEvent.KEYCODE_PAGE_DOWN));
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        boolean launchInstaller = installIfNecessary();
-        try {
-            // No resize for now.
-            long newSizeInBytes = 0;
-            diskResize(this, newSizeInBytes);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to resize disk", e);
-            Toast.makeText(this, "Error resizing disk: " + e.getMessage(), Toast.LENGTH_LONG)
-                    .show();
-        }
-
-        checkAndRequestPostNotificationsPermission();
+        mImage = InstalledImage.getDefault(this);
 
         NotificationManager notificationManager = getSystemService(NotificationManager.class);
-        NotificationChannel notificationChannel =
-                new NotificationChannel(TAG, TAG, NotificationManager.IMPORTANCE_LOW);
-        assert notificationManager != null;
-        notificationManager.createNotificationChannel(notificationChannel);
+        if (notificationManager.getNotificationChannel(this.getPackageName()) == null) {
+            NotificationChannel channel =
+                    new NotificationChannel(
+                            this.getPackageName(),
+                            getString(R.string.app_name),
+                            NotificationManager.IMPORTANCE_DEFAULT);
+            notificationManager.createNotificationChannel(channel);
+        }
+
+        boolean launchInstaller = installIfNecessary();
 
         setContentView(R.layout.activity_headless);
 
@@ -115,18 +126,83 @@ public class MainActivity extends AppCompatActivity
         mWebView.getSettings().setDatabaseEnabled(true);
         mWebView.getSettings().setDomStorageEnabled(true);
         mWebView.getSettings().setJavaScriptEnabled(true);
+        mWebView.getSettings().setCacheMode(LOAD_NO_CACHE);
         mWebView.setWebChromeClient(new WebChromeClient());
 
-        mAccessibilityManager = getSystemService(AccessibilityManager.class);
-        mAccessibilityManager.addTouchExplorationStateChangeListener(this);
+        setupModifierKeys();
 
-        connectToTerminalService();
+        mAccessibilityManager = getSystemService(AccessibilityManager.class);
+        mAccessibilityManager.addAccessibilityStateChangeListener(this);
+
         readClientCertificate();
 
+        mManageExternalStorageActivityResultLauncher =
+                registerForActivityResult(
+                        new ActivityResultContracts.StartActivityForResult(),
+                        (ActivityResult result) -> {
+                            startVm();
+                        });
+        getWindow()
+                .getDecorView()
+                .getRootView()
+                .setOnApplyWindowInsetsListener(
+                        (v, insets) -> {
+                            updateKeyboardContainerVisibility();
+                            return insets;
+                        });
         // if installer is launched, it will be handled in onActivityResult
         if (!launchInstaller) {
-            startVm();
+            if (!Environment.isExternalStorageManager()) {
+                requestStoragePermissions(this, mManageExternalStorageActivityResultLauncher);
+            } else {
+                startVm();
+            }
         }
+    }
+
+    private void setupModifierKeys() {
+        // Only ctrl key is special, it communicates with xtermjs to modify key event with ctrl key
+        findViewById(R.id.btn_ctrl)
+                .setOnClickListener(
+                        (v) -> {
+                            mWebView.loadUrl(TerminalView.CTRL_KEY_HANDLER);
+                            mWebView.loadUrl(TerminalView.ENABLE_CTRL_KEY);
+                        });
+
+        View.OnClickListener modifierButtonClickListener =
+                v -> {
+                    if (BTN_KEY_CODE_MAP.containsKey(v.getId())) {
+                        int keyCode = BTN_KEY_CODE_MAP.get(v.getId());
+                        mWebView.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, keyCode));
+                        mWebView.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, keyCode));
+                    }
+                };
+
+        for (int btn : BTN_KEY_CODE_MAP.keySet()) {
+            View v = findViewById(btn);
+            if (v != null) {
+                v.setOnClickListener(modifierButtonClickListener);
+            }
+        }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (Build.isDebuggable() && event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN) {
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                ErrorActivity.start(this, new Exception("Debug: KeyEvent.KEYCODE_UNKNOWN"));
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    private void requestStoragePermissions(
+            Context context, ActivityResultLauncher<Intent> activityResultLauncher) {
+        Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+        Uri uri = Uri.fromParts("package", context.getPackageName(), null);
+        intent.setData(uri);
+        activityResultLauncher.launch(intent);
     }
 
     private URL getTerminalServiceUrl() {
@@ -140,7 +216,9 @@ public class MainActivity extends AppCompatActivity
                         + "&fontWeightBold="
                         + (FontStyle.FONT_WEIGHT_BOLD + config.fontWeightAdjustment)
                         + "&screenReaderMode="
-                        + mAccessibilityManager.isTouchExplorationEnabled();
+                        + mAccessibilityManager.isEnabled()
+                        + "&titleFixed="
+                        + getString(R.string.app_name);
 
         try {
             return new URL("https", VM_ADDR, TTYD_PORT, "/" + query);
@@ -151,31 +229,20 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void readClientCertificate() {
-        // TODO(b/363235314): instead of using the key in asset, it should be generated in runtime
-        // and then provisioned in the vm via virtio-fs
-        try (InputStream keystoreFileStream =
-                getClass().getResourceAsStream("/assets/client.p12")) {
-            KeyStore keyStore = KeyStore.getInstance("PKCS12");
-            String password = "1234";
-            String alias = "1";
-
-            keyStore.load(keystoreFileStream, password != null ? password.toCharArray() : null);
-            Key key = keyStore.getKey(alias, password.toCharArray());
-            if (key instanceof PrivateKey) {
-                mPrivateKey = (PrivateKey) key;
-                Certificate cert = keyStore.getCertificate(alias);
-                mCertificates = new X509Certificate[1];
-                mCertificates[0] = (X509Certificate) cert;
-            }
-        } catch (Exception e) {
-            Log.e(TAG, e.getMessage());
-        }
+        KeyStore.PrivateKeyEntry pke = CertificateUtils.createOrGetKey();
+        CertificateUtils.writeCertificateToFile(this, pke.getCertificate());
+        mPrivateKey = pke.getPrivateKey();
+        mCertificates = new X509Certificate[1];
+        mCertificates[0] = (X509Certificate) pke.getCertificate();
     }
 
     private void connectToTerminalService() {
         Log.i(TAG, "URL=" + getTerminalServiceUrl().toString());
         mWebView.setWebViewClient(
                 new WebViewClient() {
+                    private boolean mLoadFailed = false;
+                    private long mRequestId = 0;
+
                     @Override
                     public boolean shouldOverrideUrlLoading(
                             WebView view, WebResourceRequest request) {
@@ -183,11 +250,19 @@ public class MainActivity extends AppCompatActivity
                     }
 
                     @Override
+                    public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                        mLoadFailed = false;
+                    }
+
+                    @Override
                     public void onReceivedError(
                             WebView view, WebResourceRequest request, WebResourceError error) {
+                        mLoadFailed = true;
                         switch (error.getErrorCode()) {
                             case WebViewClient.ERROR_CONNECT:
                             case WebViewClient.ERROR_HOST_LOOKUP:
+                            case WebViewClient.ERROR_FAILED_SSL_HANDSHAKE:
+                            case WebViewClient.ERROR_TIMEOUT:
                                 view.reload();
                                 return;
                             default:
@@ -199,17 +274,32 @@ public class MainActivity extends AppCompatActivity
 
                     @Override
                     public void onPageFinished(WebView view, String url) {
-                        URL loadedUrl = null;
-                        try {
-                            loadedUrl = new URL(url);
-                        } catch (MalformedURLException e) {
-                            // cannot happen.
+                        if (mLoadFailed) {
+                            return;
                         }
-                        Log.i(TAG, "on page finished. URL=" + loadedUrl);
-                        if (getTerminalServiceUrl().toString().equals(url)) {
-                            android.os.Trace.endAsyncSection("executeTerminal", 0);
-                            view.setVisibility(View.VISIBLE);
-                        }
+
+                        mRequestId++;
+                        view.postVisualStateCallback(
+                                mRequestId,
+                                new WebView.VisualStateCallback() {
+                                    @Override
+                                    public void onComplete(long requestId) {
+                                        if (requestId == mRequestId) {
+                                            android.os.Trace.endAsyncSection("executeTerminal", 0);
+                                            findViewById(R.id.boot_progress)
+                                                    .setVisibility(View.GONE);
+                                            findViewById(R.id.webview_container)
+                                                    .setVisibility(View.VISIBLE);
+                                            mBootCompleted.open();
+                                            // TODO(b/376813452): support talkback as well
+                                            int keyVisibility =
+                                                    mAccessibilityManager.isEnabled()
+                                                            ? View.GONE
+                                                            : View.VISIBLE;
+                                            updateKeyboardContainerVisibility();
+                                        }
+                                    }
+                                });
                     }
 
                     @Override
@@ -238,90 +328,6 @@ public class MainActivity extends AppCompatActivity
                 .start();
     }
 
-    private void diskResize(Context context, long sizeInBytes) throws IOException {
-        try {
-            if (sizeInBytes == 0) {
-                return;
-            }
-            File file = getPartitionFile(context, "root_part");
-            String filePath = file.getAbsolutePath();
-            Log.d(TAG, "Disk-resize in progress for partition: " + filePath);
-
-            long currentSize = Os.stat(filePath).st_size;
-            runE2fsck(filePath);
-            if (sizeInBytes > currentSize) {
-                allocateSpace(file, sizeInBytes);
-            }
-
-            resizeFilesystem(filePath, sizeInBytes);
-        } catch (ErrnoException e) {
-            Log.e(TAG, "ErrnoException during disk resize", e);
-            throw new IOException("ErrnoException during disk resize", e);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to resize disk", e);
-            throw e;
-        }
-    }
-
-    private static File getPartitionFile(Context context, String fileName)
-            throws FileNotFoundException {
-        File file = new File(context.getFilesDir(), fileName);
-        if (!file.exists()) {
-            Log.d(TAG, fileName + " - file not found");
-            throw new FileNotFoundException("File not found: " + fileName);
-        }
-        return file;
-    }
-
-    private static void allocateSpace(File file, long sizeInBytes) throws IOException {
-        try {
-            RandomAccessFile raf = new RandomAccessFile(file, "rw");
-            FileDescriptor fd = raf.getFD();
-            Os.posix_fallocate(fd, 0, sizeInBytes);
-            raf.close();
-            Log.d(TAG, "Allocated space to: " + sizeInBytes + " bytes");
-        } catch (ErrnoException e) {
-            Log.e(TAG, "Failed to allocate space", e);
-            throw new IOException("Failed to allocate space", e);
-        }
-    }
-
-    private static void runE2fsck(String filePath) throws IOException {
-        try {
-            runCommand("/system/bin/e2fsck", "-f", filePath);
-            Log.d(TAG, "e2fsck completed: " + filePath);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to run e2fsck", e);
-            throw e;
-        }
-    }
-
-    private static void resizeFilesystem(String filePath, long sizeInBytes) throws IOException {
-        long sizeInMB = sizeInBytes / (1024 * 1024);
-        if (sizeInMB == 0) {
-            Log.e(TAG, "Invalid size: " + sizeInBytes + " bytes");
-            throw new IllegalArgumentException("Size cannot be zero MB");
-        }
-        String sizeArg = sizeInMB + "M";
-        try {
-            runCommand("/system/bin/resize2fs", filePath, sizeArg);
-            Log.d(TAG, "resize2fs completed: " + filePath + ", size: " + sizeArg);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to run resize2fs", e);
-            throw e;
-        }
-    }
-
-    private static void runCommand(String... command) throws IOException {
-        try {
-            Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
-            process.waitFor();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Command interrupted", e);
-        }
-    }
-
     private static void waitUntilVmStarts() {
         InetAddress addr = null;
         try {
@@ -338,19 +344,10 @@ public class MainActivity extends AppCompatActivity
         return;
     }
 
-    private void checkAndRequestPostNotificationsPermission() {
-        if (getApplicationContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                    POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE);
-        }
-    }
-
     @Override
     protected void onDestroy() {
-        getSystemService(AccessibilityManager.class).removeTouchExplorationStateChangeListener(this);
-        VmLauncherServices.stopVmLauncherService(this);
+        getSystemService(AccessibilityManager.class).removeAccessibilityStateChangeListener(this);
+        VmLauncherService.stop(this);
         super.onDestroy();
     }
 
@@ -361,16 +358,15 @@ public class MainActivity extends AppCompatActivity
 
     @Override
     public void onVmStop() {
-        Toast.makeText(this, R.string.vm_stop_message, Toast.LENGTH_SHORT).show();
         Log.i(TAG, "onVmStop()");
         finish();
     }
 
     @Override
     public void onVmError() {
-        Toast.makeText(this, R.string.vm_error_message, Toast.LENGTH_SHORT).show();
         Log.i(TAG, "onVmError()");
-        finish();
+        // TODO: error cause is too simple.
+        ErrorActivity.start(this, new Exception("onVmError"));
     }
 
     @Override
@@ -396,8 +392,18 @@ public class MainActivity extends AppCompatActivity
     }
 
     @Override
-    public void onTouchExplorationStateChanged(boolean enabled) {
+    public void onAccessibilityStateChanged(boolean enabled) {
         connectToTerminalService();
+    }
+
+    private void updateKeyboardContainerVisibility() {
+        boolean imeVisible =
+                this.getWindow()
+                        .getDecorView()
+                        .getRootWindowInsets()
+                        .isVisible(WindowInsets.Type.ime());
+        View keyboardContainer = findViewById(R.id.keyboard_container);
+        keyboardContainer.setVisibility(!imeVisible ? View.GONE : View.VISIBLE);
     }
 
     @Override
@@ -409,15 +415,18 @@ public class MainActivity extends AppCompatActivity
                 Log.e(TAG, "Failed to start VM. Installer returned error.");
                 finish();
             }
-            startVm();
+            if (!Environment.isExternalStorageManager()) {
+                requestStoragePermissions(this, mManageExternalStorageActivityResultLauncher);
+            } else {
+                startVm();
+            }
         }
     }
 
     private boolean installIfNecessary() {
         // If payload from external storage exists(only for debuggable build) or there is no
         // installed image, launch installer activity.
-        if ((Build.isDebuggable() && InstallUtils.payloadFromExternalStorageExists())
-                || !InstallUtils.isImageInstalled(this)) {
+        if (!mImage.isInstalled()) {
             Intent intent = new Intent(this, InstallerActivity.class);
             startActivityForResult(intent, REQUEST_CODE_INSTALLER);
             return true;
@@ -426,32 +435,85 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void startVm() {
-        if (!InstallUtils.isImageInstalled(this)) {
+        InstalledImage image = InstalledImage.getDefault(this);
+        if (!image.isInstalled()) {
             return;
         }
-        // TODO: implement intent for setting, close and tap to the notification
-        // Currently mock a PendingIntent for notification.
-        Intent intent = new Intent();
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
+        resizeDiskIfNecessary(image);
+
+        Intent tapIntent = new Intent(this, MainActivity.class);
+        tapIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent tapPendingIntent =
+                PendingIntent.getActivity(this, 0, tapIntent, PendingIntent.FLAG_IMMUTABLE);
+
+        Intent settingsIntent = new Intent(this, SettingsActivity.class);
+        settingsIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent settingsPendingIntent = PendingIntent.getActivity(this, 0, settingsIntent,
+                PendingIntent.FLAG_IMMUTABLE);
+
+        Intent stopIntent = new Intent();
+        stopIntent.setClass(this, VmLauncherService.class);
+        stopIntent.setAction(VmLauncherService.ACTION_STOP_VM_LAUNCHER_SERVICE);
+        PendingIntent stopPendingIntent =
+                PendingIntent.getService(
+                        this,
+                        0,
+                        stopIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Icon icon = Icon.createWithResource(getResources(), R.drawable.ic_launcher_foreground);
-        Notification notification = new Notification.Builder(this, TAG)
-                .setChannelId(TAG)
-                .setSmallIcon(R.drawable.ic_launcher_foreground)
-                .setContentTitle(getResources().getString(R.string.service_notification_title))
-                .setContentText(getResources().getString(R.string.service_notification_content))
-                .setContentIntent(pendingIntent)
-                .setOngoing(true)
-                .addAction(new Notification.Action.Builder(icon,
-                        getResources().getString(R.string.service_notification_settings),
-                        pendingIntent).build())
-                .addAction(new Notification.Action.Builder(icon,
-                        getResources().getString(R.string.service_notification_quit_action),
-                        pendingIntent).build())
-                .build();
+        Notification notification =
+                new Notification.Builder(this, this.getPackageName())
+                        .setSmallIcon(R.drawable.ic_launcher_foreground)
+                        .setContentTitle(
+                                getResources().getString(R.string.service_notification_title))
+                        .setContentText(
+                                getResources().getString(R.string.service_notification_content))
+                        .setContentIntent(tapPendingIntent)
+                        .setOngoing(true)
+                        .addAction(
+                                new Notification.Action.Builder(
+                                                icon,
+                                                getResources()
+                                                        .getString(
+                                                                R.string
+                                                                        .service_notification_settings),
+                                                settingsPendingIntent)
+                                        .build())
+                        .addAction(
+                                new Notification.Action.Builder(
+                                                icon,
+                                                getResources()
+                                                        .getString(
+                                                                R.string
+                                                                        .service_notification_quit_action),
+                                                stopPendingIntent)
+                                        .build())
+                        .build();
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
-        VmLauncherServices.startVmLauncherService(this, this, notification);
+        VmLauncherService.run(this, this, notification);
+        connectToTerminalService();
+    }
+
+    @VisibleForTesting
+    public boolean waitForBootCompleted(long timeoutMillis) {
+        return mBootCompleted.block(timeoutMillis);
+    }
+
+    private void resizeDiskIfNecessary(InstalledImage image) {
+        String prefKey = getString(R.string.preference_file_key);
+        String key = getString(R.string.preference_disk_size_key);
+        SharedPreferences sharedPref = this.getSharedPreferences(prefKey, Context.MODE_PRIVATE);
+        try {
+            // Use current size as default value to ensure if its size is multiple of 4096
+            long newSize = sharedPref.getLong(key, image.getSize());
+            Log.d(TAG, "Resizing disk to " + newSize + " bytes");
+            newSize = image.resize(newSize);
+            sharedPref.edit().putLong(key, newSize).apply();
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to resize disk", e);
+            return;
+        }
     }
 }

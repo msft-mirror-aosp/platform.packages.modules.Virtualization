@@ -9,20 +9,48 @@ android_app {
         "java/**/*.kt",
     ],
     resource_dirs: ["res"],
-    asset_dirs: ["assets"],
     static_libs: [
-        "vm_launcher_lib",
         "androidx-constraintlayout_constraintlayout",
-        "com.google.android.material_material",
         "androidx.window_window",
+        "apache-commons-compress",
+        "com.google.android.material_material",
+        "debian-service-grpclib-lite",
+        "gson",
+        "VmTerminalApp.aidl-java",
     ],
+    jni_libs: [
+        "libforwarder_host_jni",
+    ],
+    libs: [
+        "androidx.annotation_annotation",
+        "framework-virtualization.impl",
+        "framework-annotations-lib",
+    ],
+    use_embedded_native_libs: true,
     platform_apis: true,
     privileged: true,
     optimize: {
+        // TODO(b/377100096): enable bytecode optimization again
+        //optimize: true,
         proguard_flags_files: ["proguard.flags"],
         shrink_resources: true,
     },
     apex_available: [
         "com.android.virt",
     ],
+}
+
+aidl_interface {
+    name: "VmTerminalApp.aidl",
+    srcs: ["aidl/**/*.aidl"],
+    unstable: true,
+    local_include_dir: "aidl",
+    backend: {
+        java: {
+            enabled: true,
+            apex_available: [
+                "com.android.virt",
+            ],
+        },
+    },
 }
