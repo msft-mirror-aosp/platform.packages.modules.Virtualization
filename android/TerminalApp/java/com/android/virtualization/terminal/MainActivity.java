@@ -18,8 +18,6 @@ package com.android.virtualization.terminal;
 import static android.webkit.WebSettings.LOAD_NO_CACHE;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
@@ -105,16 +103,6 @@ public class MainActivity extends BaseActivity
         super.onCreate(savedInstanceState);
 
         mImage = InstalledImage.getDefault(this);
-
-        NotificationManager notificationManager = getSystemService(NotificationManager.class);
-        if (notificationManager.getNotificationChannel(this.getPackageName()) == null) {
-            NotificationChannel channel =
-                    new NotificationChannel(
-                            this.getPackageName(),
-                            getString(R.string.app_name),
-                            NotificationManager.IMPORTANCE_DEFAULT);
-            notificationManager.createNotificationChannel(channel);
-        }
 
         boolean launchInstaller = installIfNecessary();
 
