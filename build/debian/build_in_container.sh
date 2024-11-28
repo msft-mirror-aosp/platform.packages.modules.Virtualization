@@ -23,6 +23,8 @@ while getopts "ra:" option; do
   esac
 done
 
-docker run --privileged -it --workdir /root/Virtualization/build/debian -v \
-  "$ANDROID_BUILD_TOP/packages/modules/Virtualization:/root/Virtualization" -v \
-  /dev:/dev ubuntu:22.04 /root/Virtualization/build/debian/build.sh -a "$arch" $release_flag
+docker run --privileged -it -v /dev:/dev \
+  -v "$ANDROID_BUILD_TOP/packages/modules/Virtualization:/root/Virtualization" \
+  --workdir /root/Virtualization/build/debian \
+  ubuntu:22.04 \
+  bash -c "/root/Virtualization/build/debian/build.sh -a "$arch" $release_flag || bash"
