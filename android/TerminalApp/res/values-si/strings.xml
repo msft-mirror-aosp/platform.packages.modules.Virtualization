@@ -17,12 +17,9 @@
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="5597111707986572208">"ටර්මිනලය"</string>
-    <!-- no translation found for terminal_display (4810127497644015237) -->
-    <skip />
-    <!-- no translation found for terminal_input (4602512831433433551) -->
-    <skip />
-    <!-- no translation found for empty_line (5012067143408427178) -->
-    <skip />
+    <string name="terminal_display" msgid="4810127497644015237">"ටර්මිනල සංදර්ශකය"</string>
+    <string name="terminal_input" msgid="4602512831433433551">"කර්සරය"</string>
+    <string name="empty_line" msgid="5012067143408427178">"හිස් රේඛාව"</string>
     <string name="installer_title_text" msgid="500663060973466805">"Linux ටර්මිනලය ස්ථාපනය කරන්න"</string>
     <string name="installer_desc_text_format" msgid="2734224805682171826">"Linux ටර්මිනලය දියත් කිරීමට, ඔබට ජාලය හරහා දත්ත <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> පමණ බාගත කිරීමට අවශ්‍ය වේ.\nඔබ ඉදිරියට යනවා ද?"</string>
     <string name="installer_wait_for_wifi_checkbox_text" msgid="487720664098014506">"Wi-Fi ලබා ගත හැකි විට බාගන්න"</string>
@@ -32,8 +29,7 @@
     <string name="installer_notif_title_text" msgid="471160690081159042">"Linux ටර්මිනලය ස්ථාපනය කරමින්"</string>
     <string name="installer_notif_desc_text" msgid="6746098106305899060">"Linux ටර්මිනලය අවසන් වූ පසු ආරම්භ වනු ඇත"</string>
     <string name="installer_error_network" msgid="3265100678310833813">"ජාල ගැටලුවක් හේතුවෙන් ස්ථාපනය කිරීමට අසමත් විය"</string>
-    <!-- no translation found for installer_error_no_wifi (8631584648989718121) -->
-    <skip />
+    <string name="installer_error_no_wifi" msgid="8631584648989718121">"Wi-Fi නොමැති නිසා ස්ථාපනය කිරීමට අසමත් විය"</string>
     <string name="installer_error_unknown" msgid="1991780204241177455">"ස්ථාපනය කිරීමට අසමත් විය. නැවත උත්සාහ කරන්න."</string>
     <string name="action_settings" msgid="5729342767795123227">"සැකසීම්"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"ටර්මිනලය සූදානම් කිරීම"</string>
@@ -66,12 +62,9 @@
     <string name="settings_recovery_error_during_removing_backup" msgid="6515615177661212463">"උපස්ථ ගොනුව ඉවත් කළ නොහැක"</string>
     <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"උපස්ථ දත්ත ඉවත් කරන්න"</string>
     <string name="settings_recovery_remove_backup_sub_title" msgid="212161719832573475">"<xliff:g id="PATH">/mnt/backup</xliff:g> පිරිසිදු කරන්න"</string>
-    <!-- no translation found for error_title (7196464038692913778) -->
-    <skip />
-    <!-- no translation found for error_desc (1939028888570920661) -->
-    <skip />
-    <!-- no translation found for error_code (3585291676855383649) -->
-    <skip />
+    <string name="error_title" msgid="7196464038692913778">"ප්‍රතිසාධනය කළ නොහැකි දෝෂය"</string>
+    <string name="error_desc" msgid="1939028888570920661">"දෝෂයකින් ප්‍රතිසාධනය කිරීමට අසමත් විය.\nඔබට යෙදුම යළි ඇරඹීමට උත්සාහ කළ හැක, නැතහොත් ප්‍රතිසාධන විකල්පයෙන් එකක් උත්සාහ කරන්න."</string>
+    <string name="error_code" msgid="3585291676855383649">"දෝෂ කේතය: <xliff:g id="ERROR_CODE">%s</xliff:g>"</string>
     <string name="service_notification_settings" msgid="1437365721184401135">"සැකසීම්"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"පර්යන්තය ධාවනය වේ"</string>
     <string name="service_notification_content" msgid="3579923802797824545">"ටර්මිනලය විවෘත කිරීමට ක්ලික් කරන්න"</string>

@@ -17,12 +17,9 @@
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="5597111707986572208">"Terminal"</string>
-    <!-- no translation found for terminal_display (4810127497644015237) -->
-    <skip />
-    <!-- no translation found for terminal_input (4602512831433433551) -->
-    <skip />
-    <!-- no translation found for empty_line (5012067143408427178) -->
-    <skip />
+    <string name="terminal_display" msgid="4810127497644015237">"Terminal displeyi"</string>
+    <string name="terminal_input" msgid="4602512831433433551">"Kursor"</string>
+    <string name="empty_line" msgid="5012067143408427178">"Boş sətir"</string>
     <string name="installer_title_text" msgid="500663060973466805">"Linux terminalını quraşdırın"</string>
     <string name="installer_desc_text_format" msgid="2734224805682171826">"Linux terminalını işə salmaq üçün şəbəkə vasitəsilə təxminən <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> həcmində data endirməlisiniz.\nDavam etmək istəyirsiniz?"</string>
     <string name="installer_wait_for_wifi_checkbox_text" msgid="487720664098014506">"Wi-Fi əlçatan olduqda endirin"</string>
@@ -32,8 +29,7 @@
     <string name="installer_notif_title_text" msgid="471160690081159042">"Linux terminalı quraşdırılır"</string>
     <string name="installer_notif_desc_text" msgid="6746098106305899060">"Tamamlandıqan sonra Linux terminalı işə salınacaq"</string>
     <string name="installer_error_network" msgid="3265100678310833813">"Şəbəkə problemi səbəbilə quraşdırmaq alınmadı"</string>
-    <!-- no translation found for installer_error_no_wifi (8631584648989718121) -->
-    <skip />
+    <string name="installer_error_no_wifi" msgid="8631584648989718121">"Wi-Fi əlçatan olmadığı üçün quraşdırmaq alınmadı"</string>
     <string name="installer_error_unknown" msgid="1991780204241177455">"Quraşdırmaq alınmadı. Yenidən cəhd edin."</string>
     <string name="action_settings" msgid="5729342767795123227">"Ayarlar"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Terminal hazırlanır"</string>

@@ -17,12 +17,9 @@
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="5597111707986572208">"Terminal"</string>
-    <!-- no translation found for terminal_display (4810127497644015237) -->
-    <skip />
-    <!-- no translation found for terminal_input (4602512831433433551) -->
-    <skip />
-    <!-- no translation found for empty_line (5012067143408427178) -->
-    <skip />
+    <string name="terminal_display" msgid="4810127497644015237">"Pantalla de la terminal"</string>
+    <string name="terminal_input" msgid="4602512831433433551">"Cursor"</string>
+    <string name="empty_line" msgid="5012067143408427178">"Línea vacía"</string>
     <string name="installer_title_text" msgid="500663060973466805">"Instala la terminal de Linux"</string>
     <string name="installer_desc_text_format" msgid="2734224805682171826">"Para iniciar la terminal de Linux, debes descargar aproximadamente <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> de datos a través de la red.\n¿Quieres continuar?"</string>
     <string name="installer_wait_for_wifi_checkbox_text" msgid="487720664098014506">"Descargar cuando haya una red Wi-Fi disponible"</string>
@@ -32,8 +29,7 @@
     <string name="installer_notif_title_text" msgid="471160690081159042">"Instalando la terminal de Linux"</string>
     <string name="installer_notif_desc_text" msgid="6746098106305899060">"Se iniciará la terminal de Linux después de finalizar"</string>
     <string name="installer_error_network" msgid="3265100678310833813">"No se pudo instalar debido a un problema de red"</string>
-    <!-- no translation found for installer_error_no_wifi (8631584648989718121) -->
-    <skip />
+    <string name="installer_error_no_wifi" msgid="8631584648989718121">"La instalación falló porque no hay una conexión Wi-Fi disponible"</string>
     <string name="installer_error_unknown" msgid="1991780204241177455">"No se pudo instalar. Vuelve a intentarlo."</string>
     <string name="action_settings" msgid="5729342767795123227">"Configuración"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Preparando la terminal"</string>

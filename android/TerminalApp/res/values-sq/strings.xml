@@ -66,12 +66,9 @@
     <string name="settings_recovery_error_during_removing_backup" msgid="6515615177661212463">"Skedari i rezervimit nuk mund të hiqet"</string>
     <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"Hiq të dhënat e rezervimit"</string>
     <string name="settings_recovery_remove_backup_sub_title" msgid="212161719832573475">"Pastro <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
-    <!-- no translation found for error_title (7196464038692913778) -->
-    <skip />
-    <!-- no translation found for error_desc (1939028888570920661) -->
-    <skip />
-    <!-- no translation found for error_code (3585291676855383649) -->
-    <skip />
+    <string name="error_title" msgid="7196464038692913778">"Gabim i parikuperueshëm"</string>
+    <string name="error_desc" msgid="1939028888570920661">"Rikuperimi nga një gabim dështoi.\nMund të provosh ta rinisësh aplikacionin ose provo një nga opsionet e rikuperimit."</string>
+    <string name="error_code" msgid="3585291676855383649">"Kodi i gabimit: <xliff:g id="ERROR_CODE">%s</xliff:g>"</string>
     <string name="service_notification_settings" msgid="1437365721184401135">"Cilësimet"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"Terminali po ekzekutohet"</string>
     <string name="service_notification_content" msgid="3579923802797824545">"Kliko për të hapur terminalin"</string>

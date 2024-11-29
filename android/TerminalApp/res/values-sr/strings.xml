@@ -17,12 +17,9 @@
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="5597111707986572208">"Терминал"</string>
-    <!-- no translation found for terminal_display (4810127497644015237) -->
-    <skip />
-    <!-- no translation found for terminal_input (4602512831433433551) -->
-    <skip />
-    <!-- no translation found for empty_line (5012067143408427178) -->
-    <skip />
+    <string name="terminal_display" msgid="4810127497644015237">"Приказ терминала"</string>
+    <string name="terminal_input" msgid="4602512831433433551">"Курсор"</string>
+    <string name="empty_line" msgid="5012067143408427178">"Празан ред"</string>
     <string name="installer_title_text" msgid="500663060973466805">"Инсталирајте Linux терминал"</string>
     <string name="installer_desc_text_format" msgid="2734224805682171826">"Да бисте покренули Linux терминал, треба да преузмете око <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> података преко мреже.\nЖелите да наставите?"</string>
     <string name="installer_wait_for_wifi_checkbox_text" msgid="487720664098014506">"Преузми када WiFi буде доступан"</string>
@@ -32,8 +29,7 @@
     <string name="installer_notif_title_text" msgid="471160690081159042">"Инсталира се Linux терминал"</string>
     <string name="installer_notif_desc_text" msgid="6746098106305899060">"Linux терминал ће се покренути после завршетка"</string>
     <string name="installer_error_network" msgid="3265100678310833813">"Инсталирање није успело због проблема са мрежом"</string>
-    <!-- no translation found for installer_error_no_wifi (8631584648989718121) -->
-    <skip />
+    <string name="installer_error_no_wifi" msgid="8631584648989718121">"Инсталирање није успело јер WiFi није доступан"</string>
     <string name="installer_error_unknown" msgid="1991780204241177455">"Инсталирање није успело. Пробајте поново."</string>
     <string name="action_settings" msgid="5729342767795123227">"Подешавања"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Терминал се припрема"</string>
