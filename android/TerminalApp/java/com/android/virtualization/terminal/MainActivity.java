@@ -299,11 +299,6 @@ public class MainActivity extends BaseActivity
                                             findViewById(R.id.webview_container)
                                                     .setVisibility(View.VISIBLE);
                                             mBootCompleted.open();
-                                            // TODO(b/376813452): support talkback as well
-                                            int keyVisibility =
-                                                    mAccessibilityManager.isEnabled()
-                                                            ? View.GONE
-                                                            : View.VISIBLE;
                                             updateModifierKeysVisibility();
                                         }
                                     }
