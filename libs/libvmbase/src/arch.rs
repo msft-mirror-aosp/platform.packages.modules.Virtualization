@@ -26,6 +26,9 @@ pub use aarch64::layout;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::linker;
 
+#[cfg(target_arch = "aarch64")]
+pub use aarch64::dbm;
+
 /// Write with well-defined compiled behavior.
 ///
 /// See https://github.com/rust-lang/rust/issues/131894

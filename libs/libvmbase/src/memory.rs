@@ -14,7 +14,6 @@
 
 //! Memory management.
 
-mod dbm;
 mod error;
 mod shared;
 mod stack;
