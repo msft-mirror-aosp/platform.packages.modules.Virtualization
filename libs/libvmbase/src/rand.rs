@@ -14,7 +14,7 @@
 
 //! Functions and drivers for obtaining true entropy.
 
-use crate::hvc;
+use crate::arch::aarch64::hvc;
 use core::fmt;
 use core::mem::size_of;
 use smccc::{self, Hvc};

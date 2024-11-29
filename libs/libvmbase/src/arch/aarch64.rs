@@ -15,6 +15,7 @@
 //! Wrappers of assembly calls.
 
 pub mod dbm;
+pub mod hvc;
 pub mod layout;
 pub mod linker;
 pub mod page_table;
