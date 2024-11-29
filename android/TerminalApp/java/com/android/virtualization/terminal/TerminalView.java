@@ -216,6 +216,8 @@ javascript: (function() {
                             if (id != View.NO_ID) {
                                 info.setText(null);
                                 info.setContentDescription(getString(R.string.terminal_display));
+                                // b/376827536
+                                info.setHintText(getString(R.string.double_tap_to_edit_text));
                             }
 
                             // These two lines below are to prevent this WebView element from being
@@ -230,6 +232,8 @@ javascript: (function() {
                             // Localize the spoken text.
                             if (isEmptyLine(info)) {
                                 info.setContentDescription(getString(R.string.empty_line));
+                                // b/376827536
+                                info.setHintText(getString(R.string.double_tap_to_edit_text));
                             }
                             break;
                         case "android.widget.TextView":

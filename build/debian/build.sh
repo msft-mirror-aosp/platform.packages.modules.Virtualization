@@ -238,6 +238,7 @@ if [[ "$arch" == "aarch64" ]]; then
 	)
 # TODO(b/365955006): remove these lines when uboot supports x86_64 EFI application
 elif [[ "$arch" == "x86_64" ]]; then
+	rm -f vmlinuz initrd.img
 	virt-get-kernel -a "${built_image}"
 	mv vmlinuz* vmlinuz
 	mv initrd.img* initrd.img

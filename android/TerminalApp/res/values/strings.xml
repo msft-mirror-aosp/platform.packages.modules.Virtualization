@@ -26,6 +26,8 @@
     <string name="terminal_input">Cursor</string>
     <!-- Description of an empty line in the terminal. This is read by talkback. [CHAR LIMIT=none] -->
     <string name="empty_line">Empty line</string>
+    <!-- Description of the hint supported by the terminal UI elements. This is read by talkback. [CHAR LIMIT=none] -->
+    <string name="double_tap_to_edit_text">Double-tap to go to cursor</string>
 
     <!-- Installer activity title [CHAR LIMIT=none] -->
     <string name="installer_title_text">Install Linux terminal</string>
@@ -72,7 +74,7 @@
     <string name="settings_disk_resize_resize_gb_max_format"><xliff:g id="max_size" example="256GB">%1$s</xliff:g> max</string>
     <!-- Settings menu button to cancel disk resize. [CHAR LIMIT=16] -->
     <string name="settings_disk_resize_resize_cancel">Cancel</string>
-    <!-- Settings menu button to apply change that requires to restart Terminal app. [CHAR LIMIT=20] -->
+    <!-- Settings menu button to apply change that requires to restart Terminal app. [CHAR LIMIT=40] -->
     <string name="settings_disk_resize_resize_restart_vm_to_apply">Restart to apply</string>
 
     <!-- Settings menu title for 'port forwarding' [CHAR LIMIT=none] -->
