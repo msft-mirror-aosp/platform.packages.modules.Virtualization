@@ -48,6 +48,5 @@ interface IIsolatedCompilationService {
      * callback, unless the returned ICompilationTask is cancelled. The caller should maintain
      * a reference to the ICompilationTask until compilation completes or is cancelled.
      */
-    ICompilationTask startTestCompile(
-            ApexSource apexSource, ICompilationTaskCallback callback, String os);
+    ICompilationTask startTestCompile(ApexSource apexSource, ICompilationTaskCallback callback);
 }
