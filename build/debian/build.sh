@@ -51,6 +51,16 @@ parse_options() {
 	fi
 }
 
+prepare_build_id() {
+	local file=${workdir}/build_id
+	if [ -z "${KOKORO_BUILD_NUMBER}" ]; then
+		echo eng-$(hostname)-$(date --utc) > ${file}
+	else
+		echo ${KOKOR_BUILD_NUMBER} > ${file}
+	fi
+	echo ${file}
+}
+
 install_prerequisites() {
 	apt update
 	packages=(
@@ -211,6 +221,7 @@ trap clean_up EXIT
 
 built_image=image.raw
 workdir=$(mktemp -d)
+build_id=$(prepare_build_id)
 debian_cloud_image=${workdir}/debian_cloud_image
 debian_version=bookworm
 config_space=${debian_cloud_image}/config_space/${debian_version}
@@ -218,6 +229,7 @@ resources_dir=${debian_cloud_image}/src/debian_cloud_images/resources
 arch=aarch64
 debian_arch=arm64
 mode=debug
+
 parse_options "$@"
 check_sudo
 install_prerequisites
@@ -252,4 +264,4 @@ elif [[ "$arch" == "x86_64" ]]; then
 fi
 
 # --sparse option isn't supported in apache-commons-compress
-tar czv -f images.tar.gz "${images[@]}" vm_config.json
+tar czv -f images.tar.gz ${build_id} "${images[@]}" vm_config.json
