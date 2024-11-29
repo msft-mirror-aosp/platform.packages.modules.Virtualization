@@ -22,7 +22,6 @@ pub mod arch;
 pub mod bionic;
 pub mod console;
 mod entry;
-pub mod exceptions;
 pub mod fdt;
 pub mod heap;
 pub mod layout;
