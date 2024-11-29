@@ -16,8 +16,8 @@
 
 use super::dbm::{flush_dirty_range, mark_dirty_block, set_dbm_enabled};
 use super::error::MemoryTrackerError;
-use super::page_table::{PageTable, MMIO_LAZY_MAP_FLAG};
 use super::shared::{SHARED_MEMORY, SHARED_POOL};
+use crate::arch::aarch64::page_table::{PageTable, MMIO_LAZY_MAP_FLAG};
 use crate::dsb;
 use crate::layout;
 use crate::memory::shared::{MemoryRange, MemorySharer, MmioSharer};

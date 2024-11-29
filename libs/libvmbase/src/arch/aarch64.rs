@@ -15,6 +15,7 @@
 //! Wrappers of assembly calls.
 
 pub mod layout;
+pub mod page_table;
 pub mod platform;
 
 /// Reads a value from a system register.
