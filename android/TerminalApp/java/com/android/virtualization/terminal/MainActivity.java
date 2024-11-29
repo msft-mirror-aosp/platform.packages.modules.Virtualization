@@ -53,6 +53,7 @@ import android.webkit.WebViewClient;
 import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
 
 import com.android.internal.annotations.VisibleForTesting;
 
@@ -102,9 +103,7 @@ public class MainActivity extends BaseActivity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (getResources().getBoolean(R.bool.terminal_portrait_only)) {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-        }
+        lockOrientationIfNecessary();
 
         mImage = InstalledImage.getDefault(this);
 
@@ -150,6 +149,23 @@ public class MainActivity extends BaseActivity
                 startVm();
             }
         }
+    }
+
+    private void lockOrientationIfNecessary() {
+        boolean hasHwQwertyKeyboard =
+                getResources().getConfiguration().keyboard == Configuration.KEYBOARD_QWERTY;
+        if (hasHwQwertyKeyboard) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        } else if (getResources().getBoolean(R.bool.terminal_portrait_only)) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        lockOrientationIfNecessary();
+        updateModifierKeysVisibility();
     }
 
     private void setupModifierKeys() {
