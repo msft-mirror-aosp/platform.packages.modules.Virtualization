@@ -46,10 +46,6 @@ enum Actions {
         /// If any APEX is staged, prefer the staged version.
         #[clap(long)]
         prefer_staged: bool,
-
-        /// OS for the VM.
-        #[clap(long, default_value = "microdroid")]
-        os: String,
     },
 }
 
@@ -60,7 +56,7 @@ fn main() -> Result<()> {
 
     match action {
         Actions::StagedApexCompile {} => run_staged_apex_compile()?,
-        Actions::TestCompile { prefer_staged, os } => run_test_compile(prefer_staged, &os)?,
+        Actions::TestCompile { prefer_staged } => run_test_compile(prefer_staged)?,
     }
 
     println!("All Ok!");
@@ -120,9 +116,9 @@ fn run_staged_apex_compile() -> Result<()> {
     run_async_compilation(|service, callback| service.startStagedApexCompile(callback))
 }
 
-fn run_test_compile(prefer_staged: bool, os: &str) -> Result<()> {
+fn run_test_compile(prefer_staged: bool) -> Result<()> {
     let apex_source = if prefer_staged { ApexSource::PreferStaged } else { ApexSource::NoStaged };
-    run_async_compilation(|service, callback| service.startTestCompile(apex_source, callback, os))
+    run_async_compilation(|service, callback| service.startTestCompile(apex_source, callback))
 }
 
 fn run_async_compilation<F>(start_compile_fn: F) -> Result<()>
