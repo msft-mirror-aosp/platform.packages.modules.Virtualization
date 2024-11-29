@@ -135,7 +135,7 @@ public class MainActivity extends BaseActivity
                 .getRootView()
                 .setOnApplyWindowInsetsListener(
                         (v, insets) -> {
-                            updateKeyboardContainerVisibility();
+                            updateModifierKeysVisibility();
                             return insets;
                         });
         // if installer is launched, it will be handled in onActivityResult
@@ -284,7 +284,7 @@ public class MainActivity extends BaseActivity
                                                     mAccessibilityManager.isEnabled()
                                                             ? View.GONE
                                                             : View.VISIBLE;
-                                            updateKeyboardContainerVisibility();
+                                            updateModifierKeysVisibility();
                                         }
                                     }
                                 });
@@ -384,14 +384,15 @@ public class MainActivity extends BaseActivity
         connectToTerminalService();
     }
 
-    private void updateKeyboardContainerVisibility() {
-        boolean imeVisible =
-                this.getWindow()
-                        .getDecorView()
-                        .getRootWindowInsets()
-                        .isVisible(WindowInsets.Type.ime());
-        View keyboardContainer = findViewById(R.id.keyboard_container);
-        keyboardContainer.setVisibility(!imeVisible ? View.GONE : View.VISIBLE);
+    private void updateModifierKeysVisibility() {
+        boolean imeShown =
+                getWindow().getDecorView().getRootWindowInsets().isVisible(WindowInsets.Type.ime());
+        boolean hasHwQwertyKeyboard =
+                getResources().getConfiguration().keyboard == Configuration.KEYBOARD_QWERTY;
+        boolean showModifierKeys = imeShown && !hasHwQwertyKeyboard;
+
+        View modifierKeys = findViewById(R.id.modifier_keys);
+        modifierKeys.setVisibility(showModifierKeys ? View.VISIBLE : View.GONE);
     }
 
     @Override
