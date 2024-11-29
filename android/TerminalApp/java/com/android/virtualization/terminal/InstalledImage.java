@@ -113,6 +113,7 @@ class InstalledImage {
                             * 1024;
             return roundUp(minSize);
         } catch (NumberFormatException e) {
+            Log.e(TAG, "Failed to parse min size, p=" + p + ", result=" + result);
             throw new IOException(e);
         }
     }
@@ -168,7 +169,12 @@ class InstalledImage {
         try {
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
             process.waitFor();
-            return new String(process.getInputStream().readAllBytes());
+            String result = new String(process.getInputStream().readAllBytes());
+            if (process.exitValue() != 0) {
+                Log.w(TAG, "Process returned with error, command=" + String.join(" ", command)
+                    + ", exitValue=" + process.exitValue() + ", result=" + result);
+            }
+            return result;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException("Command interrupted", e);
