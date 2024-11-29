@@ -14,6 +14,8 @@
 
 //! Wrappers of assembly calls.
 
+pub mod platform;
+
 /// Reads a value from a system register.
 #[macro_export]
 macro_rules! read_sysreg {
