@@ -14,13 +14,10 @@
 
 //! Memory layout.
 
-use aarch64_paging::paging::{MemoryRegion, VirtualAddress};
+use aarch64_paging::paging::VirtualAddress;
 use core::ops::Range;
 use log::info;
 use vmbase::{layout, memory::PAGE_SIZE};
-
-pub const DEVICE_REGION: MemoryRegion =
-    MemoryRegion::new(layout::crosvm::MMIO_START, layout::crosvm::MMIO_END);
 
 /// Writable data region for the stack.
 pub fn boot_stack_range() -> Range<VirtualAddress> {

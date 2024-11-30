@@ -360,12 +360,15 @@ pub struct VmContext {
     #[allow(dead_code)] // Keeps the global context alive
     pub(crate) global_context: Strong<dyn IGlobalVmContext>,
     #[allow(dead_code)] // Keeps the server alive
-    vm_server: RpcServer,
+    vm_server: Option<RpcServer>,
 }
 
 impl VmContext {
     /// Construct new VmContext.
-    pub fn new(global_context: Strong<dyn IGlobalVmContext>, vm_server: RpcServer) -> VmContext {
+    pub fn new(
+        global_context: Strong<dyn IGlobalVmContext>,
+        vm_server: Option<RpcServer>,
+    ) -> VmContext {
         VmContext { global_context, vm_server }
     }
 }
@@ -655,7 +658,9 @@ impl VmInstance {
 
         // Now that the VM has been killed, shut down the VirtualMachineService
         // server to eagerly free up the server threads.
-        self.vm_context.vm_server.shutdown()?;
+        if let Some(vm_server) = &self.vm_context.vm_server {
+            vm_server.shutdown()?;
+        }
 
         Ok(())
     }
