@@ -14,7 +14,7 @@
      See the License for the specific language governing permissions and
      limitations under the License.
 -->
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <style name="ModifierKeyStyle" parent="@style/Widget.Material3.Button.TextButton">
         <item name="android:textAppearance">?android:attr/textAppearanceSmall</item>
         <item name="android:textColor">?android:attr/textColorPrimary</item>
@@ -23,5 +23,8 @@
         <item name="android:layout_height">wrap_content</item>
         <item name="android:paddingHorizontal">0dp</item>
         <item name="android:hapticFeedbackEnabled">true</item>
+    </style>
+    <style name="VmTerminalAppTheme" parent="@style/Theme.Material3.DayNight.NoActionBar">
+        <item name="android:windowLightStatusBar" tools:targetApi="m">?android:attr/isLightTheme</item>
     </style>
 </resources>

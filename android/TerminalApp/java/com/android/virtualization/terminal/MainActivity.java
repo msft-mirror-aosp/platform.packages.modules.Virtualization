@@ -15,9 +15,9 @@
  */
 package com.android.virtualization.terminal;
 
+import static android.webkit.WebSettings.LOAD_NO_CACHE;
+
 import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
@@ -33,13 +33,12 @@ import android.os.Bundle;
 import android.os.ConditionVariable;
 import android.os.Environment;
 import android.provider.Settings;
-import android.system.ErrnoException;
-import android.system.Os;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.accessibility.AccessibilityManager;
 import android.view.accessibility.AccessibilityManager.AccessibilityStateChangeListener;
 import android.webkit.ClientCertRequest;
@@ -58,11 +57,7 @@ import com.android.internal.annotations.VisibleForTesting;
 
 import com.google.android.material.appbar.MaterialToolbar;
 
-import java.io.File;
-import java.io.FileDescriptor;
-import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -73,13 +68,14 @@ import java.security.cert.X509Certificate;
 import java.util.Map;
 
 public class MainActivity extends BaseActivity
-        implements VmLauncherServices.VmLauncherServiceCallback, AccessibilityStateChangeListener {
+        implements VmLauncherService.VmLauncherServiceCallback, AccessibilityStateChangeListener {
     static final String TAG = "VmTerminalApp";
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
     private static final int REQUEST_CODE_INSTALLER = 0x33;
     private static final int FONT_SIZE_DEFAULT = 13;
 
+    private InstalledImage mImage;
     private X509Certificate[] mCertificates;
     private PrivateKey mPrivateKey;
     private WebView mWebView;
@@ -87,7 +83,6 @@ public class MainActivity extends BaseActivity
     private ConditionVariable mBootCompleted = new ConditionVariable();
     private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
     private ActivityResultLauncher<Intent> mManageExternalStorageActivityResultLauncher;
-    private static int diskSizeStep;
     private static final Map<Integer, Integer> BTN_KEY_CODE_MAP =
             Map.ofEntries(
                     Map.entry(R.id.btn_tab, KeyEvent.KEYCODE_TAB),
@@ -107,21 +102,11 @@ public class MainActivity extends BaseActivity
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        NotificationManager notificationManager = getSystemService(NotificationManager.class);
-        if (notificationManager.getNotificationChannel(this.getPackageName()) == null) {
-            NotificationChannel channel =
-                    new NotificationChannel(
-                            this.getPackageName(),
-                            getString(R.string.app_name),
-                            NotificationManager.IMPORTANCE_DEFAULT);
-            notificationManager.createNotificationChannel(channel);
-        }
+        mImage = InstalledImage.getDefault(this);
 
         boolean launchInstaller = installIfNecessary();
 
         setContentView(R.layout.activity_headless);
-        diskSizeStep = getResources().getInteger(
-                R.integer.disk_size_round_up_step_size_in_mb) << 20;
 
         MaterialToolbar toolbar = (MaterialToolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
@@ -129,6 +114,7 @@ public class MainActivity extends BaseActivity
         mWebView.getSettings().setDatabaseEnabled(true);
         mWebView.getSettings().setDomStorageEnabled(true);
         mWebView.getSettings().setJavaScriptEnabled(true);
+        mWebView.getSettings().setCacheMode(LOAD_NO_CACHE);
         mWebView.setWebChromeClient(new WebChromeClient());
 
         setupModifierKeys();
@@ -137,7 +123,6 @@ public class MainActivity extends BaseActivity
         mAccessibilityManager.addAccessibilityStateChangeListener(this);
 
         readClientCertificate();
-        connectToTerminalService();
 
         mManageExternalStorageActivityResultLauncher =
                 registerForActivityResult(
@@ -145,7 +130,14 @@ public class MainActivity extends BaseActivity
                         (ActivityResult result) -> {
                             startVm();
                         });
-
+        getWindow()
+                .getDecorView()
+                .getRootView()
+                .setOnApplyWindowInsetsListener(
+                        (v, insets) -> {
+                            updateKeyboardContainerVisibility();
+                            return insets;
+                        });
         // if installer is launched, it will be handled in onActivityResult
         if (!launchInstaller) {
             if (!Environment.isExternalStorageManager()) {
@@ -186,7 +178,7 @@ public class MainActivity extends BaseActivity
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (Build.isDebuggable() && event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN) {
             if (event.getAction() == KeyEvent.ACTION_UP) {
-                launchErrorActivity(new Exception("Debug: KeyEvent.KEYCODE_UNKNOWN"));
+                ErrorActivity.start(this, new Exception("Debug: KeyEvent.KEYCODE_UNKNOWN"));
             }
             return true;
         }
@@ -258,6 +250,7 @@ public class MainActivity extends BaseActivity
                             case WebViewClient.ERROR_CONNECT:
                             case WebViewClient.ERROR_HOST_LOOKUP:
                             case WebViewClient.ERROR_FAILED_SSL_HANDSHAKE:
+                            case WebViewClient.ERROR_TIMEOUT:
                                 view.reload();
                                 return;
                             default:
@@ -291,8 +284,7 @@ public class MainActivity extends BaseActivity
                                                     mAccessibilityManager.isEnabled()
                                                             ? View.GONE
                                                             : View.VISIBLE;
-                                            findViewById(R.id.keyboard_container)
-                                                    .setVisibility(keyVisibility);
+                                            updateKeyboardContainerVisibility();
                                         }
                                     }
                                 });
@@ -324,80 +316,6 @@ public class MainActivity extends BaseActivity
                 .start();
     }
 
-    private void diskResize(File file, long sizeInBytes) throws IOException {
-        try {
-            if (sizeInBytes == 0) {
-                return;
-            }
-            String filePath = file.getAbsolutePath();
-            Log.d(TAG, "Disk-resize in progress for partition: " + filePath);
-
-            long currentSize = Os.stat(filePath).st_size;
-            runE2fsck(filePath);
-            if (sizeInBytes > currentSize) {
-                allocateSpace(file, sizeInBytes);
-            }
-
-            resizeFilesystem(filePath, sizeInBytes);
-        } catch (ErrnoException e) {
-            Log.e(TAG, "ErrnoException during disk resize", e);
-            throw new IOException("ErrnoException during disk resize", e);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to resize disk", e);
-            throw e;
-        }
-    }
-
-    private static void allocateSpace(File file, long sizeInBytes) throws IOException {
-        try {
-            RandomAccessFile raf = new RandomAccessFile(file, "rw");
-            FileDescriptor fd = raf.getFD();
-            Os.posix_fallocate(fd, 0, sizeInBytes);
-            raf.close();
-            Log.d(TAG, "Allocated space to: " + sizeInBytes + " bytes");
-        } catch (ErrnoException e) {
-            Log.e(TAG, "Failed to allocate space", e);
-            throw new IOException("Failed to allocate space", e);
-        }
-    }
-
-    private static void runE2fsck(String filePath) throws IOException {
-        try {
-            runCommand("/system/bin/e2fsck", "-y", "-f", filePath);
-            Log.d(TAG, "e2fsck completed: " + filePath);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to run e2fsck", e);
-            throw e;
-        }
-    }
-
-    private static void resizeFilesystem(String filePath, long sizeInBytes) throws IOException {
-        long sizeInMB = sizeInBytes / (1024 * 1024);
-        if (sizeInMB == 0) {
-            Log.e(TAG, "Invalid size: " + sizeInBytes + " bytes");
-            throw new IllegalArgumentException("Size cannot be zero MB");
-        }
-        String sizeArg = sizeInMB + "M";
-        try {
-            runCommand("/system/bin/resize2fs", filePath, sizeArg);
-            Log.d(TAG, "resize2fs completed: " + filePath + ", size: " + sizeArg);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to run resize2fs", e);
-            throw e;
-        }
-    }
-
-    private static String runCommand(String... command) throws IOException {
-        try {
-            Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
-            process.waitFor();
-            return new String(process.getInputStream().readAllBytes());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Command interrupted", e);
-        }
-    }
-
     private static void waitUntilVmStarts() {
         InetAddress addr = null;
         try {
@@ -417,7 +335,7 @@ public class MainActivity extends BaseActivity
     @Override
     protected void onDestroy() {
         getSystemService(AccessibilityManager.class).removeAccessibilityStateChangeListener(this);
-        VmLauncherServices.stopVmLauncherService(this);
+        VmLauncherService.stop(this);
         super.onDestroy();
     }
 
@@ -435,7 +353,8 @@ public class MainActivity extends BaseActivity
     @Override
     public void onVmError() {
         Log.i(TAG, "onVmError()");
-        launchErrorActivity(new Exception("onVmError"));
+        // TODO: error cause is too simple.
+        ErrorActivity.start(this, new Exception("onVmError"));
     }
 
     @Override
@@ -462,8 +381,17 @@ public class MainActivity extends BaseActivity
 
     @Override
     public void onAccessibilityStateChanged(boolean enabled) {
-        findViewById(R.id.keyboard_container).setVisibility(enabled ? View.GONE : View.VISIBLE);
         connectToTerminalService();
+    }
+
+    private void updateKeyboardContainerVisibility() {
+        boolean imeVisible =
+                this.getWindow()
+                        .getDecorView()
+                        .getRootWindowInsets()
+                        .isVisible(WindowInsets.Type.ime());
+        View keyboardContainer = findViewById(R.id.keyboard_container);
+        keyboardContainer.setVisibility(!imeVisible ? View.GONE : View.VISIBLE);
     }
 
     @Override
@@ -483,17 +411,10 @@ public class MainActivity extends BaseActivity
         }
     }
 
-    private void launchErrorActivity(Exception e) {
-        Intent intent = new Intent(this, ErrorActivity.class);
-        intent.putExtra(ErrorActivity.EXTRA_CAUSE, e);
-        intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
-        this.startActivity(intent);
-    }
-
     private boolean installIfNecessary() {
         // If payload from external storage exists(only for debuggable build) or there is no
         // installed image, launch installer activity.
-        if (!InstallUtils.isImageInstalled(this)) {
+        if (!mImage.isInstalled()) {
             Intent intent = new Intent(this, InstallerActivity.class);
             startActivityForResult(intent, REQUEST_CODE_INSTALLER);
             return true;
@@ -502,16 +423,17 @@ public class MainActivity extends BaseActivity
     }
 
     private void startVm() {
-        if (!InstallUtils.isImageInstalled(this)) {
+        InstalledImage image = InstalledImage.getDefault(this);
+        if (!image.isInstalled()) {
             return;
         }
 
-        resizeDiskIfNecessary();
+        resizeDiskIfNecessary(image);
 
         Intent tapIntent = new Intent(this, MainActivity.class);
         tapIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        PendingIntent tapPendingIntent = PendingIntent.getActivity(this, 0, tapIntent,
-                PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent tapPendingIntent =
+                PendingIntent.getActivity(this, 0, tapIntent, PendingIntent.FLAG_IMMUTABLE);
 
         Intent settingsIntent = new Intent(this, SettingsActivity.class);
         settingsIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
@@ -520,7 +442,7 @@ public class MainActivity extends BaseActivity
 
         Intent stopIntent = new Intent();
         stopIntent.setClass(this, VmLauncherService.class);
-        stopIntent.setAction(VmLauncherServices.ACTION_STOP_VM_LAUNCHER_SERVICE);
+        stopIntent.setAction(VmLauncherService.ACTION_STOP_VM_LAUNCHER_SERVICE);
         PendingIntent stopPendingIntent =
                 PendingIntent.getService(
                         this,
@@ -544,7 +466,7 @@ public class MainActivity extends BaseActivity
                                                         .getString(
                                                                 R.string
                                                                         .service_notification_settings),
-                                        settingsPendingIntent)
+                                                settingsPendingIntent)
                                         .build())
                         .addAction(
                                 new Notification.Action.Builder(
@@ -558,7 +480,8 @@ public class MainActivity extends BaseActivity
                         .build();
 
         android.os.Trace.beginAsyncSection("executeTerminal", 0);
-        VmLauncherServices.startVmLauncherService(this, this, notification);
+        VmLauncherService.run(this, this, notification);
+        connectToTerminalService();
     }
 
     @VisibleForTesting
@@ -566,52 +489,19 @@ public class MainActivity extends BaseActivity
         return mBootCompleted.block(timeoutMillis);
     }
 
-    private static long roundUpDiskSize(long diskSize) {
-        // Round up every diskSizeStep MB
-        return (long) Math.ceil(((double) diskSize) / diskSizeStep) * diskSizeStep;
-    }
-
-    public static long getMinFilesystemSize(File file) throws IOException, NumberFormatException {
+    private void resizeDiskIfNecessary(InstalledImage image) {
+        String prefKey = getString(R.string.preference_file_key);
+        String key = getString(R.string.preference_disk_size_key);
+        SharedPreferences sharedPref = this.getSharedPreferences(prefKey, Context.MODE_PRIVATE);
         try {
-            runE2fsck(file.getAbsolutePath());
-            String result = runCommand("/system/bin/resize2fs", "-P", file.getAbsolutePath());
-            // The return value is the number of 4k block
-            long minSize = Long.parseLong(
-                    result.lines().toArray(String[]::new)[1].substring(42)) * 4 * 1024;
-            return roundUpDiskSize(minSize);
-        } catch (IOException | NumberFormatException e) {
-            Log.e(TAG, "Failed to get filesystem size", e);
-            throw e;
-        }
-    }
-
-    private static long getFilesystemSize(File file) throws ErrnoException {
-        return Os.stat(file.getAbsolutePath()).st_size;
-    }
-
-    private void resizeDiskIfNecessary() {
-        try {
-            File file = InstallUtils.getRootfsFile(this);
-            SharedPreferences sharedPref = this.getSharedPreferences(
-                    getString(R.string.preference_file_key), Context.MODE_PRIVATE);
-            SharedPreferences.Editor editor = sharedPref.edit();
-
-            long currentDiskSize = getFilesystemSize(file);
-            long newSizeInBytes = sharedPref.getLong(getString(R.string.preference_disk_size_key),
-                    roundUpDiskSize(currentDiskSize));
-            editor.putLong(getString(R.string.preference_disk_size_key), newSizeInBytes);
-            editor.apply();
-
-            Log.d(TAG, "Current disk size: " + currentDiskSize);
-            Log.d(TAG, "Targeting disk size: " + newSizeInBytes);
-
-            if (newSizeInBytes != currentDiskSize) {
-                diskResize(file, newSizeInBytes);
-            }
-        } catch (FileNotFoundException e) {
-            Log.d(TAG, "No partition file");
-        } catch (IOException | ErrnoException | NumberFormatException e) {
+            // Use current size as default value to ensure if its size is multiple of 4096
+            long newSize = sharedPref.getLong(key, image.getSize());
+            Log.d(TAG, "Resizing disk to " + newSize + " bytes");
+            newSize = image.resize(newSize);
+            sharedPref.edit().putLong(key, newSize).apply();
+        } catch (IOException e) {
             Log.e(TAG, "Failed to resize disk", e);
+            return;
         }
     }
 }
