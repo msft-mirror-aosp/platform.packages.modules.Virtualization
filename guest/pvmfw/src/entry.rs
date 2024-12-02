@@ -129,7 +129,7 @@ fn main_wrapper(
         page_table,
         crosvm::MEM_START..layout::MAX_VIRT_ADDR,
         crosvm::MMIO_RANGE,
-        Some(memory::appended_payload_range()),
+        Some(layout::image_footer_range()),
     ));
 
     let slices = memory::MemorySlices::new(
@@ -326,7 +326,7 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
 /// This must only be called once, since we are returning a mutable reference.
 /// The appended data region must be mapped.
 unsafe fn get_appended_data_slice() -> &'static mut [u8] {
-    let range = memory::appended_payload_range();
+    let range = layout::image_footer_range();
     // SAFETY: This region is mapped and the linker script prevents it from overlapping with other
     // objects.
     unsafe { slice::from_raw_parts_mut(range.start.0 as *mut u8, range.end - range.start) }
