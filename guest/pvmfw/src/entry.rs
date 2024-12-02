@@ -189,7 +189,7 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
 
     const SCTLR_EL1_VAL: u64 = SCTLR_EL1_RES1 | SCTLR_EL1_ITD | SCTLR_EL1_SED | SCTLR_EL1_I;
 
-    let scratch = layout::scratch_range();
+    let scratch = layout::data_bss_range();
 
     assert_ne!(scratch.end - scratch.start, 0, "scratch memory is empty.");
     assert_eq!(scratch.start.0 % ASM_STP_ALIGN, 0, "scratch memory is misaligned.");
@@ -204,6 +204,12 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
     assert_ne!(stack.end - stack.start, 0, "stack region is empty.");
     assert_eq!(stack.start.0 % ASM_STP_ALIGN, 0, "Misaligned stack region.");
     assert_eq!(stack.end.0 % ASM_STP_ALIGN, 0, "Misaligned stack region.");
+
+    let eh_stack = layout::eh_stack_range();
+
+    assert_ne!(eh_stack.end - eh_stack.start, 0, "EH stack region is empty.");
+    assert_eq!(eh_stack.start.0 % ASM_STP_ALIGN, 0, "Misaligned EH stack region.");
+    assert_eq!(eh_stack.end.0 % ASM_STP_ALIGN, 0, "Misaligned EH stack region.");
 
     // Zero all memory that could hold secrets and that can't be safely written to from Rust.
     // Disable the exception vector, caches and page table and then jump to the payload at the
@@ -250,6 +256,18 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
             "cmp {cache_line}, {stack_end}",
             "b.lo 0b",
 
+            "mov {cache_line}, {eh_stack}",
+            // Zero EH stack region.
+            "0: stp xzr, xzr, [{eh_stack}], 16",
+            "cmp {eh_stack}, {eh_stack_end}",
+            "b.lo 0b",
+
+            // Flush d-cache over EH stack region.
+            "0: dc cvau, {cache_line}",
+            "add {cache_line}, {cache_line}, {dcache_line_size}",
+            "cmp {cache_line}, {eh_stack_end}",
+            "b.lo 0b",
+
             "msr sctlr_el1, {sctlr_el1_val}",
             "isb",
             "mov x1, xzr",
@@ -293,6 +311,8 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
             scratch_end = in(reg) u64::try_from(scratch.end.0).unwrap(),
             stack = in(reg) u64::try_from(stack.start.0).unwrap(),
             stack_end = in(reg) u64::try_from(stack.end.0).unwrap(),
+            eh_stack = in(reg) u64::try_from(eh_stack.start.0).unwrap(),
+            eh_stack_end = in(reg) u64::try_from(eh_stack.end.0).unwrap(),
             dcache_line_size = in(reg) u64::try_from(min_dcache_line_size()).unwrap(),
             in("x0") fdt_address,
             in("x30") payload_start,
