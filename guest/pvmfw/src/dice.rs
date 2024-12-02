@@ -200,6 +200,7 @@ mod tests {
         kernel_digest: [1u8; size_of::<Digest>()],
         initrd_digest: Some([2u8; size_of::<Digest>()]),
         public_key: b"public key",
+        name: None,
         capabilities: vec![],
         rollback_index: 42,
         page_size: None,
