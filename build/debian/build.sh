@@ -60,7 +60,7 @@ prepare_build_id() {
 	if [ -z "${KOKORO_BUILD_NUMBER}" ]; then
 		echo eng-$(hostname)-$(date --utc) > ${file}
 	else
-		echo ${KOKOR_BUILD_NUMBER} > ${file}
+		echo ${KOKORO_BUILD_NUMBER} > ${file}
 	fi
 	echo ${file}
 }
