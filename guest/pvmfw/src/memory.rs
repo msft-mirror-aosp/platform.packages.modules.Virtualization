@@ -54,7 +54,8 @@ pub fn init_page_table() -> result::Result<PageTable, MapError> {
 
     // Stack and scratch ranges are explicitly zeroed and flushed before jumping to payload,
     // so dirty state management can be omitted.
-    page_table.map_data(&layout::scratch_range().into())?;
+    page_table.map_data(&layout::data_bss_range().into())?;
+    page_table.map_data(&layout::eh_stack_range().into())?;
     page_table.map_data(&stack_range().into())?;
     page_table.map_code(&layout::text_range().into())?;
     page_table.map_rodata(&layout::rodata_range().into())?;
