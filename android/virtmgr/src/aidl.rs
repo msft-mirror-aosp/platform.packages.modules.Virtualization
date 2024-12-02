@@ -445,20 +445,25 @@ impl VirtualizationService {
         let context = EarlyVmContext::new(cid, temp_dir.clone())
             .context(format!("Can't create early vm contexts for {cid}"))
             .or_service_specific_exception(-1)?;
-        let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
 
-        // Start VM service listening for connections from the new CID on port=CID.
-        let port = cid;
-        let (vm_server, _) = RpcServer::new_vsock(service, cid, port)
-            .context(format!("Could not start RpcServer on port {port}"))
-            .or_service_specific_exception(-1)?;
-        vm_server.start();
-        Ok((VmContext::new(Strong::new(Box::new(context)), vm_server), cid, temp_dir))
+        if requires_vm_service(config) {
+            // Start VM service listening for connections from the new CID on port=CID.
+            let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
+            let port = cid;
+            let (vm_server, _) = RpcServer::new_vsock(service, cid, port)
+                .context(format!("Could not start RpcServer on port {port}"))
+                .or_service_specific_exception(-1)?;
+            vm_server.start();
+            Ok((VmContext::new(Strong::new(Box::new(context)), Some(vm_server)), cid, temp_dir))
+        } else {
+            Ok((VmContext::new(Strong::new(Box::new(context)), None), cid, temp_dir))
+        }
     }
 
     fn create_vm_context(
         &self,
         requester_debug_pid: pid_t,
+        config: &VirtualMachineConfig,
     ) -> binder::Result<(VmContext, Cid, PathBuf)> {
         const NUM_ATTEMPTS: usize = 5;
 
@@ -466,6 +471,12 @@ impl VirtualizationService {
             let vm_context = GLOBAL_SERVICE.allocateGlobalVmContext(requester_debug_pid)?;
             let cid = vm_context.getCid()? as Cid;
             let temp_dir: PathBuf = vm_context.getTemporaryDirectory()?.into();
+
+            // We don't need to start the VM service for custom VMs.
+            if !requires_vm_service(config) {
+                return Ok((VmContext::new(vm_context, None), cid, temp_dir));
+            }
+
             let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
 
             // Start VM service listening for connections from the new CID on port=CID.
@@ -473,7 +484,7 @@ impl VirtualizationService {
             match RpcServer::new_vsock(service, cid, port) {
                 Ok((vm_server, _)) => {
                     vm_server.start();
-                    return Ok((VmContext::new(vm_context, vm_server), cid, temp_dir));
+                    return Ok((VmContext::new(vm_context, Some(vm_server)), cid, temp_dir));
                 }
                 Err(err) => {
                     warn!("Could not start RpcServer on port {}: {}", port, err);
@@ -509,7 +520,7 @@ impl VirtualizationService {
         let (vm_context, cid, temporary_directory) = if cfg!(early) {
             self.create_early_vm_context(config)?
         } else {
-            self.create_vm_context(requester_debug_pid)?
+            self.create_vm_context(requester_debug_pid, config)?
         };
 
         if is_custom_config(config) {
@@ -817,6 +828,17 @@ fn is_custom_config(config: &VirtualMachineConfig) -> bool {
                 }) || config.osName != MICRODROID_OS_NAME
             }
         }
+    }
+}
+
+/// Returns whether a VM config requires VirtualMachineService running on the host. Only Microdroid
+/// VM (i.e. AppConfig) requires it. However, a few Microdroid tests use RawConfig for Microdroid
+/// VM. To handle the exceptional case, we use name as a second criteria; if the name is
+/// "microdroid" we run VirtualMachineService
+fn requires_vm_service(config: &VirtualMachineConfig) -> bool {
+    match config {
+        VirtualMachineConfig::AppConfig(_) => true,
+        VirtualMachineConfig::RawConfig(config) => config.name == "microdroid",
     }
 }
 

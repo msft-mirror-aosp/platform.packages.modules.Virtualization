@@ -17,25 +17,22 @@ package com.android.virtualization.terminal
 
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.icu.text.MeasureFormat
 import android.icu.text.NumberFormat
 import android.icu.util.Measure
 import android.icu.util.MeasureUnit
 import android.os.Bundle
-import android.os.FileUtils
-import android.os.Handler
-import android.os.Looper
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.TextUtils
 import android.text.style.RelativeSizeSpan
+import android.view.View
 import android.widget.SeekBar
-import android.view.Window
-import android.view.WindowManager
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
-import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.util.Locale
 import java.util.regex.Pattern
 
@@ -45,15 +42,19 @@ class SettingsDiskResizeActivity : AppCompatActivity() {
 
     private var diskSizeStepMb: Long = 0
     private var diskSizeMb: Long = 0
+    private lateinit var sharedPref: SharedPreferences
+    private lateinit var buttons: View
+    private lateinit var cancelButton: View
+    private lateinit var resizeButton: View
     private lateinit var diskSizeText: TextView
     private lateinit var diskSizeSlider: SeekBar
 
     private fun bytesToMb(bytes: Long): Long {
-        return bytes shr 20;
+        return bytes shr 20
     }
 
     private fun mbToBytes(bytes: Long): Long {
-        return bytes shl 20;
+        return bytes shl 20
     }
 
     private fun mbToProgress(bytes: Long): Int {
@@ -68,87 +69,103 @@ class SettingsDiskResizeActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.settings_disk_resize)
 
-        Handler(Looper.getMainLooper()).post {
-            val lp: WindowManager.LayoutParams = getWindow().getAttributes()
-            lp.accessibilityTitle = getString(R.string.settings_disk_resize_title)
-            getWindow().setAttributes(lp)
-        }
-
         diskSizeStepMb = 1L shl resources.getInteger(R.integer.disk_size_round_up_step_size_in_mb)
 
-        val sharedPref =
+        sharedPref =
             this.getSharedPreferences(getString(R.string.preference_file_key), Context.MODE_PRIVATE)
-        diskSizeMb = bytesToMb(sharedPref.getLong(
-                    getString(R.string.preference_disk_size_key),
-                    /* defValue= */ 0))
+        diskSizeMb =
+            bytesToMb(
+                sharedPref.getLong(getString(R.string.preference_disk_size_key), /* defValue= */ 0)
+            )
         val image = InstalledImage.getDefault(this)
-        val minDiskSizeMb =
-            bytesToMb(image.getSmallestSizePossible())
-                .coerceAtMost(diskSizeMb)
+        val minDiskSizeMb = bytesToMb(image.getSmallestSizePossible()).coerceAtMost(diskSizeMb)
 
         diskSizeText = findViewById<TextView>(R.id.settings_disk_resize_resize_gb_assigned)!!
         val diskMaxSizeText = findViewById<TextView>(R.id.settings_disk_resize_resize_gb_max)
-        diskMaxSizeText.text = getString(R.string.settings_disk_resize_resize_gb_max_format,
-            localizedFileSize(maxDiskSizeMb, /* isShort= */ true)
-        );
+        diskMaxSizeText.text =
+            getString(
+                R.string.settings_disk_resize_resize_gb_max_format,
+                localizedFileSize(maxDiskSizeMb, /* isShort= */ true),
+            )
 
+        buttons = findViewById<View>(R.id.buttons)
         diskSizeSlider = findViewById<SeekBar>(R.id.settings_disk_resize_disk_size_slider)!!
-        val cancelButton = findViewById<MaterialButton>(R.id.settings_disk_resize_cancel_button)
-        val resizeButton = findViewById<MaterialButton>(R.id.settings_disk_resize_resize_button)
+        cancelButton = findViewById<View>(R.id.settings_disk_resize_cancel_button)
+        resizeButton = findViewById<View>(R.id.settings_disk_resize_resize_button)
         diskSizeSlider.min = mbToProgress(minDiskSizeMb)
         diskSizeSlider.max = mbToProgress(maxDiskSizeMb)
         diskSizeSlider.progress = mbToProgress(diskSizeMb)
         updateSliderText(diskSizeMb)
 
-        diskSizeSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                updateSliderText(progressToMb(progress))
-                cancelButton.isVisible = true
-                resizeButton.isVisible = true
+        diskSizeSlider.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                    updateSliderText(progressToMb(progress))
+                    buttons.isVisible = true
+                    cancelButton.isVisible = true
+                    resizeButton.isVisible = true
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {
+                    // no-op
+                }
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    // no-op
+                }
             }
+        )
 
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {
-                // no-op
+        cancelButton.setOnClickListener { cancel() }
+
+        resizeButton.setOnClickListener { showConfirmationDialog() }
+    }
+
+    fun cancel() {
+        diskSizeSlider.progress = mbToProgress(diskSizeMb)
+        buttons.isVisible = false
+    }
+
+    fun showConfirmationDialog() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.settings_disk_resize_title)
+            .setMessage(R.string.settings_disk_resize_resize_confirm_dialog_message)
+            .setPositiveButton(R.string.settings_disk_resize_resize_confirm_dialog_confirm) { _, _
+                ->
+                resize()
             }
+            .setNegativeButton(R.string.settings_disk_resize_resize_cancel) { _, _ -> cancel() }
+            .create()
+            .show()
+    }
 
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                // no-op
-            }
-        })
+    fun resize() {
+        diskSizeMb = progressToMb(diskSizeSlider.progress)
+        buttons.isVisible = false
+        val editor = sharedPref.edit()
+        editor.putLong(getString(R.string.preference_disk_size_key), mbToBytes(diskSizeMb))
+        editor.apply()
 
-        cancelButton.setOnClickListener {
-            diskSizeSlider.progress = mbToProgress(diskSizeMb)
-            cancelButton.isVisible = false
-            resizeButton.isVisible = false
-        }
-
-        resizeButton.setOnClickListener {
-            diskSizeMb = progressToMb(diskSizeSlider.progress)
-            cancelButton.isVisible = false
-            resizeButton.isVisible = false
-            val editor = sharedPref.edit()
-            editor.putLong(
-                getString(R.string.preference_disk_size_key),
-                mbToBytes(diskSizeMb)
-            )
-            editor.apply()
-
-            // Restart terminal
-            val intent =
-                baseContext.packageManager.getLaunchIntentForPackage(baseContext.packageName)
-            intent?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            finish()
-            startActivity(intent)
-        }
+        // Restart terminal
+        val intent = baseContext.packageManager.getLaunchIntentForPackage(baseContext.packageName)
+        intent?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        finish()
+        startActivity(intent)
     }
 
     fun updateSliderText(sizeMb: Long) {
-        diskSizeText.text = enlargeFontOfNumber(
-            getString(R.string.settings_disk_resize_resize_gb_assigned_format,
-                localizedFileSize(sizeMb, /* isShort= */ true)))
+        diskSizeText.text =
+            enlargeFontOfNumber(
+                getString(
+                    R.string.settings_disk_resize_resize_gb_assigned_format,
+                    localizedFileSize(sizeMb, /* isShort= */ true),
+                )
+            )
         diskSizeSlider.stateDescription =
-            getString(R.string.settings_disk_resize_resize_gb_assigned_format,
-                localizedFileSize(sizeMb, /* isShort= */ false))
+            getString(
+                R.string.settings_disk_resize_resize_gb_assigned_format,
+                localizedFileSize(sizeMb, /* isShort= */ false),
+            )
     }
 
     fun localizedFileSize(sizeMb: Long, isShort: Boolean): String {
@@ -160,7 +177,8 @@ class SettingsDiskResizeActivity : AppCompatActivity() {
         numberFormatter.minimumFractionDigits = 1
         numberFormatter.maximumFractionDigits = 1
 
-        val formatWidth = if (isShort) MeasureFormat.FormatWidth.SHORT else MeasureFormat.FormatWidth.WIDE
+        val formatWidth =
+            if (isShort) MeasureFormat.FormatWidth.SHORT else MeasureFormat.FormatWidth.WIDE
         val measureFormat: MeasureFormat =
             MeasureFormat.getInstance(localeFromContext, formatWidth, numberFormatter)
         return measureFormat.format(measure)
@@ -171,14 +189,15 @@ class SettingsDiskResizeActivity : AppCompatActivity() {
             return ""
         }
 
-        val matcher = numberPattern.matcher(summary);
+        val matcher = numberPattern.matcher(summary)
         if (matcher.find()) {
             val spannableSummary = SpannableString(summary)
             spannableSummary.setSpan(
-                    RelativeSizeSpan(2f),
-                    matcher.start(),
-                    matcher.end(),
-                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                RelativeSizeSpan(2f),
+                matcher.start(),
+                matcher.end(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
             return spannableSummary
         }
         return summary
