@@ -48,7 +48,7 @@ class InstalledImage {
     private final Path mBackup;
     private final Path mConfig;
     private final Path mMarker;
-    private final String mBuildId;
+    private String mBuildId;
 
     /** Returns InstalledImage for a given app context */
     public static InstalledImage getDefault(Context context) {
@@ -62,7 +62,6 @@ class InstalledImage {
         mBackup = dir.resolve(BACKUP_FILENAME);
         mConfig = dir.resolve(CONFIG_FILENAME);
         mMarker = dir.resolve(MARKER_FILENAME);
-        mBuildId = readBuildId();
     }
 
     public Path getInstallDir() {
@@ -86,6 +85,9 @@ class InstalledImage {
 
     /** Returns the build ID of the installed image */
     public String getBuildId() {
+        if (mBuildId == null) {
+            mBuildId = readBuildId();
+        }
         return mBuildId;
     }
 
