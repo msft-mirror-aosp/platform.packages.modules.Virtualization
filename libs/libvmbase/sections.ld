@@ -76,6 +76,13 @@ SECTIONS
 	/* Everything beyond this point will not be included in the binary. */
 	bin_end = data_lma + SIZEOF(.data);
 
+	/* Data may be appended at load time to our binary. */
+	.image_footer (NOLOAD) : ALIGN(4096) {
+		image_footer_begin = .;
+		. = ALIGN(LENGTH(image));
+		image_footer_end = .;
+	} >image
+
 	/* The entry point code assumes that .bss is 16-byte aligned. */
 	.bss : ALIGN(16)  {
 		bss_begin = .;
