@@ -56,13 +56,13 @@ parse_options() {
 }
 
 prepare_build_id() {
-	local file=${workdir}/build_id
+	local filename=build_id
 	if [ -z "${KOKORO_BUILD_NUMBER}" ]; then
-		echo eng-$(hostname)-$(date --utc) > ${file}
+		echo eng-$(hostname)-$(date --utc) > ${filename}
 	else
-		echo ${KOKOR_BUILD_NUMBER} > ${file}
+		echo ${KOKORO_BUILD_NUMBER} > ${filename}
 	fi
-	echo ${file}
+	echo ${filename}
 }
 
 install_prerequisites() {
