@@ -173,8 +173,8 @@ public class MainActivity extends BaseActivity
         findViewById(R.id.btn_ctrl)
                 .setOnClickListener(
                         (v) -> {
-                            mWebView.loadUrl(TerminalView.CTRL_KEY_HANDLER);
-                            mWebView.loadUrl(TerminalView.ENABLE_CTRL_KEY);
+                            mWebView.evaluateJavascript(TerminalView.CTRL_KEY_HANDLER, null);
+                            mWebView.evaluateJavascript(TerminalView.ENABLE_CTRL_KEY, null);
                         });
 
         View.OnClickListener modifierButtonClickListener =
