@@ -1018,7 +1018,12 @@ fn assemble_shared_paths(
                 guest_gid: path.guestGid,
                 mask: path.mask,
                 tag: path.tag.clone(),
-                socket_path: temporary_directory.join(&path.socket).to_string_lossy().to_string(),
+                socket_path: temporary_directory
+                    .join(&path.socketPath)
+                    .to_string_lossy()
+                    .to_string(),
+                socket_fd: maybe_clone_file(&path.socketFd)?,
+                app_domain: path.appDomain,
             })
         })
         .collect()
