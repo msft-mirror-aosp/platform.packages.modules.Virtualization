@@ -300,6 +300,8 @@ public class MainActivity extends BaseActivity
                                                     .setVisibility(View.VISIBLE);
                                             mBootCompleted.open();
                                             updateModifierKeysVisibility();
+                                            mWebView.evaluateJavascript(
+                                                    TerminalView.TOUCH_TO_MOUSE_HANDLER, null);
                                         }
                                     }
                                 });
