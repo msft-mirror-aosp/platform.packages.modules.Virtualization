@@ -51,7 +51,7 @@ public class TerminalView extends WebView
     // keycode 97(A)-122(Z) is converted to a small letter, and mapped to ctrl code
     public static final String CTRL_KEY_HANDLER =
             """
-javascript: (function() {
+(function() {
   window.term.attachCustomKeyEventHandler((e) => {
       if (window.ctrl) {
           keyCode = e.keyCode;
@@ -77,7 +77,7 @@ javascript: (function() {
   });
 })();
 """;
-    public static final String ENABLE_CTRL_KEY = "javascript:(function(){window.ctrl=true;})();";
+    public static final String ENABLE_CTRL_KEY = "(function(){window.ctrl=true;})();";
 
     private final AccessibilityManager mA11yManager;
 
@@ -307,10 +307,7 @@ javascript: (function() {
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
         InputConnection inputConnection = super.onCreateInputConnection(outAttrs);
         if (outAttrs != null) {
-            // TODO(b/378642568): consider using InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-            // here..
-            outAttrs.inputType =
-                    InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            outAttrs.inputType |= InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
         }
         return inputConnection;
     }
