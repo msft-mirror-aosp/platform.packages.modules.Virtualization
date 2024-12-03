@@ -46,7 +46,8 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
-        <activity android:name=".SettingsActivity" />
+        <activity android:name=".SettingsActivity"
+            android:label="@string/action_settings" />
         <activity android:name=".SettingsDiskResizeActivity"
             android:label="@string/settings_disk_resize_title" />
         <activity android:name=".SettingsPortForwardingActivity"
