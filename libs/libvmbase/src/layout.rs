@@ -70,6 +70,11 @@ pub fn rodata_range() -> Range<VirtualAddress> {
     linker_region!(rodata_begin, rodata_end)
 }
 
+/// Region which may contain a footer appended to the binary at load time.
+pub fn image_footer_range() -> Range<VirtualAddress> {
+    linker_region!(image_footer_begin, image_footer_end)
+}
+
 /// Initialised writable data.
 pub fn data_range() -> Range<VirtualAddress> {
     linker_region!(data_begin, data_end)
@@ -78,6 +83,11 @@ pub fn data_range() -> Range<VirtualAddress> {
 /// Zero-initialized writable data.
 pub fn bss_range() -> Range<VirtualAddress> {
     linker_region!(bss_begin, bss_end)
+}
+
+/// Writable data region for .data and .bss.
+pub fn data_bss_range() -> Range<VirtualAddress> {
+    linker_region!(data_begin, bss_end)
 }
 
 /// Writable data region for the stack.
@@ -89,9 +99,9 @@ pub fn stack_range(stack_size: usize) -> Range<VirtualAddress> {
     start..end
 }
 
-/// All writable sections, excluding the stack.
-pub fn scratch_range() -> Range<VirtualAddress> {
-    linker_region!(eh_stack_limit, bss_end)
+/// Writable data region for the exception handler stack.
+pub fn eh_stack_range() -> Range<VirtualAddress> {
+    linker_region!(eh_stack_limit, init_eh_stack_pointer)
 }
 
 /// Range of the page at UART_PAGE_ADDR of PAGE_SIZE.

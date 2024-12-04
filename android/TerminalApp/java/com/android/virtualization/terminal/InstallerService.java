@@ -48,11 +48,6 @@ import java.util.concurrent.Executors;
 public class InstallerService extends Service {
     private static final int NOTIFICATION_ID = 1313; // any unique number among notifications
 
-    private static final String IMAGE_URL =
-            Arrays.asList(Build.SUPPORTED_ABIS).contains("x86_64")
-                    ? "https://dl.google.com/android/ferrochrome/latest/x86_64/images.tar.gz"
-                    : "https://dl.google.com/android/ferrochrome/latest/aarch64/images.tar.gz";
-
     private final Object mLock = new Object();
 
     private Notification mNotification;
@@ -191,8 +186,6 @@ public class InstallerService extends Service {
 
     // TODO(b/374015561): Support pause/resume download
     private boolean downloadFromUrl(boolean isWifiOnly) {
-        Log.i(TAG, "trying to download from " + IMAGE_URL);
-
         if (!checkForWifiOnly(isWifiOnly)) {
             Log.e(TAG, "Install isn't started because Wifi isn't available");
             notifyError(getString(R.string.installer_error_no_wifi));

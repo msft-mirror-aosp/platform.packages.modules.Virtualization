@@ -18,12 +18,11 @@ package com.android.virtualization.terminal;
 import static android.webkit.WebSettings.LOAD_NO_CACHE;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Icon;
@@ -54,6 +53,7 @@ import android.webkit.WebViewClient;
 import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
 
 import com.android.internal.annotations.VisibleForTesting;
 
@@ -103,18 +103,9 @@ public class MainActivity extends BaseActivity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        lockOrientationIfNecessary();
 
         mImage = InstalledImage.getDefault(this);
-
-        NotificationManager notificationManager = getSystemService(NotificationManager.class);
-        if (notificationManager.getNotificationChannel(this.getPackageName()) == null) {
-            NotificationChannel channel =
-                    new NotificationChannel(
-                            this.getPackageName(),
-                            getString(R.string.app_name),
-                            NotificationManager.IMPORTANCE_DEFAULT);
-            notificationManager.createNotificationChannel(channel);
-        }
 
         boolean launchInstaller = installIfNecessary();
 
@@ -147,7 +138,7 @@ public class MainActivity extends BaseActivity
                 .getRootView()
                 .setOnApplyWindowInsetsListener(
                         (v, insets) -> {
-                            updateKeyboardContainerVisibility();
+                            updateModifierKeysVisibility();
                             return insets;
                         });
         // if installer is launched, it will be handled in onActivityResult
@@ -160,13 +151,30 @@ public class MainActivity extends BaseActivity
         }
     }
 
+    private void lockOrientationIfNecessary() {
+        boolean hasHwQwertyKeyboard =
+                getResources().getConfiguration().keyboard == Configuration.KEYBOARD_QWERTY;
+        if (hasHwQwertyKeyboard) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        } else if (getResources().getBoolean(R.bool.terminal_portrait_only)) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        lockOrientationIfNecessary();
+        updateModifierKeysVisibility();
+    }
+
     private void setupModifierKeys() {
         // Only ctrl key is special, it communicates with xtermjs to modify key event with ctrl key
         findViewById(R.id.btn_ctrl)
                 .setOnClickListener(
                         (v) -> {
-                            mWebView.loadUrl(TerminalView.CTRL_KEY_HANDLER);
-                            mWebView.loadUrl(TerminalView.ENABLE_CTRL_KEY);
+                            mWebView.evaluateJavascript(TerminalView.CTRL_KEY_HANDLER, null);
+                            mWebView.evaluateJavascript(TerminalView.ENABLE_CTRL_KEY, null);
                         });
 
         View.OnClickListener modifierButtonClickListener =
@@ -291,12 +299,9 @@ public class MainActivity extends BaseActivity
                                             findViewById(R.id.webview_container)
                                                     .setVisibility(View.VISIBLE);
                                             mBootCompleted.open();
-                                            // TODO(b/376813452): support talkback as well
-                                            int keyVisibility =
-                                                    mAccessibilityManager.isEnabled()
-                                                            ? View.GONE
-                                                            : View.VISIBLE;
-                                            updateKeyboardContainerVisibility();
+                                            updateModifierKeysVisibility();
+                                            mWebView.evaluateJavascript(
+                                                    TerminalView.TOUCH_TO_MOUSE_HANDLER, null);
                                         }
                                     }
                                 });
@@ -396,14 +401,15 @@ public class MainActivity extends BaseActivity
         connectToTerminalService();
     }
 
-    private void updateKeyboardContainerVisibility() {
-        boolean imeVisible =
-                this.getWindow()
-                        .getDecorView()
-                        .getRootWindowInsets()
-                        .isVisible(WindowInsets.Type.ime());
-        View keyboardContainer = findViewById(R.id.keyboard_container);
-        keyboardContainer.setVisibility(!imeVisible ? View.GONE : View.VISIBLE);
+    private void updateModifierKeysVisibility() {
+        boolean imeShown =
+                getWindow().getDecorView().getRootWindowInsets().isVisible(WindowInsets.Type.ime());
+        boolean hasHwQwertyKeyboard =
+                getResources().getConfiguration().keyboard == Configuration.KEYBOARD_QWERTY;
+        boolean showModifierKeys = imeShown && !hasHwQwertyKeyboard;
+
+        View modifierKeys = findViewById(R.id.modifier_keys);
+        modifierKeys.setVisibility(showModifierKeys ? View.VISIBLE : View.GONE);
     }
 
     @Override

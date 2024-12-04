@@ -51,7 +51,7 @@ public class TerminalView extends WebView
     // keycode 97(A)-122(Z) is converted to a small letter, and mapped to ctrl code
     public static final String CTRL_KEY_HANDLER =
             """
-javascript: (function() {
+(function() {
   window.term.attachCustomKeyEventHandler((e) => {
       if (window.ctrl) {
           keyCode = e.keyCode;
@@ -77,7 +77,74 @@ javascript: (function() {
   });
 })();
 """;
-    public static final String ENABLE_CTRL_KEY = "javascript:(function(){window.ctrl=true;})();";
+    public static final String ENABLE_CTRL_KEY = "(function(){window.ctrl=true;})();";
+
+    // TODO(b/375326606): consider contribution on
+    // upstream(https://github.com/xtermjs/xterm.js/issues/3727)
+    public static final String TOUCH_TO_MOUSE_HANDLER =
+            """
+(function() {
+let convertTouchToMouse = false;
+function touchHandler(event) {
+  const contextmenuByTouch =
+      event.type === 'contextmenu' && event.pointerType === 'touch';
+  // Only proceed for long touches (contextmenu) or when converting touch to
+  // mouse
+  if (!contextmenuByTouch && !convertTouchToMouse) {
+    return;
+  }
+
+  const touch = event.changedTouches ? event.changedTouches[0] : event;
+
+  let type;
+  switch (event.type) {
+    case 'contextmenu':
+      convertTouchToMouse = true;
+      type = 'mousedown';
+      break;
+    case 'touchmove':
+      type = 'mousemove';
+      break;
+    case 'touchend':
+      convertTouchToMouse = false;
+      type = 'mouseup';
+      break;
+    default:
+      convertTouchToMouse = false;
+      return;
+  }
+
+  const simulatedEvent = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+    detail: 1,
+    screenX: touch.screenX,
+    screenY: touch.screenY,
+    clientX: touch.clientX,
+    clientY: touch.clientY,
+    button: 0,  // left click
+  });
+
+  touch.target.dispatchEvent(simulatedEvent);
+
+  // Prevent default behavior for touch events (except contextmenu)
+  if (event.type !== 'contextmenu') {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}
+const eventOptions = {
+  capture: true,
+  passive: false
+};
+document.addEventListener('touchstart', touchHandler, eventOptions);
+document.addEventListener('touchmove', touchHandler, eventOptions);
+document.addEventListener('touchend', touchHandler, eventOptions);
+document.addEventListener('touchcancel', touchHandler, eventOptions);
+document.addEventListener('contextmenu', touchHandler, eventOptions);
+})();
+""";
 
     private final AccessibilityManager mA11yManager;
 
@@ -216,6 +283,8 @@ javascript: (function() {
                             if (id != View.NO_ID) {
                                 info.setText(null);
                                 info.setContentDescription(getString(R.string.terminal_display));
+                                // b/376827536
+                                info.setHintText(getString(R.string.double_tap_to_edit_text));
                             }
 
                             // These two lines below are to prevent this WebView element from being
@@ -230,6 +299,8 @@ javascript: (function() {
                             // Localize the spoken text.
                             if (isEmptyLine(info)) {
                                 info.setContentDescription(getString(R.string.empty_line));
+                                // b/376827536
+                                info.setHintText(getString(R.string.double_tap_to_edit_text));
                             }
                             break;
                         case "android.widget.TextView":
@@ -303,10 +374,7 @@ javascript: (function() {
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
         InputConnection inputConnection = super.onCreateInputConnection(outAttrs);
         if (outAttrs != null) {
-            // TODO(b/378642568): consider using InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-            // here..
-            outAttrs.inputType =
-                    InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            outAttrs.inputType |= InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
         }
         return inputConnection;
     }

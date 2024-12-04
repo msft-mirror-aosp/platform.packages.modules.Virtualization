@@ -84,7 +84,8 @@ fn new_vm_parameters() -> Result<VmParameters> {
     // number of dex2oat threads.
     let cpu_topology = VmCpuTopology::MatchHost;
     let memory_mib = Some(compos_memory_mib()?);
-    Ok(VmParameters { cpu_topology, memory_mib, ..Default::default() })
+    let os = "microdroid".to_owned();
+    Ok(VmParameters { cpu_topology, memory_mib, os, ..Default::default() })
 }
 
 fn compos_memory_mib() -> Result<i32> {

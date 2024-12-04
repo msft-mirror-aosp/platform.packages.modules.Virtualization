@@ -12,6 +12,7 @@ show_help() {
 	echo "-h         Print usage and this help message and exit."
 	echo "-a ARCH    Architecture of the image [default is aarch64]"
 	echo "-r         Release mode build"
+	echo "-w         Save temp work directory (for debugging)"
 }
 
 check_sudo() {
@@ -22,7 +23,7 @@ check_sudo() {
 }
 
 parse_options() {
-	while getopts "hra:" option; do
+	while getopts "a:hrw" option; do
 		case ${option} in
 			h)
 				show_help
@@ -40,6 +41,9 @@ parse_options() {
 			r)
 				mode=release
 				;;
+			w)
+				save_workdir=1
+				;;
 			*)
 				echo "Invalid option: $OPTARG"
 				exit
@@ -49,6 +53,16 @@ parse_options() {
 	if [[ "${*:$OPTIND:1}" ]]; then
 		built_image="${*:$OPTIND:1}"
 	fi
+}
+
+prepare_build_id() {
+	local filename=build_id
+	if [ -z "${KOKORO_BUILD_NUMBER}" ]; then
+		echo eng-$(hostname)-$(date --utc) > ${filename}
+	else
+		echo ${KOKORO_BUILD_NUMBER} > ${filename}
+	fi
+	echo ${filename}
 }
 
 install_prerequisites() {
@@ -203,7 +217,7 @@ extract_partitions() {
 }
 
 clean_up() {
-	rm -rf "${workdir}"
+	[ "$save_workdir" -eq 0 ] || rm -rf "${workdir}"
 }
 
 set -e
@@ -211,6 +225,7 @@ trap clean_up EXIT
 
 built_image=image.raw
 workdir=$(mktemp -d)
+build_id=$(prepare_build_id)
 debian_cloud_image=${workdir}/debian_cloud_image
 debian_version=bookworm
 config_space=${debian_cloud_image}/config_space/${debian_version}
@@ -218,6 +233,8 @@ resources_dir=${debian_cloud_image}/src/debian_cloud_images/resources
 arch=aarch64
 debian_arch=arm64
 mode=debug
+save_workdir=0
+
 parse_options "$@"
 check_sudo
 install_prerequisites
@@ -238,6 +255,7 @@ if [[ "$arch" == "aarch64" ]]; then
 	)
 # TODO(b/365955006): remove these lines when uboot supports x86_64 EFI application
 elif [[ "$arch" == "x86_64" ]]; then
+	rm -f vmlinuz initrd.img
 	virt-get-kernel -a "${built_image}"
 	mv vmlinuz* vmlinuz
 	mv initrd.img* initrd.img
@@ -251,4 +269,4 @@ elif [[ "$arch" == "x86_64" ]]; then
 fi
 
 # --sparse option isn't supported in apache-commons-compress
-tar czv -f images.tar.gz "${images[@]}" vm_config.json
+tar czv -f images.tar.gz ${build_id} "${images[@]}" vm_config.json

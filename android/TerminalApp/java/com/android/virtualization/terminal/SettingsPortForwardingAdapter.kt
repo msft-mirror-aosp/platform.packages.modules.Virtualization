@@ -90,8 +90,9 @@ class SettingsPortForwardingAdapter(
     }
 
     override fun onCreateViewHolder(viewGroup: ViewGroup, viewType: Int): ViewHolder {
-        val view = LayoutInflater.from(viewGroup.context)
-            .inflate(R.layout.settings_port_forwarding_item, viewGroup, false)
+        val view =
+            LayoutInflater.from(viewGroup.context)
+                .inflate(R.layout.settings_port_forwarding_item, viewGroup, false)
         return ViewHolder(view)
     }
 
@@ -100,13 +101,16 @@ class SettingsPortForwardingAdapter(
         viewHolder.enabledSwitch.contentDescription = viewHolder.port.text
         viewHolder.enabledSwitch.isChecked = mItems[position].enabled
         viewHolder.enabledSwitch.setOnCheckedChangeListener { _, isChecked ->
-            val sharedPref: SharedPreferences = context.getSharedPreferences(
-                context.getString(R.string.preference_file_key), Context.MODE_PRIVATE
-            )
+            val sharedPref: SharedPreferences =
+                context.getSharedPreferences(
+                    context.getString(R.string.preference_file_key),
+                    Context.MODE_PRIVATE,
+                )
             val editor = sharedPref.edit()
             editor.putBoolean(
-                context.getString(R.string.preference_forwarding_port_is_enabled) + viewHolder.port.text,
-                isChecked
+                context.getString(R.string.preference_forwarding_port_is_enabled) +
+                    viewHolder.port.text,
+                isChecked,
             )
             editor.apply()
         }
