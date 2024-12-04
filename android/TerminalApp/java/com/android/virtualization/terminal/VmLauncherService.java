@@ -291,11 +291,6 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         mResultReceiver.send(VmLauncherService.RESULT_IPADDR, b);
     }
 
-    @Override
-    public void onActivePortsChanged(Set<String> oldPorts, Set<String> newPorts) {
-        mPortNotifier.onActivePortsChanged(oldPorts, newPorts);
-    }
-
     public static void stop(Context context) {
         Intent i = getMyIntent(context);
         context.stopService(i);
