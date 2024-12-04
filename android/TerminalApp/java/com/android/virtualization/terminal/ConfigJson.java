@@ -16,6 +16,7 @@
 
 package com.android.virtualization.terminal;
 
+
 import android.content.Context;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.graphics.Rect;
@@ -39,6 +40,7 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.Reader;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -209,13 +211,26 @@ class ConfigJson {
                                 GUEST_GID,
                                 0007,
                                 "android",
-                                "android");
+                                "android",
+                                false, /* app domain is set to false so that crosvm is spin up as child of virtmgr */
+                                "");
                     }
                     return null;
                 }
+                Path socketPath = context.getFilesDir().toPath().resolve("internal.virtiofs");
+                Files.deleteIfExists(socketPath);
                 return new SharedPath(
-                        sharedPath, terminalUid, terminalUid, 0, 0, 0007, "internal", "internal");
-            } catch (NameNotFoundException e) {
+                        sharedPath,
+                        terminalUid,
+                        terminalUid,
+                        0,
+                        0,
+                        0007,
+                        "internal",
+                        "internal",
+                        true, /* app domain is set to true so that crosvm is spin up from app context */
+                        socketPath.toString());
+            } catch (NameNotFoundException | IOException e) {
                 return null;
             }
         }
