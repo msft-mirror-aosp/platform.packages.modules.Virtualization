@@ -485,7 +485,7 @@ soong_config_module_type {
     ],
 }
 
-flag_aware_avb_add_hash_footer_defaults {
+avb_add_hash_footer_defaults {
     name: "microdroid_kernel_signed_defaults",
     src: ":empty_file",
     partition_name: "boot",
@@ -500,10 +500,16 @@ flag_aware_avb_add_hash_footer_defaults {
             enabled: true,
         },
     },
+}
+
+MICRODROID_GKI_ROLLBACK_INDEX = 1
+
+flag_aware_avb_add_hash_footer_defaults {
+    name: "microdroid_kernel_cap_defaults",
     // Below are properties that are conditionally set depending on value of build flags.
     soong_config_variables: {
         release_avf_enable_llpvm_changes: {
-            rollback_index: 1,
+            rollback_index: MICRODROID_GKI_ROLLBACK_INDEX,
             props: [
                 {
                     name: "com.android.virt.cap",
@@ -514,9 +520,36 @@ flag_aware_avb_add_hash_footer_defaults {
     },
 }
 
+flag_aware_avb_add_hash_footer_defaults {
+    name: "microdroid_kernel_cap_with_uefi_defaults",
+    // Below are properties that are conditionally set depending on value of build flags.
+    soong_config_variables: {
+        release_avf_enable_llpvm_changes: {
+            rollback_index: MICRODROID_GKI_ROLLBACK_INDEX,
+            props: [
+                {
+                    name: "com.android.virt.cap",
+                    value: "secretkeeper_protection|supports_uefi_boot",
+                },
+            ],
+            conditions_default: {
+                props: [
+                    {
+                        name: "com.android.virt.cap",
+                        value: "supports_uefi_boot",
+                    },
+                ],
+            },
+        },
+    },
+}
+
 avb_add_hash_footer {
     name: "microdroid_kernel_signed",
-    defaults: ["microdroid_kernel_signed_defaults"],
+    defaults: [
+        "microdroid_kernel_signed_defaults",
+        "microdroid_kernel_cap_defaults",
+    ],
     filename: "microdroid_kernel",
     arch: {
         arm64: {
@@ -548,7 +581,10 @@ prebuilt_etc {
 
 avb_add_hash_footer {
     name: "microdroid_kernel_16k_signed",
-    defaults: ["microdroid_kernel_signed_defaults"],
+    defaults: [
+        "microdroid_kernel_signed_defaults",
+        "microdroid_kernel_cap_defaults",
+    ],
     filename: "microdroid_kernel_16k",
     arch: {
         arm64: {
@@ -588,10 +624,9 @@ prebuilt_etc {
     src: "microdroid_gki-android15-6.6.json",
 }
 
-avb_add_hash_footer {
-    name: "microdroid_gki-android15-6.6_kernel_signed",
+avb_add_hash_footer_defaults {
+    name: "microdroid_gki_kernel_signed_defaults",
     defaults: ["microdroid_kernel_signed_defaults"],
-    filename: "microdroid_gki-android15-6.6_kernel_signed",
     arch: {
         arm64: {
             src: ":microdroid_gki_kernel_prebuilts-android15-6.6-arm64",
@@ -604,6 +639,24 @@ avb_add_hash_footer {
         ":microdroid_gki-android15-6.6_initrd_normal_hashdesc",
         ":microdroid_gki-android15-6.6_initrd_debug_hashdesc",
     ],
+}
+
+avb_add_hash_footer {
+    name: "microdroid_gki-android15-6.6_kernel_signed",
+    defaults: [
+        "microdroid_gki_kernel_signed_defaults",
+        "microdroid_kernel_cap_defaults",
+    ],
+    filename: "microdroid_gki-android15-6.6_kernel_signed",
+}
+
+avb_add_hash_footer {
+    name: "microdroid_gki-android15-6.6_kernel_signed_supports_uefi_boot",
+    defaults: [
+        "microdroid_gki_kernel_signed_defaults",
+        "microdroid_kernel_cap_with_uefi_defaults",
+    ],
+    filename: "microdroid_gki-android15-6.6_kernel_signed_supports_uefi_boot",
 }
 
 // HACK: use cc_genrule for arch-specific properties
