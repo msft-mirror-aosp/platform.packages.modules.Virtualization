@@ -72,11 +72,10 @@ extern "C" fn abort() -> ! {
 pub static mut ERRNO: c_int = 0;
 
 #[no_mangle]
-#[allow(unused_unsafe)]
+// SAFETY: C functions which call this are only called from the main thread, not from exception
+// handlers.
 unsafe extern "C" fn __errno() -> *mut c_int {
-    // SAFETY: C functions which call this are only called from the main thread, not from exception
-    // handlers.
-    unsafe { addr_of_mut!(ERRNO) as *mut _ }
+    addr_of_mut!(ERRNO) as *mut _
 }
 
 fn set_errno(value: c_int) {
