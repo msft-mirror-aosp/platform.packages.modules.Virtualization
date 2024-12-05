@@ -43,6 +43,8 @@ pub enum MemoryTrackerError {
     SharedMemorySetFailure,
     /// Failure to set `SHARED_POOL`.
     SharedPoolSetFailure,
+    /// Rejected request to map footer that is already mapped.
+    FooterAlreadyMapped,
     /// Invalid page table entry.
     InvalidPte,
     /// Failed to flush memory region.
@@ -69,6 +71,7 @@ impl fmt::Display for MemoryTrackerError {
             Self::Hypervisor(e) => e.fmt(f),
             Self::SharedMemorySetFailure => write!(f, "Failed to set SHARED_MEMORY"),
             Self::SharedPoolSetFailure => write!(f, "Failed to set SHARED_POOL"),
+            Self::FooterAlreadyMapped => write!(f, "Refused to map image footer again"),
             Self::InvalidPte => write!(f, "Page table entry is not valid"),
             Self::FlushRegionFailed => write!(f, "Failed to flush memory region"),
             Self::SetPteDirtyFailed => write!(f, "Failed to set PTE dirty state"),
