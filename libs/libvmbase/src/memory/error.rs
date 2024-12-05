@@ -21,6 +21,8 @@ use hypervisor_backends::Error as HypervisorError;
 /// Errors for MemoryTracker operations.
 #[derive(Debug, Clone)]
 pub enum MemoryTrackerError {
+    /// MemoryTracker not configured or deactivated.
+    Unavailable,
     /// Tried to modify the memory base address.
     DifferentBaseAddress,
     /// Tried to shrink to a larger memory size.
@@ -60,6 +62,7 @@ pub enum MemoryTrackerError {
 impl fmt::Display for MemoryTrackerError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Self::Unavailable => write!(f, "MemoryTracker is not available"),
             Self::DifferentBaseAddress => write!(f, "Received different base address"),
             Self::SizeTooLarge => write!(f, "Tried to shrink to a larger memory size"),
             Self::SizeTooSmall => write!(f, "Tracked regions would not fit in memory size"),
