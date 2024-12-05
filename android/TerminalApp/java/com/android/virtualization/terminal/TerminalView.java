@@ -256,7 +256,7 @@ public class TerminalView extends WebView
                             // ttyd name it as "Terminal input" but it's not i18n'ed. Override it
                             // here for better i18n.
                             info.setText(null);
-                            info.setHintText(null);
+                            info.setHintText(getString(R.string.double_tap_to_edit_text));
                             info.setContentDescription(getString(R.string.terminal_input));
                             info.setScreenReaderFocusable(true);
                             info.addAction(AccessibilityAction.ACTION_FOCUS);
