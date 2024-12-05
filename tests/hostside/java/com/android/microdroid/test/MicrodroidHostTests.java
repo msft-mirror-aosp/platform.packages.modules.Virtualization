@@ -78,7 +78,6 @@ import java.io.PipedOutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -94,6 +93,8 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     private static final String APK_NAME = "MicrodroidTestApp.apk";
     private static final String APK_UPDATED_NAME = "MicrodroidTestAppUpdated.apk";
     private static final String PACKAGE_NAME = "com.android.microdroid.test";
+    private static final String EMPTY_AOSP_PACKAGE_NAME = "com.android.microdroid.empty_payload";
+    private static final String EMPTY_PACKAGE_NAME = "com.google.android.microdroid.empty_payload";
     private static final String SHELL_PACKAGE_NAME = "com.android.shell";
     private static final String VIRT_APEX = "/apex/com.android.virt/";
     private static final String INSTANCE_IMG = TEST_ROOT + "instance.img";
@@ -112,36 +113,18 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         }
     }
 
-    // This map is needed because the parameterizer `DeviceParameterizedRunner` doesn't support "-"
-    // in test names. The key is the test name, while the value is the actual kernel version.
-    private static HashMap<String, String> sGkiVersions = new HashMap<>();
-
-    private static void initGkiVersions() {
-        if (!sGkiVersions.isEmpty()) {
-            return;
-        }
-        sGkiVersions.put("null", null); /* use microdroid kernel */
-        // TODO(b/302465542): run only the latest GKI on presubmit to reduce running time
-        for (String gki : SUPPORTED_GKI_VERSIONS) {
-            String key = gki.split("-")[0];
-            assertThat(sGkiVersions.containsKey(key)).isFalse();
-            sGkiVersions.put(key, gki);
-        }
-    }
-
     public static List<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
-        for (Object[] gki : gkiVersions()) {
-            ret.add(new Object[] {true /* protectedVm */, gki[0]});
-            ret.add(new Object[] {false /* protectedVm */, gki[0]});
+        for (Object[] osKey : osVersions()) {
+            ret.add(new Object[] {true /* protectedVm */, osKey[0]});
+            ret.add(new Object[] {false /* protectedVm */, osKey[0]});
         }
         return ret;
     }
 
-    public static List<Object[]> gkiVersions() {
-        initGkiVersions();
-        return sGkiVersions.keySet().stream()
-                .map(gki -> new Object[] {gki})
+    public static List<Object[]> osVersions() {
+        return SUPPORTED_OSES.keySet().stream()
+                .map(osKey -> new Object[] {osKey})
                 .collect(Collectors.toList());
     }
 
@@ -304,10 +287,10 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
             Map<String, File> keyOverrides,
             boolean isProtected,
             boolean updateBootconfigs,
-            String gki)
+            String os)
             throws Exception {
         CommandRunner android = new CommandRunner(getDevice());
-        gki = sGkiVersions.get(gki);
+        os = SUPPORTED_OSES.get(os);
 
         File virtApexDir = FileUtil.createTempDir("virt_apex");
 
@@ -359,7 +342,6 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         //   - its idsig
 
         // Load etc/microdroid.json
-        final String os = (gki == null) ? "microdroid" : "microdroid_gki-" + gki;
         File microdroidConfigFile = new File(virtApexEtcDir, os + ".json");
         JSONObject config = new JSONObject(FileUtil.readStringFromFile(microdroidConfigFile));
 
@@ -423,10 +405,8 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         VIRT_APEX + "bin/vm run",
                         "--console " + CONSOLE_PATH,
                         "--log " + LOG_PATH,
+                        "--name " + "microdroid", // to still be seen as microdroid vm
                         configPath);
-        if (gki != null) {
-            args.add("--gki " + gki);
-        }
 
         PipedInputStream pis = new PipedInputStream();
         Process process = createRunUtil().runCmdInBackground(args, new PipedOutputStream(pis));
@@ -438,7 +418,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     @VsrTest(requirements = {"VSR-7.1-001.008"})
     public void UpgradedPackageIsAcceptedWithSecretkeeper() throws Exception {
         // Preconditions
-        assumeVmTypeSupported(true); // Non-protected VMs may not support upgrades
+        assumeVmTypeSupported("microdroid", true); // Non-protected VMs may not support upgrades
         ensureUpdatableVmSupported();
         getDevice().uninstallPackage(PACKAGE_NAME);
         getDevice().installPackage(findTestFile(APK_NAME), /* reinstall= */ true);
@@ -456,7 +436,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     @VsrTest(requirements = {"VSR-7.1-001.008"})
     public void DowngradedPackageIsRejectedProtectedVm() throws Exception {
         // Preconditions: Rollback protection is provided only for protected VM.
-        assumeVmTypeSupported(true);
+        assumeVmTypeSupported("microdroid", true);
 
         // Install the upgraded version (v6)
         getDevice().uninstallPackage(PACKAGE_NAME);
@@ -500,13 +480,13 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
-    @Parameters(method = "gkiVersions")
-    @TestCaseName("{method}_gki_{0}")
+    @Parameters(method = "osVersions")
+    @TestCaseName("{method}_os_{0}")
     @CddTest(requirements = {"9.17/C-2-1", "9.17/C-2-2", "9.17/C-2-6"})
-    public void protectedVmRunsPvmfw(String gki) throws Exception {
+    public void protectedVmRunsPvmfw(String os) throws Exception {
         // Arrange
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(true);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, true);
         final String configPath = "assets/vm_config_apex.json";
 
         // Act
@@ -516,7 +496,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(true)
-                        .gki(sGkiVersions.get(gki))
+                        .os(SUPPORTED_OSES.get(os))
                         .name("protected_vm_runs_pvmfw")
                         .build(getAndroidDevice());
 
@@ -533,13 +513,13 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
-    @Parameters(method = "gkiVersions")
-    @TestCaseName("{method}_gki_{0}")
+    @Parameters(method = "osVersions")
+    @TestCaseName("{method}_os_{0}")
     @CddTest(requirements = {"9.17/C-2-1", "9.17/C-2-2", "9.17/C-2-5", "9.17/C-2-6"})
-    public void protectedVmWithImageSignedWithDifferentKeyFailsToVerifyPayload(String gki)
+    public void protectedVmWithImageSignedWithDifferentKeyFailsToVerifyPayload(String os)
             throws Exception {
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(true);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, true);
         File key = findTestFile("test.com.android.virt.pem");
 
         // Act
@@ -549,7 +529,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         /* keyOverrides= */ Map.of(),
                         /* isProtected= */ true,
                         /* updateBootconfigs= */ true,
-                        gki);
+                        os);
 
         // Assert
         vmInfo.mProcess.waitFor(5L, TimeUnit.SECONDS);
@@ -562,13 +542,13 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
-    @Parameters(method = "gkiVersions")
-    @TestCaseName("{method}_gki_{0}")
+    @Parameters(method = "osVersions")
+    @TestCaseName("{method}_os_{0}")
     @CddTest(requirements = {"9.17/C-2-2", "9.17/C-2-6"})
-    public void testBootSucceedsWhenNonProtectedVmStartsWithImagesSignedWithDifferentKey(String gki)
+    public void testBootSucceedsWhenNonProtectedVmStartsWithImagesSignedWithDifferentKey(String os)
             throws Exception {
         // Preconditions
-        assumeKernelSupported(gki);
+        assumeKernelSupported(os);
 
         File key = findTestFile("test.com.android.virt.pem");
         Map<String, File> keyOverrides = Map.of();
@@ -578,7 +558,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         keyOverrides,
                         /* isProtected= */ false,
                         /* updateBootconfigs= */ true,
-                        gki);
+                        os);
         assertThatEventually(
                 100000,
                 () ->
@@ -590,12 +570,12 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
-    @Parameters(method = "gkiVersions")
-    @TestCaseName("{method}_gki_{0}")
+    @Parameters(method = "osVersions")
+    @TestCaseName("{method}_os_{0}")
     @CddTest(requirements = {"9.17/C-2-2", "9.17/C-2-5", "9.17/C-2-6"})
-    public void testBootFailsWhenVbMetaDigestDoesNotMatchBootconfig(String gki) throws Exception {
+    public void testBootFailsWhenVbMetaDigestDoesNotMatchBootconfig(String os) throws Exception {
         // protectedVmWithImageSignedWithDifferentKeyRunsPvmfw() is the protected case.
-        assumeKernelSupported(gki);
+        assumeKernelSupported(os);
 
         // Sign everything with key1 except vbmeta
         File key = findTestFile("test.com.android.virt.pem");
@@ -606,7 +586,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         Map.of(),
                         /* isProtected= */ false,
                         /* updateBootconfigs= */ false,
-                        gki);
+                        os);
         // Wait so that init can print errors to console (time in cuttlefish >> in real device)
         assertThatEventually(
                 100000,
@@ -654,7 +634,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     private boolean isTombstoneGeneratedWithCmd(
-            boolean protectedVm, String gki, String configPath, String... crashCommand)
+            boolean protectedVm, String os, String configPath, String... crashCommand)
             throws Exception {
         CommandRunner android = new CommandRunner(getDevice());
         String testStartTime = android.runWithTimeout(1000, "date", "'+%Y-%m-%d %H:%M:%S.%N'");
@@ -665,7 +645,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(protectedVm)
-                        .gki(sGkiVersions.get(gki))
+                        .os(SUPPORTED_OSES.get(os))
                         .build(getAndroidDevice());
         mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
         mMicrodroidDevice.enableAdbRoot();
@@ -682,18 +662,18 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
-    public void testTombstonesAreGeneratedUponUserspaceCrash(boolean protectedVm, String gki)
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
+    public void testTombstonesAreGeneratedUponUserspaceCrash(boolean protectedVm, String os)
             throws Exception {
         // Preconditions
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
         assertThat(
                         isTombstoneGeneratedWithCmd(
                                 protectedVm,
-                                gki,
+                                os,
                                 "assets/vm_config.json",
                                 "kill",
                                 "-SIGSEGV",
@@ -703,18 +683,18 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
     public void testTombstonesAreNotGeneratedIfNotExportedUponUserspaceCrash(
-            boolean protectedVm, String gki) throws Exception {
+            boolean protectedVm, String os) throws Exception {
         // Preconditions
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
         assertThat(
                         isTombstoneGeneratedWithCmd(
                                 protectedVm,
-                                gki,
+                                os,
                                 "assets/vm_config_no_tombstone.json",
                                 "kill",
                                 "-SIGSEGV",
@@ -724,13 +704,13 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
     @Ignore("b/341087884") // TODO(b/341087884): fix & re-enable
-    public void testTombstonesAreGeneratedUponKernelCrash(boolean protectedVm, String gki)
+    public void testTombstonesAreGeneratedUponKernelCrash(boolean protectedVm, String os)
             throws Exception {
         // Preconditions
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
         assumeFalse("Cuttlefish is not supported", isCuttlefish());
         assumeFalse("Skipping test because ramdump is disabled on user build", isUserBuild());
 
@@ -738,7 +718,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         assertThat(
                         isTombstoneGeneratedWithCmd(
                                 protectedVm,
-                                gki,
+                                os,
                                 "assets/vm_config.json",
                                 "echo",
                                 "c",
@@ -748,12 +728,12 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     private boolean isTombstoneGeneratedWithVmRunApp(
-            boolean protectedVm, String gki, boolean debuggable, String... additionalArgs)
+            boolean protectedVm, String os, boolean debuggable, String... additionalArgs)
             throws Exception {
         // we can't use microdroid builder as it wants ADB connection (debuggable)
         CommandRunner android = new CommandRunner(getDevice());
         String testStartTime = android.runWithTimeout(1000, "date", "'+%Y-%m-%d %H:%M:%S.%N'");
-        gki = sGkiVersions.get(gki);
+        os = SUPPORTED_OSES.get(os);
 
         android.run("rm", "-rf", TEST_ROOT + "*");
         android.run("mkdir", "-p", TEST_ROOT + "*");
@@ -780,10 +760,8 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         if (protectedVm) {
             cmd.add("--protected");
         }
-        if (gki != null) {
-            cmd.add("--gki");
-            cmd.add(gki);
-        }
+        cmd.add("--os");
+        cmd.add(os);
         Collections.addAll(cmd, additionalArgs);
 
         android.run(cmd.toArray(new String[0]));
@@ -791,10 +769,10 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     private boolean isTombstoneGeneratedWithCrashPayload(
-            boolean protectedVm, String gki, boolean debuggable) throws Exception {
+            boolean protectedVm, String os, boolean debuggable) throws Exception {
         return isTombstoneGeneratedWithVmRunApp(
                 protectedVm,
-                gki,
+                os,
                 debuggable,
                 "--payload-binary-name",
                 "MicrodroidCrashNativeLib.so");
@@ -802,77 +780,77 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
-    public void testTombstonesAreGeneratedWithCrashPayload(boolean protectedVm, String gki)
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
+    public void testTombstonesAreGeneratedWithCrashPayload(boolean protectedVm, String os)
             throws Exception {
         // Preconditions
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
 
         // Act
-        assertThat(isTombstoneGeneratedWithCrashPayload(protectedVm, gki, /* debuggable= */ true))
+        assertThat(isTombstoneGeneratedWithCrashPayload(protectedVm, os, /* debuggable= */ true))
                 .isTrue();
     }
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
     public void testTombstonesAreNotGeneratedWithCrashPayloadWhenNonDebuggable(
-            boolean protectedVm, String gki) throws Exception {
+            boolean protectedVm, String os) throws Exception {
         // Preconditions
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
 
         // Act
-        assertThat(isTombstoneGeneratedWithCrashPayload(protectedVm, gki, /* debuggable= */ false))
+        assertThat(isTombstoneGeneratedWithCrashPayload(protectedVm, os, /* debuggable= */ false))
                 .isFalse();
     }
 
     private boolean isTombstoneGeneratedWithCrashConfig(
-            boolean protectedVm, String gki, boolean debuggable) throws Exception {
+            boolean protectedVm, String os, boolean debuggable) throws Exception {
         return isTombstoneGeneratedWithVmRunApp(
-                protectedVm, gki, debuggable, "--config-path", "assets/vm_config_crash.json");
+                protectedVm, os, debuggable, "--config-path", "assets/vm_config_crash.json");
     }
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
-    public void testTombstonesAreGeneratedWithCrashConfig(boolean protectedVm, String gki)
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
+    public void testTombstonesAreGeneratedWithCrashConfig(boolean protectedVm, String os)
             throws Exception {
         // Preconditions
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
 
         // Act
-        assertThat(isTombstoneGeneratedWithCrashConfig(protectedVm, gki, /* debuggable= */ true))
+        assertThat(isTombstoneGeneratedWithCrashConfig(protectedVm, os, /* debuggable= */ true))
                 .isTrue();
     }
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
     public void testTombstonesAreNotGeneratedWithCrashConfigWhenNonDebuggable(
-            boolean protectedVm, String gki) throws Exception {
+            boolean protectedVm, String os) throws Exception {
         // TODO(b/291867858): tombstones are failing in HWASAN enabled Microdroid.
         assumeFalse("tombstones are failing in HWASAN enabled Microdroid.", isHwasan());
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
-        assertThat(isTombstoneGeneratedWithCrashConfig(protectedVm, gki, /* debuggable= */ false))
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
+        assertThat(isTombstoneGeneratedWithCrashConfig(protectedVm, os, /* debuggable= */ false))
                 .isFalse();
     }
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
-    public void testTelemetryPushedAtoms(boolean protectedVm, String gki) throws Exception {
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
+    public void testTelemetryPushedAtoms(boolean protectedVm, String os) throws Exception {
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
         // Reset statsd config and report before the test
         ConfigUtils.removeConfig(getDevice());
         ReportUtils.clearReports(getDevice());
@@ -894,7 +872,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(protectedVm)
-                        .gki(sGkiVersions.get(gki))
+                        .os(SUPPORTED_OSES.get(os))
                         .name("test_telemetry_pushed_atoms")
                         .build(device);
         microdroid.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
@@ -1031,12 +1009,12 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-1-2", "9.17/C/1-3"})
-    public void testMicrodroidBoots(boolean protectedVm, String gki) throws Exception {
+    public void testMicrodroidBoots(boolean protectedVm, String os) throws Exception {
         // Preconditions
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
 
         final String configPath = "assets/vm_config.json"; // path inside the APK
         testMicrodroidBootsWithBuilder(
@@ -1046,35 +1024,35 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .cpuTopology("match_host")
                         .protectedVm(protectedVm)
                         .name("test_microdroid_boots")
-                        .gki(sGkiVersions.get(gki)));
+                        .os(SUPPORTED_OSES.get(os)));
     }
 
     @Test
-    public void testMicrodroidRamUsage_protectedVm_true_gki_null() throws Exception {
-        checkMicrodroidRamUsage(/* protectedVm= */ true, /* gki= */ "null");
+    public void testMicrodroidRamUsage_protectedVm_true_os_microdroid() throws Exception {
+        checkMicrodroidRamUsage(/* protectedVm= */ true, /* os= */ "microdroid");
     }
 
     @Test
-    public void testMicrodroidRamUsage_protectedVm_false_gki_null() throws Exception {
-        checkMicrodroidRamUsage(/* protectedVm= */ false, /* gki= */ "null");
+    public void testMicrodroidRamUsage_protectedVm_false_os_microdroid() throws Exception {
+        checkMicrodroidRamUsage(/* protectedVm= */ false, /* os= */ "microdroid");
     }
 
     @Test
-    public void testMicrodroidRamUsage_protectedVm_true_gki_android15() throws Exception {
-        checkMicrodroidRamUsage(/* protectedVm= */ true, /* gki= */ "android15");
+    public void testMicrodroidRamUsage_protectedVm_true_os_android15_66() throws Exception {
+        checkMicrodroidRamUsage(/* protectedVm= */ true, /* os= */ "android15_66");
     }
 
     @Test
-    public void testMicrodroidRamUsage_protectedVm_false_gki_android15() throws Exception {
-        checkMicrodroidRamUsage(/* protectedVm= */ false, /* gki= */ "android15");
+    public void testMicrodroidRamUsage_protectedVm_false_os_android15_66() throws Exception {
+        checkMicrodroidRamUsage(/* protectedVm= */ false, /* os= */ "android15_66");
     }
 
     // TODO(b/209036125): Upgrade this function to a parameterized test once metrics can be
     // collected with tradefed parameterizer.
-    void checkMicrodroidRamUsage(boolean protectedVm, String gki) throws Exception {
+    void checkMicrodroidRamUsage(boolean protectedVm, String os) throws Exception {
         // Preconditions
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
 
         final String configPath = "assets/vm_config.json";
         mMicrodroidDevice =
@@ -1083,7 +1061,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(protectedVm)
-                        .gki(sGkiVersions.get(gki))
+                        .os(SUPPORTED_OSES.get(os))
                         .name("test_microdroid_ram_usage")
                         .build(getAndroidDevice());
         mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT);
@@ -1153,6 +1131,70 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         final String ret = android.runForResult(String.join(" ", cmd)).getStderr().trim();
 
         assertThat(ret).contains("Payload binary name must not specify a path");
+    }
+
+    private boolean hasAppPackage(String pkgName, CommandRunner android) throws DeviceNotAvailableException {
+        String hasPackage =
+        android.run(
+                "pm list package | grep -w " + pkgName + " 1> /dev/null" + "; echo $?");
+        if (hasPackage.equals("0")) {
+            return true;
+        }
+
+        return false;
+    }
+
+    @Test
+    public void testRunEmptyPayload() throws Exception {
+        CommandRunner android = new CommandRunner(getDevice());
+
+        // Create the idsig file for the APK
+        String apkPath;
+        if (hasAppPackage(EMPTY_AOSP_PACKAGE_NAME, android))
+            apkPath = getPathForPackage(EMPTY_AOSP_PACKAGE_NAME);
+        else
+            apkPath = getPathForPackage(EMPTY_PACKAGE_NAME);
+
+        final String idSigPath = TEST_ROOT + "idsig";
+        final String instanceImgPath = TEST_ROOT + "instance.img";
+
+        android.run(VIRT_APEX + "bin/vm", "create-idsig", apkPath, idSigPath);
+
+        List<String> cmd =
+                new ArrayList<>(
+                        Arrays.asList(
+                                "adb",
+                                "-s",
+                                getDevice().getSerialNumber(),
+                                "shell",
+                                VIRT_APEX + "bin/vm",
+                                "run-app",
+                                "--debug full",
+                                "--console " + CONSOLE_PATH,
+                                "--payload-binary-name",
+                                "MicrodroidEmptyPayloadJniLib.so",
+                                apkPath,
+                                idSigPath,
+                                instanceImgPath));
+        if (isFeatureEnabled("com.android.kvm.LLPVM_CHANGES")) {
+            cmd.add("--instance-id-file");
+            cmd.add(TEST_ROOT + "instance_id");
+        }
+
+        PipedInputStream pis = new PipedInputStream();
+        Process process = createRunUtil().runCmdInBackground(cmd, new PipedOutputStream(pis));
+        String bufferedInput = "";
+
+        do {
+            byte[] pipeBuffer = new byte[4096];
+            pis.read(pipeBuffer, 0, 4096);
+            bufferedInput += new String(pipeBuffer);
+        } while (!bufferedInput.contains("payload is ready"));
+
+        String consoleLog = getDevice().pullFileContents(CONSOLE_PATH);
+        assertThat(consoleLog).contains("Hello Microdroid");
+
+        process.destroy();
     }
 
     @Test
@@ -1266,11 +1308,11 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
-    public void testDeviceAssignment(boolean protectedVm, String gki) throws Exception {
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
+    public void testDeviceAssignment(boolean protectedVm, String os) throws Exception {
         // Preconditions
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
         assumeVfioPlatformSupported();
 
         List<AssignableDevice> devices = getAssignableDevices();
@@ -1280,7 +1322,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
         // Try assign devices one by one
         for (AssignableDevice device : devices) {
-            launchWithDeviceAssignment(device.node, protectedVm, gki);
+            launchWithDeviceAssignment(device.node, protectedVm, os);
 
             String dtPath =
                     new CommandRunner(mMicrodroidDevice)
@@ -1302,7 +1344,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         }
     }
 
-    private void launchWithDeviceAssignment(String device, boolean protectedVm, String gki)
+    private void launchWithDeviceAssignment(String device, boolean protectedVm, String os)
             throws Exception {
         Objects.requireNonNull(device);
         final String configPath = "assets/vm_config.json";
@@ -1313,7 +1355,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(protectedVm)
-                        .gki(sGkiVersions.get(gki))
+                        .os(SUPPORTED_OSES.get(os))
                         .addAssignableDevice(device)
                         .build(getAndroidDevice());
 
@@ -1322,21 +1364,19 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
     }
 
     @Test
-    public void testGkiVersions() throws Exception {
-        for (String gki : getSupportedGKIVersions()) {
-            assertTrue(
-                    "Unknown gki \"" + gki + "\". Supported gkis: " + SUPPORTED_GKI_VERSIONS,
-                    SUPPORTED_GKI_VERSIONS.contains(gki));
+    public void testOsVersions() throws Exception {
+        for (String os : getSupportedOSList()) {
+            assertWithMessage("Unknown OS \"%s\"", os).that(SUPPORTED_OSES.values()).contains(os);
         }
     }
 
     @Test
     @Parameters(method = "params")
-    @TestCaseName("{method}_protectedVm_{0}_gki_{1}")
-    public void testHugePages(boolean protectedVm, String gki) throws Exception {
+    @TestCaseName("{method}_protectedVm_{0}_os_{1}")
+    public void testHugePages(boolean protectedVm, String os) throws Exception {
         // Preconditions
-        assumeKernelSupported(gki);
-        assumeVmTypeSupported(protectedVm);
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, protectedVm);
 
         ITestDevice device = getDevice();
         boolean disableRoot = !device.isAdbRoot();
@@ -1359,7 +1399,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         .memoryMib(minMemorySize())
                         .cpuTopology("match_host")
                         .protectedVm(protectedVm)
-                        .gki(sGkiVersions.get(gki))
+                        .os(SUPPORTED_OSES.get(os))
                         .hugePages(true)
                         .name("test_huge_pages")
                         .build(getAndroidDevice());
@@ -1369,6 +1409,136 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         if (disableRoot) {
             device.disableAdbRoot();
         }
+    }
+
+    @Test
+    @Parameters(method = "osVersions")
+    @TestCaseName("{method}_os_{0}")
+    public void microdroidDeviceTreeCompat(String os) throws Exception {
+        assumeArm64Supported();
+        final String configPath = "assets/vm_config.json";
+        // Preconditions
+        assumeKernelSupported(os);
+        int mem_size = 256;
+        assertTrue("Memory size too small", mem_size >= minMemorySize());
+
+        // Start the VM with the dump DT option.
+        mMicrodroidDevice =
+                MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
+                        .debugLevel("full")
+                        .memoryMib(mem_size)
+                        .cpuTopology("one_cpu")
+                        .protectedVm(false)
+                        .os(SUPPORTED_OSES.get(os))
+                        .name("test_device_tree")
+                        .dumpDt("/data/local/tmp/dump_dt.dtb")
+                        .build(getAndroidDevice());
+        assertThat(mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT)).isTrue();
+
+        File goldenDt = findTestFile("dt_dump_golden.dts");
+        testGoldenDeviceTree(goldenDt.getAbsolutePath());
+    }
+
+    @Test
+    @Parameters(method = "osVersions")
+    @TestCaseName("{method}_os_{0}")
+    public void microdroidProtectedDeviceTreeCompat(String os) throws Exception {
+        assumeArm64Supported();
+        final String configPath = "assets/vm_config.json";
+        // Preconditions
+        assumeKernelSupported(os);
+        assumeVmTypeSupported(os, true);
+        int mem_size = 256;
+        assertTrue("Memory size too small", mem_size >= minMemorySize());
+
+        // Start the VM with the dump DT option.
+        mMicrodroidDevice =
+                MicrodroidBuilder.fromDevicePath(getPathForPackage(PACKAGE_NAME), configPath)
+                        .debugLevel("full")
+                        .memoryMib(mem_size)
+                        .cpuTopology("one_cpu")
+                        .protectedVm(true)
+                        .os(SUPPORTED_OSES.get(os))
+                        .name("test_device_tree")
+                        .dumpDt("/data/local/tmp/dump_dt.dtb")
+                        .build(getAndroidDevice());
+        assertThat(mMicrodroidDevice.waitForBootComplete(BOOT_COMPLETE_TIMEOUT)).isTrue();
+
+        File goldenDt = findTestFile("dt_dump_protected_golden.dts");
+        testGoldenDeviceTree(goldenDt.getAbsolutePath());
+    }
+
+    private void testGoldenDeviceTree(String goldenDt) throws Exception {
+        // Pull the device tree to host.
+        TestDevice device = getAndroidDevice();
+        boolean disableRoot = !device.isAdbRoot();
+        device.enableAdbRoot();
+        assumeTrue("adb root is not enabled", device.isAdbRoot());
+
+        // Pull DT from device
+        File dtb_from_device = device.pullFile("/data/local/tmp/dump_dt.dtb");
+        if (disableRoot) {
+            device.disableAdbRoot();
+        }
+
+        File dtc = findTestFile("dtc");
+
+        // Create temp file for Device tree conversion
+        File dt_dump_dts = File.createTempFile("dt_dump", "dts");
+        dt_dump_dts.delete();
+        String dt_dump_dts_path = dt_dump_dts.getAbsolutePath();
+        // Convert DT to text format.
+        CommandResult dtb_to_dts =
+                RunUtil.getDefault()
+                        .runTimedCmd(
+                                3000,
+                                dtc.getAbsolutePath(),
+                                "-I",
+                                "dtb",
+                                "-O",
+                                "dts",
+                                "-qqq",
+                                "-f",
+                                "-s",
+                                "-o",
+                                dt_dump_dts_path,
+                                dtb_from_device.getAbsolutePath());
+        assertTrue(
+                "result convert stderr: " + dtb_to_dts.getStderr(),
+                dtb_to_dts.getStderr().trim().isEmpty());
+        assertTrue(
+                "result convert stdout: " + dtb_to_dts.getStdout(),
+                dtb_to_dts.getStdout().trim().isEmpty());
+
+        // Diff device's DT with the golden DT.
+        CommandResult result_compare =
+                RunUtil.getDefault()
+                        .runTimedCmd(
+                                3000,
+                                "diff",
+                                "-u",
+                                "-w",
+                                "-I",
+                                "kaslr-seed",
+                                "-I",
+                                "instance-id",
+                                "-I",
+                                "rng-seed",
+                                "-I",
+                                "linux,initrd-end",
+                                "-I",
+                                "secretkeeper_public_key",
+                                "-I",
+                                "interrupt-map",
+                                dt_dump_dts_path,
+                                goldenDt);
+
+        assertTrue(
+                "result compare stderr: " + result_compare.getStderr(),
+                result_compare.getStderr().trim().isEmpty());
+        assertTrue(
+                "result compare stdout: " + result_compare.getStdout(),
+                result_compare.getStdout().trim().isEmpty());
     }
 
     @Before
@@ -1439,18 +1609,27 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         return runUtil;
     }
 
-    private void assumeKernelSupported(String gki) throws Exception {
-        String gkiVersion = sGkiVersions.get(gki);
-        if (gkiVersion != null) {
-            assumeTrue(
-                    "Skipping test as the GKI is not supported: " + gkiVersion,
-                    getSupportedGKIVersions().contains(gkiVersion));
-        }
+    private void assumeKernelSupported(String osKey) throws Exception {
+        String os = SUPPORTED_OSES.get(osKey);
+        assumeTrue(
+                "Skipping test as OS \"" + os + "\" is not supported",
+                getSupportedOSList().contains(os));
     }
 
-    private void assumeVmTypeSupported(boolean protectedVm) throws Exception {
+    private void assumeVmTypeSupported(String os, boolean protectedVm) throws Exception {
+        // TODO(b/376870129): remove this check
+        if (protectedVm) {
+            assumeFalse("pVMs with 16k kernel are not supported yet :(", os.endsWith("_16k"));
+        }
         assumeTrue(
                 "Microdroid is not supported for specific VM protection type",
                 getAndroidDevice().supportsMicrodroid(protectedVm));
+    }
+
+    private void assumeArm64Supported() throws Exception {
+        CommandRunner android = new CommandRunner(getDevice());
+        String abi = android.run("getprop", "ro.product.cpu.abi");
+        assertThat(abi).isNotEmpty();
+        assumeTrue("Skipping test as the architecture is not supported", abi.startsWith("arm64"));
     }
 }

@@ -40,11 +40,8 @@ import org.json.JSONObject;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.Map;
 
 public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
     protected static final String TEST_ROOT = "/data/local/tmp/virt/";
@@ -70,8 +67,14 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
                             * 1000
                             / MICRODROID_COMMAND_RETRY_INTERVAL_MILLIS);
 
-    protected static final Set<String> SUPPORTED_GKI_VERSIONS =
-            Collections.unmodifiableSet(new HashSet(Arrays.asList("android15-6.6")));
+    // We use a map here because the parameterizer `DeviceParameterizedRunner` doesn't support "-"
+    // in test names.
+    // The key of the map is the name of the parameter while the value is the actual OS variant.
+    protected static final Map<String, String> SUPPORTED_OSES =
+            Map.ofEntries(
+                    Map.entry("microdroid", "microdroid"),
+                    Map.entry("microdroid_16k", "microdroid_16k"),
+                    Map.entry("android15_66", "microdroid_gki-android15-6.6"));
 
     /* Keep this sync with AssignableDevice.aidl */
     public static final class AssignableDevice {
@@ -259,13 +262,6 @@ public abstract class MicrodroidHostTestCaseBase extends BaseHostJUnit4Test {
 
     public List<String> getSupportedOSList() throws Exception {
         return parseStringArrayFieldsFromVmInfo("Available OS list: ");
-    }
-
-    public List<String> getSupportedGKIVersions() throws Exception {
-        return getSupportedOSList().stream()
-                .filter(os -> os.startsWith("microdroid_gki-"))
-                .map(os -> os.replaceFirst("^microdroid_gki-", ""))
-                .collect(Collectors.toList());
     }
 
     protected boolean isPkvmHypervisor() throws DeviceNotAvailableException {
