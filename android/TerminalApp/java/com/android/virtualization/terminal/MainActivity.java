@@ -21,7 +21,6 @@ import android.app.Notification;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -72,6 +71,7 @@ import java.util.Map;
 public class MainActivity extends BaseActivity
         implements VmLauncherService.VmLauncherServiceCallback, AccessibilityStateChangeListener {
     static final String TAG = "VmTerminalApp";
+    static final String KEY_DISK_SIZE = "disk_size";
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
     private static final int REQUEST_CODE_INSTALLER = 0x33;
@@ -80,7 +80,7 @@ public class MainActivity extends BaseActivity
     private InstalledImage mImage;
     private X509Certificate[] mCertificates;
     private PrivateKey mPrivateKey;
-    private WebView mWebView;
+    private TerminalView mTerminalView;
     private AccessibilityManager mAccessibilityManager;
     private ConditionVariable mBootCompleted = new ConditionVariable();
     private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
@@ -113,12 +113,12 @@ public class MainActivity extends BaseActivity
 
         MaterialToolbar toolbar = (MaterialToolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
-        mWebView = (WebView) findViewById(R.id.webview);
-        mWebView.getSettings().setDatabaseEnabled(true);
-        mWebView.getSettings().setDomStorageEnabled(true);
-        mWebView.getSettings().setJavaScriptEnabled(true);
-        mWebView.getSettings().setCacheMode(LOAD_NO_CACHE);
-        mWebView.setWebChromeClient(new WebChromeClient());
+        mTerminalView = (TerminalView) findViewById(R.id.webview);
+        mTerminalView.getSettings().setDatabaseEnabled(true);
+        mTerminalView.getSettings().setDomStorageEnabled(true);
+        mTerminalView.getSettings().setJavaScriptEnabled(true);
+        mTerminalView.getSettings().setCacheMode(LOAD_NO_CACHE);
+        mTerminalView.setWebChromeClient(new WebChromeClient());
 
         setupModifierKeys();
 
@@ -173,16 +173,16 @@ public class MainActivity extends BaseActivity
         findViewById(R.id.btn_ctrl)
                 .setOnClickListener(
                         (v) -> {
-                            mWebView.evaluateJavascript(TerminalView.CTRL_KEY_HANDLER, null);
-                            mWebView.evaluateJavascript(TerminalView.ENABLE_CTRL_KEY, null);
+                            mTerminalView.mapCtrlKey();
+                            mTerminalView.enableCtrlKey();
                         });
 
         View.OnClickListener modifierButtonClickListener =
                 v -> {
                     if (BTN_KEY_CODE_MAP.containsKey(v.getId())) {
                         int keyCode = BTN_KEY_CODE_MAP.get(v.getId());
-                        mWebView.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, keyCode));
-                        mWebView.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, keyCode));
+                        mTerminalView.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, keyCode));
+                        mTerminalView.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, keyCode));
                     }
                 };
 
@@ -246,7 +246,7 @@ public class MainActivity extends BaseActivity
 
     private void connectToTerminalService() {
         Log.i(TAG, "URL=" + getTerminalServiceUrl().toString());
-        mWebView.setWebViewClient(
+        mTerminalView.setWebViewClient(
                 new WebViewClient() {
                     private boolean mLoadFailed = false;
                     private long mRequestId = 0;
@@ -300,8 +300,7 @@ public class MainActivity extends BaseActivity
                                                     .setVisibility(View.VISIBLE);
                                             mBootCompleted.open();
                                             updateModifierKeysVisibility();
-                                            mWebView.evaluateJavascript(
-                                                    TerminalView.TOUCH_TO_MOUSE_HANDLER, null);
+                                            mTerminalView.mapTouchToMouseEvent();
                                         }
                                     }
                                 });
@@ -328,7 +327,9 @@ public class MainActivity extends BaseActivity
                         () -> {
                             waitUntilVmStarts();
                             runOnUiThread(
-                                    () -> mWebView.loadUrl(getTerminalServiceUrl().toString()));
+                                    () ->
+                                            mTerminalView.loadUrl(
+                                                    getTerminalServiceUrl().toString()));
                         })
                 .start();
     }
@@ -508,17 +509,11 @@ public class MainActivity extends BaseActivity
     }
 
     private void resizeDiskIfNecessary(InstalledImage image) {
-        String prefKey = getString(R.string.preference_file_key);
-        String key = getString(R.string.preference_disk_size_key);
-        SharedPreferences sharedPref = this.getSharedPreferences(prefKey, Context.MODE_PRIVATE);
         try {
-            // Use current size as default value to ensure if its size is multiple of 4096
-            long newSize = sharedPref.getLong(key, image.getSize());
-            Log.d(TAG, "Resizing disk to " + newSize + " bytes");
-            newSize = image.resize(newSize);
-            sharedPref.edit().putLong(key, newSize).apply();
+            // TODO(b/382190982): Show snackbar message instead when it's recoverable.
+            image.resize(getIntent().getLongExtra(KEY_DISK_SIZE, image.getSize()));
         } catch (IOException e) {
-            Log.e(TAG, "Failed to resize disk", e);
+            ErrorActivity.start(this, new Exception("Failed to resize disk", e));
             return;
         }
     }
