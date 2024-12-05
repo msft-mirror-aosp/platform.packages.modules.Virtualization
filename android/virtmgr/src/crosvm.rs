@@ -235,6 +235,8 @@ pub struct SharedPathConfig {
     pub mask: i32,
     pub tag: String,
     pub socket_path: String,
+    pub socket_fd: Option<File>,
+    pub app_domain: bool,
 }
 
 /// virtio-input device configuration from `external/crosvm/src/crosvm/config.rs`
@@ -360,12 +362,15 @@ pub struct VmContext {
     #[allow(dead_code)] // Keeps the global context alive
     pub(crate) global_context: Strong<dyn IGlobalVmContext>,
     #[allow(dead_code)] // Keeps the server alive
-    vm_server: RpcServer,
+    vm_server: Option<RpcServer>,
 }
 
 impl VmContext {
     /// Construct new VmContext.
-    pub fn new(global_context: Strong<dyn IGlobalVmContext>, vm_server: RpcServer) -> VmContext {
+    pub fn new(
+        global_context: Strong<dyn IGlobalVmContext>,
+        vm_server: Option<RpcServer>,
+    ) -> VmContext {
         VmContext { global_context, vm_server }
     }
 }
@@ -475,10 +480,23 @@ impl VmInstance {
     fn monitor_vm_exit(
         &self,
         child: Arc<SharedChild>,
-        mut failure_pipe_read: File,
+        failure_pipe_read: File,
         vfio_devices: Vec<VfioDevice>,
         tap: Option<File>,
     ) {
+        let failure_reason_thread = std::thread::spawn(move || {
+            // Read the pipe to see if any failure reason is written
+            let mut failure_reason = String::new();
+            // Arbitrary max size in case of misbehaving guest.
+            const MAX_SIZE: u64 = 50_000;
+            match failure_pipe_read.take(MAX_SIZE).read_to_string(&mut failure_reason) {
+                Err(e) => error!("Error reading VM failure reason from pipe: {}", e),
+                Ok(len) if len > 0 => error!("VM returned failure reason '{}'", &failure_reason),
+                _ => (),
+            };
+            failure_reason
+        });
+
         let result = child.wait();
         match &result {
             Err(e) => error!("Error waiting for crosvm({}) instance to die: {}", child.id(), e),
@@ -492,19 +510,13 @@ impl VmInstance {
             }
         }
 
+        let failure_reason = failure_reason_thread.join().expect("failure_reason_thread panic'd");
+
         let mut vm_state = self.vm_state.lock().unwrap();
         *vm_state = VmState::Dead;
         // Ensure that the mutex is released before calling the callbacks.
         drop(vm_state);
         info!("{} exited", &self);
-
-        // Read the pipe to see if any failure reason is written
-        let mut failure_reason = String::new();
-        match failure_pipe_read.read_to_string(&mut failure_reason) {
-            Err(e) => error!("Error reading VM failure reason from pipe: {}", e),
-            Ok(len) if len > 0 => info!("VM returned failure reason '{}'", &failure_reason),
-            _ => (),
-        };
 
         // In case of hangup, the pipe doesn't give us any information because the hangup can't be
         // detected on the VM side (otherwise, it isn't a hangup), but in the
@@ -648,7 +660,9 @@ impl VmInstance {
 
         // Now that the VM has been killed, shut down the VirtualMachineService
         // server to eagerly free up the server threads.
-        self.vm_context.vm_server.shutdown()?;
+        if let Some(vm_server) = &self.vm_context.vm_server {
+            vm_server.shutdown()?;
+        }
 
         Ok(())
     }
@@ -900,6 +914,9 @@ fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Erro
 
 fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
     for shared_path in &config.shared_paths {
+        if shared_path.app_domain {
+            continue;
+        }
         let ugid_map_value = format!(
             "{} {} {} {} {} /",
             shared_path.guest_uid,
@@ -975,7 +992,11 @@ fn run_vm(
     if config.protected {
         match system_properties::read(SYSPROP_CUSTOM_PVMFW_PATH)? {
             Some(pvmfw_path) if !pvmfw_path.is_empty() => {
-                command.arg("--protected-vm-with-firmware").arg(pvmfw_path)
+                if pvmfw_path == "none" {
+                    command.arg("--protected-vm-without-firmware")
+                } else {
+                    command.arg("--protected-vm-with-firmware").arg(pvmfw_path)
+                }
             }
             _ => command.arg("--protected-vm"),
         };
@@ -1010,6 +1031,13 @@ fn run_vm(
         command.arg("--params").arg("printk.devkmsg=on");
         command.arg("--params").arg("console=hvc0");
     }
+
+    // Move the PCI MMIO regions to near the end of the low-MMIO space.
+    // This is done to accommodate a limitation in a partner's hypervisor.
+    #[cfg(target_arch = "aarch64")]
+    command
+        .arg("--pci")
+        .arg("mem=[start=0x70000000,size=0x2000000],cam=[start=0x72000000,size=0x1000000]");
 
     command.arg("--mem").arg(memory_mib.to_string());
 
@@ -1244,9 +1272,23 @@ fn run_vm(
     }
 
     for shared_path in &config.shared_paths {
-        command
-            .arg("--vhost-user-fs")
-            .arg(format!("{},tag={}", &shared_path.socket_path, &shared_path.tag));
+        if shared_path.app_domain {
+            if let Some(socket_fd) = &shared_path.socket_fd {
+                let socket_path =
+                    add_preserved_fd(&mut preserved_fds, socket_fd.try_clone().unwrap());
+                let raw_fd: i32 = socket_path.rsplit_once('/').unwrap().1.parse().unwrap();
+                command
+                    .arg("--vhost-user-fs")
+                    .arg(format!("tag={},socket-fd={}", &shared_path.tag, raw_fd));
+            }
+        } else {
+            if let Err(e) = wait_for_file(&shared_path.socket_path, 5) {
+                bail!("Error waiting for file: {}", e);
+            }
+            command
+                .arg("--vhost-user-fs")
+                .arg(format!("{},tag={}", &shared_path.socket_path, &shared_path.tag));
+        }
     }
 
     debug!("Preserving FDs {:?}", preserved_fds);
@@ -1267,6 +1309,23 @@ fn run_vm(
     let result = SharedChild::spawn(&mut command)?;
     debug!("Spawned crosvm({}).", result.id());
     Ok(result)
+}
+
+fn wait_for_file(path: &str, timeout_secs: u64) -> Result<(), std::io::Error> {
+    let start_time = std::time::Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+
+    while start_time.elapsed() < timeout {
+        if std::fs::metadata(path).is_ok() {
+            return Ok(()); // File exists
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("File not found within {} seconds: {}", timeout_secs, path),
+    ))
 }
 
 /// Ensure that the configuration has a valid combination of fields set, or return an error if not.

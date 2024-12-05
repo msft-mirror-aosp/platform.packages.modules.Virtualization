@@ -72,6 +72,11 @@ pub struct CommonConfig {
     /// Boost uclamp to stablise results for benchmarks.
     #[arg(short, long)]
     boost_uclamp: bool,
+
+    /// Secure services this VM wants to access.
+    #[cfg(tee_services_allowlist)]
+    #[arg(long)]
+    tee_services: Vec<String>,
 }
 
 impl CommonConfig {
@@ -81,6 +86,16 @@ impl CommonConfig {
                 self.network_supported
             } else {
                 false
+            }
+        }
+    }
+
+    fn tee_services(&self) -> &[String] {
+        cfg_if::cfg_if! {
+            if #[cfg(tee_services_allowlist)] {
+                &self.tee_services
+            } else {
+                &[]
             }
         }
     }
@@ -155,10 +170,10 @@ pub struct MicrodroidConfig {
     #[arg(long)]
     devices: Vec<PathBuf>,
 
-    /// Version of GKI to use. If set, use instead of microdroid kernel
-    #[cfg(vendor_modules)]
+    /// Version of OS to use. If not set, defaults to microdroid.
+    /// You can list all available OSes via `vm info` command.
     #[arg(long)]
-    gki: Option<String>,
+    os: Option<String>,
 }
 
 impl MicrodroidConfig {
@@ -166,16 +181,6 @@ impl MicrodroidConfig {
         cfg_if::cfg_if! {
             if #[cfg(vendor_modules)] {
                 self.vendor.as_ref()
-            } else {
-                None
-            }
-        }
-    }
-
-    fn gki(&self) -> Option<&str> {
-        cfg_if::cfg_if! {
-            if #[cfg(vendor_modules)] {
-                self.gki.as_deref()
             } else {
                 None
             }
