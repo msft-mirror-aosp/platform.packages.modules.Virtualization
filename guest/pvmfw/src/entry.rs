@@ -26,11 +26,10 @@ use log::LevelFilter;
 use vmbase::util::RangeExt as _;
 use vmbase::{
     arch::aarch64::min_dcache_line_size,
-    configure_heap, console_writeln, layout, main,
+    configure_heap, console_writeln, layout, limit_stack_size, main,
     memory::{
-        deactivate_dynamic_page_tables, map_image_footer, switch_to_dynamic_page_tables,
-        unshare_all_memory, unshare_all_mmio_except_uart, unshare_uart, MemoryTrackerError,
-        SIZE_128KB, SIZE_4KB,
+        deactivate_dynamic_page_tables, map_image_footer, unshare_all_memory,
+        unshare_all_mmio_except_uart, unshare_uart, MemoryTrackerError, SIZE_128KB, SIZE_4KB,
     },
     power::reboot,
 };
@@ -73,6 +72,7 @@ impl RebootReason {
 
 main!(start);
 configure_heap!(SIZE_128KB);
+limit_stack_size!(SIZE_4KB * 12);
 
 /// Entry point for pVM firmware.
 pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64) {
@@ -107,13 +107,6 @@ fn main_wrapper(
     // - only access non-pvmfw memory once (and while) it has been mapped
 
     log::set_max_level(LevelFilter::Info);
-
-    let page_table = memory::init_page_table().map_err(|e| {
-        error!("Failed to set up the dynamic page tables: {e}");
-        RebootReason::InternalError
-    })?;
-    // Up to this point, we were using the built-in static (from .rodata) page tables.
-    switch_to_dynamic_page_tables(page_table);
 
     let appended_data = get_appended_data_slice().map_err(|e| {
         error!("Failed to map the appended data: {e}");
@@ -190,7 +183,7 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
     assert_eq!(bcc.start % ASM_STP_ALIGN, 0, "Misaligned guest BCC.");
     assert_eq!(bcc.end % ASM_STP_ALIGN, 0, "Misaligned guest BCC.");
 
-    let stack = memory::stack_range();
+    let stack = layout::stack_range();
 
     assert_ne!(stack.end - stack.start, 0, "stack region is empty.");
     assert_eq!(stack.start.0 % ASM_STP_ALIGN, 0, "Misaligned stack region.");
