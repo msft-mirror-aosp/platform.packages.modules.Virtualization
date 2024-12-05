@@ -38,6 +38,8 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.webkit.WebView;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.List;
 
 public class TerminalView extends WebView
@@ -46,105 +48,9 @@ public class TerminalView extends WebView
     // arbitrarily set. We may want to adjust this in the future.
     private static final int TEXT_TOO_LONG_TO_ANNOUNCE = 200;
 
-    // keyCode 229 means composing text, so get the last character in e.target.value.
-    // keycode 64(@)-95(_) is mapped to a ctrl code
-    // keycode 97(A)-122(Z) is converted to a small letter, and mapped to ctrl code
-    public static final String CTRL_KEY_HANDLER =
-            """
-(function() {
-  window.term.attachCustomKeyEventHandler((e) => {
-      if (window.ctrl) {
-          keyCode = e.keyCode;
-          if (keyCode === 229) {
-              keyCode = e.target.value.charAt(e.target.selectionStart - 1).charCodeAt();
-          }
-          if (64 <= keyCode && keyCode <= 95) {
-              input = String.fromCharCode(keyCode - 64);
-          } else if (97 <= keyCode && keyCode <= 122) {
-              input = String.fromCharCode(keyCode - 96);
-          } else {
-              return true;
-          }
-          if (e.type === 'keyup') {
-              window.term.input(input);
-              e.target.value = e.target.value.slice(0, -1);
-              window.ctrl = false;
-          }
-          return false;
-      } else {
-          return true;
-      }
-  });
-})();
-""";
-    public static final String ENABLE_CTRL_KEY = "(function(){window.ctrl=true;})();";
-
-    // TODO(b/375326606): consider contribution on
-    // upstream(https://github.com/xtermjs/xterm.js/issues/3727)
-    public static final String TOUCH_TO_MOUSE_HANDLER =
-            """
-(function() {
-let convertTouchToMouse = false;
-function touchHandler(event) {
-  const contextmenuByTouch =
-      event.type === 'contextmenu' && event.pointerType === 'touch';
-  // Only proceed for long touches (contextmenu) or when converting touch to
-  // mouse
-  if (!contextmenuByTouch && !convertTouchToMouse) {
-    return;
-  }
-
-  const touch = event.changedTouches ? event.changedTouches[0] : event;
-
-  let type;
-  switch (event.type) {
-    case 'contextmenu':
-      convertTouchToMouse = true;
-      type = 'mousedown';
-      break;
-    case 'touchmove':
-      type = 'mousemove';
-      break;
-    case 'touchend':
-      convertTouchToMouse = false;
-      type = 'mouseup';
-      break;
-    default:
-      convertTouchToMouse = false;
-      return;
-  }
-
-  const simulatedEvent = new MouseEvent(type, {
-    bubbles: true,
-    cancelable: true,
-    view: window,
-    detail: 1,
-    screenX: touch.screenX,
-    screenY: touch.screenY,
-    clientX: touch.clientX,
-    clientY: touch.clientY,
-    button: 0,  // left click
-  });
-
-  touch.target.dispatchEvent(simulatedEvent);
-
-  // Prevent default behavior for touch events (except contextmenu)
-  if (event.type !== 'contextmenu') {
-    event.preventDefault();
-    event.stopPropagation();
-  }
-}
-const eventOptions = {
-  capture: true,
-  passive: false
-};
-document.addEventListener('touchstart', touchHandler, eventOptions);
-document.addEventListener('touchmove', touchHandler, eventOptions);
-document.addEventListener('touchend', touchHandler, eventOptions);
-document.addEventListener('touchcancel', touchHandler, eventOptions);
-document.addEventListener('contextmenu', touchHandler, eventOptions);
-})();
-""";
+    private final String CTRL_KEY_HANDLER;
+    private final String ENABLE_CTRL_KEY;
+    private final String TOUCH_TO_MOUSE_HANDLER;
 
     private final AccessibilityManager mA11yManager;
 
@@ -155,6 +61,32 @@ document.addEventListener('contextmenu', touchHandler, eventOptions);
         mA11yManager.addTouchExplorationStateChangeListener(this);
         mA11yManager.addAccessibilityStateChangeListener(this);
         adjustToA11yStateChange();
+        try {
+            CTRL_KEY_HANDLER = readAssetAsString(context, "js/ctrl_key_handler.js");
+            ENABLE_CTRL_KEY = readAssetAsString(context, "js/enable_ctrl_key.js");
+            TOUCH_TO_MOUSE_HANDLER = readAssetAsString(context, "js/touch_to_mouse_handler.js");
+        } catch (IOException e) {
+            // It cannot happen
+            throw new IllegalArgumentException("cannot read code from asset", e);
+        }
+    }
+
+    private String readAssetAsString(Context context, String filePath) throws IOException {
+        try (InputStream is = context.getAssets().open(filePath)) {
+            return new String(is.readAllBytes());
+        }
+    }
+
+    public void mapTouchToMouseEvent() {
+        this.evaluateJavascript(TOUCH_TO_MOUSE_HANDLER, null);
+    }
+
+    public void mapCtrlKey() {
+        this.evaluateJavascript(CTRL_KEY_HANDLER, null);
+    }
+
+    public void enableCtrlKey() {
+        this.evaluateJavascript(ENABLE_CTRL_KEY, null);
     }
 
     @Override
