@@ -31,7 +31,7 @@ use vmbase::{
     configure_heap, console_writeln,
     layout::{self, crosvm, UART_PAGE_ADDR},
     main,
-    memory::{MemoryTracker, MEMORY, SIZE_128KB, SIZE_4KB},
+    memory::{MemoryTracker, MemoryTrackerError, MEMORY, SIZE_128KB, SIZE_4KB},
     power::reboot,
 };
 use zeroize::Zeroize;
@@ -113,9 +113,17 @@ fn main_wrapper(
         RebootReason::InternalError
     })?;
 
-    // SAFETY: We only get the appended payload from here, once. The region was statically mapped,
-    // then remapped by `init_page_table()`.
-    let appended_data = unsafe { get_appended_data_slice() };
+    // Up to this point, we were using the built-in static (from .rodata) page tables.
+    MEMORY.lock().replace(MemoryTracker::new(
+        page_table,
+        crosvm::MEM_START..layout::MAX_VIRT_ADDR,
+        crosvm::MMIO_RANGE,
+    ));
+
+    let appended_data = get_appended_data_slice().map_err(|e| {
+        error!("Failed to map the appended data: {e}");
+        RebootReason::InternalError
+    })?;
 
     let appended = AppendedPayload::new(appended_data).ok_or_else(|| {
         error!("No valid configuration found");
@@ -123,14 +131,6 @@ fn main_wrapper(
     })?;
 
     let config_entries = appended.get_entries();
-
-    // Up to this point, we were using the built-in static (from .rodata) page tables.
-    MEMORY.lock().replace(MemoryTracker::new(
-        page_table,
-        crosvm::MEM_START..layout::MAX_VIRT_ADDR,
-        crosvm::MMIO_RANGE,
-        Some(layout::image_footer_range()),
-    ));
 
     let slices = memory::MemorySlices::new(
         fdt,
@@ -321,15 +321,11 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
     };
 }
 
-/// # Safety
-///
-/// This must only be called once, since we are returning a mutable reference.
-/// The appended data region must be mapped.
-unsafe fn get_appended_data_slice() -> &'static mut [u8] {
-    let range = layout::image_footer_range();
-    // SAFETY: This region is mapped and the linker script prevents it from overlapping with other
-    // objects.
-    unsafe { slice::from_raw_parts_mut(range.start.0 as *mut u8, range.end - range.start) }
+fn get_appended_data_slice() -> Result<&'static mut [u8], MemoryTrackerError> {
+    let range = MEMORY.lock().as_mut().unwrap().map_image_footer()?;
+    // SAFETY: This region was just mapped for the first time (as map_image_footer() didn't fail)
+    // and the linker script prevents it from overlapping with other objects.
+    Ok(unsafe { slice::from_raw_parts_mut(range.start as *mut u8, range.len()) })
 }
 
 enum AppendedPayload<'a> {
