@@ -27,7 +27,7 @@
     <!-- Description of an empty line in the terminal. This is read by talkback. [CHAR LIMIT=none] -->
     <string name="empty_line">Empty line</string>
     <!-- Description of the hint supported by the terminal UI elements. This is read by talkback. [CHAR LIMIT=none] -->
-    <string name="double_tap_to_edit_text">Double-tap to go to cursor</string>
+    <string name="double_tap_to_edit_text">Double-tap to type input</string>
 
     <!-- Installer activity title [CHAR LIMIT=none] -->
     <string name="installer_title_text">Install Linux terminal</string>
