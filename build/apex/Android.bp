@@ -45,12 +45,7 @@ apex_defaults {
 
     apps: [
         "android.system.virtualmachine.res",
-    ] + select(release_flag("RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES"), {
-        true: [
-            "VmTerminalApp",
-        ],
-        default: [],
-    }),
+    ],
 
     file_contexts: ":com.android.virt-file_contexts",
 
@@ -113,6 +108,7 @@ apex_defaults {
                 "rialto_bin",
                 "android_bootloader_crosvm_aarch64",
             ],
+            native_shared_libs: ["libavf"],
         },
         x86_64: {
             binaries: [
@@ -133,6 +129,7 @@ apex_defaults {
             prebuilts: [
                 "android_bootloader_crosvm_x86_64",
             ],
+            native_shared_libs: ["libavf"],
         },
     },
     binaries: [
@@ -167,13 +164,26 @@ apex_defaults {
     }) + select(release_flag("RELEASE_AVF_ENABLE_NETWORK"), {
         true: ["com.android.virt.vmnic.rc"],
         default: [],
+    }) + select(soong_config_variable("ANDROID", "target_boots_16k"), {
+        true: [
+            "microdroid_16k_initrd_debuggable",
+            "microdroid_16k_initrd_normal",
+            "microdroid_kernel_16k",
+            "microdroid_16k.json",
+        ],
+        default: [],
     }),
     host_required: [
         "vm_shell",
     ],
     apps: [
         "EmptyPayloadApp",
-    ],
+    ] + select(release_flag("RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES"), {
+        true: [
+            "VmTerminalApp",
+        ],
+        default: [],
+    }),
     androidManifest: select(release_flag("RELEASE_AVF_ENABLE_LLPVM_CHANGES"), {
         true: "AndroidManifest.xml",
         default: unset,
