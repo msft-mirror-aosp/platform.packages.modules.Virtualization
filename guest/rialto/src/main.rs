@@ -46,11 +46,11 @@ use vmbase::{
     fdt::pci::PciInfo,
     fdt::SwiotlbInfo,
     generate_image_header,
-    layout::{self, crosvm},
+    layout::crosvm,
     main,
     memory::{
         init_shared_pool, map_rodata, map_rodata_outside_main_memory, resize_available_memory,
-        switch_to_dynamic_page_tables, PageTable, PAGE_SIZE, SIZE_128KB,
+        SIZE_128KB,
     },
     power::reboot,
     virtio::{
@@ -71,28 +71,12 @@ fn vm_type(fdt: &libfdt::Fdt) -> Result<VmType> {
     }
 }
 
-fn new_page_table() -> Result<PageTable> {
-    let mut page_table = PageTable::default();
-
-    page_table.map_data(&layout::data_bss_range().into())?;
-    page_table.map_data(&layout::eh_stack_range().into())?;
-    page_table.map_data(&layout::stack_range(40 * PAGE_SIZE).into())?;
-    page_table.map_code(&layout::text_range().into())?;
-    page_table.map_rodata(&layout::rodata_range().into())?;
-    page_table.map_device(&layout::console_uart_page().into())?;
-
-    Ok(page_table)
-}
-
 /// # Safety
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 /// * The `fdt_addr` must be a valid pointer and points to a valid `Fdt`.
 unsafe fn try_main(fdt_addr: usize) -> Result<()> {
     info!("Welcome to Rialto!");
-    let page_table = new_page_table()?;
-
-    switch_to_dynamic_page_tables(page_table);
 
     let fdt_size = NonZeroUsize::new(crosvm::FDT_MAX_SIZE).unwrap();
     map_rodata(fdt_addr, fdt_size)?;
