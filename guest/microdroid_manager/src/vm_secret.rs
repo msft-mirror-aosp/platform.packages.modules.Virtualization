@@ -98,27 +98,23 @@ impl VmSecret {
 
         let explicit_dice = OwnedDiceArtifactsWithExplicitKey::from_owned_artifacts(dice_artifacts)
             .context("Failed to get Dice artifacts in explicit key format")?;
-        // For pVM, skp_secret are stored in Secretkeeper. For non-protected it is all 0s.
+        let sk_service = get_secretkeeper_service(vm_service)?;
+        let mut session =
+            SkSession::new(sk_service, &explicit_dice, Some(get_secretkeeper_identity()?))?;
+        let id = super::get_instance_id()?.ok_or(anyhow!("Missing instance_id"))?;
+        let explicit_dice_chain = explicit_dice
+            .explicit_key_dice_chain()
+            .ok_or(anyhow!("Missing explicit dice chain, this is unusual"))?;
+        let policy = sealing_policy(explicit_dice_chain)
+            .map_err(|e| anyhow!("Failed to build a sealing_policy: {e}"))?;
+
         let mut skp_secret = Zeroizing::new([0u8; SECRET_SIZE]);
-        if super::is_strict_boot() {
-            let sk_service = get_secretkeeper_service(vm_service)?;
-            let mut session =
-                SkSession::new(sk_service, &explicit_dice, Some(get_secretkeeper_identity()?))?;
-            let id = super::get_instance_id()?.ok_or(anyhow!("Missing instance_id"))?;
-            let explicit_dice_chain = explicit_dice
-                .explicit_key_dice_chain()
-                .ok_or(anyhow!("Missing explicit dice chain, this is unusual"))?;
-            let policy = sealing_policy(explicit_dice_chain)
-                .map_err(|e| anyhow!("Failed to build a sealing_policy: {e}"))?;
-            if let Some(secret) = get_secret(&mut session, id, Some(policy.clone()))? {
-                *skp_secret = secret;
-            } else {
-                log::warn!(
-                    "No entry found in Secretkeeper for this VM instance, creating new secret."
-                );
-                *skp_secret = rand::random();
-                store_secret(&mut session, id, skp_secret.clone(), policy)?;
-            }
+        if let Some(secret) = get_secret(&mut session, id, Some(policy.clone()))? {
+            *skp_secret = secret
+        } else {
+            log::warn!("No entry found in Secretkeeper for this VM instance, creating new secret.");
+            *skp_secret = rand::random();
+            store_secret(&mut session, id, skp_secret.clone(), policy)?;
         }
         Ok(Self::V2 {
             dice_artifacts: explicit_dice,
