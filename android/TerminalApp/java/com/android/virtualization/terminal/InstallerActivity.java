@@ -16,6 +16,8 @@
 
 package com.android.virtualization.terminal;
 
+import static com.android.virtualization.terminal.MainActivity.TAG;
+
 import android.annotation.MainThread;
 import android.content.ComponentName;
 import android.content.Context;
@@ -29,22 +31,22 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.text.format.Formatter;
 import android.util.Log;
+import android.view.KeyEvent;
+import android.view.View;
 import android.widget.CheckBox;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import com.android.internal.annotations.VisibleForTesting;
 
+import com.google.android.material.progressindicator.LinearProgressIndicator;
+import com.google.android.material.snackbar.Snackbar;
+
+import java.io.IOException;
 import java.lang.ref.WeakReference;
-import java.util.concurrent.ExecutorService;
 
 public class InstallerActivity extends BaseActivity {
-    private static final String TAG = "LinuxInstaller";
+    private static final long ESTIMATED_IMG_SIZE_BYTES = FileUtils.parseSize("550MB");
 
-    private static final long ESTIMATED_IMG_SIZE_BYTES = FileUtils.parseSize("350MB");
-    static final String EXTRA_AUTO_DOWNLOAD = "auto_download";
-
-    private ExecutorService mExecutorService;
     private CheckBox mWaitForWifiCheckbox;
     private TextView mInstallButton;
 
@@ -62,12 +64,8 @@ public class InstallerActivity extends BaseActivity {
         mInstallProgressListener = new InstallProgressListener(this);
 
         setContentView(R.layout.activity_installer);
-
-        TextView desc = (TextView) findViewById(R.id.installer_desc);
-        desc.setText(
-                getString(
-                        R.string.installer_desc_text_format,
-                        Formatter.formatShortFileSize(this, ESTIMATED_IMG_SIZE_BYTES)));
+        updateSizeEstimation(ESTIMATED_IMG_SIZE_BYTES);
+        measureImageSizeAndUpdateDescription();
 
         mWaitForWifiCheckbox = (CheckBox) findViewById(R.id.installer_wait_for_wifi_checkbox);
         mInstallButton = (TextView) findViewById(R.id.installer_install_button);
@@ -77,17 +75,48 @@ public class InstallerActivity extends BaseActivity {
                     requestInstall();
                 });
 
-        if (getIntent().getBooleanExtra(EXTRA_AUTO_DOWNLOAD, false)) {
-            Log.i(TAG, "Auto downloading");
-            requestInstall();
-        }
-
         Intent intent = new Intent(this, InstallerService.class);
         mInstallerServiceConnection = new InstallerServiceConnection(this);
         if (!bindService(intent, mInstallerServiceConnection, Context.BIND_AUTO_CREATE)) {
-            handleCriticalError(new Exception("Failed to connect to installer service"));
+            handleInternalError(new Exception("Failed to connect to installer service"));
         }
+    }
 
+    private void updateSizeEstimation(long est) {
+        String desc =
+                getString(
+                        R.string.installer_desc_text_format,
+                        Formatter.formatShortFileSize(this, est));
+        runOnUiThread(
+                () -> {
+                    TextView view = (TextView) findViewById(R.id.installer_desc);
+                    view.setText(desc);
+                });
+    }
+
+    private void measureImageSizeAndUpdateDescription() {
+        new Thread(
+                        () -> {
+                            long est;
+                            try {
+                                est = ImageArchive.getDefault().getSize();
+                            } catch (IOException e) {
+                                Log.w(TAG, "Failed to measure image size.", e);
+                                return;
+                            }
+                            updateSizeEstimation(est);
+                        })
+                .start();
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+
+        if (Build.isDebuggable() && ImageArchive.fromSdCard().exists()) {
+            showSnackbar("Auto installing", Snackbar.LENGTH_LONG);
+            requestInstall();
+        }
     }
 
     @Override
@@ -100,18 +129,31 @@ public class InstallerActivity extends BaseActivity {
         super.onDestroy();
     }
 
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_START) {
+            requestInstall();
+            return true;
+        }
+        return super.onKeyUp(keyCode, event);
+    }
+
     @VisibleForTesting
     public boolean waitForInstallCompleted(long timeoutMillis) {
         return mInstallCompleted.block(timeoutMillis);
     }
 
-    public void handleCriticalError(Exception e) {
+    private void showSnackbar(String message, int length) {
+        Snackbar snackbar = Snackbar.make(findViewById(android.R.id.content), message, length);
+        snackbar.setAnchorView(mWaitForWifiCheckbox);
+        snackbar.show();
+    }
+
+    public void handleInternalError(Exception e) {
         if (Build.isDebuggable()) {
-            Toast.makeText(
-                            this,
-                            e.getMessage() + ". File a bugreport to go/ferrochrome-bug",
-                            Toast.LENGTH_LONG)
-                    .show();
+            showSnackbar(
+                    e.getMessage() + ". File a bugreport to go/ferrochrome-bug",
+                    Snackbar.LENGTH_INDEFINITE);
         }
         Log.e(TAG, "Internal error", e);
         finishWithResult(RESULT_CANCELED);
@@ -128,6 +170,12 @@ public class InstallerActivity extends BaseActivity {
     private void setInstallEnabled(boolean enable) {
         mInstallButton.setEnabled(enable);
         mWaitForWifiCheckbox.setEnabled(enable);
+        LinearProgressIndicator progressBar = findViewById(R.id.installer_progress);
+        if (enable) {
+            progressBar.setVisibility(View.INVISIBLE);
+        } else {
+            progressBar.setVisibility(View.VISIBLE);
+        }
 
         int resId =
                 enable
@@ -142,9 +190,9 @@ public class InstallerActivity extends BaseActivity {
 
         if (mService != null) {
             try {
-                mService.requestInstall();
+                mService.requestInstall(mWaitForWifiCheckbox.isChecked());
             } catch (RemoteException e) {
-                handleCriticalError(e);
+                handleInternalError(e);
             }
         } else {
             Log.d(TAG, "requestInstall() is called, but not yet connected");
@@ -169,21 +217,18 @@ public class InstallerActivity extends BaseActivity {
                 setInstallEnabled(false);
             }
         } catch (RemoteException e) {
-            handleCriticalError(e);
+            handleInternalError(e);
         }
     }
 
     @MainThread
     public void handleInstallerServiceDisconnected() {
-        handleCriticalError(new Exception("InstallerService is destroyed while in use"));
+        handleInternalError(new Exception("InstallerService is destroyed while in use"));
     }
 
     @MainThread
-    private void handleError(String displayText) {
-        // TODO(b/375542145): Display error with snackbar.
-        if (Build.isDebuggable()) {
-            Toast.makeText(this, displayText, Toast.LENGTH_LONG).show();
-        }
+    private void handleInstallError(String displayText) {
+        showSnackbar(displayText, Snackbar.LENGTH_LONG);
         setInstallEnabled(true);
     }
 
@@ -223,7 +268,7 @@ public class InstallerActivity extends BaseActivity {
                             return;
                         }
 
-                        activity.handleError(displayText);
+                        activity.handleInstallError(displayText);
                     });
         }
     }
@@ -244,7 +289,7 @@ public class InstallerActivity extends BaseActivity {
                 return;
             }
             if (service == null) {
-                activity.handleCriticalError(new Exception("service shouldn't be null"));
+                activity.handleInternalError(new Exception("service shouldn't be null"));
             }
 
             activity.mService = IInstallerService.Stub.asInterface(service);

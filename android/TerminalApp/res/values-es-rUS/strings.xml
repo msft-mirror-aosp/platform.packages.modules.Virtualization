@@ -17,41 +17,88 @@
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="5597111707986572208">"Terminal"</string>
+    <string name="terminal_display" msgid="4810127497644015237">"Pantalla de la terminal"</string>
+    <string name="terminal_input" msgid="4602512831433433551">"Cursor"</string>
+    <string name="empty_line" msgid="5012067143408427178">"Línea vacía"</string>
+    <!-- no translation found for double_tap_to_edit_text (7380095045491399890) -->
+    <skip />
     <string name="installer_title_text" msgid="500663060973466805">"Instala la terminal de Linux"</string>
-    <string name="installer_desc_text_format" msgid="2734224805682171826">"Para iniciar la terminal de Linux, debes descargar aproximadamente <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> de datos a través de la red.\n¿Quieres continuar?"</string>
-    <!-- no translation found for installer_wait_for_wifi_checkbox_text (487720664098014506) -->
+    <!-- no translation found for installer_desc_text_format (5935117404303982823) -->
+    <skip />
+    <!-- no translation found for installer_wait_for_wifi_checkbox_text (5812378362605046639) -->
     <skip />
     <string name="installer_install_button_enabled_text" msgid="6142090640081511103">"Instalar"</string>
     <string name="installer_install_button_disabled_text" msgid="8651445004125422467">"Instalando"</string>
-    <string name="installer_install_network_error_message" msgid="2450409107529774410">"Error de red. Comprueba la conexión y vuelve a intentarlo."</string>
+    <!-- no translation found for installer_install_network_error_message (6483202005746623398) -->
+    <skip />
     <string name="installer_notif_title_text" msgid="471160690081159042">"Instalando la terminal de Linux"</string>
-    <string name="installer_notif_desc_text" msgid="6746098106305899060">"Se iniciará la terminal de Linux después de finalizar"</string>
-    <string name="installer_error_network" msgid="3265100678310833813">"No se pudo instalar debido a un problema de red"</string>
-    <string name="installer_error_unknown" msgid="1991780204241177455">"No se pudo instalar. Vuelve a intentarlo."</string>
+    <!-- no translation found for installer_notif_desc_text (2353770076549425837) -->
+    <skip />
+    <!-- no translation found for installer_error_network (5627330072955876676) -->
+    <skip />
+    <!-- no translation found for installer_error_no_wifi (1180164894845030969) -->
+    <skip />
+    <!-- no translation found for installer_error_unknown (5657920711470180224) -->
+    <skip />
     <string name="action_settings" msgid="5729342767795123227">"Configuración"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Preparando la terminal"</string>
     <string name="vm_stop_message" msgid="3978349856095529255">"Deteniendo la terminal"</string>
     <string name="vm_error_message" msgid="5231867246177661525">"Se produjo un error en la terminal"</string>
-    <string name="settings_disk_resize_title" msgid="1545791169419914600">"Cambiar el tamaño del disco"</string>
-    <string name="settings_disk_resize_sub_title" msgid="149418971610906138">"Cambiar el tamaño/Rootfs"</string>
+    <!-- no translation found for settings_disk_resize_title (8648082439414122069) -->
+    <skip />
+    <!-- no translation found for settings_disk_resize_sub_title (568100064927028058) -->
+    <skip />
     <string name="settings_disk_resize_resize_message" msgid="5990475712303845087">"Se estableció el tamaño del disco"</string>
     <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"<xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g> asignados"</string>
     <string name="settings_disk_resize_resize_gb_max_format" msgid="6221210151688630371">"<xliff:g id="MAX_SIZE">%1$s</xliff:g> máx."</string>
     <string name="settings_disk_resize_resize_cancel" msgid="2182388126941686562">"Cancelar"</string>
-    <string name="settings_disk_resize_resize_restart_vm_to_apply" msgid="8122668558537714453">"Reiniciar la VM para aplicar el cambio"</string>
-    <string name="settings_port_forwarding_title" msgid="4867439149919324784">"Redirección de puertos"</string>
-    <string name="settings_port_forwarding_sub_title" msgid="6848040752531535488">"Configura la redirección de puertos"</string>
-    <string name="settings_port_forwarding_notification_title" msgid="2822798067500254704">"La terminal está intentando abrir un puerto nuevo"</string>
-    <string name="settings_port_forwarding_notification_content" msgid="2167103177775323330">"Puerto solicitado para abrir: <xliff:g id="PORT_NUMBER">%d</xliff:g>"</string>
+    <!-- no translation found for settings_disk_resize_resize_restart_vm_to_apply (6651018335906339973) -->
+    <skip />
+    <!-- no translation found for settings_disk_resize_resize_confirm_dialog_message (6906352501525496328) -->
+    <skip />
+    <!-- no translation found for settings_disk_resize_resize_confirm_dialog_confirm (7347432999245803583) -->
+    <skip />
+    <!-- no translation found for settings_port_forwarding_title (4911743992816071205) -->
+    <skip />
+    <string name="settings_port_forwarding_sub_title" msgid="6848040752531535488">"Configurar la redirección de puertos"</string>
+    <!-- no translation found for settings_port_forwarding_notification_title (6950621555592547524) -->
+    <skip />
+    <!-- no translation found for settings_port_forwarding_notification_content (5072621159244211971) -->
+    <skip />
     <string name="settings_port_forwarding_notification_accept" msgid="3571520986524038185">"Aceptar"</string>
     <string name="settings_port_forwarding_notification_deny" msgid="636848749634710403">"Rechazar"</string>
     <string name="settings_recovery_title" msgid="6586840079226383285">"Recuperación"</string>
-    <string name="settings_recovery_sub_title" msgid="1067782421529340576">"Opciones de recuperación de particiones"</string>
-    <string name="settings_recovery_reset_title" msgid="8785305518694186025">"Cambiar a la versión inicial"</string>
-    <string name="settings_recovery_reset_sub_title" msgid="5656572074090728544">"Quitar todos"</string>
-    <string name="settings_recovery_reset_message" msgid="3450358289168768830">"Restablecimiento de la VM"</string>
+    <!-- no translation found for settings_recovery_sub_title (3906996270508262595) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_title (5388842560910568731) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_sub_title (1079896907344675995) -->
+    <skip />
+    <string name="settings_recovery_reset_dialog_title" msgid="874946981716251094">"Restablecer terminal"</string>
+    <!-- no translation found for settings_recovery_reset_dialog_message (851530339815113000) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_dialog_confirm (6916237820754131902) -->
+    <skip />
+    <string name="settings_recovery_reset_dialog_cancel" msgid="1666264288208459725">"Cancelar"</string>
+    <string name="settings_recovery_reset_dialog_backup_option" msgid="2079431035205584614">"Crear una copia de seguridad de los datos en <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
+    <!-- no translation found for settings_recovery_error_due_to_backup (9034741074141274096) -->
+    <skip />
+    <string name="settings_recovery_error" msgid="2451912941535666379">"Falló la recuperación"</string>
+    <!-- no translation found for settings_recovery_error_during_removing_backup (2447990797766248691) -->
+    <skip />
+    <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"Quitar datos de copia de seguridad"</string>
+    <!-- no translation found for settings_recovery_remove_backup_sub_title (7791375988320242059) -->
+    <skip />
+    <!-- no translation found for error_title (405150657301906598) -->
+    <skip />
+    <!-- no translation found for error_desc (1984714179775053347) -->
+    <skip />
+    <string name="error_code" msgid="3585291676855383649">"Código de error: <xliff:g id="ERROR_CODE">%s</xliff:g>"</string>
     <string name="service_notification_settings" msgid="1437365721184401135">"Configuración"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"Se está ejecutando la terminal"</string>
-    <string name="service_notification_content" msgid="8652887364784704911">"Haz clic para abrir la terminal."</string>
+    <!-- no translation found for service_notification_content (5772901142342308273) -->
+    <skip />
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Cerrar"</string>
+    <!-- no translation found for virgl_enabled (5242525588039698086) -->
+    <skip />
 </resources>

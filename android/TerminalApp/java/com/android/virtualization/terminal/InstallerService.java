@@ -16,55 +16,37 @@
 
 package com.android.virtualization.terminal;
 
+import static com.android.virtualization.terminal.MainActivity.TAG;
+
 import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.IBinder;
-import android.os.SELinux;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.android.internal.annotations.GuardedBy;
-import com.android.virtualization.vmlauncher.InstallUtils;
 
-import org.apache.commons.compress.archivers.ArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
-
-import java.io.BufferedInputStream;
-import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.ref.WeakReference;
-import java.net.URL;
+import java.net.SocketException;
 import java.net.UnknownHostException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
-import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class InstallerService extends Service {
-    private static final String TAG = "InstallerService";
-
-    private static final String NOTIFICATION_CHANNEL_ID = "installer";
     private static final int NOTIFICATION_ID = 1313; // any unique number among notifications
-
-    // TODO(b/369740847): Replace this URL with dl.google.com
-    private static final String IMAGE_URL =
-            Arrays.asList(Build.SUPPORTED_ABIS).contains("x86_64")
-                    ? "https://github.com/ikicha/debian_ci/releases/download/release_x86_64/images.tar.gz"
-                    : "https://github.com/ikicha/debian_ci/releases/download/release_aarch64/images.tar.gz";
-
-    private static final String SELINUX_FILE_CONTEXT =
-            "u:object_r:virtualizationservice_data_file:";
 
     private final Object mLock = new Object();
 
@@ -74,31 +56,25 @@ public class InstallerService extends Service {
     private boolean mIsInstalling;
 
     @GuardedBy("mLock")
+    private boolean mHasWifi;
+
+    @GuardedBy("mLock")
     private IInstallProgressListener mListener;
 
     private ExecutorService mExecutorService;
+    private ConnectivityManager mConnectivityManager;
+    private MyNetworkCallback mNetworkCallback;
 
     @Override
     public void onCreate() {
         super.onCreate();
-
-        // Create mandatory notification
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
-            NotificationChannel channel =
-                    new NotificationChannel(
-                            NOTIFICATION_CHANNEL_ID,
-                            getString(R.string.installer_notif_title_text),
-                            NotificationManager.IMPORTANCE_DEFAULT);
-            manager.createNotificationChannel(channel);
-        }
 
         Intent intent = new Intent(this, MainActivity.class);
         PendingIntent pendingIntent =
                 PendingIntent.getActivity(
                         this, /* requestCode= */ 0, intent, PendingIntent.FLAG_IMMUTABLE);
         mNotification =
-                new Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
+                new Notification.Builder(this, this.getPackageName())
                         .setSmallIcon(R.drawable.ic_launcher_foreground)
                         .setContentTitle(getString(R.string.installer_notif_title_text))
                         .setContentText(getString(R.string.installer_notif_desc_text))
@@ -107,6 +83,18 @@ public class InstallerService extends Service {
                         .build();
 
         mExecutorService = Executors.newSingleThreadExecutor();
+
+        mConnectivityManager = getSystemService(ConnectivityManager.class);
+        Network defaultNetwork = mConnectivityManager.getBoundNetworkForProcess();
+        if (defaultNetwork != null) {
+            NetworkCapabilities capability =
+                    mConnectivityManager.getNetworkCapabilities(defaultNetwork);
+            if (capability != null) {
+                mHasWifi = capability.hasTransport(NetworkCapabilities.TRANSPORT_WIFI);
+            }
+        }
+        mNetworkCallback = new MyNetworkCallback();
+        mConnectivityManager.registerDefaultNetworkCallback(mNetworkCallback);
     }
 
     @Nullable
@@ -132,27 +120,29 @@ public class InstallerService extends Service {
         if (mExecutorService != null) {
             mExecutorService.shutdown();
         }
+        mConnectivityManager.unregisterNetworkCallback(mNetworkCallback);
     }
 
-    private void requestInstall() {
-        Log.i(TAG, "Installing..");
+    private void requestInstall(boolean isWifiOnly) {
+        synchronized (mLock) {
+            if (mIsInstalling) {
+                Log.i(TAG, "already installing..");
+                return;
+            } else {
+                Log.i(TAG, "installing..");
+                mIsInstalling = true;
+            }
+        }
 
         // Make service to be long running, even after unbind() when InstallerActivity is destroyed
         // The service will still be destroyed if task is remove.
         startService(new Intent(this, InstallerService.class));
         startForeground(
                 NOTIFICATION_ID, mNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        synchronized (mLock) {
-            mIsInstalling = true;
-        }
 
         mExecutorService.execute(
                 () -> {
-                    // TODO(b/374015561): Provide progress update
-                    boolean success = downloadFromSdcard() || downloadFromUrl();
-                    if (success) {
-                        reLabelImagesSELinuxContext();
-                    }
+                    boolean success = downloadFromSdcard() || downloadFromUrl(isWifiOnly);
                     stopForeground(STOP_FOREGROUND_REMOVE);
 
                     synchronized (mLock) {
@@ -164,78 +154,69 @@ public class InstallerService extends Service {
                 });
     }
 
-    private void reLabelImagesSELinuxContext() {
-        File payloadFolder = InstallUtils.getInternalStorageDir(this);
-
-        // The context should be u:object_r:privapp_data_file:s0:c35,c257,c512,c768
-        // and we want to get s0:c35,c257,c512,c768 part
-        String level = SELinux.getFileContext(payloadFolder.toString()).split(":", 4)[3];
-        String targetContext = SELINUX_FILE_CONTEXT + level;
-
-        File[] files = payloadFolder.listFiles();
-        for (File file : files) {
-            if (file.isFile() &&
-                    !Objects.equals(SELinux.getFileContext(file.toString()),
-                            targetContext)) {
-                SELinux.setFileContext(file.toString(), targetContext);
-            }
-        }
-    }
-
     private boolean downloadFromSdcard() {
+        ImageArchive archive = ImageArchive.fromSdCard();
+
         // Installing from sdcard is preferred, but only supported only in debuggable build.
-        if (Build.isDebuggable()) {
+        if (Build.isDebuggable() && archive.exists()) {
             Log.i(TAG, "trying to install /sdcard/linux/images.tar.gz");
 
-            if (InstallUtils.installImageFromExternalStorage(this)) {
+            Path dest = InstalledImage.getDefault(this).getInstallDir();
+            try {
+                archive.installTo(dest, null);
                 Log.i(TAG, "image is installed from /sdcard/linux/images.tar.gz");
                 return true;
+            } catch (IOException e) {
+                Log.i(TAG, "Failed to install /sdcard/linux/images.tar.gz", e);
             }
-            Log.i(TAG, "Failed to install /sdcard/linux/images.tar.gz");
         } else {
             Log.i(TAG, "Non-debuggable build doesn't support installation from /sdcard/linux");
         }
         return false;
     }
 
-    // TODO(b/374015561): Support pause/resume download
-    // TODO(b/374015561): Wait for Wi-Fi on metered network if requested.
-    private boolean downloadFromUrl() {
-        Log.i(TAG, "trying to download from " + IMAGE_URL);
+    private boolean checkForWifiOnly(boolean isWifiOnly) {
+        if (!isWifiOnly) {
+            return true;
+        }
+        synchronized (mLock) {
+            return mHasWifi;
+        }
+    }
 
-        try (BufferedInputStream inputStream =
-                        new BufferedInputStream(new URL(IMAGE_URL).openStream());
-                TarArchiveInputStream tar =
-                        new TarArchiveInputStream(new GzipCompressorInputStream(inputStream))) {
-            ArchiveEntry entry;
-            Path baseDir = InstallUtils.getInternalStorageDir(this).toPath();
-            Files.createDirectories(baseDir);
-            while ((entry = tar.getNextEntry()) != null) {
-                Path extractTo = baseDir.resolve(entry.getName());
-                if (entry.isDirectory()) {
-                    Files.createDirectories(extractTo);
-                } else {
-                    Files.copy(tar, extractTo, StandardCopyOption.REPLACE_EXISTING);
-                }
-            }
-        } catch (UnknownHostException e) {
+    // TODO(b/374015561): Support pause/resume download
+    private boolean downloadFromUrl(boolean isWifiOnly) {
+        if (!checkForWifiOnly(isWifiOnly)) {
+            Log.e(TAG, "Install isn't started because Wifi isn't available");
+            notifyError(getString(R.string.installer_error_no_wifi));
+            return false;
+        }
+
+        Path dest = InstalledImage.getDefault(this).getInstallDir();
+        try {
+            ImageArchive.fromInternet()
+                    .installTo(
+                            dest,
+                            is -> {
+                                WifiCheckInputStream filter = new WifiCheckInputStream(is);
+                                filter.setWifiOnly(isWifiOnly);
+                                return filter;
+                            });
+        } catch (WifiCheckInputStream.NoWifiException e) {
+            Log.e(TAG, "Install failed because of Wi-Fi is gone");
+            notifyError(getString(R.string.installer_error_no_wifi));
+            return false;
+        } catch (UnknownHostException | SocketException e) {
             // Log.e() doesn't print stack trace for UnknownHostException
-            Log.e(TAG, "Install failed UnknownHostException: " + e.getMessage());
-            notifyError(getString(R.string.installer_install_network_error_message));
+            Log.e(TAG, "Install failed: " + e.getMessage(), e);
+            notifyError(getString(R.string.installer_error_network));
             return false;
         } catch (IOException e) {
-            // TODO(b/374015561): Provide more finer grained error message
             Log.e(TAG, "Installation failed", e);
             notifyError(getString(R.string.installer_error_unknown));
             return false;
         }
-
-        if (!InstallUtils.resolvePathInVmConfig(this)) {
-            // TODO(b/374015561): Provide more finer grained error message
-            notifyError(getString(R.string.installer_error_unknown));
-            return false;
-        }
-        return InstallUtils.createInstalledMarker(this);
+        return true;
     }
 
     private void notifyError(String displayText) {
@@ -282,10 +263,10 @@ public class InstallerService extends Service {
         }
 
         @Override
-        public void requestInstall() {
+        public void requestInstall(boolean isWifiOnly) {
             InstallerService service = ensureServiceConnected();
             synchronized (service.mLock) {
-                service.requestInstall();
+                service.requestInstall(isWifiOnly);
             }
         }
 
@@ -309,7 +290,63 @@ public class InstallerService extends Service {
         public boolean isInstalled() {
             InstallerService service = ensureServiceConnected();
             synchronized (service.mLock) {
-                return !service.mIsInstalling && InstallUtils.isImageInstalled(service);
+                return !service.mIsInstalling && InstalledImage.getDefault(service).isInstalled();
+            }
+        }
+    }
+
+    private final class WifiCheckInputStream extends InputStream {
+        private static final int READ_BYTES = 1024;
+
+        private final InputStream mInputStream;
+        private boolean mIsWifiOnly;
+
+        public WifiCheckInputStream(InputStream is) {
+            super();
+            mInputStream = is;
+        }
+
+        public void setWifiOnly(boolean isWifiOnly) {
+            mIsWifiOnly = isWifiOnly;
+        }
+
+        @Override
+        public int read(byte[] buf, int offset, int numToRead) throws IOException {
+            int totalRead = 0;
+            while (numToRead > 0) {
+                if (!checkForWifiOnly(mIsWifiOnly)) {
+                    throw new NoWifiException();
+                }
+                int read =
+                        mInputStream.read(buf, offset + totalRead, Math.min(READ_BYTES, numToRead));
+                if (read <= 0) {
+                    break;
+                }
+                totalRead += read;
+                numToRead -= read;
+            }
+            return totalRead;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (!checkForWifiOnly(mIsWifiOnly)) {
+                throw new NoWifiException();
+            }
+            return mInputStream.read();
+        }
+
+        private static final class NoWifiException extends SocketException {
+            // empty
+        }
+    }
+
+    private final class MyNetworkCallback extends ConnectivityManager.NetworkCallback {
+        @Override
+        public void onCapabilitiesChanged(
+                @NonNull Network network, @NonNull NetworkCapabilities capability) {
+            synchronized (mLock) {
+                mHasWifi = capability.hasTransport(NetworkCapabilities.TRANSPORT_WIFI);
             }
         }
     }
