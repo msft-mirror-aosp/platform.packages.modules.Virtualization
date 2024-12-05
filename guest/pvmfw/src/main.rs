@@ -55,7 +55,6 @@ use pvmfw_embedded_key::PUBLIC_KEY;
 use vmbase::fdt::pci::{PciError, PciInfo};
 use vmbase::heap;
 use vmbase::memory::flush;
-use vmbase::memory::MEMORY;
 use vmbase::rand;
 use vmbase::virtio::pci;
 
@@ -101,7 +100,7 @@ fn main(
     // Set up PCI bus for VirtIO devices.
     let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;
     debug!("PCI: {:#x?}", pci_info);
-    let mut pci_root = pci::initialize(pci_info, MEMORY.lock().as_mut().unwrap()).map_err(|e| {
+    let mut pci_root = pci::initialize(pci_info).map_err(|e| {
         error!("Failed to initialize PCI: {e}");
         RebootReason::InternalError
     })?;
