@@ -16,23 +16,34 @@
 
 syntax = "proto3";
 
-package com.android.virtualization.vmlauncher.proto;
+package com.android.virtualization.terminal.proto;
 
-option java_package = "com.android.virtualization.vmlauncher.proto";
+option java_package = "com.android.virtualization.terminal.proto";
 option java_multiple_files = true;
 
 service DebianService {
+  rpc ReportVmActivePorts (ReportVmActivePortsRequest) returns (ReportVmActivePortsResponse) {}
   rpc ReportVmIpAddr (IpAddr) returns (ReportVmIpAddrResponse) {}
-  rpc OpenForwardingRequestQueue (Empty) returns (stream ForwardingRequestItem) {}
+  rpc OpenForwardingRequestQueue (QueueOpeningRequest) returns (stream ForwardingRequestItem) {}
 }
 
-message Empty {}
+message QueueOpeningRequest {
+  int32 cid = 1;
+}
 
 message IpAddr {
   string addr = 1;
 }
 
 message ReportVmIpAddrResponse {
+  bool success = 1;
+}
+
+message ReportVmActivePortsRequest {
+  repeated int32 ports = 1;
+}
+
+message ReportVmActivePortsResponse {
   bool success = 1;
 }
 

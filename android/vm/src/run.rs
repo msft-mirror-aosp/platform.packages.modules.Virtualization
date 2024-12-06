@@ -140,11 +140,7 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         bail!("Either --config-path or --payload-binary-name must be defined")
     };
 
-    let os_name = if let Some(ver) = config.microdroid.gki() {
-        format!("microdroid_gki-{ver}")
-    } else {
-        "microdroid".to_owned()
-    };
+    let os_name = if let Some(ref os) = config.microdroid.os { os } else { "microdroid" };
 
     let payload_config_str = format!("{:?}!{:?}", config.apk, payload);
 
@@ -160,6 +156,7 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
             })
             .collect::<Result<_, _>>()?,
         networkSupported: config.common.network_supported(),
+        teeServices: config.common.tee_services().to_vec(),
         ..Default::default()
     };
 
@@ -176,6 +173,7 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         } else {
             bail!("unexpected architecture!");
         }
+        custom_config.extraKernelCmdlineParams.push(String::from("keep_bootcon"));
     }
 
     let vm_config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
@@ -192,7 +190,7 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         memoryMib: config.common.mem.unwrap_or(0) as i32, // 0 means use the VM default
         cpuTopology: config.common.cpu_topology,
         customConfig: Some(custom_config),
-        osName: os_name,
+        osName: os_name.to_string(),
         hugePages: config.common.hugepages,
         boostUclamp: config.common.boost_uclamp,
     });
@@ -267,8 +265,8 @@ pub fn command_run(config: RunCustomVmConfig) -> Result<(), Error> {
     if let Some(mem) = config.common.mem {
         vm_config.memoryMib = mem as i32;
     }
-    if let Some(name) = config.common.name {
-        vm_config.name = name;
+    if let Some(ref name) = config.common.name {
+        vm_config.name = name.to_string();
     } else {
         vm_config.name = String::from("VmRun");
     }
@@ -278,6 +276,7 @@ pub fn command_run(config: RunCustomVmConfig) -> Result<(), Error> {
     vm_config.cpuTopology = config.common.cpu_topology;
     vm_config.hugePages = config.common.hugepages;
     vm_config.boostUclamp = config.common.boost_uclamp;
+    vm_config.teeServices = config.common.tee_services().to_vec();
     run(
         get_service()?.as_ref(),
         &VirtualMachineConfig::RawConfig(vm_config),

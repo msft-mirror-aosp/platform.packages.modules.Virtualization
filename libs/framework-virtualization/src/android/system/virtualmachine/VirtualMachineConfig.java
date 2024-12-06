@@ -22,7 +22,6 @@ import static android.os.ParcelFileDescriptor.MODE_READ_WRITE;
 
 import static java.util.Objects.requireNonNull;
 
-import android.annotation.FlaggedApi;
 import android.annotation.IntDef;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
@@ -34,6 +33,8 @@ import android.annotation.TestApi;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.net.LocalSocket;
+import android.net.LocalSocketAddress;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.PersistableBundle;
@@ -57,6 +58,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -636,6 +639,34 @@ public final class VirtualMachineConfig {
         }
     }
 
+    private void startCrosvmVirtiofs(
+            String sharedPath,
+            int host_uid,
+            int guest_uid,
+            int guest_gid,
+            String tagName,
+            int mask,
+            String socketPath)
+            throws IOException {
+        String ugidMapValue =
+                String.format("%d %d %d %d %d /", guest_uid, guest_gid, host_uid, host_uid, mask);
+        String cfgArg = String.format("ugid_map='%s'", ugidMapValue);
+        ProcessBuilder pb =
+                new ProcessBuilder(
+                        "/apex/com.android.virt/bin/crosvm",
+                        "device",
+                        "fs",
+                        "--socket=" + socketPath,
+                        "--tag=" + tagName,
+                        "--shared-dir=" + sharedPath,
+                        "--cfg",
+                        cfgArg,
+                        "--disable-sandbox",
+                        "--skip-pivot-root=true");
+
+        pb.start();
+    }
+
     VirtualMachineRawConfig toVsRawConfig() throws IllegalStateException, IOException {
         VirtualMachineRawConfig config = new VirtualMachineRawConfig();
         VirtualMachineCustomImageConfig customImageConfig = getCustomImageConfig();
@@ -715,6 +746,38 @@ public final class VirtualMachineConfig {
                                 .orElse(0)];
         for (int i = 0; i < config.sharedPaths.length; i++) {
             config.sharedPaths[i] = customImageConfig.getSharedPaths()[i].toParcelable();
+            if (config.sharedPaths[i].appDomain) {
+                try {
+                    String socketPath = customImageConfig.getSharedPaths()[i].getSocketPath();
+                    startCrosvmVirtiofs(
+                            config.sharedPaths[i].sharedPath,
+                            config.sharedPaths[i].hostUid,
+                            config.sharedPaths[i].guestUid,
+                            config.sharedPaths[i].guestGid,
+                            config.sharedPaths[i].tag,
+                            config.sharedPaths[i].mask,
+                            socketPath);
+                    long startTime = System.currentTimeMillis();
+                    long deadline = startTime + 5000;
+                    // TODO: use socketpair instead of crosvm creating the named sockets.
+                    while (!Files.exists(Path.of(socketPath))
+                            && System.currentTimeMillis() < deadline) {
+                        Thread.sleep(200);
+                    }
+                    if (!Files.exists(Path.of(socketPath))) {
+                        throw new IOException("Timeout waiting for socket: " + socketPath);
+                    }
+                    LocalSocket socket = new LocalSocket();
+                    socket.connect(
+                            new LocalSocketAddress(
+                                    socketPath, LocalSocketAddress.Namespace.FILESYSTEM));
+                    config.sharedPaths[i].socketFd =
+                            ParcelFileDescriptor.dup(socket.getFileDescriptor());
+                } catch (IOException | InterruptedException e) {
+                    Log.e(TAG, "startCrosvmVirtiofs failed", e);
+                    throw new RuntimeException(e);
+                }
+            }
         }
 
         config.displayConfig =
@@ -745,6 +808,7 @@ public final class VirtualMachineConfig {
                                     return usbConfig;
                                 })
                         .orElse(null);
+        config.teeServices = EMPTY_STRING_ARRAY;
         return config;
     }
 
@@ -799,6 +863,7 @@ public final class VirtualMachineConfig {
                     new VirtualMachineAppConfig.CustomConfig();
             customConfig.devices = EMPTY_STRING_ARRAY;
             customConfig.extraKernelCmdlineParams = EMPTY_STRING_ARRAY;
+            customConfig.teeServices = EMPTY_STRING_ARRAY;
             try {
                 customConfig.vendorImage =
                         ParcelFileDescriptor.open(mVendorDiskImage, MODE_READ_ONLY);

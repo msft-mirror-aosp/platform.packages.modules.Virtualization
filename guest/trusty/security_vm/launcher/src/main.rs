@@ -15,8 +15,8 @@
 //! A client for trusty security VMs during early boot.
 
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    IVirtualizationService::IVirtualizationService, VirtualMachineConfig::VirtualMachineConfig,
-    VirtualMachineRawConfig::VirtualMachineRawConfig,
+    CpuTopology::CpuTopology, IVirtualizationService::IVirtualizationService,
+    VirtualMachineConfig::VirtualMachineConfig, VirtualMachineRawConfig::VirtualMachineRawConfig,
 };
 use android_system_virtualizationservice::binder::{ParcelFileDescriptor, Strong};
 use anyhow::{Context, Result};
@@ -26,7 +26,8 @@ use std::path::PathBuf;
 use vmclient::VmInstance;
 
 #[derive(Parser)]
-struct Args {
+/// Collection of CLI for trusty_security_vm_launcher
+pub struct Args {
     /// Path to the trusty kernel image.
     #[arg(long)]
     kernel: PathBuf,
@@ -34,12 +35,32 @@ struct Args {
     /// Whether the VM is protected or not.
     #[arg(long)]
     protected: bool,
+
+    /// Name of the VM. Used to pull correct config from early_vms.xml
+    #[arg(long, default_value = "trusty_security_vm_launcher")]
+    name: String,
+
+    /// Memory size of the VM in MiB
+    #[arg(long, default_value_t = 128)]
+    memory_size_mib: i32,
+
+    /// CPU Topology exposed to the VM <one-cpu|match-host>
+    #[arg(long, default_value = "one-cpu", value_parser = parse_cpu_topology)]
+    cpu_topology: CpuTopology,
 }
 
 fn get_service() -> Result<Strong<dyn IVirtualizationService>> {
     let virtmgr = vmclient::VirtualizationService::new_early()
         .context("Failed to spawn VirtualizationService")?;
     virtmgr.connect().context("Failed to connect to VirtualizationService")
+}
+
+fn parse_cpu_topology(s: &str) -> Result<CpuTopology, String> {
+    match s {
+        "one-cpu" => Ok(CpuTopology::ONE_CPU),
+        "match-host" => Ok(CpuTopology::MATCH_HOST),
+        _ => Err(format!("Invalid cpu topology {}", s)),
+    }
 }
 
 fn main() -> Result<()> {
@@ -51,10 +72,11 @@ fn main() -> Result<()> {
         File::open(&args.kernel).with_context(|| format!("Failed to open {:?}", &args.kernel))?;
 
     let vm_config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
-        name: "trusty_security_vm_launcher".to_owned(),
+        name: args.name.to_owned(),
         kernel: Some(ParcelFileDescriptor::new(kernel)),
         protectedVm: args.protected,
-        memoryMib: 128,
+        memoryMib: args.memory_size_mib,
+        cpuTopology: args.cpu_topology,
         platformVersion: "~1.0".to_owned(),
         // TODO: add instanceId
         ..Default::default()

@@ -16,11 +16,13 @@
 
 use core::fmt;
 
-use crate::hyp;
+use hypervisor_backends::Error as HypervisorError;
 
 /// Errors for MemoryTracker operations.
 #[derive(Debug, Clone)]
 pub enum MemoryTrackerError {
+    /// MemoryTracker not configured or deactivated.
+    Unavailable,
     /// Tried to modify the memory base address.
     DifferentBaseAddress,
     /// Tried to shrink to a larger memory size.
@@ -38,11 +40,13 @@ pub enum MemoryTrackerError {
     /// Region couldn't be unmapped.
     FailedToUnmap,
     /// Error from the interaction with the hypervisor.
-    Hypervisor(hyp::Error),
+    Hypervisor(HypervisorError),
     /// Failure to set `SHARED_MEMORY`.
     SharedMemorySetFailure,
     /// Failure to set `SHARED_POOL`.
     SharedPoolSetFailure,
+    /// Rejected request to map footer that is already mapped.
+    FooterAlreadyMapped,
     /// Invalid page table entry.
     InvalidPte,
     /// Failed to flush memory region.
@@ -58,6 +62,7 @@ pub enum MemoryTrackerError {
 impl fmt::Display for MemoryTrackerError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Self::Unavailable => write!(f, "MemoryTracker is not available"),
             Self::DifferentBaseAddress => write!(f, "Received different base address"),
             Self::SizeTooLarge => write!(f, "Tried to shrink to a larger memory size"),
             Self::SizeTooSmall => write!(f, "Tracked regions would not fit in memory size"),
@@ -69,6 +74,7 @@ impl fmt::Display for MemoryTrackerError {
             Self::Hypervisor(e) => e.fmt(f),
             Self::SharedMemorySetFailure => write!(f, "Failed to set SHARED_MEMORY"),
             Self::SharedPoolSetFailure => write!(f, "Failed to set SHARED_POOL"),
+            Self::FooterAlreadyMapped => write!(f, "Refused to map image footer again"),
             Self::InvalidPte => write!(f, "Page table entry is not valid"),
             Self::FlushRegionFailed => write!(f, "Failed to flush memory region"),
             Self::SetPteDirtyFailed => write!(f, "Failed to set PTE dirty state"),
@@ -82,8 +88,8 @@ impl fmt::Display for MemoryTrackerError {
     }
 }
 
-impl From<hyp::Error> for MemoryTrackerError {
-    fn from(e: hyp::Error) -> Self {
+impl From<HypervisorError> for MemoryTrackerError {
+    fn from(e: HypervisorError) -> Self {
         Self::Hypervisor(e)
     }
 }
