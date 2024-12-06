@@ -235,6 +235,8 @@ pub struct SharedPathConfig {
     pub mask: i32,
     pub tag: String,
     pub socket_path: String,
+    pub socket_fd: Option<File>,
+    pub app_domain: bool,
 }
 
 /// virtio-input device configuration from `external/crosvm/src/crosvm/config.rs`
@@ -360,12 +362,15 @@ pub struct VmContext {
     #[allow(dead_code)] // Keeps the global context alive
     pub(crate) global_context: Strong<dyn IGlobalVmContext>,
     #[allow(dead_code)] // Keeps the server alive
-    vm_server: RpcServer,
+    vm_server: Option<RpcServer>,
 }
 
 impl VmContext {
     /// Construct new VmContext.
-    pub fn new(global_context: Strong<dyn IGlobalVmContext>, vm_server: RpcServer) -> VmContext {
+    pub fn new(
+        global_context: Strong<dyn IGlobalVmContext>,
+        vm_server: Option<RpcServer>,
+    ) -> VmContext {
         VmContext { global_context, vm_server }
     }
 }
@@ -655,7 +660,9 @@ impl VmInstance {
 
         // Now that the VM has been killed, shut down the VirtualMachineService
         // server to eagerly free up the server threads.
-        self.vm_context.vm_server.shutdown()?;
+        if let Some(vm_server) = &self.vm_context.vm_server {
+            vm_server.shutdown()?;
+        }
 
         Ok(())
     }
@@ -907,6 +914,9 @@ fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Erro
 
 fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
     for shared_path in &config.shared_paths {
+        if shared_path.app_domain {
+            continue;
+        }
         let ugid_map_value = format!(
             "{} {} {} {} {} /",
             shared_path.guest_uid,
@@ -1021,6 +1031,13 @@ fn run_vm(
         command.arg("--params").arg("printk.devkmsg=on");
         command.arg("--params").arg("console=hvc0");
     }
+
+    // Move the PCI MMIO regions to near the end of the low-MMIO space.
+    // This is done to accommodate a limitation in a partner's hypervisor.
+    #[cfg(target_arch = "aarch64")]
+    command
+        .arg("--pci")
+        .arg("mem=[start=0x70000000,size=0x2000000],cam=[start=0x72000000,size=0x1000000]");
 
     command.arg("--mem").arg(memory_mib.to_string());
 
@@ -1255,12 +1272,23 @@ fn run_vm(
     }
 
     for shared_path in &config.shared_paths {
-        if let Err(e) = wait_for_file(&shared_path.socket_path, 5) {
-            bail!("Error waiting for file: {}", e);
+        if shared_path.app_domain {
+            if let Some(socket_fd) = &shared_path.socket_fd {
+                let socket_path =
+                    add_preserved_fd(&mut preserved_fds, socket_fd.try_clone().unwrap());
+                let raw_fd: i32 = socket_path.rsplit_once('/').unwrap().1.parse().unwrap();
+                command
+                    .arg("--vhost-user-fs")
+                    .arg(format!("tag={},socket-fd={}", &shared_path.tag, raw_fd));
+            }
+        } else {
+            if let Err(e) = wait_for_file(&shared_path.socket_path, 5) {
+                bail!("Error waiting for file: {}", e);
+            }
+            command
+                .arg("--vhost-user-fs")
+                .arg(format!("{},tag={}", &shared_path.socket_path, &shared_path.tag));
         }
-        command
-            .arg("--vhost-user-fs")
-            .arg(format!("{},tag={}", &shared_path.socket_path, &shared_path.tag));
     }
 
     debug!("Preserving FDs {:?}", preserved_fds);

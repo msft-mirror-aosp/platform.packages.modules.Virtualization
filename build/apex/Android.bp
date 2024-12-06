@@ -108,6 +108,7 @@ apex_defaults {
                 "rialto_bin",
                 "android_bootloader_crosvm_aarch64",
             ],
+            native_shared_libs: ["libavf"],
         },
         x86_64: {
             binaries: [
@@ -128,6 +129,7 @@ apex_defaults {
             prebuilts: [
                 "android_bootloader_crosvm_x86_64",
             ],
+            native_shared_libs: ["libavf"],
         },
     },
     binaries: [
@@ -189,12 +191,6 @@ apex_defaults {
     vintf_fragment_modules: select(soong_config_variable("ANDROID", "avf_remote_attestation_enabled"), {
         "true": ["virtualizationservice.xml"],
         default: unset,
-    }),
-    required: select(release_flag("RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES"), {
-        true: [
-            "default-permissions_com.android.virt.xml",
-        ],
-        default: [],
     }),
 }
 
