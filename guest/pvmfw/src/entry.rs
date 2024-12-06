@@ -148,7 +148,6 @@ fn main_wrapper(
         error!("Failed to unshare MMIO ranges: {e}");
         RebootReason::InternalError
     })?;
-    // Call unshare_all_memory here (instead of relying on the dtor) while UART is still mapped.
     unshare_all_memory();
 
     Ok((slices.kernel.as_ptr() as usize, next_bcc, keep_uart))
