@@ -132,6 +132,18 @@ pub fn map_data(addr: usize, size: NonZeroUsize) -> Result<()> {
     Ok(())
 }
 
+/// Map the provided range as normal memory, with R/W permissions.
+///
+/// Unlike `map_data()`, `deactivate_dynamic_page_tables()` will not flush caches for the range.
+///
+/// This fails if the range has already been (partially) mapped.
+pub fn map_data_noflush(addr: usize, size: NonZeroUsize) -> Result<()> {
+    let mut locked_tracker = try_lock_memory_tracker()?;
+    let tracker = locked_tracker.as_mut().ok_or(MemoryTrackerError::Unavailable)?;
+    let _ = tracker.alloc_mut_noflush(addr, size)?;
+    Ok(())
+}
+
 /// Map the region potentially holding data appended to the image, with read-write permissions.
 ///
 /// This fails if the footer has already been mapped.
@@ -294,6 +306,16 @@ impl MemoryTracker {
         self.add(region)
     }
 
+    fn alloc_range_mut_noflush(&mut self, range: &MemoryRange) -> Result<MemoryRange> {
+        let region = MemoryRegion { range: range.clone(), mem_type: MemoryType::ReadWrite };
+        self.check_allocatable(&region)?;
+        self.page_table.map_data(&get_va_range(range)).map_err(|e| {
+            error!("Error during non-flushed mutable range allocation: {e}");
+            MemoryTrackerError::FailedToMap
+        })?;
+        self.add(region)
+    }
+
     /// Maps the image footer, with read-write permissions.
     fn map_image_footer(&mut self) -> Result<MemoryRange> {
         if self.image_footer_mapped {
@@ -316,6 +338,10 @@ impl MemoryTracker {
     /// Allocate the address range for a mutable slice; returns None if failed.
     fn alloc_mut(&mut self, base: usize, size: NonZeroUsize) -> Result<MemoryRange> {
         self.alloc_range_mut(&(base..(base + size.get())))
+    }
+
+    fn alloc_mut_noflush(&mut self, base: usize, size: NonZeroUsize) -> Result<MemoryRange> {
+        self.alloc_range_mut_noflush(&(base..(base + size.get())))
     }
 
     /// Checks that the given range of addresses is within the MMIO region, and then maps it
