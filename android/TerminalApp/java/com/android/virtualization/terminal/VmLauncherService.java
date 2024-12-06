@@ -54,7 +54,6 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -144,7 +143,10 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (Objects.equals(intent.getAction(), ACTION_STOP_VM_LAUNCHER_SERVICE)) {
-            stopSelf();
+            // If there is no Debian service or it fails to shutdown, just stop the service.
+            if (mDebianService == null || !mDebianService.shutdownDebian()) {
+                stopSelf();
+            }
             return START_NOT_STICKY;
         }
         if (mVirtualMachine != null) {
@@ -293,7 +295,8 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
 
     public static void stop(Context context) {
         Intent i = getMyIntent(context);
-        context.stopService(i);
+        i.setAction(VmLauncherService.ACTION_STOP_VM_LAUNCHER_SERVICE);
+        context.startService(i);
     }
 
     @Override
