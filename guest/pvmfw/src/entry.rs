@@ -17,21 +17,20 @@
 use crate::config;
 use crate::memory;
 use core::arch::asm;
-use core::mem::{drop, size_of};
+use core::mem::size_of;
 use core::ops::Range;
 use core::slice;
-use hypervisor_backends::get_mmio_guard;
 use log::error;
-use log::info;
 use log::warn;
 use log::LevelFilter;
 use vmbase::util::RangeExt as _;
 use vmbase::{
     arch::aarch64::min_dcache_line_size,
-    configure_heap, console_writeln,
-    layout::{self, crosvm, UART_PAGE_ADDR},
-    main,
-    memory::{MemoryTracker, MEMORY, SIZE_128KB, SIZE_4KB},
+    configure_heap, console_writeln, layout, limit_stack_size, main,
+    memory::{
+        deactivate_dynamic_page_tables, map_image_footer, unshare_all_memory,
+        unshare_all_mmio_except_uart, unshare_uart, MemoryTrackerError, SIZE_128KB, SIZE_4KB,
+    },
     power::reboot,
 };
 use zeroize::Zeroize;
@@ -73,6 +72,7 @@ impl RebootReason {
 
 main!(start);
 configure_heap!(SIZE_128KB);
+limit_stack_size!(SIZE_4KB * 12);
 
 /// Entry point for pVM firmware.
 pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64) {
@@ -108,14 +108,10 @@ fn main_wrapper(
 
     log::set_max_level(LevelFilter::Info);
 
-    let page_table = memory::init_page_table().map_err(|e| {
-        error!("Failed to set up the dynamic page tables: {e}");
+    let appended_data = get_appended_data_slice().map_err(|e| {
+        error!("Failed to map the appended data: {e}");
         RebootReason::InternalError
     })?;
-
-    // SAFETY: We only get the appended payload from here, once. The region was statically mapped,
-    // then remapped by `init_page_table()`.
-    let appended_data = unsafe { get_appended_data_slice() };
 
     let appended = AppendedPayload::new(appended_data).ok_or_else(|| {
         error!("No valid configuration found");
@@ -123,14 +119,6 @@ fn main_wrapper(
     })?;
 
     let config_entries = appended.get_entries();
-
-    // Up to this point, we were using the built-in static (from .rodata) page tables.
-    MEMORY.lock().replace(MemoryTracker::new(
-        page_table,
-        crosvm::MEM_START..layout::MAX_VIRT_ADDR,
-        crosvm::MMIO_RANGE,
-        Some(layout::image_footer_range()),
-    ));
 
     let slices = memory::MemorySlices::new(
         fdt,
@@ -152,27 +140,23 @@ fn main_wrapper(
     // Writable-dirty regions will be flushed when MemoryTracker is dropped.
     config_entries.bcc.zeroize();
 
-    info!("Expecting a bug making MMIO_GUARD_UNMAP return NOT_SUPPORTED on success");
-    MEMORY.lock().as_mut().unwrap().unshare_all_mmio().map_err(|e| {
+    unshare_all_mmio_except_uart().map_err(|e| {
         error!("Failed to unshare MMIO ranges: {e}");
         RebootReason::InternalError
     })?;
     // Call unshare_all_memory here (instead of relying on the dtor) while UART is still mapped.
-    MEMORY.lock().as_mut().unwrap().unshare_all_memory();
+    unshare_all_memory();
 
-    if let Some(mmio_guard) = get_mmio_guard() {
-        if cfg!(debuggable_vms_improvements) && debuggable_payload {
-            // Keep UART MMIO_GUARD-ed for debuggable payloads, to enable earlycon.
-        } else {
-            mmio_guard.unmap(UART_PAGE_ADDR).map_err(|e| {
-                error!("Failed to unshare the UART: {e}");
-                RebootReason::InternalError
-            })?;
-        }
+    if cfg!(debuggable_vms_improvements) && debuggable_payload {
+        // Keep UART MMIO_GUARD-ed for debuggable payloads, to enable earlycon.
+    } else {
+        unshare_uart().map_err(|e| {
+            error!("Failed to unshare the UART: {e}");
+            RebootReason::InternalError
+        })?;
     }
 
-    // Drop MemoryTracker and deactivate page table.
-    drop(MEMORY.lock().take());
+    deactivate_dynamic_page_tables();
 
     Ok((slices.kernel.as_ptr() as usize, next_bcc))
 }
@@ -199,7 +183,7 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
     assert_eq!(bcc.start % ASM_STP_ALIGN, 0, "Misaligned guest BCC.");
     assert_eq!(bcc.end % ASM_STP_ALIGN, 0, "Misaligned guest BCC.");
 
-    let stack = memory::stack_range();
+    let stack = layout::stack_range();
 
     assert_ne!(stack.end - stack.start, 0, "stack region is empty.");
     assert_eq!(stack.start.0 % ASM_STP_ALIGN, 0, "Misaligned stack region.");
@@ -321,15 +305,11 @@ fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> !
     };
 }
 
-/// # Safety
-///
-/// This must only be called once, since we are returning a mutable reference.
-/// The appended data region must be mapped.
-unsafe fn get_appended_data_slice() -> &'static mut [u8] {
-    let range = layout::image_footer_range();
-    // SAFETY: This region is mapped and the linker script prevents it from overlapping with other
-    // objects.
-    unsafe { slice::from_raw_parts_mut(range.start.0 as *mut u8, range.end - range.start) }
+fn get_appended_data_slice() -> Result<&'static mut [u8], MemoryTrackerError> {
+    let range = map_image_footer()?;
+    // SAFETY: This region was just mapped for the first time (as map_image_footer() didn't fail)
+    // and the linker script prevents it from overlapping with other objects.
+    Ok(unsafe { slice::from_raw_parts_mut(range.start as *mut u8, range.len()) })
 }
 
 enum AppendedPayload<'a> {
