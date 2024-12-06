@@ -32,6 +32,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.ConditionVariable;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -67,6 +68,8 @@ import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends BaseActivity
         implements VmLauncherService.VmLauncherServiceCallback, AccessibilityStateChangeListener {
@@ -74,9 +77,11 @@ public class MainActivity extends BaseActivity
     static final String KEY_DISK_SIZE = "disk_size";
     private static final String VM_ADDR = "192.168.0.2";
     private static final int TTYD_PORT = 7681;
+    private static final int TERMINAL_CONNECTION_TIMEOUT_MS = 10_000;
     private static final int REQUEST_CODE_INSTALLER = 0x33;
     private static final int FONT_SIZE_DEFAULT = 13;
 
+    private ExecutorService mExecutorService;
     private InstalledImage mImage;
     private X509Certificate[] mCertificates;
     private PrivateKey mPrivateKey;
@@ -141,6 +146,11 @@ public class MainActivity extends BaseActivity
                             updateModifierKeysVisibility();
                             return insets;
                         });
+
+        mExecutorService =
+                Executors.newSingleThreadExecutor(
+                        new TerminalThreadFactory(getApplicationContext()));
+
         // if installer is launched, it will be handled in onActivityResult
         if (!launchInstaller) {
             if (!Environment.isExternalStorageManager()) {
@@ -323,15 +333,12 @@ public class MainActivity extends BaseActivity
                         handler.proceed();
                     }
                 });
-        new Thread(
-                        () -> {
-                            waitUntilVmStarts();
-                            runOnUiThread(
-                                    () ->
-                                            mTerminalView.loadUrl(
-                                                    getTerminalServiceUrl().toString()));
-                        })
-                .start();
+        mExecutorService.execute(
+                () -> {
+                    // TODO(b/376793781): Remove polling
+                    waitUntilVmStarts();
+                    runOnUiThread(() -> mTerminalView.loadUrl(getTerminalServiceUrl().toString()));
+                });
     }
 
     private static void waitUntilVmStarts() {
@@ -341,17 +348,33 @@ public class MainActivity extends BaseActivity
         } catch (UnknownHostException e) {
             // this can never happen.
         }
-        try {
-            while (!addr.isReachable(10000)) {}
-        } catch (IOException e) {
-            // give up on network error
-            throw new RuntimeException(e);
+
+        long startTime = SystemClock.elapsedRealtime();
+        while (true) {
+            int remainingTime =
+                    TERMINAL_CONNECTION_TIMEOUT_MS
+                            - (int) (SystemClock.elapsedRealtime() - startTime);
+            if (remainingTime <= 0) {
+                throw new RuntimeException("Connection to terminal timedout");
+            }
+            try {
+                // Note: this quits immediately if VM is unreachable.
+                if (addr.isReachable(remainingTime)) {
+                    return;
+                }
+            } catch (IOException e) {
+                // give up on network error
+                throw new RuntimeException(e);
+            }
         }
-        return;
     }
 
     @Override
     protected void onDestroy() {
+        if (mExecutorService != null) {
+            mExecutorService.shutdown();
+        }
+
         getSystemService(AccessibilityManager.class).removeAccessibilityStateChangeListener(this);
         VmLauncherService.stop(this);
         super.onDestroy();
