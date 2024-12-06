@@ -144,7 +144,6 @@ fn main_wrapper(
         error!("Failed to unshare MMIO ranges: {e}");
         RebootReason::InternalError
     })?;
-    // Call unshare_all_memory here (instead of relying on the dtor) while UART is still mapped.
     unshare_all_memory();
 
     if cfg!(debuggable_vms_improvements) && debuggable_payload {
