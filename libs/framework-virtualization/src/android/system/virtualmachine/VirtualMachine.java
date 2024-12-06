@@ -43,7 +43,6 @@ import static android.system.virtualmachine.VirtualMachineCallback.STOP_REASON_V
 import static java.util.Objects.requireNonNull;
 
 import android.annotation.CallbackExecutor;
-import android.annotation.FlaggedApi;
 import android.annotation.IntDef;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
@@ -82,7 +81,6 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 
 import com.android.internal.annotations.GuardedBy;
-import com.android.system.virtualmachine.flags.Flags;
 
 import libcore.io.IoBridge;
 import libcore.io.IoUtils;
@@ -1578,7 +1576,8 @@ public class VirtualMachine implements AutoCloseable {
                                 : createVirtualMachineConfigForAppFrom(vmConfig, service);
 
                 mVirtualMachine =
-                        service.createVm(vmConfigParcel, consoleOutFd, consoleInFd, mLogWriter);
+                        service.createVm(
+                                vmConfigParcel, consoleOutFd, consoleInFd, mLogWriter, null);
                 mVirtualMachine.registerCallback(new CallbackTranslator(service));
                 if (mMemoryManagementCallbacks != null) {
                     mContext.registerComponentCallbacks(mMemoryManagementCallbacks);
@@ -2055,7 +2054,6 @@ public class VirtualMachine implements AutoCloseable {
      */
     @TestApi
     @RequiresPermission(USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
-    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
     public void enableTestAttestation() throws VirtualMachineException {
         try {
             mVirtualizationService.getBinder().enableTestAttestation();

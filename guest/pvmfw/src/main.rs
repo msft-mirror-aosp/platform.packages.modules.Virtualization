@@ -45,17 +45,16 @@ use alloc::boxed::Box;
 use bssl_avf::Digester;
 use core::ops::Range;
 use cstr::cstr;
-use diced_open_dice::{bcc_handover_parse, DiceArtifacts, Hidden};
-use fdtpci::{PciError, PciInfo};
+use diced_open_dice::{bcc_handover_parse, DiceArtifacts, DiceContext, Hidden, VM_KEY_ALGORITHM};
 use libfdt::{Fdt, FdtNode};
 use log::{debug, error, info, trace, warn};
 use pvmfw_avb::verify_payload;
 use pvmfw_avb::Capability;
 use pvmfw_avb::DebugLevel;
 use pvmfw_embedded_key::PUBLIC_KEY;
+use vmbase::fdt::pci::{PciError, PciInfo};
 use vmbase::heap;
 use vmbase::memory::flush;
-use vmbase::memory::MEMORY;
 use vmbase::rand;
 use vmbase::virtio::pci;
 
@@ -101,7 +100,7 @@ fn main(
     // Set up PCI bus for VirtIO devices.
     let pci_info = PciInfo::from_fdt(fdt).map_err(handle_pci_error)?;
     debug!("PCI: {:#x?}", pci_info);
-    let mut pci_root = pci::initialize(pci_info, MEMORY.lock().as_mut().unwrap()).map_err(|e| {
+    let mut pci_root = pci::initialize(pci_info).map_err(|e| {
         error!("Failed to initialize PCI: {e}");
         RebootReason::InternalError
     })?;
@@ -154,6 +153,11 @@ fn main(
             return Err(RebootReason::InvalidPayload);
         }
         (false, instance_hash.unwrap())
+    } else if verified_boot_data.has_capability(Capability::TrustySecurityVm) {
+        // The rollback protection of Trusty VMs are handled by AuthMgr, so we don't need to
+        // handle it here.
+        info!("Trusty Security VM detected");
+        (false, instance_hash.unwrap())
     } else {
         info!("Fallback to instance.img based rollback checks");
         let (recorded_entry, mut instance_img, header_index) =
@@ -200,6 +204,15 @@ fn main(
         Cow::Owned(truncated_bcc_handover)
     };
 
+    trace!("BCC leaf subject public key algorithm: {:?}", bcc.leaf_subject_pubkey().cose_alg);
+
+    let dice_context = DiceContext {
+        authority_algorithm: bcc.leaf_subject_pubkey().cose_alg.try_into().map_err(|e| {
+            error!("{e}");
+            RebootReason::InternalError
+        })?,
+        subject_algorithm: VM_KEY_ALGORITHM,
+    };
     dice_inputs
         .write_next_bcc(
             new_bcc_handover.as_ref(),
@@ -207,6 +220,7 @@ fn main(
             instance_hash,
             defer_rollback_protection,
             next_bcc,
+            dice_context,
         )
         .map_err(|e| {
             error!("Failed to derive next-stage DICE secrets: {e:?}");

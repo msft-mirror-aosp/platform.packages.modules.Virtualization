@@ -45,13 +45,7 @@ apex_defaults {
 
     apps: [
         "android.system.virtualmachine.res",
-    ] + select(release_flag("RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES"), {
-        true: [
-            "VmLauncherApp",
-            "VmTerminalApp",
-        ],
-        default: [],
-    }),
+    ],
 
     file_contexts: ":com.android.virt-file_contexts",
 
@@ -78,6 +72,11 @@ apex_defaults {
         true: "canned_fs_config_sys_nice",
         default: "canned_fs_config",
     }),
+}
+
+vintf_fragment {
+    name: "virtualizationservice.xml",
+    src: "virtualizationservice.xml",
 }
 
 apex_defaults {
@@ -107,7 +106,9 @@ apex_defaults {
             filesystems: microdroid_filesystem_images,
             prebuilts: [
                 "rialto_bin",
+                "android_bootloader_crosvm_aarch64",
             ],
+            native_shared_libs: ["libavf"],
         },
         x86_64: {
             binaries: [
@@ -125,6 +126,10 @@ apex_defaults {
                 default: [],
             }),
             filesystems: microdroid_filesystem_images,
+            prebuilts: [
+                "android_bootloader_crosvm_x86_64",
+            ],
+            native_shared_libs: ["libavf"],
         },
     },
     binaries: [
@@ -132,19 +137,25 @@ apex_defaults {
         "vm",
     ],
     prebuilts: [
-        "features_com.android.virt.xml",
         "microdroid_initrd_debuggable",
         "microdroid_initrd_normal",
         "microdroid.json",
         "microdroid_kernel",
         "com.android.virt.init.rc",
-        "android_bootloader_crosvm_aarch64",
     ] + select(soong_config_variable("ANDROID", "avf_microdroid_guest_gki_version"), {
         "android15_66": [
             "microdroid_gki-android15-6.6_initrd_debuggable",
             "microdroid_gki-android15-6.6_initrd_normal",
             "microdroid_gki-android15-6.6_kernel",
             "microdroid_gki-android15-6.6.json",
+        ],
+        // Internal option used by pkvm team while developing new features.
+        // Should not be used on production kernels.
+        "pkvm_experimental": [
+            "microdroid_gki-pkvm_experimental_initrd_debuggable",
+            "microdroid_gki-pkvm_experimental_initrd_normal",
+            "microdroid_gki-pkvm_experimental_kernel",
+            "microdroid_gki-pkvm_experimental.json",
         ],
         default: [],
     }) + select(release_flag("RELEASE_AVF_ENABLE_DEVICE_ASSIGNMENT"), {
@@ -153,18 +164,31 @@ apex_defaults {
     }) + select(release_flag("RELEASE_AVF_ENABLE_NETWORK"), {
         true: ["com.android.virt.vmnic.rc"],
         default: [],
+    }) + select(soong_config_variable("ANDROID", "target_boots_16k"), {
+        true: [
+            "microdroid_16k_initrd_debuggable",
+            "microdroid_16k_initrd_normal",
+            "microdroid_kernel_16k",
+            "microdroid_16k.json",
+        ],
+        default: [],
     }),
     host_required: [
         "vm_shell",
     ],
     apps: [
         "EmptyPayloadApp",
-    ],
+    ] + select(release_flag("RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES"), {
+        true: [
+            "VmTerminalApp",
+        ],
+        default: [],
+    }),
     androidManifest: select(release_flag("RELEASE_AVF_ENABLE_LLPVM_CHANGES"), {
         true: "AndroidManifest.xml",
         default: unset,
     }),
-    vintf_fragments: select(soong_config_variable("ANDROID", "avf_remote_attestation_enabled"), {
+    vintf_fragment_modules: select(soong_config_variable("ANDROID", "avf_remote_attestation_enabled"), {
         "true": ["virtualizationservice.xml"],
         default: unset,
     }),
@@ -278,8 +302,10 @@ sh_test_host {
         "libz",
     ],
     data: [
-        ":com.android.virt",
         ":test.com.android.virt.pem",
+    ],
+    device_common_data: [
+        ":com.android.virt",
     ],
     test_suites: ["general-tests"],
 }

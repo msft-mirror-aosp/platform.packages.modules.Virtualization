@@ -15,18 +15,19 @@
 //! Rust entry point.
 
 use crate::{
-    bionic, console, heap, hyp,
+    bionic, console, heap,
     layout::{UART_ADDRESSES, UART_PAGE_ADDR},
     logger,
-    memory::{PAGE_SIZE, SIZE_16KB, SIZE_4KB},
+    memory::{switch_to_dynamic_page_tables, PAGE_SIZE, SIZE_16KB, SIZE_4KB},
     power::{reboot, shutdown},
     rand,
 };
 use core::mem::size_of;
+use hypervisor_backends::{get_mmio_guard, Error};
 use static_assertions::const_assert_eq;
 
-fn try_console_init() -> Result<(), hyp::Error> {
-    if let Some(mmio_guard) = hyp::get_mmio_guard() {
+fn try_console_init() -> Result<(), Error> {
+    if let Some(mmio_guard) = get_mmio_guard() {
         mmio_guard.enroll()?;
 
         // TODO(ptosi): Use MmioSharer::share() to properly track this MMIO_GUARD_MAP.
@@ -56,8 +57,7 @@ fn try_console_init() -> Result<(), hyp::Error> {
 /// This is the entry point to the Rust code, called from the binary entry point in `entry.S`.
 #[no_mangle]
 extern "C" fn rust_entry(x0: u64, x1: u64, x2: u64, x3: u64) -> ! {
-    // SAFETY: Only called once, from here, and inaccessible to client code.
-    unsafe { heap::init() };
+    heap::init();
 
     if try_console_init().is_err() {
         // Don't panic (or log) here to avoid accessing the console.
@@ -81,6 +81,8 @@ extern "C" fn rust_entry(x0: u64, x1: u64, x2: u64, x3: u64) -> ! {
     }
 
     bionic::__get_tls().stack_guard = u64::from_ne_bytes(stack_guard);
+
+    switch_to_dynamic_page_tables();
 
     // Note: If rust_entry ever returned (which it shouldn't by being -> !), the compiler-injected
     // stack guard comparison would detect a mismatch and call __stack_chk_fail.

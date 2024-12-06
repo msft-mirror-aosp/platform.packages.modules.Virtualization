@@ -50,6 +50,7 @@ android_system_image {
     avb_private_key: ":microdroid_sign_key",
     avb_algorithm: "SHA256_RSA4096",
     avb_hash_algorithm: "sha256",
+    use_fec: false,
     partition_name: "system",
     deps: [
         "init_second_stage.microdroid",
@@ -139,7 +140,10 @@ android_system_image {
             ],
         },
     },
-    linker_config_src: "linker.config.json",
+    linker_config: {
+        gen_linker_config: true,
+        linker_config_srcs: ["linker.config.json"],
+    },
     base_dir: "system",
     dirs: microdroid_rootdirs + select(release_flag("RELEASE_AVF_ENABLE_DICE_CHANGES"), {
         true: ["microdroid_resources"],
@@ -197,7 +201,7 @@ prebuilt_root {
     no_full_install: true,
 }
 
-genrule {
+java_genrule {
     name: "microdroid_build_prop_gen_x86_64",
     srcs: [
         "build.prop",
@@ -215,7 +219,7 @@ genrule {
         "echo ro.product.cpu.abi=x86_64) > $(out)",
 }
 
-genrule {
+java_genrule {
     name: "microdroid_build_prop_gen_arm64",
     srcs: [
         "build.prop",
@@ -242,6 +246,7 @@ android_filesystem {
     avb_private_key: ":microdroid_sign_key",
     avb_algorithm: "SHA256_RSA4096",
     avb_hash_algorithm: "sha256",
+    use_fec: false,
     file_contexts: ":microdroid_vendor_file_contexts.gen",
     // For deterministic output, use fake_timestamp, hard-coded uuid
     fake_timestamp: "1611569676",
@@ -344,6 +349,11 @@ genrule {
     cmd: "cat $(in) > $(out)",
 }
 
+filegroup {
+    name: "microdroid_16k_bootconfig_x86_64_gen",
+    srcs: ["bootconfig.x86_64_16k"],
+}
+
 prebuilt_etc {
     name: "microdroid_fstab",
     src: "fstab.microdroid",
@@ -374,6 +384,11 @@ vbmeta {
 prebuilt_etc {
     name: "microdroid.json",
     src: "microdroid.json",
+}
+
+prebuilt_etc {
+    name: "microdroid_16k.json",
+    src: "microdroid_16k.json",
 }
 
 prebuilt_etc {
@@ -431,6 +446,12 @@ avb_gen_vbmeta_image {
     src: ":microdroid_initrd_normal",
 }
 
+avb_gen_vbmeta_image {
+    name: "microdroid_16k_initrd_normal_hashdesc",
+    defaults: ["microdroid_initrd_normal_defaults"],
+    src: ":microdroid_16k_initrd_normal",
+}
+
 // python -c "import hashlib; print(hashlib.sha256(b'initrd_debug').hexdigest())"
 initrd_debug_salt = "8ab9dc9cb7e6456700ff6ef18c6b4c3acc24c5fa5381b829563f8d7a415d869a"
 
@@ -447,6 +468,12 @@ avb_gen_vbmeta_image {
     src: ":microdroid_initrd_debuggable",
 }
 
+avb_gen_vbmeta_image {
+    name: "microdroid_16k_initrd_debug_hashdesc",
+    defaults: ["microdroid_initrd_debug_defaults"],
+    src: ":microdroid_16k_initrd_debuggable",
+}
+
 soong_config_module_type {
     name: "flag_aware_avb_add_hash_footer_defaults",
     module_type: "avb_add_hash_footer_defaults",
@@ -460,7 +487,7 @@ soong_config_module_type {
     ],
 }
 
-flag_aware_avb_add_hash_footer_defaults {
+avb_add_hash_footer_defaults {
     name: "microdroid_kernel_signed_defaults",
     src: ":empty_file",
     partition_name: "boot",
@@ -475,10 +502,16 @@ flag_aware_avb_add_hash_footer_defaults {
             enabled: true,
         },
     },
+}
+
+MICRODROID_GKI_ROLLBACK_INDEX = 1
+
+flag_aware_avb_add_hash_footer_defaults {
+    name: "microdroid_kernel_cap_defaults",
     // Below are properties that are conditionally set depending on value of build flags.
     soong_config_variables: {
         release_avf_enable_llpvm_changes: {
-            rollback_index: 1,
+            rollback_index: MICRODROID_GKI_ROLLBACK_INDEX,
             props: [
                 {
                     name: "com.android.virt.cap",
@@ -489,9 +522,36 @@ flag_aware_avb_add_hash_footer_defaults {
     },
 }
 
+flag_aware_avb_add_hash_footer_defaults {
+    name: "microdroid_kernel_cap_with_uefi_defaults",
+    // Below are properties that are conditionally set depending on value of build flags.
+    soong_config_variables: {
+        release_avf_enable_llpvm_changes: {
+            rollback_index: MICRODROID_GKI_ROLLBACK_INDEX,
+            props: [
+                {
+                    name: "com.android.virt.cap",
+                    value: "secretkeeper_protection|supports_uefi_boot",
+                },
+            ],
+            conditions_default: {
+                props: [
+                    {
+                        name: "com.android.virt.cap",
+                        value: "supports_uefi_boot",
+                    },
+                ],
+            },
+        },
+    },
+}
+
 avb_add_hash_footer {
     name: "microdroid_kernel_signed",
-    defaults: ["microdroid_kernel_signed_defaults"],
+    defaults: [
+        "microdroid_kernel_signed_defaults",
+        "microdroid_kernel_cap_defaults",
+    ],
     filename: "microdroid_kernel",
     arch: {
         arm64: {
@@ -521,6 +581,43 @@ prebuilt_etc {
     },
 }
 
+avb_add_hash_footer {
+    name: "microdroid_kernel_16k_signed",
+    defaults: [
+        "microdroid_kernel_signed_defaults",
+        "microdroid_kernel_cap_defaults",
+    ],
+    filename: "microdroid_kernel_16k",
+    arch: {
+        arm64: {
+            src: ":microdroid_kernel_16k_prebuilt-arm64",
+        },
+        // There is no 16k x86_64 kernel. Instead the 16k emulation is triggered by adding
+        // `page_shift=14` to the kernel cmdline or bootconfig.
+        x86_64: {
+            src: ":microdroid_kernel_prebuilt-x86_64",
+        },
+    },
+    include_descriptors_from_images: [
+        ":microdroid_16k_initrd_normal_hashdesc",
+        ":microdroid_16k_initrd_debug_hashdesc",
+    ],
+}
+
+prebuilt_etc {
+    name: "microdroid_kernel_16k",
+    src: ":empty_file",
+    relative_install_path: "fs",
+    arch: {
+        arm64: {
+            src: ":microdroid_kernel_16k_signed",
+        },
+        x86_64: {
+            src: ":microdroid_kernel_16k_signed",
+        },
+    },
+}
+
 ///////////////////////////////////////
 // GKI-android15-6.6
 ///////////////////////////////////////
@@ -529,10 +626,9 @@ prebuilt_etc {
     src: "microdroid_gki-android15-6.6.json",
 }
 
-avb_add_hash_footer {
-    name: "microdroid_gki-android15-6.6_kernel_signed",
+avb_add_hash_footer_defaults {
+    name: "microdroid_gki_kernel_signed_defaults",
     defaults: ["microdroid_kernel_signed_defaults"],
-    filename: "microdroid_gki-android15-6.6_kernel_signed",
     arch: {
         arm64: {
             src: ":microdroid_gki_kernel_prebuilts-android15-6.6-arm64",
@@ -545,6 +641,24 @@ avb_add_hash_footer {
         ":microdroid_gki-android15-6.6_initrd_normal_hashdesc",
         ":microdroid_gki-android15-6.6_initrd_debug_hashdesc",
     ],
+}
+
+avb_add_hash_footer {
+    name: "microdroid_gki-android15-6.6_kernel_signed",
+    defaults: [
+        "microdroid_gki_kernel_signed_defaults",
+        "microdroid_kernel_cap_defaults",
+    ],
+    filename: "microdroid_gki-android15-6.6_kernel_signed",
+}
+
+avb_add_hash_footer {
+    name: "microdroid_gki-android15-6.6_kernel_signed_supports_uefi_boot",
+    defaults: [
+        "microdroid_gki_kernel_signed_defaults",
+        "microdroid_kernel_cap_with_uefi_defaults",
+    ],
+    filename: "microdroid_gki-android15-6.6_kernel_signed_supports_uefi_boot",
 }
 
 // HACK: use cc_genrule for arch-specific properties
@@ -597,6 +711,7 @@ python_binary_host {
 // HACK: use cc_genrule for arch-specific properties
 cc_genrule {
     name: "microdroid_kernel_hashes_rs",
+    compile_multilib: "first",
     srcs: [":microdroid_kernel"],
     arch: {
         arm64: {
@@ -621,6 +736,7 @@ cc_genrule {
 
 rust_library_rlib {
     name: "libmicrodroid_kernel_hashes",
+    compile_multilib: "first",
     srcs: [":microdroid_kernel_hashes_rs"],
     crate_name: "microdroid_kernel_hashes",
     prefer_rlib: true,

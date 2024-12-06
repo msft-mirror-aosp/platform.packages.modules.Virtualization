@@ -28,3 +28,7 @@ smostafa@google.com
 tabba@google.com
 vdonnefort@google.com
 victorhsieh@google.com
+
+# Ferrochrome
+per-file android/TerminalApp/**=jiyong@google.com,jeongik@google.com
+per-file build/debian/**=jiyong@google.com,jeongik@google.com

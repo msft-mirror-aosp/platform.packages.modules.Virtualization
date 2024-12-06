@@ -83,6 +83,7 @@ import com.google.common.truth.BooleanSubject;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.function.ThrowingRunnable;
@@ -129,15 +130,13 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
 
-    @Parameterized.Parameters(name = "protectedVm={0},gki={1}")
+    @Parameterized.Parameters(name = "protectedVm={0},os={1}")
     public static Collection<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
-        ret.add(new Object[] {true /* protectedVm */, null /* use microdroid kernel */});
-        ret.add(new Object[] {false /* protectedVm */, null /* use microdroid kernel */});
         // TODO(b/302465542): run only the latest GKI on presubmit to reduce running time
-        for (String gki : SUPPORTED_GKI_VERSIONS) {
-            ret.add(new Object[] {true /* protectedVm */, gki});
-            ret.add(new Object[] {false /* protectedVm */, gki});
+        for (String os : SUPPORTED_OSES) {
+            ret.add(new Object[] {true /* protectedVm */, os});
+            ret.add(new Object[] {false /* protectedVm */, os});
         }
         return ret;
     }
@@ -146,12 +145,12 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     public boolean mProtectedVm;
 
     @Parameterized.Parameter(1)
-    public String mGki;
+    public String mOs;
 
     @Before
     public void setup() {
-        prepareTestSetup(mProtectedVm, mGki);
-        if (mGki != null) {
+        prepareTestSetup(mProtectedVm, mOs);
+        if (mOs != "microdroid") {
             // Using a non-default VM always needs the custom permission.
             grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         } else {
@@ -223,6 +222,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    @VsrTest(requirements = {"VSR-7.1-001.006"})
     public void vmAttestationWhenRemoteAttestationIsNotSupported() throws Exception {
         // pVM remote attestation is only supported on protected VMs.
         assumeProtectedVM();
@@ -251,6 +251,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    @VsrTest(requirements = {"VSR-7.1-001.006"})
     public void vmAttestationWithVendorPartitionWhenSupported() throws Exception {
         // pVM remote attestation is only supported on protected VMs.
         assumeProtectedVM();
@@ -269,6 +270,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    @VsrTest(requirements = {"VSR-7.1-001.006"})
     public void vmAttestationWhenRemoteAttestationIsSupported() throws Exception {
         // pVM remote attestation is only supported on protected VMs.
         assumeProtectedVM();
@@ -1212,7 +1214,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7"})
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7", "9.17/C-3-4"})
     public void instancesOfSameVmHaveDifferentCdis() throws Exception {
         assumeSupportedDevice();
         // TODO(b/325094712): VMs on CF with same payload have the same secret. This is because
@@ -1239,7 +1241,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7"})
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7", "9.17/C-3-4"})
     public void sameInstanceKeepsSameCdis() throws Exception {
         assumeSupportedDevice();
         assume().withMessage("Skip on CF. Too Slow. b/257270529").that(isCuttlefish()).isFalse();
@@ -1937,6 +1939,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
+    @Ignore("b/372874464")
     public void outputIsNotRedirectedToLogcatIfNotDebuggable() throws Exception {
         assumeSupportedDevice();
 
@@ -1957,7 +1960,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     public void testConsoleInputSupported() throws Exception {
         assumeSupportedDevice();
-        assumeTrue("Not supported on GKI kernels", mGki == null);
+        assumeFalse("Not supported on GKI kernels", mOs.startsWith("microdroid_gki-"));
 
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
@@ -2511,6 +2514,30 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(testResults.mException).isNull();
         int expectedFlags = MS_NOATIME | MS_RDONLY;
         assertThat(testResults.mMountFlags & expectedFlags).isEqualTo(expectedFlags);
+    }
+
+    @Test
+    public void pageSize() throws Exception {
+        assumeSupportedDevice();
+
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_page_size", config);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mPageSize = ts.getPageSize();
+                        });
+
+        assertThat(testResults.mException).isNull();
+        int expectedPageSize = mOs.endsWith("_16k") ? 16384 : 4096;
+        assertThat(testResults.mPageSize).isEqualTo(expectedPageSize);
     }
 
     private static class VmShareServiceConnection implements ServiceConnection {

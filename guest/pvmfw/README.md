@@ -233,10 +233,10 @@ In version 1.2, a fourth blob is added.
 
 [header]: src/config.rs
 [DTBO]: https://android.googlesource.com/platform/external/dtc/+/refs/heads/main/Documentation/dt-object-internal.txt
-[debug_policy]: ../docs/debug/README.md#debug-policy
-[device_assignment]: ../docs/device_assignment.md
+[debug_policy]: ../../docs/debug/README.md#debug-policy
+[device_assignment]: ../../docs/device_assignment.md
 [secretkeeper_key]: https://android.googlesource.com/platform/system/secretkeeper/+/refs/heads/main/README.md#secretkeeper-public-key
-[vendor_hashtree_digest]: ../microdroid/README.md#verification-of-vendor-image
+[vendor_hashtree_digest]: ../../build/microdroid/README.md#verification-of-vendor-image
 
 #### Virtual Platform DICE Chain Handover
 
@@ -402,7 +402,7 @@ DICE chain:
 };
 ```
 
-[dt.md]: ../docs/device_trees.md#avf_specific-properties-and-nodes
+[dt.md]: ../../docs/device_trees.md#avf_specific-properties-and-nodes
 
 ### Guest Image Signing
 
@@ -450,6 +450,18 @@ kernel][soong-udroid]).
 
 [soong-udroid]: https://cs.android.com/android/platform/superproject/main/+/main:packages/modules/Virtualization/microdroid/Android.bp;l=425;drc=b94a5cf516307c4279f6c16a63803527a8affc6d
 
+#### VBMeta Properties
+
+AVF defines special keys for AVB VBMeta descriptor properties that pvmfw
+recognizes, allowing VM owners to ensure that pvmfw performs its role in a way
+that is compatible with their guest kernel. These are:
+
+- `"com.android.virt.cap"`: a `|`-separated list of "capabilities" from
+  - `remote_attest`: pvmfw uses a hard-coded index for rollback protection
+  - `secretkeeper_protection`: pvmfw defers rollback protection to the guest
+  - `supports_uefi_boot`: pvmfw boots the VM as a EFI payload (experimental)
+  - `trusty_security_vm`: pvmfw skips rollback protection
+
 ## Development
 
 For faster iteration, you can build pvmfw, adb-push it to the device, and use
@@ -487,3 +499,19 @@ adb shell /apex/com.android.virt/bin/vm run-microdroid --protected
 Note: `adb root` is required to set the system property.
 
 [bcc.dat]: https://cs.android.com/android/platform/superproject/main/+/main:packages/modules/Virtualization/tests/pvmfw/assets/bcc.dat
+
+### Running pVM without pvmfw
+
+Sometimes, it might be useful to start a pVM without pvmfw, e.g. when debugging
+early pVM boot issues. You can achieve that by setting `hypervisor.pvmfw.path`
+propety to the value `none`:
+
+```shell
+adb shell 'setprop hypervisor.pvmfw.path "none"'
+```
+
+Then run a protected VM:
+
+```shell
+adb shell /apex/com.android.virt/bin/vm run-microdroid --protected
+```

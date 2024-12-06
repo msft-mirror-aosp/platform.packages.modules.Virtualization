@@ -70,13 +70,24 @@ pub enum Capability {
     RemoteAttest,
     /// Secretkeeper protected secrets.
     SecretkeeperProtection,
+    /// Trusty security VM.
+    TrustySecurityVm,
+    /// UEFI support for booting guest kernel.
+    SupportsUefiBoot,
+    /// (internal)
+    #[allow(non_camel_case_types)] // TODO: Use mem::variant_count once stable.
+    _VARIANT_COUNT,
 }
 
 impl Capability {
     const KEY: &'static str = "com.android.virt.cap";
     const REMOTE_ATTEST: &'static [u8] = b"remote_attest";
+    const TRUSTY_SECURITY_VM: &'static [u8] = b"trusty_security_vm";
     const SECRETKEEPER_PROTECTION: &'static [u8] = b"secretkeeper_protection";
     const SEPARATOR: u8 = b'|';
+    const SUPPORTS_UEFI_BOOT: &'static [u8] = b"supports_uefi_boot";
+    /// Number of supported capabilites.
+    pub const COUNT: usize = Self::_VARIANT_COUNT as usize;
 
     /// Returns the capabilities indicated in `descriptor`, or error if the descriptor has
     /// unexpected contents.
@@ -90,7 +101,9 @@ impl Capability {
         for v in descriptor.value.split(|b| *b == Self::SEPARATOR) {
             let cap = match v {
                 Self::REMOTE_ATTEST => Self::RemoteAttest,
+                Self::TRUSTY_SECURITY_VM => Self::TrustySecurityVm,
                 Self::SECRETKEEPER_PROTECTION => Self::SecretkeeperProtection,
+                Self::SUPPORTS_UEFI_BOOT => Self::SupportsUefiBoot,
                 _ => return Err(PvmfwVerifyError::UnknownVbmetaProperty),
             };
             if res.contains(&cap) {

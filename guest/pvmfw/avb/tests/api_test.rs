@@ -38,6 +38,7 @@ const TEST_IMG_WITH_NON_INITRD_HASHDESC_PATH: &str = "test_image_with_non_initrd
 const TEST_IMG_WITH_INITRD_AND_NON_INITRD_DESC_PATH: &str =
     "test_image_with_initrd_and_non_initrd_desc.img";
 const TEST_IMG_WITH_MULTIPLE_CAPABILITIES: &str = "test_image_with_multiple_capabilities.img";
+const TEST_IMG_WITH_ALL_CAPABILITIES: &str = "test_image_with_all_capabilities.img";
 const UNSIGNED_TEST_IMG_PATH: &str = "unsigned_test.img";
 
 const RANDOM_FOOTER_POS: usize = 30;
@@ -50,6 +51,18 @@ fn latest_normal_payload_passes_verification() -> Result<()> {
         &load_latest_initrd_normal()?,
         b"initrd_normal",
         DebugLevel::None,
+    )
+}
+
+#[test]
+fn latest_trusty_security_vm_kernel_passes_verification() -> Result<()> {
+    let salt = b"trusty_security_vm_salt";
+    let expected_rollback_index = 1;
+    assert_payload_without_initrd_passes_verification(
+        &load_latest_trusty_security_vm_signed_kernel()?,
+        salt,
+        expected_rollback_index,
+        vec![Capability::TrustySecurityVm],
     )
 }
 
@@ -416,5 +429,25 @@ fn payload_with_multiple_capabilities() -> Result<()> {
 
     assert!(verified_boot_data.has_capability(Capability::RemoteAttest));
     assert!(verified_boot_data.has_capability(Capability::SecretkeeperProtection));
+    Ok(())
+}
+
+#[test]
+fn payload_with_all_capabilities() -> Result<()> {
+    let public_key = load_trusted_public_key()?;
+    let verified_boot_data = verify_payload(
+        &fs::read(TEST_IMG_WITH_ALL_CAPABILITIES)?,
+        /* initrd= */ None,
+        &public_key,
+    )
+    .map_err(|e| anyhow!("Verification failed. Error: {}", e))?;
+
+    assert!(verified_boot_data.has_capability(Capability::RemoteAttest));
+    assert!(verified_boot_data.has_capability(Capability::TrustySecurityVm));
+    assert!(verified_boot_data.has_capability(Capability::SecretkeeperProtection));
+    assert!(verified_boot_data.has_capability(Capability::SupportsUefiBoot));
+    // Fail if this test doesn't actually cover all supported capabilities.
+    assert_eq!(Capability::COUNT, 4);
+
     Ok(())
 }

@@ -79,9 +79,10 @@ rust_library_rlib {
     rustlibs: [
         "libaarch64_paging",
         "libbuddy_system_allocator",
+        "libcfg_if",
         "libcstr",
-        "libfdtpci",
-        "liblibfdt",
+        "libhypervisor_backends",
+        "liblibfdt_nostd",
         "liblog_rust_nostd",
         "libonce_cell_nostd",
         "libsmccc",
