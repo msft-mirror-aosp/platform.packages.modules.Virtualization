@@ -294,7 +294,7 @@ impl MemoryTracker {
         self.add(region)
     }
 
-    /// Maps the image footer read-write, with permissions.
+    /// Maps the image footer, with read-write permissions.
     fn map_image_footer(&mut self) -> Result<MemoryRange> {
         if self.image_footer_mapped {
             return Err(MemoryTrackerError::FooterAlreadyMapped);
