@@ -10,15 +10,14 @@ show_help() {
 	echo "Builds a debian image and save it to FILE. [sudo is required]"
 	echo "Options:"
 	echo "-h         Print usage and this help message and exit."
-	echo "-a ARCH    Architecture of the image [default is aarch64]"
+	echo "-a ARCH    Architecture of the image [default is host arch: $(uname -m)]"
 	echo "-r         Release mode build"
-	echo "-w         Save temp work directory (for debugging)"
+	echo "-w         Save temp work directory [for debugging]"
 }
 
 check_sudo() {
 	if [ "$EUID" -ne 0 ]; then
-		echo "Please run as root."
-		exit
+		echo "Please run as root." ; exit 1
 	fi
 }
 
@@ -26,17 +25,10 @@ parse_options() {
 	while getopts "a:hrw" option; do
 		case ${option} in
 			h)
-				show_help
-				exit;;
+				show_help ; exit
+				;;
 			a)
-				if [[ "$OPTARG" != "aarch64" && "$OPTARG" != "x86_64" ]]; then
-					echo "Invalid architecture: $OPTARG"
-					exit
-				fi
 				arch="$OPTARG"
-				if [[ "$arch" == "x86_64" ]]; then
-					debian_arch="amd64"
-				fi
 				;;
 			r)
 				mode=release
@@ -45,11 +37,21 @@ parse_options() {
 				save_workdir=1
 				;;
 			*)
-				echo "Invalid option: $OPTARG"
-				exit
+				echo "Invalid option: $OPTARG" ; exit 1
 				;;
 		esac
 	done
+	case "$arch" in
+		aarch64)
+			debian_arch="arm64"
+			;;
+		x86_64)
+			debian_arch="amd64"
+			;;
+		*)
+			echo "Invalid architecture: $arch" ; exit 1
+			;;
+	esac
 	if [[ "${*:$OPTIND:1}" ]]; then
 		built_image="${*:$OPTIND:1}"
 	fi
@@ -68,6 +70,7 @@ prepare_build_id() {
 install_prerequisites() {
 	apt update
 	packages=(
+		apt-utils
 		automake
 		binfmt-support
 		build-essential
@@ -184,6 +187,7 @@ copy_android_config() {
 	cp -R "${src}"/* "${dst}"
 	cp "$(dirname "$0")/image.yaml" "${resources_dir}"
 
+	cp -R "$(dirname "$0")/localdebs/" "${debian_cloud_image}/"
 	build_ttyd
 	build_rust_binary_and_copy forwarder_guest
 	build_rust_binary_and_copy forwarder_guest_launcher
@@ -217,7 +221,7 @@ extract_partitions() {
 }
 
 clean_up() {
-	[ "$save_workdir" -eq 0 ] || rm -rf "${workdir}"
+	[ "$save_workdir" -eq 1 ] || rm -rf "${workdir}"
 }
 
 set -e
@@ -230,8 +234,7 @@ debian_cloud_image=${workdir}/debian_cloud_image
 debian_version=bookworm
 config_space=${debian_cloud_image}/config_space/${debian_version}
 resources_dir=${debian_cloud_image}/src/debian_cloud_images/resources
-arch=aarch64
-debian_arch=arm64
+arch="$(uname -m)"
 mode=debug
 save_workdir=0
 

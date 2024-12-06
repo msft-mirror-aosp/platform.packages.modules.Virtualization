@@ -14,10 +14,12 @@
 
 //! Memory layout.
 
+#![allow(unused_unsafe)]
+
 pub mod crosvm;
 
 use crate::linker::__stack_chk_guard;
-use crate::memory::{page_4kb_of, PAGE_SIZE};
+use crate::memory::{max_stack_size, page_4kb_of, PAGE_SIZE};
 use aarch64_paging::paging::VirtualAddress;
 use core::ops::Range;
 use core::ptr::addr_of;
@@ -91,10 +93,16 @@ pub fn data_bss_range() -> Range<VirtualAddress> {
 }
 
 /// Writable data region for the stack.
-pub fn stack_range(stack_size: usize) -> Range<VirtualAddress> {
+pub fn stack_range() -> Range<VirtualAddress> {
     let end = linker_addr!(init_stack_pointer);
-    let start = VirtualAddress(end.0.checked_sub(stack_size).unwrap());
-    assert!(start >= linker_addr!(stack_limit));
+    let start = if let Some(stack_size) = max_stack_size() {
+        assert_eq!(stack_size % PAGE_SIZE, 0);
+        let start = VirtualAddress(end.0.checked_sub(stack_size).unwrap());
+        assert!(start >= linker_addr!(stack_limit));
+        start
+    } else {
+        linker_addr!(stack_limit)
+    };
 
     start..end
 }
