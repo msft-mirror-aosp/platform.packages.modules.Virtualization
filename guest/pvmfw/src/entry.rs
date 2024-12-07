@@ -81,7 +81,9 @@ pub fn start(fdt_address: u64, payload_start: u64, payload_size: u64, _arg3: u64
     // - can't access MMIO (except the console, already configured by vmbase)
 
     match main_wrapper(fdt_address as usize, payload_start as usize, payload_size as usize) {
-        Ok((entry, bcc)) => jump_to_payload(fdt_address, entry.try_into().unwrap(), bcc),
+        Ok((entry, bcc, keep_uart)) => {
+            jump_to_payload(fdt_address, entry.try_into().unwrap(), bcc, keep_uart)
+        }
         Err(e) => {
             const REBOOT_REASON_CONSOLE: usize = 1;
             console_writeln!(REBOOT_REASON_CONSOLE, "{}", e.as_avf_reboot_string());
@@ -100,7 +102,7 @@ fn main_wrapper(
     fdt: usize,
     payload: usize,
     payload_size: usize,
-) -> Result<(usize, Range<usize>), RebootReason> {
+) -> Result<(usize, Range<usize>, bool), RebootReason> {
     // Limitations in this function:
     // - only access MMIO once (and while) it has been mapped and configured
     // - only perform logging once the logger has been initialized
@@ -136,6 +138,8 @@ fn main_wrapper(
         config_entries.bcc,
         config_entries.debug_policy,
     )?;
+    // Keep UART MMIO_GUARD-ed for debuggable payloads, to enable earlycon.
+    let keep_uart = cfg!(debuggable_vms_improvements) && debuggable_payload;
 
     // Writable-dirty regions will be flushed when MemoryTracker is dropped.
     config_entries.bcc.zeroize();
@@ -144,24 +148,18 @@ fn main_wrapper(
         error!("Failed to unshare MMIO ranges: {e}");
         RebootReason::InternalError
     })?;
-    // Call unshare_all_memory here (instead of relying on the dtor) while UART is still mapped.
     unshare_all_memory();
 
-    if cfg!(debuggable_vms_improvements) && debuggable_payload {
-        // Keep UART MMIO_GUARD-ed for debuggable payloads, to enable earlycon.
-    } else {
-        unshare_uart().map_err(|e| {
-            error!("Failed to unshare the UART: {e}");
-            RebootReason::InternalError
-        })?;
+    Ok((slices.kernel.as_ptr() as usize, next_bcc, keep_uart))
+}
+
+fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>, keep_uart: bool) -> ! {
+    if !keep_uart {
+        unshare_uart().unwrap();
     }
 
     deactivate_dynamic_page_tables();
 
-    Ok((slices.kernel.as_ptr() as usize, next_bcc))
-}
-
-fn jump_to_payload(fdt_address: u64, payload_start: u64, bcc: Range<usize>) -> ! {
     const ASM_STP_ALIGN: usize = size_of::<u64>() * 2;
     const SCTLR_EL1_RES1: u64 = (0b11 << 28) | (0b101 << 20) | (0b1 << 11);
     // Stage 1 instruction access cacheability is unaffected.
