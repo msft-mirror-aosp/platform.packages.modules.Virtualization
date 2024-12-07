@@ -121,12 +121,30 @@ int AVirtualMachineRawConfig_addDisk(AVirtualMachineRawConfig* _Nonnull config, 
 /**
  * Set how much memory will be given to a virtual machine.
  *
+ * When `AVirtualMachineRawConfig_setProtectedVm(..., true)` is set, the memory
+ * size provided here will be automatically augmented with the swiotlb size.
+ *
  * \param config a virtual machine config object.
  * \param memoryMiB the amount of RAM to give the virtual machine, in MiB. 0 or negative to use the
  *   default.
  */
 void AVirtualMachineRawConfig_setMemoryMiB(AVirtualMachineRawConfig* _Nonnull config,
                                            int32_t memoryMiB) __INTRODUCED_IN(36);
+
+/**
+ * Set how much swiotlb will be given to a virtual machine.
+ *
+ * Only applicable when `AVirtualMachineRawConfig_setProtectedVm(..., true)` is
+ * set.
+ *
+ * For information on swiotlb, see https://docs.kernel.org/core-api/swiotlb.html.
+ *
+ * \param config a virtual machine config object.
+ * \param memoryMiB the amount of swiotlb to give the virtual machine, in MiB.
+ *   0 or negative to use the default.
+ */
+void AVirtualMachineRawConfig_setSwiotlbMiB(AVirtualMachineRawConfig* _Nonnull config,
+                                            int32_t swiotlbMiB) __INTRODUCED_IN(36);
 
 /**
  * Set whether the virtual machine's memory will be protected from the host, so the host can't
