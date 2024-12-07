@@ -798,7 +798,7 @@ public final class VirtualMachineConfig {
                 Optional.ofNullable(customImageConfig.getAudioConfig())
                         .map(ac -> ac.toParcelable())
                         .orElse(null);
-        config.noBalloon = !customImageConfig.useAutoMemoryBalloon();
+        config.balloon = customImageConfig.useAutoMemoryBalloon();
         config.usbConfig =
                 Optional.ofNullable(customImageConfig.getUsbConfig())
                         .map(
