@@ -14,6 +14,8 @@
 
 //! Memory layout.
 
+#![allow(unused_unsafe)]
+
 pub mod crosvm;
 
 use crate::linker::__stack_chk_guard;
