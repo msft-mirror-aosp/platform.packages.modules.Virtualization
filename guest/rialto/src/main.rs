@@ -73,7 +73,8 @@ fn vm_type(fdt: &libfdt::Fdt) -> Result<VmType> {
 fn new_page_table() -> Result<PageTable> {
     let mut page_table = PageTable::default();
 
-    page_table.map_data(&layout::scratch_range().into())?;
+    page_table.map_data(&layout::data_bss_range().into())?;
+    page_table.map_data(&layout::eh_stack_range().into())?;
     page_table.map_data(&layout::stack_range(40 * PAGE_SIZE).into())?;
     page_table.map_code(&layout::text_range().into())?;
     page_table.map_rodata(&layout::rodata_range().into())?;
@@ -117,7 +118,7 @@ unsafe fn try_main(fdt_addr: usize) -> Result<()> {
         MEMORY.lock().as_mut().unwrap().init_dynamic_shared_pool(granule).inspect_err(|_| {
             error!("Failed to initialize dynamically shared pool.");
         })?;
-    } else if let Ok(swiotlb_info) = SwiotlbInfo::new_from_fdt(fdt) {
+    } else if let Ok(Some(swiotlb_info)) = SwiotlbInfo::new_from_fdt(fdt) {
         let range = swiotlb_info.fixed_range().ok_or_else(|| {
             error!("Pre-shared pool range not specified in swiotlb node");
             Error::from(FdtError::BadValue)

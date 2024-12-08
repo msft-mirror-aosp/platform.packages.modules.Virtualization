@@ -17,62 +17,88 @@
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="5597111707986572208">"Terminal"</string>
-    <!-- no translation found for terminal_display (4810127497644015237) -->
-    <skip />
-    <!-- no translation found for terminal_input (4602512831433433551) -->
-    <skip />
-    <!-- no translation found for empty_line (5012067143408427178) -->
+    <string name="terminal_display" msgid="4810127497644015237">"Display ng terminal"</string>
+    <string name="terminal_input" msgid="4602512831433433551">"Cursor"</string>
+    <string name="empty_line" msgid="5012067143408427178">"Walang lamang linya"</string>
+    <!-- no translation found for double_tap_to_edit_text (7380095045491399890) -->
     <skip />
     <string name="installer_title_text" msgid="500663060973466805">"I-install ang terminal ng Linux"</string>
-    <string name="installer_desc_text_format" msgid="2734224805682171826">"Para ilunsad ang terminal ng Linux, kailangan mong mag-download ng humigit-kumulang <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> na data sa network.\nGusto mo bang magpatuloy?"</string>
-    <string name="installer_wait_for_wifi_checkbox_text" msgid="487720664098014506">"I-download kapag available ang Wi-Fi"</string>
+    <!-- no translation found for installer_desc_text_format (5935117404303982823) -->
+    <skip />
+    <!-- no translation found for installer_wait_for_wifi_checkbox_text (5812378362605046639) -->
+    <skip />
     <string name="installer_install_button_enabled_text" msgid="6142090640081511103">"I-install"</string>
     <string name="installer_install_button_disabled_text" msgid="8651445004125422467">"Ini-install"</string>
-    <string name="installer_install_network_error_message" msgid="2450409107529774410">"Error sa network. Tingnan ang koneksyon at subukan ulit."</string>
-    <string name="installer_notif_title_text" msgid="471160690081159042">"Ini-install ang terminal ng Linux"</string>
-    <string name="installer_notif_desc_text" msgid="6746098106305899060">"Magsisimula ang terminal ng Linux pagkatapos mag-install"</string>
-    <string name="installer_error_network" msgid="3265100678310833813">"Hindi na-install dahil sa isyu sa network"</string>
-    <!-- no translation found for installer_error_no_wifi (8631584648989718121) -->
+    <!-- no translation found for installer_install_network_error_message (6483202005746623398) -->
     <skip />
-    <string name="installer_error_unknown" msgid="1991780204241177455">"Hindi na-install. Subukan ulit."</string>
+    <string name="installer_notif_title_text" msgid="471160690081159042">"Ini-install ang terminal ng Linux"</string>
+    <!-- no translation found for installer_notif_desc_text (2353770076549425837) -->
+    <skip />
+    <!-- no translation found for installer_error_network (5627330072955876676) -->
+    <skip />
+    <!-- no translation found for installer_error_no_wifi (1180164894845030969) -->
+    <skip />
+    <!-- no translation found for installer_error_unknown (5657920711470180224) -->
+    <skip />
     <string name="action_settings" msgid="5729342767795123227">"Mga Setting"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Inihahanda ang terminal"</string>
     <string name="vm_stop_message" msgid="3978349856095529255">"Hinihinto ang terminal"</string>
     <string name="vm_error_message" msgid="5231867246177661525">"Nag-crash ang terminal"</string>
-    <string name="settings_disk_resize_title" msgid="1545791169419914600">"I-resize ang Disk"</string>
-    <string name="settings_disk_resize_sub_title" msgid="149418971610906138">"I-resize / Rootfs"</string>
+    <!-- no translation found for settings_disk_resize_title (8648082439414122069) -->
+    <skip />
+    <!-- no translation found for settings_disk_resize_sub_title (568100064927028058) -->
+    <skip />
     <string name="settings_disk_resize_resize_message" msgid="5990475712303845087">"Nakatakda na ang laki ng disk"</string>
     <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"<xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g> ang nakatalaga"</string>
     <string name="settings_disk_resize_resize_gb_max_format" msgid="6221210151688630371">"<xliff:g id="MAX_SIZE">%1$s</xliff:g> ang max"</string>
     <string name="settings_disk_resize_resize_cancel" msgid="2182388126941686562">"Kanselahin"</string>
-    <string name="settings_disk_resize_resize_restart_vm_to_apply" msgid="83303619015991908">"I-restart para gawin"</string>
-    <string name="settings_port_forwarding_title" msgid="4867439149919324784">"Pag-forward ng Port"</string>
+    <!-- no translation found for settings_disk_resize_resize_restart_vm_to_apply (6651018335906339973) -->
+    <skip />
+    <!-- no translation found for settings_disk_resize_resize_confirm_dialog_message (6906352501525496328) -->
+    <skip />
+    <!-- no translation found for settings_disk_resize_resize_confirm_dialog_confirm (7347432999245803583) -->
+    <skip />
+    <!-- no translation found for settings_port_forwarding_title (4911743992816071205) -->
+    <skip />
     <string name="settings_port_forwarding_sub_title" msgid="6848040752531535488">"I-configure ang pag-forward ng port"</string>
-    <string name="settings_port_forwarding_notification_title" msgid="2822798067500254704">"Sinusubukan ng terminal na magbukas ng bagong port"</string>
-    <string name="settings_port_forwarding_notification_content" msgid="2167103177775323330">"Port na na-request na maging bukas: <xliff:g id="PORT_NUMBER">%d</xliff:g>"</string>
+    <!-- no translation found for settings_port_forwarding_notification_title (6950621555592547524) -->
+    <skip />
+    <!-- no translation found for settings_port_forwarding_notification_content (5072621159244211971) -->
+    <skip />
     <string name="settings_port_forwarding_notification_accept" msgid="3571520986524038185">"Tanggapin"</string>
     <string name="settings_port_forwarding_notification_deny" msgid="636848749634710403">"Tanggihan"</string>
     <string name="settings_recovery_title" msgid="6586840079226383285">"Pag-recover"</string>
-    <string name="settings_recovery_sub_title" msgid="1067782421529340576">"Mga opsyon sa Pag-recover ng Partition"</string>
-    <string name="settings_recovery_reset_title" msgid="8785305518694186025">"Baguhin sa inisyal na bersyon"</string>
-    <string name="settings_recovery_reset_sub_title" msgid="5656572074090728544">"Alisin lahat"</string>
+    <!-- no translation found for settings_recovery_sub_title (3906996270508262595) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_title (5388842560910568731) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_sub_title (1079896907344675995) -->
+    <skip />
     <string name="settings_recovery_reset_dialog_title" msgid="874946981716251094">"I-reset ang terminal"</string>
-    <string name="settings_recovery_reset_dialog_message" msgid="6392681199895696206">"Made-delete ang data"</string>
-    <string name="settings_recovery_reset_dialog_confirm" msgid="431718610013947861">"Kumpirmahin"</string>
+    <!-- no translation found for settings_recovery_reset_dialog_message (851530339815113000) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_dialog_confirm (6916237820754131902) -->
+    <skip />
     <string name="settings_recovery_reset_dialog_cancel" msgid="1666264288208459725">"Kanselahin"</string>
     <string name="settings_recovery_reset_dialog_backup_option" msgid="2079431035205584614">"Mag-back up ng data sa <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
-    <string name="settings_recovery_error_due_to_backup" msgid="2129959464075410607">"Hindi na-recover dahil hindi gumana ang backup"</string>
+    <!-- no translation found for settings_recovery_error_due_to_backup (9034741074141274096) -->
+    <skip />
     <string name="settings_recovery_error" msgid="2451912941535666379">"Hindi na-recover"</string>
-    <string name="settings_recovery_error_during_removing_backup" msgid="6515615177661212463">"Hindi maalis ang backup file"</string>
+    <!-- no translation found for settings_recovery_error_during_removing_backup (2447990797766248691) -->
+    <skip />
     <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"Alisin ang backup data"</string>
-    <string name="settings_recovery_remove_backup_sub_title" msgid="212161719832573475">"I-clean up ang <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
-    <string name="error_title" msgid="7196464038692913778">"Hindi nare-recover na error"</string>
-    <string name="error_desc" msgid="1939028888570920661">"Hindi naka-recover mula sa isang error.\nPuwede mong subukang i-restart ang app, o subukan ang isa sa mga opsyon sa pag-recover."</string>
+    <!-- no translation found for settings_recovery_remove_backup_sub_title (7791375988320242059) -->
+    <skip />
+    <!-- no translation found for error_title (405150657301906598) -->
+    <skip />
+    <!-- no translation found for error_desc (1984714179775053347) -->
+    <skip />
     <string name="error_code" msgid="3585291676855383649">"Code ng error: <xliff:g id="ERROR_CODE">%s</xliff:g>"</string>
     <string name="service_notification_settings" msgid="1437365721184401135">"Mga Setting"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"Gumagana ang terminal"</string>
-    <string name="service_notification_content" msgid="3579923802797824545">"I-click para buksan ang terminal"</string>
+    <!-- no translation found for service_notification_content (5772901142342308273) -->
+    <skip />
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Isara"</string>
-    <!-- no translation found for virgl_enabled (5466273280705345122) -->
+    <!-- no translation found for virgl_enabled (5242525588039698086) -->
     <skip />
 </resources>

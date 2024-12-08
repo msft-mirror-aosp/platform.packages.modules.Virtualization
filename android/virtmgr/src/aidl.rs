@@ -53,6 +53,7 @@ use android_system_virtualmachineservice::aidl::android::system::virtualmachines
 };
 use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::ISecretkeeper::{BnSecretkeeper, ISecretkeeper};
 use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::SecretId::SecretId;
+use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::PublicKey::PublicKey;
 use android_hardware_security_authgraph::aidl::android::hardware::security::authgraph::{
     Arc::Arc as AuthgraphArc, IAuthGraphKeyExchange::IAuthGraphKeyExchange,
     IAuthGraphKeyExchange::BnAuthGraphKeyExchange, Identity::Identity, KeInitResult::KeInitResult,
@@ -445,20 +446,25 @@ impl VirtualizationService {
         let context = EarlyVmContext::new(cid, temp_dir.clone())
             .context(format!("Can't create early vm contexts for {cid}"))
             .or_service_specific_exception(-1)?;
-        let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
 
-        // Start VM service listening for connections from the new CID on port=CID.
-        let port = cid;
-        let (vm_server, _) = RpcServer::new_vsock(service, cid, port)
-            .context(format!("Could not start RpcServer on port {port}"))
-            .or_service_specific_exception(-1)?;
-        vm_server.start();
-        Ok((VmContext::new(Strong::new(Box::new(context)), vm_server), cid, temp_dir))
+        if requires_vm_service(config) {
+            // Start VM service listening for connections from the new CID on port=CID.
+            let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
+            let port = cid;
+            let (vm_server, _) = RpcServer::new_vsock(service, cid, port)
+                .context(format!("Could not start RpcServer on port {port}"))
+                .or_service_specific_exception(-1)?;
+            vm_server.start();
+            Ok((VmContext::new(Strong::new(Box::new(context)), Some(vm_server)), cid, temp_dir))
+        } else {
+            Ok((VmContext::new(Strong::new(Box::new(context)), None), cid, temp_dir))
+        }
     }
 
     fn create_vm_context(
         &self,
         requester_debug_pid: pid_t,
+        config: &VirtualMachineConfig,
     ) -> binder::Result<(VmContext, Cid, PathBuf)> {
         const NUM_ATTEMPTS: usize = 5;
 
@@ -466,6 +472,12 @@ impl VirtualizationService {
             let vm_context = GLOBAL_SERVICE.allocateGlobalVmContext(requester_debug_pid)?;
             let cid = vm_context.getCid()? as Cid;
             let temp_dir: PathBuf = vm_context.getTemporaryDirectory()?.into();
+
+            // We don't need to start the VM service for custom VMs.
+            if !requires_vm_service(config) {
+                return Ok((VmContext::new(vm_context, None), cid, temp_dir));
+            }
+
             let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
 
             // Start VM service listening for connections from the new CID on port=CID.
@@ -473,7 +485,7 @@ impl VirtualizationService {
             match RpcServer::new_vsock(service, cid, port) {
                 Ok((vm_server, _)) => {
                     vm_server.start();
-                    return Ok((VmContext::new(vm_context, vm_server), cid, temp_dir));
+                    return Ok((VmContext::new(vm_context, Some(vm_server)), cid, temp_dir));
                 }
                 Err(err) => {
                     warn!("Could not start RpcServer on port {}: {}", port, err);
@@ -509,7 +521,7 @@ impl VirtualizationService {
         let (vm_context, cid, temporary_directory) = if cfg!(early) {
             self.create_early_vm_context(config)?
         } else {
-            self.create_vm_context(requester_debug_pid)?
+            self.create_vm_context(requester_debug_pid, config)?
         };
 
         if is_custom_config(config) {
@@ -820,6 +832,17 @@ fn is_custom_config(config: &VirtualMachineConfig) -> bool {
     }
 }
 
+/// Returns whether a VM config requires VirtualMachineService running on the host. Only Microdroid
+/// VM (i.e. AppConfig) requires it. However, a few Microdroid tests use RawConfig for Microdroid
+/// VM. To handle the exceptional case, we use name as a second criteria; if the name is
+/// "microdroid" we run VirtualMachineService
+fn requires_vm_service(config: &VirtualMachineConfig) -> bool {
+    match config {
+        VirtualMachineConfig::AppConfig(_) => true,
+        VirtualMachineConfig::RawConfig(config) => config.name == "microdroid",
+    }
+}
+
 fn extract_vendor_hashtree_digest(config: &VirtualMachineConfig) -> Result<Option<Vec<u8>>> {
     let VirtualMachineConfig::AppConfig(config) = config else {
         return Ok(None);
@@ -866,15 +889,32 @@ fn maybe_create_device_tree_overlay(
         .context("Failed to extract vendor hashtree digest")
         .or_service_specific_exception(-1)?;
 
-    let trusted_props = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
+    let vendor_hashtree_digest = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
         info!(
             "Passing vendor hashtree digest to pvmfw. This will be rejected if it doesn't \
                 match the trusted digest in the pvmfw config, causing the VM to fail to start."
         );
-        vec![(cstr!("vendor_hashtree_descriptor_root_digest"), vendor_hashtree_digest.as_slice())]
+        Some((cstr!("vendor_hashtree_descriptor_root_digest"), vendor_hashtree_digest.as_slice()))
     } else {
-        vec![]
+        None
     };
+
+    let key_material;
+    let secretkeeper_public_key = if is_secretkeeper_supported() {
+        let sk: Strong<dyn ISecretkeeper> = binder::wait_for_interface(SECRETKEEPER_IDENTIFIER)?;
+        if sk.getInterfaceVersion()? >= 2 {
+            let PublicKey { keyMaterial } = sk.getSecretkeeperIdentity()?;
+            key_material = keyMaterial;
+            Some((cstr!("secretkeeper_public_key"), key_material.as_slice()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let trusted_props: Vec<(&CStr, &[u8])> =
+        vec![vendor_hashtree_digest, secretkeeper_public_key].into_iter().flatten().collect();
 
     let instance_id;
     let mut untrusted_props = Vec::with_capacity(2);
@@ -996,7 +1036,12 @@ fn assemble_shared_paths(
                 guest_gid: path.guestGid,
                 mask: path.mask,
                 tag: path.tag.clone(),
-                socket_path: temporary_directory.join(&path.socket).to_string_lossy().to_string(),
+                socket_path: temporary_directory
+                    .join(&path.socketPath)
+                    .to_string_lossy()
+                    .to_string(),
+                socket_fd: maybe_clone_file(&path.socketFd)?,
+                app_domain: path.appDomain,
             })
         })
         .collect()
@@ -2014,6 +2059,14 @@ impl ISecretkeeper for SecretkeeperProxy {
 
     fn deleteAll(&self) -> binder::Result<()> {
         self.0.deleteAll()
+    }
+
+    fn getSecretkeeperIdentity(&self) -> binder::Result<PublicKey> {
+        // SecretkeeperProxy is really a RPC binder service for PVM (It is called by
+        // MicrodroidManager). PVMs do not & must not (for security reason) rely on
+        // getSecretKeeperIdentity, so we throw an exception if someone attempts to
+        // use this API from the proxy.
+        Err(ExceptionCode::SECURITY.into())
     }
 }
 
