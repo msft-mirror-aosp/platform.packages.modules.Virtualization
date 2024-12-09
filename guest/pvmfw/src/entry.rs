@@ -122,13 +122,7 @@ fn main_wrapper(
 
     let config_entries = appended.get_entries();
 
-    let slices = memory::MemorySlices::new(
-        fdt,
-        payload,
-        payload_size,
-        config_entries.vm_dtbo,
-        config_entries.vm_ref_dt,
-    )?;
+    let slices = memory::MemorySlices::new(fdt, payload, payload_size)?;
 
     // This wrapper allows main() to be blissfully ignorant of platform details.
     let (next_bcc, debuggable_payload) = crate::main(
@@ -137,6 +131,8 @@ fn main_wrapper(
         slices.ramdisk,
         config_entries.bcc,
         config_entries.debug_policy,
+        config_entries.vm_dtbo,
+        config_entries.vm_ref_dt,
     )?;
     // Keep UART MMIO_GUARD-ed for debuggable payloads, to enable earlycon.
     let keep_uart = cfg!(debuggable_vms_improvements) && debuggable_payload;
