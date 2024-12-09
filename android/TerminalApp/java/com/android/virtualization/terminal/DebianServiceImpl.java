@@ -30,8 +30,6 @@ import com.android.virtualization.terminal.proto.QueueOpeningRequest;
 import com.android.virtualization.terminal.proto.ReportVmActivePortsRequest;
 import com.android.virtualization.terminal.proto.ReportVmActivePortsResponse;
 import com.android.virtualization.terminal.proto.ReportVmIpAddrResponse;
-import com.android.virtualization.terminal.proto.ShutdownQueueOpeningRequest;
-import com.android.virtualization.terminal.proto.ShutdownRequestItem;
 
 import io.grpc.stub.StreamObserver;
 
@@ -43,7 +41,6 @@ final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
     private final PortsStateManager mPortsStateManager;
     private PortsStateManager.Listener mPortsStateListener;
     private final DebianServiceCallback mCallback;
-    private Runnable mShutdownRunnable;
 
     static {
         System.loadLibrary("forwarder_host_jni");
@@ -94,28 +91,6 @@ final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
         updateListeningPorts();
         runForwarderHost(request.getCid(), new ForwarderHostCallback(responseObserver));
         responseObserver.onCompleted();
-    }
-
-    public boolean shutdownDebian() {
-        if (mShutdownRunnable == null) {
-            Log.d(TAG, "mShutdownRunnable is not ready.");
-            return false;
-        }
-        mShutdownRunnable.run();
-        return true;
-    }
-
-    @Override
-    public void openShutdownRequestQueue(
-            ShutdownQueueOpeningRequest request,
-            StreamObserver<ShutdownRequestItem> responseObserver) {
-        Log.d(TAG, "openShutdownRequestQueue");
-        mShutdownRunnable =
-                () -> {
-                    responseObserver.onNext(ShutdownRequestItem.newBuilder().build());
-                    responseObserver.onCompleted();
-                    mShutdownRunnable = null;
-                };
     }
 
     @Keep

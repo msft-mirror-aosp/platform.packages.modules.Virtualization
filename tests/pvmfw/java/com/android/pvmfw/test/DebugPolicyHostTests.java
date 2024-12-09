@@ -248,8 +248,6 @@ public class DebugPolicyHostTests extends CustomPvmfwHostTestCaseBase {
                         "run-app",
                         "--log",
                         MICRODROID_LOG_PATH,
-                        "--console",
-                        MICRODROID_CONSOLE_PATH,
                         "--protected",
                         getPathForPackage(PACKAGE_NAME),
                         TEST_ROOT + "idsig",

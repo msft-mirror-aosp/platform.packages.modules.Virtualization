@@ -20,72 +20,85 @@
     <string name="terminal_display" msgid="4810127497644015237">"Ekran terminala"</string>
     <string name="terminal_input" msgid="4602512831433433551">"Kursor"</string>
     <string name="empty_line" msgid="5012067143408427178">"Pusty wiersz"</string>
-    <!-- no translation found for double_tap_to_edit_text (2344363097580051316) -->
+    <!-- no translation found for double_tap_to_edit_text (7380095045491399890) -->
     <skip />
     <string name="installer_title_text" msgid="500663060973466805">"Zainstaluj terminal Linuxa"</string>
-    <string name="installer_desc_text_format" msgid="5935117404303982823">"Aby uruchomić terminal Linuxa, musisz pobrać przez sieć około <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> danych.\nChcesz kontynuować?"</string>
-    <string name="installer_wait_for_wifi_checkbox_text" msgid="5812378362605046639">"Pobieraj tylko przez Wi-Fi"</string>
+    <!-- no translation found for installer_desc_text_format (5935117404303982823) -->
+    <skip />
+    <!-- no translation found for installer_wait_for_wifi_checkbox_text (5812378362605046639) -->
+    <skip />
     <string name="installer_install_button_enabled_text" msgid="6142090640081511103">"Zainstaluj"</string>
     <string name="installer_install_button_disabled_text" msgid="8651445004125422467">"Instaluję"</string>
-    <string name="installer_install_network_error_message" msgid="6483202005746623398">"Nie udało się zainstalować z powodu błędu sieci. Sprawdź połączenie i spróbuj jeszcze raz."</string>
+    <!-- no translation found for installer_install_network_error_message (6483202005746623398) -->
+    <skip />
     <string name="installer_notif_title_text" msgid="471160690081159042">"Instaluję terminal Linuxa"</string>
-    <string name="installer_notif_desc_text" msgid="2353770076549425837">"Po zakończeniu instalacji uruchomi się terminal Linuxa"</string>
-    <string name="installer_error_network" msgid="5627330072955876676">"Nie udało się zainstalować z powodu problemu z siecią"</string>
-    <string name="installer_error_no_wifi" msgid="1180164894845030969">"Nie udało się zainstalować, ponieważ Wi-Fi jest niedostępne"</string>
-    <string name="installer_error_unknown" msgid="5657920711470180224">"Nie udało się zainstalować. Spróbuj jeszcze raz"</string>
+    <!-- no translation found for installer_notif_desc_text (2353770076549425837) -->
+    <skip />
+    <!-- no translation found for installer_error_network (5627330072955876676) -->
+    <skip />
+    <!-- no translation found for installer_error_no_wifi (1180164894845030969) -->
+    <skip />
+    <!-- no translation found for installer_error_unknown (5657920711470180224) -->
+    <skip />
     <string name="action_settings" msgid="5729342767795123227">"Ustawienia"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Przygotowuję terminal"</string>
     <string name="vm_stop_message" msgid="3978349856095529255">"Zatrzymuję terminal"</string>
     <string name="vm_error_message" msgid="5231867246177661525">"Terminal uległ awarii"</string>
-    <string name="settings_disk_resize_title" msgid="8648082439414122069">"Zmiana rozmiaru dysku"</string>
-    <string name="settings_disk_resize_sub_title" msgid="568100064927028058">"Zmień rozmiar partycji poziomu głównego"</string>
+    <!-- no translation found for settings_disk_resize_title (8648082439414122069) -->
+    <skip />
+    <!-- no translation found for settings_disk_resize_sub_title (568100064927028058) -->
+    <skip />
     <string name="settings_disk_resize_resize_message" msgid="5990475712303845087">"Rozmiar dysku został ustawiony"</string>
     <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"Przypisano <xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_gb_max_format" msgid="6221210151688630371">"Maksymalny rozmiar <xliff:g id="MAX_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_cancel" msgid="2182388126941686562">"Anuluj"</string>
-    <string name="settings_disk_resize_resize_restart_vm_to_apply" msgid="6651018335906339973">"Zastosuj"</string>
-    <string name="settings_disk_resize_resize_confirm_dialog_message" msgid="6906352501525496328">"Aby zmienić rozmiar dysku, terminal zostanie uruchomiony ponownie"</string>
-    <string name="settings_disk_resize_resize_confirm_dialog_confirm" msgid="7347432999245803583">"Potwierdź"</string>
-    <!-- no translation found for settings_port_forwarding_title (4971368519093858377) -->
+    <!-- no translation found for settings_disk_resize_resize_restart_vm_to_apply (6651018335906339973) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_sub_title (6547942778715654953) -->
+    <!-- no translation found for settings_disk_resize_resize_confirm_dialog_message (6906352501525496328) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_active_ports_title (1841436780635889858) -->
+    <!-- no translation found for settings_disk_resize_resize_confirm_dialog_confirm (7347432999245803583) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_other_enabled_ports_title (2644381842623436676) -->
+    <!-- no translation found for settings_port_forwarding_title (4911743992816071205) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_dialog_title (2734992099990516463) -->
+    <string name="settings_port_forwarding_sub_title" msgid="6848040752531535488">"Skonfiguruj przekierowanie portów"</string>
+    <!-- no translation found for settings_port_forwarding_notification_title (6950621555592547524) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_dialog_textview_hint (3514035855169269600) -->
+    <!-- no translation found for settings_port_forwarding_notification_content (5072621159244211971) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_dialog_save (1097831033824718393) -->
-    <skip />
-    <!-- no translation found for settings_port_forwarding_dialog_cancel (1972597831318470889) -->
-    <skip />
-    <string name="settings_port_forwarding_notification_title" msgid="6950621555592547524">"Terminal wysłał żądanie otwarcia nowego portu"</string>
-    <string name="settings_port_forwarding_notification_content" msgid="5072621159244211971">"Żądany port: <xliff:g id="PORT_NUMBER">%d</xliff:g>"</string>
     <string name="settings_port_forwarding_notification_accept" msgid="3571520986524038185">"Zaakceptuj"</string>
     <string name="settings_port_forwarding_notification_deny" msgid="636848749634710403">"Odrzuć"</string>
     <string name="settings_recovery_title" msgid="6586840079226383285">"Odzyskiwanie"</string>
-    <string name="settings_recovery_sub_title" msgid="3906996270508262595">"Opcje odzyskiwania partycji"</string>
-    <string name="settings_recovery_reset_title" msgid="5388842560910568731">"Przywróć wersję początkową"</string>
-    <string name="settings_recovery_reset_sub_title" msgid="1079896907344675995">"Usuń wszystkie dane"</string>
+    <!-- no translation found for settings_recovery_sub_title (3906996270508262595) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_title (5388842560910568731) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_sub_title (1079896907344675995) -->
+    <skip />
     <string name="settings_recovery_reset_dialog_title" msgid="874946981716251094">"Zresetuj terminal"</string>
-    <string name="settings_recovery_reset_dialog_message" msgid="851530339815113000">"Dane zostaną usunięte"</string>
-    <string name="settings_recovery_reset_dialog_confirm" msgid="6916237820754131902">"Resetuj"</string>
+    <!-- no translation found for settings_recovery_reset_dialog_message (851530339815113000) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_dialog_confirm (6916237820754131902) -->
+    <skip />
     <string name="settings_recovery_reset_dialog_cancel" msgid="1666264288208459725">"Anuluj"</string>
     <string name="settings_recovery_reset_dialog_backup_option" msgid="2079431035205584614">"Utwórz kopię zapasową w lokalizacji <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
-    <string name="settings_recovery_error_due_to_backup" msgid="9034741074141274096">"Nie udało się przywrócić z powodu błędu kopii zapasowej"</string>
+    <!-- no translation found for settings_recovery_error_due_to_backup (9034741074141274096) -->
+    <skip />
     <string name="settings_recovery_error" msgid="2451912941535666379">"Nie udało się przywrócić"</string>
-    <string name="settings_recovery_error_during_removing_backup" msgid="2447990797766248691">"Nie udało się usunąć danych kopii zapasowej"</string>
+    <!-- no translation found for settings_recovery_error_during_removing_backup (2447990797766248691) -->
+    <skip />
     <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"Usuń dane kopii zapasowej"</string>
-    <string name="settings_recovery_remove_backup_sub_title" msgid="7791375988320242059">"Usuń: <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
-    <string name="error_title" msgid="405150657301906598">"Nieodwracalny błąd"</string>
-    <string name="error_desc" msgid="1984714179775053347">"Nie udało się przywrócić aplikacji po błędzie.\nMożesz spróbować ponownie uruchomić terminal lub skorzystać z jednej z opcji odzyskiwania."</string>
+    <!-- no translation found for settings_recovery_remove_backup_sub_title (7791375988320242059) -->
+    <skip />
+    <!-- no translation found for error_title (405150657301906598) -->
+    <skip />
+    <!-- no translation found for error_desc (1984714179775053347) -->
+    <skip />
     <string name="error_code" msgid="3585291676855383649">"Kod błędu: <xliff:g id="ERROR_CODE">%s</xliff:g>"</string>
     <string name="service_notification_settings" msgid="1437365721184401135">"Ustawienia"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"Terminal jest uruchomiony"</string>
-    <string name="service_notification_content" msgid="5772901142342308273">"Kliknij, aby otworzyć terminal"</string>
+    <!-- no translation found for service_notification_content (5772901142342308273) -->
+    <skip />
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Zamknij"</string>
-    <string name="virgl_enabled" msgid="5242525588039698086">"Układ <xliff:g id="ID_1">VirGL</xliff:g> jest włączony"</string>
+    <!-- no translation found for virgl_enabled (5242525588039698086) -->
+    <skip />
 </resources>

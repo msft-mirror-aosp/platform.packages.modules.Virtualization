@@ -20,72 +20,85 @@
     <string name="terminal_display" msgid="4810127497644015237">"Zobrazenie terminálu"</string>
     <string name="terminal_input" msgid="4602512831433433551">"Kurzor"</string>
     <string name="empty_line" msgid="5012067143408427178">"Prázdny riadok"</string>
-    <!-- no translation found for double_tap_to_edit_text (2344363097580051316) -->
+    <!-- no translation found for double_tap_to_edit_text (7380095045491399890) -->
     <skip />
     <string name="installer_title_text" msgid="500663060973466805">"Inštalácia terminálu systému Linux"</string>
-    <string name="installer_desc_text_format" msgid="5935117404303982823">"Ak chcete spustiť terminál Linux, musíte cez sieť stiahnuť približne <xliff:g id="EXPECTED_SIZE">%1$s</xliff:g> dát.\nChcete pokračovať?"</string>
-    <string name="installer_wait_for_wifi_checkbox_text" msgid="5812378362605046639">"Sťahovať iba cez Wi‑Fi"</string>
+    <!-- no translation found for installer_desc_text_format (5935117404303982823) -->
+    <skip />
+    <!-- no translation found for installer_wait_for_wifi_checkbox_text (5812378362605046639) -->
+    <skip />
     <string name="installer_install_button_enabled_text" msgid="6142090640081511103">"Inštalovať"</string>
     <string name="installer_install_button_disabled_text" msgid="8651445004125422467">"Inštaluje sa"</string>
-    <string name="installer_install_network_error_message" msgid="6483202005746623398">"Nepodarilo sa nainštalovať pre chybu siete. Skontrolujte pripojenie a skúste to znova."</string>
+    <!-- no translation found for installer_install_network_error_message (6483202005746623398) -->
+    <skip />
     <string name="installer_notif_title_text" msgid="471160690081159042">"Inštaluje sa terminál systému Linux"</string>
-    <string name="installer_notif_desc_text" msgid="2353770076549425837">"Terminál Linux sa spustí po dokončení inštalácie"</string>
-    <string name="installer_error_network" msgid="5627330072955876676">"Nepodarilo sa nainštalovať pre problém so sieťou"</string>
-    <string name="installer_error_no_wifi" msgid="1180164894845030969">"Inštalácia sa nepodarila, pretože nie je k dispozícii Wi‑Fi"</string>
-    <string name="installer_error_unknown" msgid="5657920711470180224">"Nepodarilo sa nainštalovať. Skúste to znova."</string>
+    <!-- no translation found for installer_notif_desc_text (2353770076549425837) -->
+    <skip />
+    <!-- no translation found for installer_error_network (5627330072955876676) -->
+    <skip />
+    <!-- no translation found for installer_error_no_wifi (1180164894845030969) -->
+    <skip />
+    <!-- no translation found for installer_error_unknown (5657920711470180224) -->
+    <skip />
     <string name="action_settings" msgid="5729342767795123227">"Nastavenia"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Terminál sa pripravuje"</string>
     <string name="vm_stop_message" msgid="3978349856095529255">"Terminál sa zastavuje"</string>
     <string name="vm_error_message" msgid="5231867246177661525">"Terminál spadol"</string>
-    <string name="settings_disk_resize_title" msgid="8648082439414122069">"Zmena veľkosti disku"</string>
-    <string name="settings_disk_resize_sub_title" msgid="568100064927028058">"Zmena veľkosti koreňového oddielu"</string>
+    <!-- no translation found for settings_disk_resize_title (8648082439414122069) -->
+    <skip />
+    <!-- no translation found for settings_disk_resize_sub_title (568100064927028058) -->
+    <skip />
     <string name="settings_disk_resize_resize_message" msgid="5990475712303845087">"Veľkosť disku je nastavená"</string>
     <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"Pridelené <xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_gb_max_format" msgid="6221210151688630371">"Max. <xliff:g id="MAX_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_cancel" msgid="2182388126941686562">"Zrušiť"</string>
-    <string name="settings_disk_resize_resize_restart_vm_to_apply" msgid="6651018335906339973">"Použiť"</string>
-    <string name="settings_disk_resize_resize_confirm_dialog_message" msgid="6906352501525496328">"Terminál sa reštartuje, aby sa zmenila veľkosť disku"</string>
-    <string name="settings_disk_resize_resize_confirm_dialog_confirm" msgid="7347432999245803583">"Potvrdiť"</string>
-    <!-- no translation found for settings_port_forwarding_title (4971368519093858377) -->
+    <!-- no translation found for settings_disk_resize_resize_restart_vm_to_apply (6651018335906339973) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_sub_title (6547942778715654953) -->
+    <!-- no translation found for settings_disk_resize_resize_confirm_dialog_message (6906352501525496328) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_active_ports_title (1841436780635889858) -->
+    <!-- no translation found for settings_disk_resize_resize_confirm_dialog_confirm (7347432999245803583) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_other_enabled_ports_title (2644381842623436676) -->
+    <!-- no translation found for settings_port_forwarding_title (4911743992816071205) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_dialog_title (2734992099990516463) -->
+    <string name="settings_port_forwarding_sub_title" msgid="6848040752531535488">"Nakonfigurovať presmerovanie portov"</string>
+    <!-- no translation found for settings_port_forwarding_notification_title (6950621555592547524) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_dialog_textview_hint (3514035855169269600) -->
+    <!-- no translation found for settings_port_forwarding_notification_content (5072621159244211971) -->
     <skip />
-    <!-- no translation found for settings_port_forwarding_dialog_save (1097831033824718393) -->
-    <skip />
-    <!-- no translation found for settings_port_forwarding_dialog_cancel (1972597831318470889) -->
-    <skip />
-    <string name="settings_port_forwarding_notification_title" msgid="6950621555592547524">"Terminál požaduje otvoriť nový port"</string>
-    <string name="settings_port_forwarding_notification_content" msgid="5072621159244211971">"Požadovaný port: <xliff:g id="PORT_NUMBER">%d</xliff:g>"</string>
     <string name="settings_port_forwarding_notification_accept" msgid="3571520986524038185">"Prijať"</string>
     <string name="settings_port_forwarding_notification_deny" msgid="636848749634710403">"Zamietnuť"</string>
     <string name="settings_recovery_title" msgid="6586840079226383285">"Obnovenie"</string>
-    <string name="settings_recovery_sub_title" msgid="3906996270508262595">"Možnosti obnovenia oddielu"</string>
-    <string name="settings_recovery_reset_title" msgid="5388842560910568731">"Reset na pôvodnú verziu"</string>
-    <string name="settings_recovery_reset_sub_title" msgid="1079896907344675995">"Odstránenie všetkých údajov"</string>
+    <!-- no translation found for settings_recovery_sub_title (3906996270508262595) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_title (5388842560910568731) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_sub_title (1079896907344675995) -->
+    <skip />
     <string name="settings_recovery_reset_dialog_title" msgid="874946981716251094">"Resetovanie terminálu"</string>
-    <string name="settings_recovery_reset_dialog_message" msgid="851530339815113000">"Údaje budú odstránené"</string>
-    <string name="settings_recovery_reset_dialog_confirm" msgid="6916237820754131902">"Resetovať"</string>
+    <!-- no translation found for settings_recovery_reset_dialog_message (851530339815113000) -->
+    <skip />
+    <!-- no translation found for settings_recovery_reset_dialog_confirm (6916237820754131902) -->
+    <skip />
     <string name="settings_recovery_reset_dialog_cancel" msgid="1666264288208459725">"Zrušiť"</string>
     <string name="settings_recovery_reset_dialog_backup_option" msgid="2079431035205584614">"Zálohovať údaje do <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
-    <string name="settings_recovery_error_due_to_backup" msgid="9034741074141274096">"Nepodarilo sa obnoviť pre chybu zálohy"</string>
+    <!-- no translation found for settings_recovery_error_due_to_backup (9034741074141274096) -->
+    <skip />
     <string name="settings_recovery_error" msgid="2451912941535666379">"Obnovenie sa nepodarilo"</string>
-    <string name="settings_recovery_error_during_removing_backup" msgid="2447990797766248691">"Údaje zálohy sa nepodarilo odstrániť"</string>
+    <!-- no translation found for settings_recovery_error_during_removing_backup (2447990797766248691) -->
+    <skip />
     <string name="settings_recovery_remove_backup_title" msgid="1540850288876158899">"Odstrániť údaje zálohy"</string>
-    <string name="settings_recovery_remove_backup_sub_title" msgid="7791375988320242059">"Odstránenie cesty <xliff:g id="PATH">/mnt/backup</xliff:g>"</string>
-    <string name="error_title" msgid="405150657301906598">"Neopraviteľná chyba"</string>
-    <string name="error_desc" msgid="1984714179775053347">"Nepodarilo sa obnoviť z chybového stavu.\nSkúste terminál reštartovať alebo vyskúšajte jednu z možností obnovenia."</string>
+    <!-- no translation found for settings_recovery_remove_backup_sub_title (7791375988320242059) -->
+    <skip />
+    <!-- no translation found for error_title (405150657301906598) -->
+    <skip />
+    <!-- no translation found for error_desc (1984714179775053347) -->
+    <skip />
     <string name="error_code" msgid="3585291676855383649">"Kód chyby: <xliff:g id="ERROR_CODE">%s</xliff:g>."</string>
     <string name="service_notification_settings" msgid="1437365721184401135">"Nastavenia"</string>
     <string name="service_notification_title" msgid="2918088850910713393">"Terminál je spustený"</string>
-    <string name="service_notification_content" msgid="5772901142342308273">"Kliknutím otvorte terminál"</string>
+    <!-- no translation found for service_notification_content (5772901142342308273) -->
+    <skip />
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Zavrieť"</string>
-    <string name="virgl_enabled" msgid="5242525588039698086">"Procesor <xliff:g id="ID_1">VirGL</xliff:g> je aktivovaný"</string>
+    <!-- no translation found for virgl_enabled (5242525588039698086) -->
+    <skip />
 </resources>

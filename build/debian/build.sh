@@ -192,7 +192,6 @@ copy_android_config() {
 	build_rust_binary_and_copy forwarder_guest
 	build_rust_binary_and_copy forwarder_guest_launcher
 	build_rust_binary_and_copy ip_addr_reporter
-	build_rust_binary_and_copy shutdown_runner
 }
 
 run_fai() {
