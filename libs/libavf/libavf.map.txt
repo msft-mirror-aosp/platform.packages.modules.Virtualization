@@ -17,6 +17,7 @@ LIBAVF { # introduced=36
     AVirtualMachine_createRaw; # apex llndk
     AVirtualMachine_start; # apex llndk
     AVirtualMachine_stop; # apex llndk
+    AVirtualMachine_connectVsock; # apex llndk
     AVirtualMachine_waitForStop; # apex llndk
     AVirtualMachine_destroy; # apex llndk
   local:

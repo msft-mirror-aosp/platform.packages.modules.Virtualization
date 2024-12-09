@@ -332,6 +332,19 @@ int AVirtualMachine_start(AVirtualMachine* _Nonnull vm) __INTRODUCED_IN(36);
 int AVirtualMachine_stop(AVirtualMachine* _Nonnull vm) __INTRODUCED_IN(36);
 
 /**
+ * Open a vsock connection to the VM on the given port. The caller takes ownership of the returned
+ * file descriptor, and is responsible for closing the file descriptor.
+ *
+ * This operation is synchronous and `AVirtualMachine_connectVsock` may block.
+ *
+ * \param vm a handle on a virtual machine.
+ * \param port a vsock port number.
+ *
+ * \return If successful, it returns a valid file descriptor. Otherwise, it returns `-EIO`.
+ */
+int AVirtualMachine_connectVsock(AVirtualMachine* _Nonnull vm, uint32_t port) __INTRODUCED_IN(36);
+
+/**
  * Wait until a virtual machine stops or the given timeout elapses.
  *
  * \param vm a handle on a virtual machine.
