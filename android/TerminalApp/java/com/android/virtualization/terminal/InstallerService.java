@@ -74,6 +74,7 @@ public class InstallerService extends Service {
                         this, /* requestCode= */ 0, intent, PendingIntent.FLAG_IMMUTABLE);
         mNotification =
                 new Notification.Builder(this, this.getPackageName())
+                        .setSilent(true)
                         .setSmallIcon(R.drawable.ic_launcher_foreground)
                         .setContentTitle(getString(R.string.installer_notif_title_text))
                         .setContentText(getString(R.string.installer_notif_desc_text))
