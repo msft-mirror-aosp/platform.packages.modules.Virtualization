@@ -471,6 +471,7 @@ public class MainActivity extends BaseActivity
         Icon icon = Icon.createWithResource(getResources(), R.drawable.ic_launcher_foreground);
         Notification notification =
                 new Notification.Builder(this, this.getPackageName())
+                        .setSilent(true)
                         .setSmallIcon(R.drawable.ic_launcher_foreground)
                         .setContentTitle(
                                 getResources().getString(R.string.service_notification_title))
