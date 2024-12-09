@@ -54,7 +54,9 @@
             android:label="@string/settings_port_forwarding_title" />
         <activity android:name=".SettingsRecoveryActivity"
             android:label="@string/settings_recovery_title" />
-        <activity android:name=".ErrorActivity" />
+        <activity android:name=".ErrorActivity"
+            android:label="@string/error_title"
+            android:process=":error" />
         <property
             android:name="android.window.PROPERTY_ACTIVITY_EMBEDDING_SPLITS_ENABLED"
             android:value="true" />
