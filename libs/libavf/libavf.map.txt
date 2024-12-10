@@ -1,4 +1,4 @@
-LIBAVF {
+LIBAVF { # introduced=36
   global:
     AVirtualMachineRawConfig_create; # apex llndk
     AVirtualMachineRawConfig_destroy; # apex llndk
