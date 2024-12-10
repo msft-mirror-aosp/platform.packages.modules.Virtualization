@@ -17,11 +17,10 @@
 use crate::ops::{Ops, Payload};
 use crate::partition::PartitionName;
 use crate::PvmfwVerifyError;
-use alloc::vec;
 use alloc::vec::Vec;
 use avb::{
-    Descriptor, DescriptorError, DescriptorResult, HashDescriptor, PartitionData,
-    PropertyDescriptor, SlotVerifyError, SlotVerifyNoDataResult, VbmetaData,
+    Descriptor, DescriptorError, DescriptorResult, HashDescriptor, PartitionData, SlotVerifyError,
+    SlotVerifyNoDataResult, VbmetaData,
 };
 
 // We use this for the rollback_index field if SlotVerifyData has empty rollback_indexes
@@ -93,14 +92,14 @@ impl Capability {
 
     /// Returns the capabilities indicated in `descriptor`, or error if the descriptor has
     /// unexpected contents.
-    fn get_capabilities(descriptor: &PropertyDescriptor) -> Result<Vec<Self>, PvmfwVerifyError> {
-        if descriptor.key != Self::KEY {
-            return Err(PvmfwVerifyError::UnknownVbmetaProperty);
-        }
+    fn get_capabilities(vbmeta_data: &VbmetaData) -> Result<Vec<Self>, PvmfwVerifyError> {
+        let Some(value) = vbmeta_data.get_property_value(Self::KEY) else {
+            return Ok(Vec::new());
+        };
 
         let mut res = Vec::new();
 
-        for v in descriptor.value.split(|b| *b == Self::SEPARATOR) {
+        for v in value.split(|b| *b == Self::SEPARATOR) {
             let cap = match v {
                 Self::REMOTE_ATTEST => Self::RemoteAttest,
                 Self::TRUSTY_SECURITY_VM => Self::TrustySecurityVm,
@@ -153,30 +152,6 @@ fn verify_loaded_partition_has_expected_length(
     } else {
         Err(SlotVerifyError::Verification(None))
     }
-}
-
-/// Verifies that the vbmeta contains at most one property descriptor and it indicates the
-/// vm type is service VM.
-fn verify_property_and_get_capabilities(
-    descriptors: &[Descriptor],
-) -> Result<Vec<Capability>, PvmfwVerifyError> {
-    let mut iter = descriptors.iter().filter_map(|d| match d {
-        Descriptor::Property(p) => Some(p),
-        _ => None,
-    });
-
-    let descriptor = match iter.next() {
-        // No property descriptors -> no capabilities.
-        None => return Ok(vec![]),
-        Some(d) => d,
-    };
-
-    // Multiple property descriptors -> error.
-    if iter.next().is_some() {
-        return Err(DescriptorError::InvalidContents.into());
-    }
-
-    Capability::get_capabilities(descriptor)
 }
 
 /// Hash descriptors extracted from a vbmeta image.
@@ -280,7 +255,7 @@ pub fn verify_payload<'a>(
     verify_vbmeta_is_from_kernel_partition(vbmeta_image)?;
     let descriptors = vbmeta_image.descriptors()?;
     let hash_descriptors = HashDescriptors::get(&descriptors)?;
-    let capabilities = verify_property_and_get_capabilities(&descriptors)?;
+    let capabilities = Capability::get_capabilities(vbmeta_image)?;
     let page_size = None; // TODO(ptosi): Read from payload.
 
     if initrd.is_none() {
