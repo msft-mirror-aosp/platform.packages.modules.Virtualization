@@ -37,6 +37,14 @@ rust_test {
         ":test_image_with_one_hashdesc",
         ":test_image_with_non_initrd_hashdesc",
         ":test_image_with_initrd_and_non_initrd_desc",
+        ":test_image_with_invalid_page_size",
+        ":test_image_with_negative_page_size",
+        ":test_image_with_overflow_page_size",
+        ":test_image_with_0k_page_size",
+        ":test_image_with_1k_page_size",
+        ":test_image_with_4k_page_size",
+        ":test_image_with_9k_page_size",
+        ":test_image_with_16k_page_size",
         ":test_image_with_service_vm_prop",
         ":test_image_with_unknown_vm_type_prop",
         ":test_image_with_duplicated_capability",
@@ -112,6 +120,118 @@ avb_add_hash_footer {
             enabled: true,
         },
     },
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_invalid_page_size",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "2134",
+    props: [
+        {
+            name: "com.android.virt.page_size",
+            value: "invalid",
+        },
+    ],
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_negative_page_size",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "2134",
+    props: [
+        {
+            name: "com.android.virt.page_size",
+            value: "-16",
+        },
+    ],
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_overflow_page_size",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "2134",
+    props: [
+        {
+            name: "com.android.virt.page_size",
+            value: "18014398509481983",
+        },
+    ],
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_0k_page_size",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "2134",
+    props: [
+        {
+            name: "com.android.virt.page_size",
+            value: "0",
+        },
+    ],
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_1k_page_size",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "2134",
+    props: [
+        {
+            name: "com.android.virt.page_size",
+            value: "1",
+        },
+    ],
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_4k_page_size",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "2134",
+    props: [
+        {
+            name: "com.android.virt.page_size",
+            value: "4",
+        },
+    ],
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_9k_page_size",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "2134",
+    props: [
+        {
+            name: "com.android.virt.page_size",
+            value: "9",
+        },
+    ],
+}
+
+avb_add_hash_footer {
+    name: "test_image_with_16k_page_size",
+    src: ":unsigned_test_image",
+    partition_name: "boot",
+    private_key: ":pvmfw_sign_key",
+    salt: "2134",
+    props: [
+        {
+            name: "com.android.virt.page_size",
+            value: "16",
+        },
+    ],
 }
 
 avb_add_hash_footer {
