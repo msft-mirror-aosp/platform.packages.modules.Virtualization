@@ -41,7 +41,6 @@ import java.lang.ref.WeakReference;
 import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.nio.file.Path;
-import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -75,6 +74,7 @@ public class InstallerService extends Service {
                         this, /* requestCode= */ 0, intent, PendingIntent.FLAG_IMMUTABLE);
         mNotification =
                 new Notification.Builder(this, this.getPackageName())
+                        .setSilent(true)
                         .setSmallIcon(R.drawable.ic_launcher_foreground)
                         .setContentTitle(getString(R.string.installer_notif_title_text))
                         .setContentText(getString(R.string.installer_notif_desc_text))
@@ -82,7 +82,9 @@ public class InstallerService extends Service {
                         .setContentIntent(pendingIntent)
                         .build();
 
-        mExecutorService = Executors.newSingleThreadExecutor();
+        mExecutorService =
+                Executors.newSingleThreadExecutor(
+                        new TerminalThreadFactory(getApplicationContext()));
 
         mConnectivityManager = getSystemService(ConnectivityManager.class);
         Network defaultNetwork = mConnectivityManager.getBoundNetworkForProcess();
