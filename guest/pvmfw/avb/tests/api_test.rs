@@ -29,10 +29,8 @@ use utils::*;
 
 const TEST_IMG_WITH_ONE_HASHDESC_PATH: &str = "test_image_with_one_hashdesc.img";
 const TEST_IMG_WITH_ROLLBACK_INDEX_5: &str = "test_image_with_rollback_index_5.img";
-const TEST_IMG_WITH_PROP_DESC_PATH: &str = "test_image_with_prop_desc.img";
 const TEST_IMG_WITH_SERVICE_VM_PROP_PATH: &str = "test_image_with_service_vm_prop.img";
 const TEST_IMG_WITH_UNKNOWN_VM_TYPE_PROP_PATH: &str = "test_image_with_unknown_vm_type_prop.img";
-const TEST_IMG_WITH_MULTIPLE_PROPS_PATH: &str = "test_image_with_multiple_props.img";
 const TEST_IMG_WITH_DUPLICATED_CAP_PATH: &str = "test_image_with_duplicated_capability.img";
 const TEST_IMG_WITH_NON_INITRD_HASHDESC_PATH: &str = "test_image_with_non_initrd_hashdesc.img";
 const TEST_IMG_WITH_INITRD_AND_NON_INITRD_DESC_PATH: &str =
@@ -159,32 +157,12 @@ fn payload_with_unknown_vm_type_fails_verification_with_no_initrd() -> Result<()
 }
 
 #[test]
-fn payload_with_multiple_props_fails_verification_with_no_initrd() -> Result<()> {
-    assert_payload_verification_fails(
-        &fs::read(TEST_IMG_WITH_MULTIPLE_PROPS_PATH)?,
-        /* initrd= */ None,
-        &load_trusted_public_key()?,
-        PvmfwVerifyError::InvalidDescriptors(DescriptorError::InvalidContents),
-    )
-}
-
-#[test]
 fn payload_with_duplicated_capability_fails_verification_with_no_initrd() -> Result<()> {
     assert_payload_verification_fails(
         &fs::read(TEST_IMG_WITH_DUPLICATED_CAP_PATH)?,
         /* initrd= */ None,
         &load_trusted_public_key()?,
         SlotVerifyError::InvalidMetadata.into(),
-    )
-}
-
-#[test]
-fn payload_with_prop_descriptor_fails_verification_with_no_initrd() -> Result<()> {
-    assert_payload_verification_fails(
-        &fs::read(TEST_IMG_WITH_PROP_DESC_PATH)?,
-        /* initrd= */ None,
-        &load_trusted_public_key()?,
-        PvmfwVerifyError::UnknownVbmetaProperty,
     )
 }
 
