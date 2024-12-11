@@ -139,15 +139,6 @@ void AVirtualMachineRawConfig_setProtectedVm(AVirtualMachineRawConfig* _Nonnull 
                                              bool protectedVm) __INTRODUCED_IN(36);
 
 /**
- * Set whether a virtual machine uses memory ballooning.
- *
- * \param config a virtual machine config object.
- * \param balloon whether the virtual machine should use memory ballooning.
- */
-void AVirtualMachineRawConfig_setBalloon(AVirtualMachineRawConfig* _Nonnull config, bool balloon)
-        __INTRODUCED_IN(36);
-
-/**
  * Set whether to use an alternate, hypervisor-specific authentication method
  * for protected VMs.
  *
