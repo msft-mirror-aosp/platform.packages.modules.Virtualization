@@ -205,21 +205,6 @@ pub unsafe extern "C" fn AVirtualMachineRawConfig_setProtectedVm(
     config.protectedVm = protected_vm;
 }
 
-/// Set whether a virtual machine uses memory ballooning or not.
-///
-/// # Safety
-/// `config` must be a pointer returned by `AVirtualMachineRawConfig_create`.
-#[no_mangle]
-pub unsafe extern "C" fn AVirtualMachineRawConfig_setBalloon(
-    config: *mut VirtualMachineRawConfig,
-    balloon: bool,
-) {
-    // SAFETY: `config` is assumed to be a valid, non-null pointer returned by
-    // AVirtualMachineRawConfig_create. It's the only reference to the object.
-    let config = unsafe { &mut *config };
-    config.balloon = balloon;
-}
-
 /// NOT IMPLEMENTED.
 ///
 /// # Returns
