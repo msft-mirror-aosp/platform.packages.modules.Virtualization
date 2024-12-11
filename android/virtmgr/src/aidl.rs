@@ -18,7 +18,7 @@ use crate::{get_calling_pid, get_calling_uid, get_this_pid};
 use crate::atom::{write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
 use crate::crosvm::{AudioConfig, CrosvmConfig, DiskFile, SharedPathConfig, DisplayConfig, GpuConfig, InputDeviceOption, PayloadState, UsbConfig, VmContext, VmInstance, VmState};
-use crate::debug_config::DebugConfig;
+use crate::debug_config::{DebugConfig, DebugPolicy};
 use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
 use crate::selinux::{check_tee_service_permission, getfilecon, getprevcon, SeContext};
@@ -317,6 +317,12 @@ impl IVirtualizationService for VirtualizationService {
     /// Get a list of supported OSes.
     fn getSupportedOSList(&self) -> binder::Result<Vec<String>> {
         Ok(Vec::from_iter(SUPPORTED_OS_NAMES.iter().cloned()))
+    }
+
+    /// Get printable debug policy for testing and debugging
+    fn getDebugPolicy(&self) -> binder::Result<String> {
+        let debug_policy = DebugPolicy::from_host();
+        Ok(format!("{debug_policy:?}"))
     }
 
     /// Returns whether given feature is enabled
@@ -889,34 +895,18 @@ fn maybe_create_device_tree_overlay(
         .context("Failed to extract vendor hashtree digest")
         .or_service_specific_exception(-1)?;
 
-    let vendor_hashtree_digest = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
+    let mut trusted_props = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
         info!(
             "Passing vendor hashtree digest to pvmfw. This will be rejected if it doesn't \
                 match the trusted digest in the pvmfw config, causing the VM to fail to start."
         );
-        Some((cstr!("vendor_hashtree_descriptor_root_digest"), vendor_hashtree_digest.as_slice()))
+        vec![(cstr!("vendor_hashtree_descriptor_root_digest"), vendor_hashtree_digest.as_slice())]
     } else {
-        None
+        vec![]
     };
-
-    let key_material;
-    let secretkeeper_public_key = if is_secretkeeper_supported() {
-        let sk: Strong<dyn ISecretkeeper> = binder::wait_for_interface(SECRETKEEPER_IDENTIFIER)?;
-        if sk.getInterfaceVersion()? >= 2 {
-            let PublicKey { keyMaterial } = sk.getSecretkeeperIdentity()?;
-            key_material = keyMaterial;
-            Some((cstr!("secretkeeper_public_key"), key_material.as_slice()))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let trusted_props: Vec<(&CStr, &[u8])> =
-        vec![vendor_hashtree_digest, secretkeeper_public_key].into_iter().flatten().collect();
 
     let instance_id;
+    let key_material;
     let mut untrusted_props = Vec::with_capacity(2);
     if cfg!(llpvm_changes) {
         instance_id = extract_instance_id(config);
@@ -925,7 +915,14 @@ fn maybe_create_device_tree_overlay(
         if want_updatable && is_secretkeeper_supported() {
             // Let guest know that it can defer rollback protection to Secretkeeper by setting
             // an empty property in untrusted node in DT. This enables Updatable VMs.
-            untrusted_props.push((cstr!("defer-rollback-protection"), &[]))
+            untrusted_props.push((cstr!("defer-rollback-protection"), &[]));
+            let sk: Strong<dyn ISecretkeeper> =
+                binder::wait_for_interface(SECRETKEEPER_IDENTIFIER)?;
+            if sk.getInterfaceVersion()? >= 2 {
+                let PublicKey { keyMaterial } = sk.getSecretkeeperIdentity()?;
+                key_material = keyMaterial;
+                trusted_props.push((cstr!("secretkeeper_public_key"), key_material.as_slice()));
+            }
         }
     }
 
