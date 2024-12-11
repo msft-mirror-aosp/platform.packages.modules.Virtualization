@@ -217,7 +217,7 @@ pub unsafe extern "C" fn AVirtualMachineRawConfig_setBalloon(
     // SAFETY: `config` is assumed to be a valid, non-null pointer returned by
     // AVirtualMachineRawConfig_create. It's the only reference to the object.
     let config = unsafe { &mut *config };
-    config.noBalloon = !balloon;
+    config.balloon = balloon;
 }
 
 /// NOT IMPLEMENTED.
