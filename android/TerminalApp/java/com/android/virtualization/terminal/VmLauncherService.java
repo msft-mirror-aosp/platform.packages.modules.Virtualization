@@ -20,9 +20,11 @@ import static com.android.virtualization.terminal.MainActivity.TAG;
 
 import android.app.Notification;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.drawable.Icon;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -54,7 +56,6 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -144,14 +145,23 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (Objects.equals(intent.getAction(), ACTION_STOP_VM_LAUNCHER_SERVICE)) {
-            stopSelf();
+
+            if (mDebianService != null && mDebianService.shutdownDebian()) {
+                // During shutdown, change the notification content to indicate that it's closing
+                Notification notification = createNotificationForTerminalClose();
+                getSystemService(NotificationManager.class).notify(this.hashCode(), notification);
+            } else {
+                // If there is no Debian service or it fails to shutdown, just stop the service.
+                stopSelf();
+            }
             return START_NOT_STICKY;
         }
         if (mVirtualMachine != null) {
             Log.d(TAG, "VM instance is already started");
             return START_NOT_STICKY;
         }
-        mExecutorService = Executors.newCachedThreadPool();
+        mExecutorService =
+                Executors.newCachedThreadPool(new TerminalThreadFactory(getApplicationContext()));
 
         InstalledImage image = InstalledImage.getDefault(this);
         ConfigJson json = ConfigJson.from(this, image.getConfigPath());
@@ -170,9 +180,7 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
             android.os.Trace.endSection();
             android.os.Trace.beginAsyncSection("debianBoot", 0);
         } catch (VirtualMachineException e) {
-            Log.e(TAG, "cannot create runner", e);
-            stopSelf();
-            return START_NOT_STICKY;
+            throw new RuntimeException("cannot create runner", e);
         }
         mVirtualMachine = runner.getVm();
         mResultReceiver =
@@ -200,6 +208,32 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
         startDebianServer();
 
         return START_NOT_STICKY;
+    }
+
+    private Notification createNotificationForTerminalClose() {
+        Intent stopIntent = new Intent();
+        stopIntent.setClass(this, VmLauncherService.class);
+        stopIntent.setAction(VmLauncherService.ACTION_STOP_VM_LAUNCHER_SERVICE);
+        PendingIntent stopPendingIntent =
+                PendingIntent.getService(
+                        this,
+                        0,
+                        stopIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Icon icon = Icon.createWithResource(getResources(), R.drawable.ic_launcher_foreground);
+        String stopActionText =
+                getResources().getString(R.string.service_notification_force_quit_action);
+        String stopNotificationTitle =
+                getResources().getString(R.string.service_notification_close_title);
+        return new Notification.Builder(this, this.getPackageName())
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(stopNotificationTitle)
+                .setOngoing(true)
+                .setSilent(true)
+                .addAction(
+                        new Notification.Action.Builder(icon, stopActionText, stopPendingIntent)
+                                .build())
+                .build();
     }
 
     private boolean overrideConfigIfNecessary(VirtualMachineCustomImageConfig.Builder builder) {
@@ -293,12 +327,15 @@ public class VmLauncherService extends Service implements DebianServiceImpl.Debi
 
     public static void stop(Context context) {
         Intent i = getMyIntent(context);
-        context.stopService(i);
+        i.setAction(VmLauncherService.ACTION_STOP_VM_LAUNCHER_SERVICE);
+        context.startService(i);
     }
 
     @Override
     public void onDestroy() {
-        mPortNotifier.stop();
+        if (mPortNotifier != null) {
+            mPortNotifier.stop();
+        }
         getSystemService(NotificationManager.class).cancelAll();
         stopDebianServer();
         if (mVirtualMachine != null) {
