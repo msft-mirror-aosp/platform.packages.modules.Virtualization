@@ -114,6 +114,7 @@ pub fn assert_latest_payload_verification_passes(
     initrd: &[u8],
     initrd_salt: &[u8],
     expected_debug_level: DebugLevel,
+    page_size: Option<usize>,
 ) -> Result<()> {
     let public_key = load_trusted_public_key()?;
     let kernel = load_latest_signed_kernel()?;
@@ -133,6 +134,7 @@ pub fn assert_latest_payload_verification_passes(
         public_key: &public_key,
         capabilities,
         rollback_index: if cfg!(llpvm_changes) { 1 } else { 0 },
+        page_size,
     };
     assert_eq!(expected_boot_data, verified_boot_data);
 
@@ -144,6 +146,7 @@ pub fn assert_payload_without_initrd_passes_verification(
     salt: &[u8],
     expected_rollback_index: u64,
     capabilities: Vec<Capability>,
+    page_size: Option<usize>,
 ) -> Result<()> {
     let public_key = load_trusted_public_key()?;
     let verified_boot_data = verify_payload(
@@ -163,10 +166,21 @@ pub fn assert_payload_without_initrd_passes_verification(
         public_key: &public_key,
         capabilities,
         rollback_index: expected_rollback_index,
+        page_size,
     };
     assert_eq!(expected_boot_data, verified_boot_data);
 
     Ok(())
+}
+
+pub fn read_page_size(kernel: &[u8]) -> Result<Option<usize>, PvmfwVerifyError> {
+    let public_key = load_trusted_public_key().unwrap();
+    let verified_boot_data = verify_payload(
+        kernel,
+        None, // initrd
+        &public_key,
+    )?;
+    Ok(verified_boot_data.page_size)
 }
 
 pub fn hash(inputs: &[&[u8]]) -> Digest {
