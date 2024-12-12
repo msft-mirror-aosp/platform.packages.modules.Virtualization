@@ -193,6 +193,19 @@ int AVirtualMachineRawConfig_setHypervisorSpecificAuthMethod(
 int AVirtualMachineRawConfig_addCustomMemoryBackingFile(AVirtualMachineRawConfig* _Nonnull config,
                                                         int fd, uint64_t rangeStart,
                                                         uint64_t rangeEnd) __INTRODUCED_IN(36);
+/**
+ * Use the specified fd as the device tree overlay blob for booting VM.
+ *
+ * Here's the format of the device tree overlay blob.
+ * link: https://source.android.com/docs/core/architecture/dto
+ *
+ * \param config a virtual machine config object.
+ * \param fd a readable, seekable, and sized (i.e. report a valid size using fstat()) file
+ *   descriptor containing device tree overlay, or -1 to unset.
+ *   `AVirtualMachineRawConfig_setDeviceTreeOverlay` takes ownership of `fd`.
+ */
+void AVirtualMachineRawConfig_setDeviceTreeOverlay(AVirtualMachineRawConfig* _Nonnull config,
+                                                   int fd) __INTRODUCED_IN(36);
 
 /**
  * Represents a handle on a virtualization service, responsible for managing virtual machines.
