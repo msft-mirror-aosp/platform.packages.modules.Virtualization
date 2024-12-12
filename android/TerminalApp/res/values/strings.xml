@@ -89,6 +89,8 @@
     <string name="settings_port_forwarding_active_ports_title">Listening ports</string>
     <!-- Title for other enabled ports setting in port forwarding [CHAR LIMIT=none] -->
     <string name="settings_port_forwarding_other_enabled_ports_title">Saved allowed ports</string>
+    <!-- Description of close button for other enabled ports. Used for talkback. [CHAR LIMIT=none] -->
+    <string name="settings_port_forwarding_other_enabled_port_close_button">Delete <xliff:g id="port_number" example="8000">%d</xliff:g></string>
 
     <!-- Dialog title for enabling a new port [CHAR LIMIT=none] -->
     <string name="settings_port_forwarding_dialog_title">Allow a new port</string>
@@ -152,6 +154,11 @@
     <string name="service_notification_content">Click to open terminal</string>
     <!-- Notification action button for closing the virtual machine [CHAR LIMIT=20] -->
     <string name="service_notification_quit_action">Close</string>
+
+    <!-- Notification title for foreground service notification during closing [CHAR LIMIT=none] -->
+    <string name="service_notification_close_title">Terminal is closing</string>
+    <!-- Notification action button for force-closing the virtual machine [CHAR LIMIT=30] -->
+    <string name="service_notification_force_quit_action">Force close</string>
 
     <!-- This string is for toast message to notify that VirGL is enabled. [CHAR LIMIT=40] -->
     <string name="virgl_enabled"><xliff:g>VirGL</xliff:g> is enabled</string>
