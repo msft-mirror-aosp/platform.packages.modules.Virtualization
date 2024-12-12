@@ -621,8 +621,8 @@ public final class VirtualMachineConfig {
                 && this.mVmOutputCaptured == other.mVmOutputCaptured
                 && this.mVmConsoleInputSupported == other.mVmConsoleInputSupported
                 && this.mConnectVmConsole == other.mConnectVmConsole
-                && this.mConsoleInputDevice == other.mConsoleInputDevice
                 && (this.mVendorDiskImage == null) == (other.mVendorDiskImage == null)
+                && Objects.equals(this.mConsoleInputDevice, other.mConsoleInputDevice)
                 && Objects.equals(this.mPayloadConfigPath, other.mPayloadConfigPath)
                 && Objects.equals(this.mPayloadBinaryName, other.mPayloadBinaryName)
                 && Objects.equals(this.mPackageName, other.mPackageName)
@@ -798,7 +798,7 @@ public final class VirtualMachineConfig {
                 Optional.ofNullable(customImageConfig.getAudioConfig())
                         .map(ac -> ac.toParcelable())
                         .orElse(null);
-        config.noBalloon = !customImageConfig.useAutoMemoryBalloon();
+        config.balloon = customImageConfig.useAutoMemoryBalloon();
         config.usbConfig =
                 Optional.ofNullable(customImageConfig.getUsbConfig())
                         .map(

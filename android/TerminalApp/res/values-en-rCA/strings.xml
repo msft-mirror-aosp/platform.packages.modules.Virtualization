@@ -78,5 +78,9 @@
     <string name="service_notification_title" msgid="2918088850910713393">"Terminal is running"</string>
     <string name="service_notification_content" msgid="5772901142342308273">"Click to open terminal"</string>
     <string name="service_notification_quit_action" msgid="4888327875869277455">"Close"</string>
+    <!-- no translation found for service_notification_close_title (1442526433361428844) -->
+    <skip />
+    <!-- no translation found for service_notification_force_quit_action (3462226330416157775) -->
+    <skip />
     <string name="virgl_enabled" msgid="5242525588039698086">"<xliff:g id="ID_1">VirGL</xliff:g> is enabled"</string>
 </resources>
