@@ -39,4 +39,6 @@
         <option name="shell-timeout" value="300000" />
         <option name="test-timeout" value="300000" />
     </test>
+
+    <!-- PLACEHOLDER_FOR_ANNOTATION -->
 </configuration>
