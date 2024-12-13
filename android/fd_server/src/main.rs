@@ -109,7 +109,8 @@ fn convert_args(args: Args) -> Result<(BTreeMap<i32, FdConfig>, Option<OwnedFd>)
 }
 
 fn main() -> Result<()> {
-    // SAFETY: nobody has taken ownership of the inherited FDs yet.
+    // SAFETY: This is very early in the process. Nobody has taken ownership of the inherited FDs
+    // yet.
     unsafe { rustutils::inherited_fd::init_once()? };
 
     android_logger::init_once(

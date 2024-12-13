@@ -170,7 +170,8 @@ fn should_defer_rollback_protection() -> bool {
 }
 
 fn main() -> Result<()> {
-    // SAFETY: nobody has taken ownership of the inherited FDs yet.
+    // SAFETY: This is very early in the process. Nobody has taken ownership of the inherited FDs
+    // yet.
     unsafe { rustutils::inherited_fd::init_once()? };
 
     // If debuggable, print full backtrace to console log with stdio_to_kmsg
