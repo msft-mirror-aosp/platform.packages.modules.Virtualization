@@ -180,7 +180,7 @@ pub unsafe extern "C" fn AVirtualMachineRawConfig_addDisk(
 /// # Safety
 /// `config` must be a pointer returned by `AVirtualMachineRawConfig_create`.
 #[no_mangle]
-pub unsafe extern "C" fn AVirtualMachineRawConfig_setMemoryMib(
+pub unsafe extern "C" fn AVirtualMachineRawConfig_setMemoryMiB(
     config: *mut VirtualMachineRawConfig,
     memory_mib: i32,
 ) {
