@@ -109,7 +109,8 @@ fn clean_up_working_directory() -> Result<()> {
 
 #[allow(clippy::eq_op)]
 fn try_main() -> Result<()> {
-    // SAFETY: nobody has taken ownership of the inherited FDs yet.
+    // SAFETY: This is very early in the process. Nobody has taken ownership of the inherited FDs
+    // yet.
     unsafe { rustutils::inherited_fd::init_once()? };
 
     let debuggable = env!("TARGET_BUILD_VARIANT") != "user";

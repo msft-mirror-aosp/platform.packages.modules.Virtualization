@@ -83,7 +83,8 @@ fn check_vm_support() -> Result<()> {
 }
 
 fn main() {
-    // SAFETY: nobody has taken ownership of the inherited FDs yet.
+    // SAFETY: This is very early in the process. Nobody has taken ownership of the inherited FDs
+    // yet.
     unsafe { rustutils::inherited_fd::init_once() }
         .expect("Failed to take ownership of inherited FDs");
 
