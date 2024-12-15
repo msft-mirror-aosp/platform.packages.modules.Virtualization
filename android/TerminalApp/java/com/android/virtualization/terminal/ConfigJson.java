@@ -76,6 +76,7 @@ class ConfigJson {
     private SharedPathJson[] sharedPath;
     private DisplayJson display;
     private GpuJson gpu;
+    private boolean auto_memory_balloon;
 
     /** Parses JSON file at jsonPath */
     static ConfigJson from(Context context, Path jsonPath) {
@@ -92,12 +93,7 @@ class ConfigJson {
         rules.put("\\$PAYLOAD_DIR", InstalledImage.getDefault(context).getInstallDir().toString());
         rules.put("\\$USER_ID", String.valueOf(context.getUserId()));
         rules.put("\\$PACKAGE_NAME", context.getPackageName());
-        String appDataDir = context.getDataDir().toString();
-        // TODO: remove this hack
-        if (context.getUserId() == 0) {
-            appDataDir = "/data/data/" + context.getPackageName();
-        }
-        rules.put("\\$APP_DATA_DIR", appDataDir);
+        rules.put("\\$APP_DATA_DIR", context.getDataDir().toString());
 
         try (BufferedReader br = new BufferedReader(r)) {
             return br.lines()
@@ -150,7 +146,8 @@ class ConfigJson {
                 .setBootloaderPath(bootloader)
                 .setKernelPath(kernel)
                 .setInitrdPath(initrd)
-                .useNetwork(network);
+                .useNetwork(network)
+                .useAutoMemoryBalloon(auto_memory_balloon);
 
         if (input != null) {
             builder.useTouch(input.touchscreen)

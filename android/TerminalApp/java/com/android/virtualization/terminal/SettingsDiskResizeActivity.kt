@@ -21,6 +21,7 @@ import android.icu.text.NumberFormat
 import android.icu.util.Measure
 import android.icu.util.MeasureUnit
 import android.os.Bundle
+import android.os.Environment
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.TextUtils
@@ -35,9 +36,8 @@ import java.util.Locale
 import java.util.regex.Pattern
 
 class SettingsDiskResizeActivity : AppCompatActivity() {
-    // TODO(b/382191950): Calculate the maxDiskSizeMb based on the device storage usage
-    private val maxDiskSizeMb: Long = 16 shl 10
     private val numberPattern: Pattern = Pattern.compile("[\\d]*[\\٫.,]?[\\d]+")
+    private val defaultMaxDiskSizeMb: Long = 16 shl 10
 
     private var diskSizeStepMb: Long = 0
     private var diskSizeMb: Long = 0
@@ -72,6 +72,10 @@ class SettingsDiskResizeActivity : AppCompatActivity() {
         val image = InstalledImage.getDefault(this)
         diskSizeMb = bytesToMb(image.getSize())
         val minDiskSizeMb = bytesToMb(image.getSmallestSizePossible()).coerceAtMost(diskSizeMb)
+        val usableSpaceMb =
+            bytesToMb(Environment.getDataDirectory().getUsableSpace()) and
+                (diskSizeStepMb - 1).inv()
+        val maxDiskSizeMb = defaultMaxDiskSizeMb.coerceAtMost(diskSizeMb + usableSpaceMb)
 
         diskSizeText = findViewById<TextView>(R.id.settings_disk_resize_resize_gb_assigned)!!
         val diskMaxSizeText = findViewById<TextView>(R.id.settings_disk_resize_resize_gb_max)
