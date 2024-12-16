@@ -44,7 +44,7 @@ typedef struct AVirtualMachineRawConfig AVirtualMachineRawConfig;
  *
  * \return A new virtual machine raw config object. On failure (such as out of memory), it aborts.
  */
-AVirtualMachineRawConfig* _Nonnull AVirtualMachineRawConfig_create() __INTRODUCED_IN(36);
+AVirtualMachineRawConfig* _Nonnull AVirtualMachineRawConfig_create(void) __INTRODUCED_IN(36);
 
 /**
  * Destroy a virtual machine config object.
