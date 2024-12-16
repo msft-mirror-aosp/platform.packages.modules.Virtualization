@@ -65,6 +65,9 @@ parcelable VirtualMachineRawConfig {
     /** The vCPU topology that will be generated for the VM. Default to 1 vCPU. */
     CpuTopology cpuTopology = CpuTopology.ONE_CPU;
 
+    /** The number of vCPUs. Ignored unless `cpuTopology == CUSTOM`. */
+    int customVcpuCount;
+
     /**
      * A version or range of versions of the virtual platform that this config is compatible with.
      * The format follows SemVer.
@@ -106,7 +109,7 @@ parcelable VirtualMachineRawConfig {
 
     @nullable AudioConfig audioConfig;
 
-    boolean noBalloon;
+    boolean balloon;
 
     /** Enable or disable USB passthrough support */
     @nullable UsbConfig usbConfig;

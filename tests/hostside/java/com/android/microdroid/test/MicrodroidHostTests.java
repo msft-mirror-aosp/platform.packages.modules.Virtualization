@@ -405,6 +405,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
                         VIRT_APEX + "bin/vm run",
                         "--console " + CONSOLE_PATH,
                         "--log " + LOG_PATH,
+                        "--name " + "microdroid", // to still be seen as microdroid vm
                         configPath);
 
         PipedInputStream pis = new PipedInputStream();
@@ -1269,7 +1270,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
         List<String> command =
                 Arrays.asList(avbtool.getAbsolutePath(), "info_image", "--image", image_path);
         CommandResult result =
-                createRunUtil().runTimedCmd(5000, "/bin/bash", "-c", String.join(" ", command));
+                createRunUtil().runTimedCmd(10000, "/bin/bash", "-c", String.join(" ", command));
         String out = result.getStdout();
         String err = result.getStderr();
         assertWithMessage(

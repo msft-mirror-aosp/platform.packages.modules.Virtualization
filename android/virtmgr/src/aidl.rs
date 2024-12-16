@@ -18,7 +18,7 @@ use crate::{get_calling_pid, get_calling_uid, get_this_pid};
 use crate::atom::{write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
 use crate::crosvm::{AudioConfig, CrosvmConfig, DiskFile, SharedPathConfig, DisplayConfig, GpuConfig, InputDeviceOption, PayloadState, UsbConfig, VmContext, VmInstance, VmState};
-use crate::debug_config::DebugConfig;
+use crate::debug_config::{DebugConfig, DebugPolicy};
 use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
 use crate::selinux::{check_tee_service_permission, getfilecon, getprevcon, SeContext};
@@ -53,6 +53,7 @@ use android_system_virtualmachineservice::aidl::android::system::virtualmachines
 };
 use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::ISecretkeeper::{BnSecretkeeper, ISecretkeeper};
 use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::SecretId::SecretId;
+use android_hardware_security_secretkeeper::aidl::android::hardware::security::secretkeeper::PublicKey::PublicKey;
 use android_hardware_security_authgraph::aidl::android::hardware::security::authgraph::{
     Arc::Arc as AuthgraphArc, IAuthGraphKeyExchange::IAuthGraphKeyExchange,
     IAuthGraphKeyExchange::BnAuthGraphKeyExchange, Identity::Identity, KeInitResult::KeInitResult,
@@ -318,6 +319,12 @@ impl IVirtualizationService for VirtualizationService {
         Ok(Vec::from_iter(SUPPORTED_OS_NAMES.iter().cloned()))
     }
 
+    /// Get printable debug policy for testing and debugging
+    fn getDebugPolicy(&self) -> binder::Result<String> {
+        let debug_policy = DebugPolicy::from_host();
+        Ok(format!("{debug_policy:?}"))
+    }
+
     /// Returns whether given feature is enabled
     fn isFeatureEnabled(&self, feature: &str) -> binder::Result<bool> {
         check_manage_access()?;
@@ -445,20 +452,25 @@ impl VirtualizationService {
         let context = EarlyVmContext::new(cid, temp_dir.clone())
             .context(format!("Can't create early vm contexts for {cid}"))
             .or_service_specific_exception(-1)?;
-        let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
 
-        // Start VM service listening for connections from the new CID on port=CID.
-        let port = cid;
-        let (vm_server, _) = RpcServer::new_vsock(service, cid, port)
-            .context(format!("Could not start RpcServer on port {port}"))
-            .or_service_specific_exception(-1)?;
-        vm_server.start();
-        Ok((VmContext::new(Strong::new(Box::new(context)), vm_server), cid, temp_dir))
+        if requires_vm_service(config) {
+            // Start VM service listening for connections from the new CID on port=CID.
+            let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
+            let port = cid;
+            let (vm_server, _) = RpcServer::new_vsock(service, cid, port)
+                .context(format!("Could not start RpcServer on port {port}"))
+                .or_service_specific_exception(-1)?;
+            vm_server.start();
+            Ok((VmContext::new(Strong::new(Box::new(context)), Some(vm_server)), cid, temp_dir))
+        } else {
+            Ok((VmContext::new(Strong::new(Box::new(context)), None), cid, temp_dir))
+        }
     }
 
     fn create_vm_context(
         &self,
         requester_debug_pid: pid_t,
+        config: &VirtualMachineConfig,
     ) -> binder::Result<(VmContext, Cid, PathBuf)> {
         const NUM_ATTEMPTS: usize = 5;
 
@@ -466,6 +478,12 @@ impl VirtualizationService {
             let vm_context = GLOBAL_SERVICE.allocateGlobalVmContext(requester_debug_pid)?;
             let cid = vm_context.getCid()? as Cid;
             let temp_dir: PathBuf = vm_context.getTemporaryDirectory()?.into();
+
+            // We don't need to start the VM service for custom VMs.
+            if !requires_vm_service(config) {
+                return Ok((VmContext::new(vm_context, None), cid, temp_dir));
+            }
+
             let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
 
             // Start VM service listening for connections from the new CID on port=CID.
@@ -473,7 +491,7 @@ impl VirtualizationService {
             match RpcServer::new_vsock(service, cid, port) {
                 Ok((vm_server, _)) => {
                     vm_server.start();
-                    return Ok((VmContext::new(vm_context, vm_server), cid, temp_dir));
+                    return Ok((VmContext::new(vm_context, Some(vm_server)), cid, temp_dir));
                 }
                 Err(err) => {
                     warn!("Could not start RpcServer on port {}: {}", port, err);
@@ -509,7 +527,7 @@ impl VirtualizationService {
         let (vm_context, cid, temporary_directory) = if cfg!(early) {
             self.create_early_vm_context(config)?
         } else {
-            self.create_vm_context(requester_debug_pid)?
+            self.create_vm_context(requester_debug_pid, config)?
         };
 
         if is_custom_config(config) {
@@ -635,6 +653,14 @@ impl VirtualizationService {
         let (cpus, host_cpu_topology) = match config.cpuTopology {
             CpuTopology::MATCH_HOST => (None, true),
             CpuTopology::ONE_CPU => (NonZeroU32::new(1), false),
+            CpuTopology::CUSTOM => (
+                NonZeroU32::new(
+                    u32::try_from(config.customVcpuCount)
+                        .context("bad customVcpuCount")
+                        .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?,
+                ),
+                false,
+            ),
             val => {
                 return Err(anyhow!("Failed to parse CPU topology value {:?}", val))
                     .with_log()
@@ -769,7 +795,7 @@ impl VirtualizationService {
             boost_uclamp: config.boostUclamp,
             gpu_config,
             audio_config,
-            no_balloon: config.noBalloon,
+            balloon: config.balloon,
             usb_config,
             dump_dt_fd,
         };
@@ -820,6 +846,17 @@ fn is_custom_config(config: &VirtualMachineConfig) -> bool {
     }
 }
 
+/// Returns whether a VM config requires VirtualMachineService running on the host. Only Microdroid
+/// VM (i.e. AppConfig) requires it. However, a few Microdroid tests use RawConfig for Microdroid
+/// VM. To handle the exceptional case, we use name as a second criteria; if the name is
+/// "microdroid" we run VirtualMachineService
+fn requires_vm_service(config: &VirtualMachineConfig) -> bool {
+    match config {
+        VirtualMachineConfig::AppConfig(_) => true,
+        VirtualMachineConfig::RawConfig(config) => config.name == "microdroid",
+    }
+}
+
 fn extract_vendor_hashtree_digest(config: &VirtualMachineConfig) -> Result<Option<Vec<u8>>> {
     let VirtualMachineConfig::AppConfig(config) = config else {
         return Ok(None);
@@ -866,7 +903,7 @@ fn maybe_create_device_tree_overlay(
         .context("Failed to extract vendor hashtree digest")
         .or_service_specific_exception(-1)?;
 
-    let trusted_props = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
+    let mut trusted_props = if let Some(ref vendor_hashtree_digest) = vendor_hashtree_digest {
         info!(
             "Passing vendor hashtree digest to pvmfw. This will be rejected if it doesn't \
                 match the trusted digest in the pvmfw config, causing the VM to fail to start."
@@ -877,6 +914,7 @@ fn maybe_create_device_tree_overlay(
     };
 
     let instance_id;
+    let key_material;
     let mut untrusted_props = Vec::with_capacity(2);
     if cfg!(llpvm_changes) {
         instance_id = extract_instance_id(config);
@@ -885,7 +923,14 @@ fn maybe_create_device_tree_overlay(
         if want_updatable && is_secretkeeper_supported() {
             // Let guest know that it can defer rollback protection to Secretkeeper by setting
             // an empty property in untrusted node in DT. This enables Updatable VMs.
-            untrusted_props.push((cstr!("defer-rollback-protection"), &[]))
+            untrusted_props.push((cstr!("defer-rollback-protection"), &[]));
+            let sk: Strong<dyn ISecretkeeper> =
+                binder::wait_for_interface(SECRETKEEPER_IDENTIFIER)?;
+            if sk.getInterfaceVersion()? >= 2 {
+                let PublicKey { keyMaterial } = sk.getSecretkeeperIdentity()?;
+                key_material = keyMaterial;
+                trusted_props.push((cstr!("secretkeeper_public_key"), key_material.as_slice()));
+            }
         }
     }
 
@@ -996,7 +1041,12 @@ fn assemble_shared_paths(
                 guest_gid: path.guestGid,
                 mask: path.mask,
                 tag: path.tag.clone(),
-                socket_path: temporary_directory.join(&path.socket).to_string_lossy().to_string(),
+                socket_path: temporary_directory
+                    .join(&path.socketPath)
+                    .to_string_lossy()
+                    .to_string(),
+                socket_fd: maybe_clone_file(&path.socketFd)?,
+                app_domain: path.appDomain,
             })
         })
         .collect()
@@ -1186,6 +1236,9 @@ fn load_app_config(
     vm_config.name.clone_from(&config.name);
     vm_config.protectedVm = config.protectedVm;
     vm_config.cpuTopology = config.cpuTopology;
+    if config.cpuTopology == CpuTopology::CUSTOM {
+        bail!("AppConfig doesn't support CpuTopology::CUSTOM");
+    }
     vm_config.hugePages = config.hugePages || vm_payload_config.hugepages;
     vm_config.boostUclamp = config.boostUclamp;
 
@@ -2014,6 +2067,14 @@ impl ISecretkeeper for SecretkeeperProxy {
 
     fn deleteAll(&self) -> binder::Result<()> {
         self.0.deleteAll()
+    }
+
+    fn getSecretkeeperIdentity(&self) -> binder::Result<PublicKey> {
+        // SecretkeeperProxy is really a RPC binder service for PVM (It is called by
+        // MicrodroidManager). PVMs do not & must not (for security reason) rely on
+        // getSecretKeeperIdentity, so we throw an exception if someone attempts to
+        // use this API from the proxy.
+        Err(ExceptionCode::SECURITY.into())
     }
 }
 

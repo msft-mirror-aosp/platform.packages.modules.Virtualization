@@ -17,12 +17,38 @@
 package com.android.virtualization.terminal;
 
 import android.Manifest;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.pm.PackageManager;
+import android.os.Bundle;
 
 import androidx.appcompat.app.AppCompatActivity;
 
 public abstract class BaseActivity extends AppCompatActivity {
     private static final int POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 101;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        NotificationManager notificationManager = getSystemService(NotificationManager.class);
+        if (notificationManager.getNotificationChannel(this.getPackageName()) == null) {
+            NotificationChannel channel =
+                    new NotificationChannel(
+                            this.getPackageName(),
+                            getString(R.string.app_name),
+                            NotificationManager.IMPORTANCE_DEFAULT);
+            notificationManager.createNotificationChannel(channel);
+        }
+
+        if (!(this instanceof ErrorActivity)) {
+            Thread currentThread = Thread.currentThread();
+            if (!(currentThread.getUncaughtExceptionHandler()
+                    instanceof TerminalExceptionHandler)) {
+                currentThread.setUncaughtExceptionHandler(
+                        new TerminalExceptionHandler(getApplicationContext()));
+            }
+        }
+    }
 
     @Override
     public void onResume() {
