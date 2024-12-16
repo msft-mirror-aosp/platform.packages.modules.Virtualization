@@ -85,9 +85,7 @@ public class RkpdVmAttestationTest extends MicrodroidDeviceTestBase {
         assume().withMessage("RKP Integration tests rely on network availability.")
                 .that(isNetworkConnected(getContext()))
                 .isTrue();
-        assume().withMessage("Test needs Remote Attestation support")
-                .that(getVirtualMachineManager().isRemoteAttestationSupported())
-                .isTrue();
+        ensureVmAttestationSupported();
 
         if (mOs == "microdroid") {
             // We don't need this permission to use the microdroid kernel.
