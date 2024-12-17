@@ -88,6 +88,7 @@ rust_library_rlib {
         "libsmccc",
         "libspin_nostd",
         "libstatic_assertions",
+        "libthiserror_nostd",
         "libtinyvec_nostd",
         "libuuid_nostd",
         "libvirtio_drivers",
