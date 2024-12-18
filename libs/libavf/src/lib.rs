@@ -31,6 +31,7 @@ use android_system_virtualizationservice::{
 };
 use avf_bindgen::AVirtualMachineStopReason;
 use libc::timespec;
+use log::error;
 use vmclient::{DeathReason, VirtualizationService, VmInstance};
 
 /// Create a new virtual machine config object with no properties.
@@ -350,7 +351,10 @@ pub unsafe extern "C" fn AVirtualMachine_createRaw(
             }
             0
         }
-        Err(_) => -libc::EIO,
+        Err(e) => {
+            error!("AVirtualMachine_createRaw failed: {e:?}");
+            -libc::EIO
+        }
     }
 }
 
@@ -365,7 +369,10 @@ pub unsafe extern "C" fn AVirtualMachine_start(vm: *const VmInstance) -> c_int {
     let vm = unsafe { &*vm };
     match vm.start() {
         Ok(_) => 0,
-        Err(_) => -libc::EIO,
+        Err(e) => {
+            error!("AVirtualMachine_start failed: {e:?}");
+            -libc::EIO
+        }
     }
 }
 
@@ -380,7 +387,10 @@ pub unsafe extern "C" fn AVirtualMachine_stop(vm: *const VmInstance) -> c_int {
     let vm = unsafe { &*vm };
     match vm.stop() {
         Ok(_) => 0,
-        Err(_) => -libc::EIO,
+        Err(e) => {
+            error!("AVirtualMachine_stop failed: {e:?}");
+            -libc::EIO
+        }
     }
 }
 
@@ -395,7 +405,10 @@ pub unsafe extern "C" fn AVirtualMachine_connectVsock(vm: *const VmInstance, por
     let vm = unsafe { &*vm };
     match vm.connect_vsock(port) {
         Ok(pfd) => pfd.into_raw_fd(),
-        Err(_) => -libc::EIO,
+        Err(e) => {
+            error!("AVirtualMachine_connectVsock failed: {e:?}");
+            -libc::EIO
+        }
     }
 }
 
