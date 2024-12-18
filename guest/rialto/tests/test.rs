@@ -25,7 +25,10 @@ use anyhow::{bail, Context, Result};
 use bssl_avf::{rand_bytes, sha256, EcKey, PKey};
 use client_vm_csr::generate_attestation_key_and_csr;
 use coset::{CborSerializable, CoseMac0, CoseSign};
-use hwtrust::{rkp, session::Session};
+use hwtrust::{
+    rkp,
+    session::{RkpInstance, Session},
+};
 use log::{info, warn};
 use service_vm_comm::{
     ClientVmAttestationParams, Csr, CsrPayload, EcdsaP256KeyPair, GenerateCertificateRequestParams,
@@ -37,7 +40,6 @@ use service_vm_fake_chain::client_vm::{
 use service_vm_manager::{ServiceVm, VM_MEMORY_MB};
 use std::fs;
 use std::fs::File;
-use std::panic;
 use std::path::PathBuf;
 use std::str::FromStr;
 use vmclient::VmInstance;
@@ -68,14 +70,9 @@ fn process_requests_in_protected_vm() -> Result<()> {
 
 #[test]
 fn process_requests_in_non_protected_vm() -> Result<()> {
-    check_processing_requests(VmType::NonProtectedVm, None)
-}
-
-#[ignore] // TODO(b/360077974): Figure out why this is flaky.
-#[test]
-fn process_requests_in_non_protected_vm_with_extra_ram() -> Result<()> {
     const MEMORY_MB: i32 = 300;
-    check_processing_requests(VmType::NonProtectedVm, Some(MEMORY_MB))
+    check_processing_requests(VmType::NonProtectedVm, Some(MEMORY_MB))?;
+    check_processing_requests(VmType::NonProtectedVm, None)
 }
 
 fn check_processing_requests(vm_type: VmType, vm_memory_mb: Option<i32>) -> Result<()> {
@@ -211,7 +208,8 @@ fn check_vm_component(vm_component: &asn1::Any, expected_component: &SubComponen
     let vm_component = vm_component.decode_as::<asn1::SequenceOf<asn1::Any, 4>>().unwrap();
     assert_eq!(4, vm_component.len());
     let name = vm_component.get(0).unwrap().decode_as::<asn1::Utf8StringRef>().unwrap();
-    assert_eq!(expected_component.name, name.as_ref());
+    let name_str: &str = name.as_ref();
+    assert_eq!(expected_component.name, name_str);
     let version = vm_component.get(1).unwrap().decode_as::<u64>().unwrap();
     assert_eq!(expected_component.version, version);
     let code_hash = vm_component.get(2).unwrap().decode_as::<asn1::OctetString>().unwrap();
@@ -288,7 +286,10 @@ fn check_certificate_for_client_vm(
 }
 
 fn check_csr(csr: Vec<u8>) -> Result<()> {
-    let _csr = rkp::Csr::from_cbor(&Session::default(), &csr[..]).context("Failed to parse CSR")?;
+    let mut session = Session::default();
+    session.set_allow_any_mode(true);
+    session.set_rkp_instance(RkpInstance::Avf);
+    let _csr = rkp::Csr::from_cbor(&session, &csr[..]).context("Failed to parse CSR")?;
     Ok(())
 }
 
@@ -298,10 +299,6 @@ fn start_service_vm(vm_type: VmType, vm_memory_mb: Option<i32>) -> Result<Servic
             .with_tag("rialto")
             .with_max_level(log::LevelFilter::Debug),
     );
-    // Redirect panic messages to logcat.
-    panic::set_hook(Box::new(|panic_info| {
-        log::error!("{}", panic_info);
-    }));
     // We need to start the thread pool for Binder to work properly, especially link_to_death.
     ProcessState::start_thread_pool();
     ServiceVm::start_vm(vm_instance(vm_type, vm_memory_mb)?, vm_type)
@@ -338,6 +335,14 @@ fn nonprotected_vm_instance(memory_mib: i32) -> Result<VmInstance> {
     let virtmgr = vmclient::VirtualizationService::new().context("Failed to spawn VirtMgr")?;
     let service = virtmgr.connect().context("Failed to connect to VirtMgr")?;
     info!("Connected to VirtMgr for service VM");
-    VmInstance::create(service.as_ref(), &config, console, /* consoleIn */ None, log, None)
-        .context("Failed to create VM")
+    VmInstance::create(
+        service.as_ref(),
+        &config,
+        console,
+        /* consoleIn */ None,
+        log,
+        /* dump_dt */ None,
+        None,
+    )
+    .context("Failed to create VM")
 }

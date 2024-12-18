@@ -127,6 +127,12 @@ parcelable VirtualMachineAppConfig {
 
         /** Whether the VM should have network feature. */
         boolean networkSupported;
+
+        /** Additional parameters to pass to the VM's kernel cmdline. */
+        String[] extraKernelCmdlineParams;
+
+        /** List of tee services this VM wants to access */
+        String[] teeServices;
     }
 
     /** Configuration parameters guarded by android.permission.USE_CUSTOM_VIRTUAL_MACHINE */

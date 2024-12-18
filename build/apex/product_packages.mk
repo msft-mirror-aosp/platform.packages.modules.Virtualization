@@ -24,11 +24,14 @@ $(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)
 
 PRODUCT_PACKAGES += \
     com.android.compos \
+    features_com.android.virt.xml
 
-# TODO(b/207336449): Figure out how to get these off /system
+ifneq (true, $(RELEASE_INSTALL_APEX_SYSTEMSERVER_DEXPREOPT_SAME_PARTITION))
 PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST := \
     system/framework/oat/%@service-compos.jar@classes.odex \
     system/framework/oat/%@service-compos.jar@classes.vdex \
+
+endif
 
 PRODUCT_APEX_SYSTEM_SERVER_JARS := com.android.compos:service-compos
 

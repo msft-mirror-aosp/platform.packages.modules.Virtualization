@@ -20,16 +20,15 @@ use android_system_virtualizationservice_internal::aidl::android::system::virtua
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IVfioHandler::VfioDev::VfioDev;
 use android_system_virtualizationservice_internal::binder::ParcelFileDescriptor;
 use binder::{self, BinderFeatures, ExceptionCode, Interface, IntoBinderResult, Strong};
-use lazy_static::lazy_static;
 use log::error;
 use std::fs::{read_link, write, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
+use std::sync::LazyLock;
 use std::path::{Path, PathBuf};
 use rustutils::system_properties;
 use zerocopy::{
     byteorder::{BigEndian, U32},
-    FromZeroes,
     FromBytes,
 };
 
@@ -131,7 +130,7 @@ const DEFAULT_DRIVER: &str = "\n";
 /// The structure of DT table header in dtbo.img.
 /// https://source.android.com/docs/core/architecture/dto/partitions
 #[repr(C)]
-#[derive(Debug, FromZeroes, FromBytes)]
+#[derive(Debug, FromBytes)]
 struct DtTableHeader {
     /// DT_TABLE_MAGIC
     magic: U32<BigEndian>,
@@ -155,7 +154,7 @@ struct DtTableHeader {
 /// The structure of each DT table entry (v0) in dtbo.img.
 /// https://source.android.com/docs/core/architecture/dto/partitions
 #[repr(C)]
-#[derive(Debug, FromZeroes, FromBytes)]
+#[derive(Debug, FromBytes)]
 struct DtTableEntry {
     /// size of each DT
     dt_size: U32<BigEndian>,
@@ -169,10 +168,9 @@ struct DtTableEntry {
     _custom: [U32<BigEndian>; 4],
 }
 
-lazy_static! {
-    static ref IS_VFIO_SUPPORTED: bool =
-        Path::new(DEV_VFIO_PATH).exists() && Path::new(VFIO_PLATFORM_DRIVER_PATH).exists();
-}
+static IS_VFIO_SUPPORTED: LazyLock<bool> = LazyLock::new(|| {
+    Path::new(DEV_VFIO_PATH).exists() && Path::new(VFIO_PLATFORM_DRIVER_PATH).exists()
+});
 
 fn check_platform_device(path: &Path) -> binder::Result<()> {
     if !path.exists() {

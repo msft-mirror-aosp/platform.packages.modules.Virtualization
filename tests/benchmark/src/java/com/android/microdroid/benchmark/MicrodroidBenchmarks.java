@@ -48,6 +48,7 @@ import com.android.microdroid.test.common.ProcessUtil;
 import com.android.microdroid.test.device.MicrodroidDeviceTestBase;
 import com.android.microdroid.testservice.IBenchmarkService;
 import com.android.microdroid.testservice.ITestService;
+import com.android.virt.vm_attestation.testservice.IAttestationService;
 
 import org.junit.After;
 import org.junit.Before;
@@ -74,6 +75,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
@@ -81,6 +83,7 @@ import java.util.function.Function;
 public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     private static final String TAG = "MicrodroidBenchmarks";
     private static final String METRIC_NAME_PREFIX = getMetricPrefix() + "microdroid/";
+    private static final String VM_ATTESTATION_PAYLOAD = "libvm_attestation_test_payload.so";
     private static final int IO_TEST_TRIAL_COUNT = 5;
     private static final int TEST_TRIAL_COUNT = 5;
     private static final long ONE_MEBI = 1024 * 1024;
@@ -94,14 +97,12 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     private static final String MICRODROID_IMG_PREFIX = "microdroid_";
     private static final String MICRODROID_IMG_SUFFIX = ".img";
 
-    @Parameterized.Parameters(name = "protectedVm={0},gki={1}")
+    @Parameterized.Parameters(name = "protectedVm={0},os={1}")
     public static Collection<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
-        ret.add(new Object[] {true /* protectedVm */, null /* use microdroid kernel */});
-        ret.add(new Object[] {false /* protectedVm */, null /* use microdroid kernel */});
-        for (String gki : SUPPORTED_GKI_VERSIONS) {
-            ret.add(new Object[] {true /* protectedVm */, gki});
-            ret.add(new Object[] {false /* protectedVm */, gki});
+        for (String os : SUPPORTED_OSES) {
+            ret.add(new Object[] {true /* protectedVm */, os});
+            ret.add(new Object[] {false /* protectedVm */, os});
         }
         return ret;
     }
@@ -110,7 +111,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     public boolean mProtectedVm;
 
     @Parameterized.Parameter(1)
-    public String mGki;
+    public String mOs;
 
     private final MetricsProcessor mMetricsProcessor = new MetricsProcessor(METRIC_NAME_PREFIX);
 
@@ -143,7 +144,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     public void setup() throws IOException {
         grantPermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
-        prepareTestSetup(mProtectedVm, mGki);
+        prepareTestSetup(mProtectedVm, mOs);
         mInstrumentation = getInstrumentation();
     }
 
@@ -596,7 +597,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         @Override
         public void onPayloadReady(VirtualMachine vm, IBenchmarkService service)
                 throws RemoteException {
-            int vmPid = ProcessUtil.getCrosvmPid(Os.getpid(), mShellExecutor);
+            int vmPid = ProcessUtil.getCrosvmPid(Os.getpid(), "test_vm_mem_usage", mShellExecutor);
 
             mMemTotal = service.getMemInfoEntry("MemTotal");
             mMemFree = service.getMemInfoEntry("MemFree");
@@ -670,7 +671,8 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
         @SuppressWarnings("ReturnValueIgnored")
         public void onPayloadReady(VirtualMachine vm, IBenchmarkService service)
                 throws RemoteException {
-            int vmPid = ProcessUtil.getCrosvmPid(Os.getpid(), mShellExecutor);
+            int vmPid =
+                    ProcessUtil.getCrosvmPid(Os.getpid(), "test_vm_mem_reclaim", mShellExecutor);
 
             // Allocate 256MB of anonymous memory. This will fill all guest
             // memory and cause swapping to start.
@@ -872,5 +874,57 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
             listener.runToFinish(TAG, vm);
         }
         reportMetrics(vmKillTime, "vm_kill_time", "microsecond");
+    }
+
+    @Test
+    public void requestAttestationTime() throws Exception {
+        assume().withMessage("Remote attestation is only supported on protected VM")
+                .that(mProtectedVm)
+                .isTrue();
+        assume().withMessage("Test needs Remote Attestation support")
+                .that(getVirtualMachineManager().isRemoteAttestationSupported())
+                .isTrue();
+
+        VirtualMachineConfig.Builder builder =
+                newVmConfigBuilderWithPayloadBinary(VM_ATTESTATION_PAYLOAD)
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setVmOutputCaptured(true);
+        VirtualMachineConfig config = builder.build();
+
+        List<Double> requestAttestationTime = new ArrayList<>(TEST_TRIAL_COUNT);
+
+        for (int i = 0; i < TEST_TRIAL_COUNT; ++i) {
+            VirtualMachine vm = forceCreateNewVirtualMachine("attestation_client", config);
+
+            vm.enableTestAttestation();
+            CompletableFuture<Exception> exception = new CompletableFuture<>();
+            CompletableFuture<Boolean> payloadReady = new CompletableFuture<>();
+            VmEventListener listener =
+                    new VmEventListener() {
+                        @Override
+                        public void onPayloadReady(VirtualMachine vm) {
+                            payloadReady.complete(true);
+                            try {
+                                IAttestationService service =
+                                        IAttestationService.Stub.asInterface(
+                                                vm.connectToVsockServer(IAttestationService.PORT));
+                                long start = System.nanoTime();
+                                service.requestAttestationForTesting();
+                                requestAttestationTime.add(
+                                        (double) (System.nanoTime() - start) / NANO_TO_MICRO);
+                                service.validateAttestationResult();
+                            } catch (Exception e) {
+                                exception.complete(e);
+                            } finally {
+                                forceStop(vm);
+                            }
+                        }
+                    };
+
+            listener.runToFinish(TAG, vm);
+            assertThat(payloadReady.getNow(false)).isTrue();
+            assertThat(exception.getNow(null)).isNull();
+        }
+        reportMetrics(requestAttestationTime, "request_attestation_time", "microsecond");
     }
 }

@@ -25,7 +25,6 @@ use android_system_virtualizationservice::{
     binder::ParcelFileDescriptor,
 };
 use anyhow::{anyhow, ensure, Context, Result};
-use lazy_static::lazy_static;
 use log::{info, warn};
 use service_vm_comm::{Request, Response, ServiceVmRequest, VmType};
 use std::fs::{self, File, OpenOptions};
@@ -48,11 +47,10 @@ const INSTANCE_IMG_SIZE_BYTES: i64 = 1 << 20; // 1MB
 const WRITE_BUFFER_CAPACITY: usize = 512;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-lazy_static! {
-    static ref PENDING_REQUESTS: AtomicCounter = AtomicCounter::default();
-    static ref SERVICE_VM: Mutex<Option<ServiceVm>> = Mutex::new(None);
-    static ref SERVICE_VM_SHUTDOWN: Condvar = Condvar::new();
-}
+
+static PENDING_REQUESTS: AtomicCounter = AtomicCounter::new();
+static SERVICE_VM: Mutex<Option<ServiceVm>> = Mutex::new(None);
+static SERVICE_VM_SHUTDOWN: Condvar = Condvar::new();
 
 /// Atomic counter with a condition variable that is used to wait for the counter
 /// to become positive within a timeout.
@@ -63,6 +61,10 @@ struct AtomicCounter {
 }
 
 impl AtomicCounter {
+    const fn new() -> Self {
+        Self { num: Mutex::new(0), num_increased: Condvar::new() }
+    }
+
     /// Checks if the counter becomes positive within the given timeout.
     fn is_positive_within_timeout(&self, timeout: Duration) -> bool {
         let (guard, _wait_result) = self
@@ -236,14 +238,16 @@ pub fn protected_vm_instance(instance_img_path: PathBuf) -> Result<VmInstance> {
         memoryMib: VM_MEMORY_MB,
         cpuTopology: CpuTopology::ONE_CPU,
         platformVersion: "~1.0".to_string(),
-        gdbPort: 0, // No gdb
+        gdbPort: 0,    // No gdb
+        balloon: true, // TODO: probably don't want ballooning.
         ..Default::default()
     });
     let console_out = Some(android_log_fd()?);
     let console_in = None;
     let log = Some(android_log_fd()?);
+    let dump_dt = None;
     let callback = None;
-    VmInstance::create(service.as_ref(), &config, console_out, console_in, log, callback)
+    VmInstance::create(service.as_ref(), &config, console_out, console_in, log, dump_dt, callback)
         .context("Failed to create service VM")
 }
 

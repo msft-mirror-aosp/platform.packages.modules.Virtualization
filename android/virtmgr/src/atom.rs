@@ -92,6 +92,26 @@ pub(crate) fn get_num_cpus() -> Option<usize> {
     }
 }
 
+fn get_num_vcpus(cpu_topology: CpuTopology, custom_vcpu_count: Option<i32>) -> i32 {
+    match cpu_topology {
+        CpuTopology::ONE_CPU => 1,
+        CpuTopology::MATCH_HOST => {
+            get_num_cpus().and_then(|v| v.try_into().ok()).unwrap_or_else(|| {
+                warn!("Failed to determine the number of CPUs in the host");
+                INVALID_NUM_CPUS
+            })
+        }
+        CpuTopology::CUSTOM => custom_vcpu_count.unwrap_or_else(|| {
+            warn!("AppConfig doesn't support CpuTopology::CUSTOM");
+            INVALID_NUM_CPUS
+        }),
+        _ => {
+            warn!("invalid CpuTopology: {cpu_topology:?}");
+            INVALID_NUM_CPUS
+        }
+    }
+}
+
 /// Write the stats of VMCreation to statsd
 /// The function creates a separate thread which waits for statsd to start to push atom
 pub fn write_vm_creation_stats(
@@ -99,6 +119,10 @@ pub fn write_vm_creation_stats(
     is_protected: bool,
     ret: &binder::Result<Strong<dyn IVirtualMachine>>,
 ) {
+    if cfg!(early) {
+        info!("Writing VmCreationRequested atom for early VMs is not implemented; skipping");
+        return;
+    }
     let creation_succeeded;
     let binder_exception_code;
     match ret {
@@ -111,31 +135,22 @@ pub fn write_vm_creation_stats(
             binder_exception_code = e.exception_code() as i32;
         }
     }
-    let (vm_identifier, config_type, cpu_topology, memory_mib, apexes) = match config {
+
+    let (vm_identifier, config_type, num_cpus, memory_mib, apexes) = match config {
         VirtualMachineConfig::AppConfig(config) => (
             config.name.clone(),
             vm_creation_requested::ConfigType::VirtualMachineAppConfig,
-            config.cpuTopology,
+            get_num_vcpus(config.cpuTopology, None),
             config.memoryMib,
             get_apex_list(config),
         ),
         VirtualMachineConfig::RawConfig(config) => (
             config.name.clone(),
             vm_creation_requested::ConfigType::VirtualMachineRawConfig,
-            config.cpuTopology,
+            get_num_vcpus(config.cpuTopology, Some(config.customVcpuCount)),
             config.memoryMib,
             String::new(),
         ),
-    };
-
-    let num_cpus: i32 = match cpu_topology {
-        CpuTopology::MATCH_HOST => {
-            get_num_cpus().and_then(|v| v.try_into().ok()).unwrap_or_else(|| {
-                warn!("Failed to determine the number of CPUs in the host");
-                INVALID_NUM_CPUS
-            })
-        }
-        _ => 1,
     };
 
     let atom = AtomVmCreationRequested {
@@ -165,6 +180,11 @@ pub fn write_vm_booted_stats(
     vm_identifier: &str,
     vm_start_timestamp: Option<SystemTime>,
 ) {
+    if cfg!(early) {
+        info!("Writing VmCreationRequested atom for early VMs is not implemented; skipping");
+        return;
+    }
+
     let vm_identifier = vm_identifier.to_owned();
     let duration = get_duration(vm_start_timestamp);
 
@@ -190,6 +210,10 @@ pub fn write_vm_exited_stats_sync(
     exit_signal: Option<i32>,
     vm_metric: &VmMetric,
 ) {
+    if cfg!(early) {
+        info!("Writing VmExited atom for early VMs is not implemented; skipping");
+        return;
+    }
     let vm_identifier = vm_identifier.to_owned();
     let elapsed_time_millis = get_duration(vm_metric.start_timestamp).as_millis() as i64;
     let guest_time_millis = vm_metric.cpu_guest_time.unwrap_or_default();

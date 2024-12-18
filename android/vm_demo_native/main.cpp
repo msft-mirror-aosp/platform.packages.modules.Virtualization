@@ -226,8 +226,10 @@ Result<std::shared_ptr<IVirtualMachine>> create_virtual_machine(
     ScopedFileDescriptor console_out_fd(fcntl(fileno(stdout), F_DUPFD_CLOEXEC));
     ScopedFileDescriptor console_in_fd(fcntl(fileno(stdin), F_DUPFD_CLOEXEC));
     ScopedFileDescriptor log_fd(fcntl(fileno(stdout), F_DUPFD_CLOEXEC));
+    ScopedFileDescriptor dump_dt_fd(-1);
 
-    ScopedAStatus ret = service.createVm(config, console_out_fd, console_in_fd, log_fd, &vm);
+    ScopedAStatus ret =
+            service.createVm(config, console_out_fd, console_in_fd, log_fd, dump_dt_fd, &vm);
     if (!ret.isOk()) {
         return Error() << "Failed to create VM";
     }
@@ -359,8 +361,10 @@ Result<void> do_something(ITestService& payload) {
 
 // This is the main routine that follows the steps in order
 Result<void> inner_main() {
-    TemporaryDir work_dir;
-    std::string work_dir_path(work_dir.path);
+    std::string work_dir_path("/data/local/tmp/vm_demo/");
+    if (mkdir(work_dir_path.c_str(), 0700) == -1 && errno != EEXIST) {
+        return ErrnoError() << "failed to create working directory " << work_dir_path.c_str();
+    }
 
     // Step 1: connect to the virtualizationservice
     unique_fd fd = OR_RETURN(get_service_fd());

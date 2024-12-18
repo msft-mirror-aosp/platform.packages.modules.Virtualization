@@ -23,7 +23,6 @@ use binder::{
     unstable_api::{new_spibinder, AIBinder},
     Strong, ExceptionCode,
 };
-use lazy_static::lazy_static;
 use log::{error, info, LevelFilter};
 use rpcbinder::{RpcServer, RpcSession};
 use openssl::{ec::EcKey, sha::sha256, ecdsa::EcdsaSig};
@@ -35,6 +34,7 @@ use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
+    LazyLock,
     Mutex,
 };
 use vm_payload_status_bindgen::AVmAttestationStatus;
@@ -42,13 +42,11 @@ use vm_payload_status_bindgen::AVmAttestationStatus;
 /// Maximum size of an ECDSA signature for EC P-256 key is 72 bytes.
 const MAX_ECDSA_P256_SIGNATURE_SIZE: usize = 72;
 
-lazy_static! {
-    static ref VM_APK_CONTENTS_PATH_C: CString =
-        CString::new(VM_APK_CONTENTS_PATH).expect("CString::new failed");
-    static ref PAYLOAD_CONNECTION: Mutex<Option<Strong<dyn IVmPayloadService>>> = Mutex::default();
-    static ref VM_ENCRYPTED_STORAGE_PATH_C: CString =
-        CString::new(ENCRYPTEDSTORE_MOUNTPOINT).expect("CString::new failed");
-}
+static VM_APK_CONTENTS_PATH_C: LazyLock<CString> =
+    LazyLock::new(|| CString::new(VM_APK_CONTENTS_PATH).expect("CString::new failed"));
+static PAYLOAD_CONNECTION: Mutex<Option<Strong<dyn IVmPayloadService>>> = Mutex::new(None);
+static VM_ENCRYPTED_STORAGE_PATH_C: LazyLock<CString> =
+    LazyLock::new(|| CString::new(ENCRYPTEDSTORE_MOUNTPOINT).expect("CString::new failed"));
 
 static ALREADY_NOTIFIED: AtomicBool = AtomicBool::new(false);
 
@@ -146,7 +144,7 @@ unsafe fn try_run_vsock_server(
     let service = unsafe { new_spibinder(service) };
     if let Some(service) = service {
         match RpcServer::new_vsock(service, libc::VMADDR_CID_HOST, port) {
-            Ok(server) => {
+            Ok((server, _)) => {
                 if let Some(on_ready) = on_ready {
                     // SAFETY: We're calling the callback with the parameter specified within the
                     // allowed lifetime.

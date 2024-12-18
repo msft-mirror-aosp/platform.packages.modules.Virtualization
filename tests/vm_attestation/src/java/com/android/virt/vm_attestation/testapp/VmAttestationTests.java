@@ -23,7 +23,6 @@ import static com.google.common.truth.TruthJUnit.assume;
 
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
-import android.system.virtualmachine.VirtualMachineManager;
 
 import com.android.microdroid.test.device.MicrodroidDeviceTestBase;
 import com.android.virt.vm_attestation.testservice.IAttestationService;
@@ -45,14 +44,13 @@ public class VmAttestationTests extends MicrodroidDeviceTestBase {
     private static final String VM_PAYLOAD_PATH = "libvm_attestation_test_payload.so";
 
     @Parameterized.Parameter(0)
-    public String mGki;
+    public String mOs;
 
-    @Parameterized.Parameters(name = "gki={0}")
+    @Parameterized.Parameters(name = "os={0}")
     public static Collection<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
-        ret.add(new Object[] {null /* use microdroid kernel */});
-        for (String gki : SUPPORTED_GKI_VERSIONS) {
-            ret.add(new Object[] {gki});
+        for (String os : SUPPORTED_OSES) {
+            ret.add(new Object[] {os});
         }
         return ret;
     }
@@ -61,7 +59,7 @@ public class VmAttestationTests extends MicrodroidDeviceTestBase {
     public void setup() throws IOException {
         grantPermission(VirtualMachine.MANAGE_VIRTUAL_MACHINE_PERMISSION);
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
-        prepareTestSetup(true /* protectedVm */, mGki);
+        prepareTestSetup(true /* protectedVm */, mOs);
         setMaxPerformanceTaskProfile();
     }
 
@@ -70,10 +68,7 @@ public class VmAttestationTests extends MicrodroidDeviceTestBase {
         assume().withMessage("Remote attestation is not supported on CF.")
                 .that(isCuttlefish())
                 .isFalse();
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
-        assume().withMessage("Test needs Remote Attestation support")
-                .that(getVirtualMachineManager().isRemoteAttestationSupported())
-                .isTrue();
+        ensureVmAttestationSupported();
 
         VirtualMachineConfig.Builder builder =
                 newVmConfigBuilderWithPayloadBinary(VM_PAYLOAD_PATH)

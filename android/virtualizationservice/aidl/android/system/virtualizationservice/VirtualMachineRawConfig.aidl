@@ -21,6 +21,8 @@ import android.system.virtualizationservice.DiskImage;
 import android.system.virtualizationservice.DisplayConfig;
 import android.system.virtualizationservice.GpuConfig;
 import android.system.virtualizationservice.InputDevice;
+import android.system.virtualizationservice.SharedPath;
+import android.system.virtualizationservice.UsbConfig;
 
 /** Raw configuration for running a VM. */
 parcelable VirtualMachineRawConfig {
@@ -51,14 +53,23 @@ parcelable VirtualMachineRawConfig {
     /** Disk images to be made available to the VM. */
     DiskImage[] disks;
 
+    /** Shared paths between host and guest */
+    SharedPath[] sharedPaths;
+
     /** Whether the VM should be a protected VM. */
     boolean protectedVm;
 
     /** The amount of RAM to give the VM, in MiB. 0 or negative to use the default. */
     int memoryMib;
 
+    /** The amount of swiotlb to give the VM, in MiB. 0 or negative to use the default. */
+    int swiotlbMib;
+
     /** The vCPU topology that will be generated for the VM. Default to 1 vCPU. */
     CpuTopology cpuTopology = CpuTopology.ONE_CPU;
+
+    /** The number of vCPUs. Ignored unless `cpuTopology == CUSTOM`. */
+    int customVcpuCount;
 
     /**
      * A version or range of versions of the virtual platform that this config is compatible with.
@@ -100,4 +111,12 @@ parcelable VirtualMachineRawConfig {
     @nullable GpuConfig gpuConfig;
 
     @nullable AudioConfig audioConfig;
+
+    boolean balloon;
+
+    /** Enable or disable USB passthrough support */
+    @nullable UsbConfig usbConfig;
+
+    /** List of tee services this VM wants to access */
+    String[] teeServices;
 }

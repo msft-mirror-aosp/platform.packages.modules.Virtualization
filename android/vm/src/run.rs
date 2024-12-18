@@ -140,15 +140,11 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         bail!("Either --config-path or --payload-binary-name must be defined")
     };
 
-    let os_name = if let Some(ver) = config.microdroid.gki() {
-        format!("microdroid_gki-{ver}")
-    } else {
-        "microdroid".to_owned()
-    };
+    let os_name = if let Some(ref os) = config.microdroid.os { os } else { "microdroid" };
 
     let payload_config_str = format!("{:?}!{:?}", config.apk, payload);
 
-    let custom_config = CustomConfig {
+    let mut custom_config = CustomConfig {
         gdbPort: config.debug.gdb.map(u16::from).unwrap_or(0) as i32, // 0 means no gdb
         vendorImage: vendor,
         devices: config
@@ -160,8 +156,25 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
             })
             .collect::<Result<_, _>>()?,
         networkSupported: config.common.network_supported(),
+        teeServices: config.common.tee_services().to_vec(),
         ..Default::default()
     };
+
+    if config.debug.enable_earlycon() {
+        if config.debug.debug != DebugLevel::FULL {
+            bail!("earlycon is only supported for debuggable VMs")
+        }
+        if cfg!(target_arch = "aarch64") {
+            custom_config
+                .extraKernelCmdlineParams
+                .push(String::from("earlycon=uart8250,mmio,0x3f8"));
+        } else if cfg!(target_arch = "x86_64") {
+            custom_config.extraKernelCmdlineParams.push(String::from("earlycon=uart8250,io,0x3f8"));
+        } else {
+            bail!("unexpected architecture!");
+        }
+        custom_config.extraKernelCmdlineParams.push(String::from("keep_bootcon"));
+    }
 
     let vm_config = VirtualMachineConfig::AppConfig(VirtualMachineAppConfig {
         name: config.common.name.unwrap_or_else(|| String::from("VmRunApp")),
@@ -177,7 +190,7 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         memoryMib: config.common.mem.unwrap_or(0) as i32, // 0 means use the VM default
         cpuTopology: config.common.cpu_topology,
         customConfig: Some(custom_config),
-        osName: os_name,
+        osName: os_name.to_string(),
         hugePages: config.common.hugepages,
         boostUclamp: config.common.boost_uclamp,
     });
@@ -188,6 +201,7 @@ pub fn command_run_app(config: RunAppConfig) -> Result<(), Error> {
         config.debug.console.as_ref().map(|p| p.as_ref()),
         config.debug.console_in.as_ref().map(|p| p.as_ref()),
         config.debug.log.as_ref().map(|p| p.as_ref()),
+        config.debug.dump_device_tree.as_ref().map(|p| p.as_ref()),
     )
 }
 
@@ -251,8 +265,8 @@ pub fn command_run(config: RunCustomVmConfig) -> Result<(), Error> {
     if let Some(mem) = config.common.mem {
         vm_config.memoryMib = mem as i32;
     }
-    if let Some(name) = config.common.name {
-        vm_config.name = name;
+    if let Some(ref name) = config.common.name {
+        vm_config.name = name.to_string();
     } else {
         vm_config.name = String::from("VmRun");
     }
@@ -262,6 +276,7 @@ pub fn command_run(config: RunCustomVmConfig) -> Result<(), Error> {
     vm_config.cpuTopology = config.common.cpu_topology;
     vm_config.hugePages = config.common.hugepages;
     vm_config.boostUclamp = config.common.boost_uclamp;
+    vm_config.teeServices = config.common.tee_services().to_vec();
     run(
         get_service()?.as_ref(),
         &VirtualMachineConfig::RawConfig(vm_config),
@@ -269,6 +284,7 @@ pub fn command_run(config: RunCustomVmConfig) -> Result<(), Error> {
         config.debug.console.as_ref().map(|p| p.as_ref()),
         config.debug.console_in.as_ref().map(|p| p.as_ref()),
         config.debug.log.as_ref().map(|p| p.as_ref()),
+        config.debug.dump_device_tree.as_ref().map(|p| p.as_ref()),
     )
 }
 
@@ -291,6 +307,7 @@ fn run(
     console_out_path: Option<&Path>,
     console_in_path: Option<&Path>,
     log_path: Option<&Path>,
+    dump_device_tree: Option<&Path>,
 ) -> Result<(), Error> {
     let console_out = if let Some(console_out_path) = console_out_path {
         Some(File::create(console_out_path).with_context(|| {
@@ -315,9 +332,17 @@ fn run(
     } else {
         Some(duplicate_fd(io::stdout())?)
     };
+    let dump_dt = if let Some(dump_device_tree) = dump_device_tree {
+        Some(File::create(dump_device_tree).with_context(|| {
+            format!("Failed to open file to dump device tree: {:?}", dump_device_tree)
+        })?)
+    } else {
+        None
+    };
     let callback = Box::new(Callback {});
-    let vm = VmInstance::create(service, config, console_out, console_in, log, Some(callback))
-        .context("Failed to create VM")?;
+    let vm =
+        VmInstance::create(service, config, console_out, console_in, log, dump_dt, Some(callback))
+            .context("Failed to create VM")?;
     vm.start().context("Failed to start VM")?;
 
     let debug_level = get_debug_level(config).unwrap_or(DebugLevel::NONE);

@@ -25,6 +25,8 @@ import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_NON
 import static android.system.virtualmachine.VirtualMachineManager.CAPABILITY_NON_PROTECTED_VM;
 import static android.system.virtualmachine.VirtualMachineManager.CAPABILITY_PROTECTED_VM;
 
+import static com.android.system.virtualmachine.flags.Flags.promoteSetShouldUseHugepagesToSystemApi;
+
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
@@ -52,6 +54,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.ParcelFileDescriptor.AutoCloseInputStream;
 import android.os.ParcelFileDescriptor.AutoCloseOutputStream;
 import android.os.SystemProperties;
+import android.platform.test.annotations.RequiresFlagsEnabled;
 import android.system.OsConstants;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineCallback;
@@ -69,6 +72,7 @@ import com.android.microdroid.test.vmshare.IVmShareTestService;
 import com.android.microdroid.testservice.IAppCallback;
 import com.android.microdroid.testservice.ITestService;
 import com.android.microdroid.testservice.IVmCallback;
+import com.android.system.virtualmachine.flags.Flags;
 import com.android.virt.vm_attestation.testservice.IAttestationService.AttestationStatus;
 import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 import com.android.virt.vm_attestation.util.X509Utils;
@@ -129,15 +133,13 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Rule public Timeout globalTimeout = Timeout.seconds(300);
 
-    @Parameterized.Parameters(name = "protectedVm={0},gki={1}")
+    @Parameterized.Parameters(name = "protectedVm={0},os={1}")
     public static Collection<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
-        ret.add(new Object[] {true /* protectedVm */, null /* use microdroid kernel */});
-        ret.add(new Object[] {false /* protectedVm */, null /* use microdroid kernel */});
         // TODO(b/302465542): run only the latest GKI on presubmit to reduce running time
-        for (String gki : SUPPORTED_GKI_VERSIONS) {
-            ret.add(new Object[] {true /* protectedVm */, gki});
-            ret.add(new Object[] {false /* protectedVm */, gki});
+        for (String os : SUPPORTED_OSES) {
+            ret.add(new Object[] {true /* protectedVm */, os});
+            ret.add(new Object[] {false /* protectedVm */, os});
         }
         return ret;
     }
@@ -146,12 +148,12 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     public boolean mProtectedVm;
 
     @Parameterized.Parameter(1)
-    public String mGki;
+    public String mOs;
 
     @Before
     public void setup() {
-        prepareTestSetup(mProtectedVm, mGki);
-        if (mGki != null) {
+        prepareTestSetup(mProtectedVm, mOs);
+        if (mOs != "microdroid") {
             // Using a non-default VM always needs the custom permission.
             grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         } else {
@@ -177,15 +179,19 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     private static final String VM_SHARE_APP_PACKAGE_NAME = "com.android.microdroid.vmshare_app";
 
-    private void createAndConnectToVmHelper(int cpuTopology) throws Exception {
+    private void createAndConnectToVmHelper(int cpuTopology, boolean shouldUseHugepages)
+            throws Exception {
         assumeSupportedDevice();
 
-        VirtualMachineConfig config =
+        VirtualMachineConfig.Builder builder =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setMemoryBytes(minMemoryRequired())
                         .setDebugLevel(DEBUG_LEVEL_FULL)
-                        .setCpuTopology(cpuTopology)
-                        .build();
+                        .setCpuTopology(cpuTopology);
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            builder.setShouldUseHugepages(shouldUseHugepages);
+        }
+        VirtualMachineConfig config = builder.build();
         VirtualMachine vm = forceCreateNewVirtualMachine("test_vm", config);
 
         TestResults testResults =
@@ -212,21 +218,41 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
     public void createAndConnectToVm() throws Exception {
-        createAndConnectToVmHelper(CPU_TOPOLOGY_ONE_CPU);
+        createAndConnectToVmHelper(CPU_TOPOLOGY_ONE_CPU, /* shouldUseHugepages= */ false);
     }
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
     public void createAndConnectToVm_HostCpuTopology() throws Exception {
-        createAndConnectToVmHelper(CPU_TOPOLOGY_MATCH_HOST);
+        createAndConnectToVmHelper(CPU_TOPOLOGY_MATCH_HOST, /* shouldUseHugepages= */ false);
+    }
+
+    @Test
+    @RequiresFlagsEnabled(Flags.FLAG_PROMOTE_SET_SHOULD_USE_HUGEPAGES_TO_SYSTEM_API)
+    public void createAndConnectToVm_WithHugepages() throws Exception {
+        // Note: setting shouldUseHugepages to true only hints that VM wants to use transparent huge
+        // pages. Whether it will actually be used depends on the value in the
+        // /sys/kernel/mm/transparent_hugepages/shmem_enabled.
+        // See packages/modules/Virtualization/docs/hugepages.md
+        createAndConnectToVmHelper(CPU_TOPOLOGY_ONE_CPU, /* shouldUseHugepages= */ true);
+    }
+
+    @Test
+    @RequiresFlagsEnabled(Flags.FLAG_PROMOTE_SET_SHOULD_USE_HUGEPAGES_TO_SYSTEM_API)
+    public void createAndConnectToVm_HostCpuTopology_WithHugepages() throws Exception {
+        // Note: setting shouldUseHugepages to true only hints that VM wants to use transparent huge
+        // pages. Whether it will actually be used depends on the value in the
+        // /sys/kernel/mm/transparent_hugepages/shmem_enabled.
+        // See packages/modules/Virtualization/docs/hugepages.md
+        createAndConnectToVmHelper(CPU_TOPOLOGY_MATCH_HOST, /* shouldUseHugepages= */ true);
     }
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    @VsrTest(requirements = {"VSR-7.1-001.006"})
     public void vmAttestationWhenRemoteAttestationIsNotSupported() throws Exception {
         // pVM remote attestation is only supported on protected VMs.
         assumeProtectedVM();
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
         assume().withMessage(
                         "This test does not apply to a device that supports Remote Attestation")
                 .that(getVirtualMachineManager().isRemoteAttestationSupported())
@@ -251,10 +277,10 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    @VsrTest(requirements = {"VSR-7.1-001.006"})
     public void vmAttestationWithVendorPartitionWhenSupported() throws Exception {
         // pVM remote attestation is only supported on protected VMs.
         assumeProtectedVM();
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
         assume().withMessage("Test needs Remote Attestation support")
                 .that(getVirtualMachineManager().isRemoteAttestationSupported())
                 .isTrue();
@@ -269,13 +295,11 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
+    @VsrTest(requirements = {"VSR-7.1-001.006"})
     public void vmAttestationWhenRemoteAttestationIsSupported() throws Exception {
         // pVM remote attestation is only supported on protected VMs.
         assumeProtectedVM();
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
-        assume().withMessage("Test needs Remote Attestation support")
-                .that(getVirtualMachineManager().isRemoteAttestationSupported())
-                .isTrue();
+        ensureVmAttestationSupported();
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary(VM_ATTESTATION_PAYLOAD_PATH)
                         .setProtectedVm(mProtectedVm)
@@ -578,6 +602,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(minimal.getEncryptedStorageBytes()).isEqualTo(0);
         assertThat(minimal.isVmOutputCaptured()).isFalse();
         assertThat(minimal.getOs()).isEqualTo("microdroid");
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            assertThat(minimal.shouldUseHugepages()).isFalse();
+        }
 
         // Maximal has everything that can be set to some non-default value. (And has different
         // values than minimal for the required fields.)
@@ -594,6 +621,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setEncryptedStorageBytes(1_000_000)
                         .setVmOutputCaptured(true)
                         .setOs("microdroid_gki-android14-6.1");
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            maximalBuilder.setShouldUseHugepages(true);
+        }
         VirtualMachineConfig maximal = maximalBuilder.build();
 
         assertThat(maximal.getApkPath()).isEqualTo("/apk/path");
@@ -610,6 +640,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(maximal.getEncryptedStorageBytes()).isEqualTo(1_000_000);
         assertThat(maximal.isVmOutputCaptured()).isTrue();
         assertThat(maximal.getOs()).isEqualTo("microdroid_gki-android14-6.1");
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            assertThat(maximal.shouldUseHugepages()).isTrue();
+        }
 
         assertThat(minimal.isCompatibleWith(maximal)).isFalse();
         assertThat(minimal.isCompatibleWith(minimal)).isTrue();
@@ -679,6 +712,10 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertConfigCompatible(
                         baseline, newBaselineBuilder().setCpuTopology(CPU_TOPOLOGY_MATCH_HOST))
                 .isTrue();
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            assertConfigCompatible(baseline, newBaselineBuilder().setShouldUseHugepages(true))
+                    .isTrue();
+        }
 
         // Changes that must be incompatible, since they must change the VM identity.
         assertConfigCompatible(baseline, newBaselineBuilder().addExtraApk("foo")).isFalse();
@@ -1212,7 +1249,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7"})
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7", "9.17/C-3-4"})
     public void instancesOfSameVmHaveDifferentCdis() throws Exception {
         assumeSupportedDevice();
         // TODO(b/325094712): VMs on CF with same payload have the same secret. This is because
@@ -1239,7 +1276,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7"})
+    @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-7", "9.17/C-3-4"})
     public void sameInstanceKeepsSameCdis() throws Exception {
         assumeSupportedDevice();
         assume().withMessage("Skip on CF. Too Slow. b/257270529").that(isCuttlefish()).isFalse();
@@ -1305,7 +1342,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    @VsrTest(requirements = {"VSR-7.1-001.005"})
+    @VsrTest(requirements = {"VSR-7.1-001.004"})
     public void protectedVmHasValidDiceChain() throws Exception {
         // This test validates two things regarding the pVM DICE chain:
         // 1. The DICE chain is well-formed that all the entries conform to the DICE spec.
@@ -1313,12 +1350,12 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assumeSupportedDevice();
         assumeProtectedVM();
         assumeVsrCompliant();
-        assumeTrue("Vendor API must be at least 202404", getVendorApiLevel() >= 202404);
+        assumeTrue("Vendor API must be newer than 202404", getVendorApiLevel() > 202404);
 
         grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadConfig("assets/vm_config.json")
-                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setDebugLevel(DEBUG_LEVEL_NONE)
                         .build();
         VirtualMachine vm = forceCreateNewVirtualMachine("bcc_vm_for_vsr", config);
         TestResults testResults =
@@ -1331,7 +1368,11 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         testResults.assertNoException();
         byte[] bccBytes = testResults.mBcc;
         assertThat(bccBytes).isNotNull();
-        assertThat(HwTrustJni.validateDiceChain(bccBytes)).isTrue();
+
+        String buildType = SystemProperties.get("ro.build.type");
+        boolean nonUserBuild = !buildType.isEmpty() && buildType != "user";
+
+        assertThat(HwTrustJni.validateDiceChain(bccBytes, nonUserBuild)).isTrue();
     }
 
     @Test
@@ -1925,35 +1966,33 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(checkVmOutputIsRedirectedToLogcat(true)).isTrue();
     }
 
-    private boolean setSystemProperties(String name, String value) {
+    private boolean isDebugPolicyEnabled(String entry) {
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         UiAutomation uiAutomation = instrumentation.getUiAutomation();
-        String cmd = "setprop " + name + " " + (value.isEmpty() ? "\"\"" : value);
-        return runInShellWithStderr(TAG, uiAutomation, cmd).trim().isEmpty();
+        String cmd = "/apex/com.android.virt/bin/vm info";
+        String output = runInShellWithStderr(TAG, uiAutomation, cmd).trim();
+        for (String line : output.split("\\v")) {
+            if (line.matches("^.*Debug policy.*" + entry + ": true.*$")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Test
     public void outputIsNotRedirectedToLogcatIfNotDebuggable() throws Exception {
         assumeSupportedDevice();
 
-        // Disable debug policy to ensure no log output.
-        String sysprop = "hypervisor.virtualizationmanager.debug_policy.path";
-        String old = SystemProperties.get(sysprop);
-        assumeTrue(
-                "Can't disable debug policy. Perhapse user build?",
-                setSystemProperties(sysprop, ""));
+        // Debug policy shouldn't enable log
+        assumeFalse(isDebugPolicyEnabled("log"));
 
-        try {
-            assertThat(checkVmOutputIsRedirectedToLogcat(false)).isFalse();
-        } finally {
-            assertThat(setSystemProperties(sysprop, old)).isTrue();
-        }
+        assertThat(checkVmOutputIsRedirectedToLogcat(false)).isFalse();
     }
 
     @Test
     public void testConsoleInputSupported() throws Exception {
         assumeSupportedDevice();
-        assumeTrue("Not supported on GKI kernels", mGki == null);
+        assumeFalse("Not supported on GKI kernels", mOs.startsWith("microdroid_gki-"));
 
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
@@ -2507,6 +2546,30 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(testResults.mException).isNull();
         int expectedFlags = MS_NOATIME | MS_RDONLY;
         assertThat(testResults.mMountFlags & expectedFlags).isEqualTo(expectedFlags);
+    }
+
+    @Test
+    public void pageSize() throws Exception {
+        assumeSupportedDevice();
+
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .build();
+
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_page_size", config);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mPageSize = ts.getPageSize();
+                        });
+
+        assertThat(testResults.mException).isNull();
+        int expectedPageSize = mOs.endsWith("_16k") ? 16384 : 4096;
+        assertThat(testResults.mPageSize).isEqualTo(expectedPageSize);
     }
 
     private static class VmShareServiceConnection implements ServiceConnection {

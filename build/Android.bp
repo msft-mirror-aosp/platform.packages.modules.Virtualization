@@ -41,8 +41,14 @@ rust_defaults {
     }) + select(release_flag("RELEASE_AVF_ENABLE_VENDOR_MODULES"), {
         true: ["vendor_modules"],
         default: [],
+    }) + select(release_flag("RELEASE_AVF_ENABLE_VM_TO_TEE_SERVICES_ALLOWLIST"), {
+        true: ["tee_services_allowlist"],
+        default: [],
     }) + select(release_flag("RELEASE_AVF_ENABLE_VIRT_CPUFREQ"), {
         true: ["virt_cpufreq"],
+        default: [],
+    }) + select(release_flag("RELEASE_AVF_IMPROVE_DEBUGGABLE_VMS"), {
+        true: ["debuggable_vms_improvements"],
         default: [],
     }) + select(release_flag("RELEASE_AVF_SUPPORT_CUSTOM_VM_WITH_PARAVIRTUALIZED_DEVICES"), {
         true: ["paravirtualized_devices"],
@@ -70,7 +76,7 @@ genrule_defaults {
     cmd: "FILES=($(in)) && $(location dtc) -@ -I dts -O dtb $${FILES[-1]} -o $(out)",
 }
 
-// This is a temporary workaround until b/309090563 is implemented.
+// This is a temporary workaround until b/343795511 is implemented.
 aconfig_declarations {
     name: "avf_aconfig_flags",
     package: "com.android.system.virtualmachine.flags",

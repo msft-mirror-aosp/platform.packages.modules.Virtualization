@@ -43,7 +43,9 @@ use command_fds::CommandFdExt;
 use log::warn;
 use rpcbinder::{FileDescriptorTransportMode, RpcSession};
 use shared_child::SharedChild;
+use std::ffi::{c_char, c_int, c_void, CString};
 use std::io::{self, Read};
+use std::os::fd::RawFd;
 use std::process::Command;
 use std::{
     fmt::{self, Debug, Formatter},
@@ -53,6 +55,7 @@ use std::{
     time::Duration,
 };
 
+const EARLY_VIRTMGR_PATH: &str = "/apex/com.android.virt/bin/early_virtmgr";
 const VIRTMGR_PATH: &str = "/apex/com.android.virt/bin/virtmgr";
 const VIRTMGR_THREADS: usize = 2;
 
@@ -74,6 +77,40 @@ fn posix_socketpair() -> Result<(OwnedFd, OwnedFd), io::Error> {
     Ok(socketpair(AddressFamily::Unix, SockType::Stream, None, SockFlag::SOCK_CLOEXEC)?)
 }
 
+/// Error handling function for `get_virtualization_service`.
+///
+/// # Safety
+/// `message` shouldn't be used outside of the lifetime of the function. Management of `ctx` is
+/// entirely up to the function.
+pub type ErrorCallback =
+    unsafe extern "C" fn(code: c_int, message: *const c_char, ctx: *mut c_void);
+
+/// Spawns a new instance of virtmgr and rerturns a file descriptor for the socket connection to
+/// the service. When error occurs, it is reported via the ErrorCallback function along with the
+/// error message and any context that is set by the client.
+///
+/// # Safety
+/// `cb` should be null or a valid function pointer of type `ErrorCallback`
+#[no_mangle]
+pub unsafe extern "C" fn get_virtualization_service(
+    cb: Option<ErrorCallback>,
+    ctx: *mut c_void,
+) -> RawFd {
+    match VirtualizationService::new() {
+        Ok(vs) => vs.client_fd.into_raw_fd(),
+        Err(e) => {
+            if let Some(cb) = cb {
+                let code = e.raw_os_error().unwrap_or(-1);
+                let msg = CString::new(e.to_string()).unwrap();
+                // SAFETY: `cb` doesn't use `msg` outside of the lifetime of the function.
+                // msg's lifetime is longer than `cb` as it is bound to a local variable.
+                unsafe { cb(code, msg.as_ptr(), ctx) };
+            }
+            -1
+        }
+    }
+}
+
 /// A running instance of virtmgr which is hosting a VirtualizationService
 /// RpcBinder server.
 pub struct VirtualizationService {
@@ -86,10 +123,20 @@ impl VirtualizationService {
     /// Spawns a new instance of virtmgr, a child process that will host
     /// the VirtualizationService AIDL service.
     pub fn new() -> Result<VirtualizationService, io::Error> {
+        Self::new_with_path(VIRTMGR_PATH)
+    }
+
+    /// Spawns a new instance of early_virtmgr, a child process that will host
+    /// the VirtualizationService AIDL service for early VMs.
+    pub fn new_early() -> Result<VirtualizationService, io::Error> {
+        Self::new_with_path(EARLY_VIRTMGR_PATH)
+    }
+
+    fn new_with_path(virtmgr_path: &str) -> Result<VirtualizationService, io::Error> {
         let (wait_fd, ready_fd) = posix_pipe()?;
         let (client_fd, server_fd) = posix_socketpair()?;
 
-        let mut command = Command::new(VIRTMGR_PATH);
+        let mut command = Command::new(virtmgr_path);
         // Can't use BorrowedFd as it doesn't implement Display
         command.arg("--rpc-server-fd").arg(format!("{}", server_fd.as_raw_fd()));
         command.arg("--ready-fd").arg(format!("{}", ready_fd.as_raw_fd()));
@@ -97,10 +144,11 @@ impl VirtualizationService {
 
         SharedChild::spawn(&mut command)?;
 
-        // Wait for the child to signal that the RpcBinder server is ready
-        // by closing its end of the pipe.
-        let _ignored = File::from(wait_fd).read(&mut [0]);
-
+        // Wait for the child to signal that the RpcBinder server is read by closing its end of the
+        // pipe. Failing to read (especially EACCESS or EPERM) can happen if the client lacks the
+        // MANAGE_VIRTUAL_MACHINE permission. Therefore, such errors are propagated instead of
+        // being ignored.
+        let _ = File::from(wait_fd).read(&mut [0])?;
         Ok(VirtualizationService { client_fd })
     }
 
@@ -160,14 +208,21 @@ impl VmInstance {
         console_out: Option<File>,
         console_in: Option<File>,
         log: Option<File>,
+        dump_dt: Option<File>,
         callback: Option<Box<dyn VmCallback + Send + Sync>>,
     ) -> BinderResult<Self> {
         let console_out = console_out.map(ParcelFileDescriptor::new);
         let console_in = console_in.map(ParcelFileDescriptor::new);
         let log = log.map(ParcelFileDescriptor::new);
+        let dump_dt = dump_dt.map(ParcelFileDescriptor::new);
 
-        let vm =
-            service.createVm(config, console_out.as_ref(), console_in.as_ref(), log.as_ref())?;
+        let vm = service.createVm(
+            config,
+            console_out.as_ref(),
+            console_in.as_ref(),
+            log.as_ref(),
+            dump_dt.as_ref(),
+        )?;
 
         let cid = vm.getCid()?;
 
@@ -186,6 +241,11 @@ impl VmInstance {
     /// Starts the VM.
     pub fn start(&self) -> BinderResult<()> {
         self.vm.start()
+    }
+
+    /// Stops the VM.
+    pub fn stop(&self) -> BinderResult<()> {
+        self.vm.stop()
     }
 
     /// Returns the CID used for vsock connections to the VM.
@@ -251,6 +311,11 @@ impl VmInstance {
                 }
             }
         })
+    }
+
+    /// Opens a vsock connection to the CID of the VM on the given vsock port.
+    pub fn connect_vsock(&self, port: u32) -> BinderResult<ParcelFileDescriptor> {
+        self.vm.connectVsock(port as i32)
     }
 }
 

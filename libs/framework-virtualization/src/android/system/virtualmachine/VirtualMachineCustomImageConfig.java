@@ -46,6 +46,7 @@ public class VirtualMachineCustomImageConfig {
     private static final String KEY_AUDIO_CONFIG = "audio_config";
     private static final String KEY_TRACKPAD = "trackpad";
     private static final String KEY_AUTO_MEMORY_BALLOON = "auto_memory_balloon";
+    private static final String KEY_USB_CONFIG = "usb_config";
 
     @Nullable private final String name;
     @Nullable private final String kernelPath;
@@ -53,6 +54,7 @@ public class VirtualMachineCustomImageConfig {
     @Nullable private final String bootloaderPath;
     @Nullable private final String[] params;
     @Nullable private final Disk[] disks;
+    @Nullable private final SharedPath[] sharedPaths;
     @Nullable private final DisplayConfig displayConfig;
     @Nullable private final AudioConfig audioConfig;
     private final boolean touch;
@@ -63,6 +65,7 @@ public class VirtualMachineCustomImageConfig {
     @Nullable private final GpuConfig gpuConfig;
     private final boolean trackpad;
     private final boolean autoMemoryBalloon;
+    @Nullable private final UsbConfig usbConfig;
 
     @Nullable
     public Disk[] getDisks() {
@@ -92,6 +95,11 @@ public class VirtualMachineCustomImageConfig {
     @Nullable
     public String[] getParams() {
         return params;
+    }
+
+    @Nullable
+    public SharedPath[] getSharedPaths() {
+        return sharedPaths;
     }
 
     public boolean useTouch() {
@@ -130,6 +138,7 @@ public class VirtualMachineCustomImageConfig {
             String bootloaderPath,
             String[] params,
             Disk[] disks,
+            SharedPath[] sharedPaths,
             DisplayConfig displayConfig,
             boolean touch,
             boolean keyboard,
@@ -139,13 +148,15 @@ public class VirtualMachineCustomImageConfig {
             GpuConfig gpuConfig,
             AudioConfig audioConfig,
             boolean trackpad,
-            boolean autoMemoryBalloon) {
+            boolean autoMemoryBalloon,
+            UsbConfig usbConfig) {
         this.name = name;
         this.kernelPath = kernelPath;
         this.initrdPath = initrdPath;
         this.bootloaderPath = bootloaderPath;
         this.params = params;
         this.disks = disks;
+        this.sharedPaths = sharedPaths;
         this.displayConfig = displayConfig;
         this.touch = touch;
         this.keyboard = keyboard;
@@ -156,6 +167,7 @@ public class VirtualMachineCustomImageConfig {
         this.audioConfig = audioConfig;
         this.trackpad = trackpad;
         this.autoMemoryBalloon = autoMemoryBalloon;
+        this.usbConfig = usbConfig;
     }
 
     static VirtualMachineCustomImageConfig from(PersistableBundle customImageConfigBundle) {
@@ -208,6 +220,9 @@ public class VirtualMachineCustomImageConfig {
         builder.setAudioConfig(AudioConfig.from(audioConfigPb));
         builder.useTrackpad(customImageConfigBundle.getBoolean(KEY_TRACKPAD));
         builder.useAutoMemoryBalloon(customImageConfigBundle.getBoolean(KEY_AUTO_MEMORY_BALLOON));
+        PersistableBundle usbConfigPb =
+                customImageConfigBundle.getPersistableBundle(KEY_USB_CONFIG);
+        builder.setUsbConfig(UsbConfig.from(usbConfigPb));
         return builder.build();
     }
 
@@ -266,6 +281,9 @@ public class VirtualMachineCustomImageConfig {
                 Optional.ofNullable(audioConfig).map(ac -> ac.toPersistableBundle()).orElse(null));
         pb.putBoolean(KEY_TRACKPAD, trackpad);
         pb.putBoolean(KEY_AUTO_MEMORY_BALLOON, autoMemoryBalloon);
+        pb.putPersistableBundle(
+                KEY_USB_CONFIG,
+                Optional.ofNullable(usbConfig).map(uc -> uc.toPersistableBundle()).orElse(null));
         return pb;
     }
 
@@ -282,6 +300,113 @@ public class VirtualMachineCustomImageConfig {
     @Nullable
     public GpuConfig getGpuConfig() {
         return gpuConfig;
+    }
+
+    @Nullable
+    public UsbConfig getUsbConfig() {
+        return usbConfig;
+    }
+
+    /** @hide */
+    public static final class SharedPath {
+        private final String path;
+        private final int hostUid;
+        private final int hostGid;
+        private final int guestUid;
+        private final int guestGid;
+        private final int mask;
+        private final String tag;
+        private final String socket;
+        private final boolean appDomain;
+        private final String socketPath;
+
+        public SharedPath(
+                String path,
+                int hostUid,
+                int hostGid,
+                int guestUid,
+                int guestGid,
+                int mask,
+                String tag,
+                String socket,
+                boolean appDomain,
+                String socketPath) {
+            this.path = path;
+            this.hostUid = hostUid;
+            this.hostGid = hostGid;
+            this.guestUid = guestUid;
+            this.guestGid = guestGid;
+            this.mask = mask;
+            this.tag = tag;
+            this.socket = socket;
+            this.appDomain = appDomain;
+            this.socketPath = socketPath;
+        }
+
+        android.system.virtualizationservice.SharedPath toParcelable() {
+            android.system.virtualizationservice.SharedPath parcelable =
+                    new android.system.virtualizationservice.SharedPath();
+            parcelable.sharedPath = this.path;
+            parcelable.hostUid = this.hostUid;
+            parcelable.hostGid = this.hostGid;
+            parcelable.guestUid = this.guestUid;
+            parcelable.guestGid = this.guestGid;
+            parcelable.mask = this.mask;
+            parcelable.tag = this.tag;
+            parcelable.socketPath = this.socket;
+            parcelable.appDomain = this.appDomain;
+            return parcelable;
+        }
+
+        /** @hide */
+        public String getSharedPath() {
+            return path;
+        }
+
+        /** @hide */
+        public int getHostUid() {
+            return hostUid;
+        }
+
+        /** @hide */
+        public int getHostGid() {
+            return hostGid;
+        }
+
+        /** @hide */
+        public int getGuestUid() {
+            return guestUid;
+        }
+
+        /** @hide */
+        public int getGuestGid() {
+            return guestGid;
+        }
+
+        /** @hide */
+        public int getMask() {
+            return mask;
+        }
+
+        /** @hide */
+        public String getTag() {
+            return tag;
+        }
+
+        /** @hide */
+        public String getSocket() {
+            return socket;
+        }
+
+        /** @hide */
+        public boolean getAppDomain() {
+            return appDomain;
+        }
+
+        /** @hide */
+        public String getSocketPath() {
+            return socketPath;
+        }
     }
 
     /** @hide */
@@ -351,6 +476,7 @@ public class VirtualMachineCustomImageConfig {
         private String bootloaderPath;
         private List<String> params = new ArrayList<>();
         private List<Disk> disks = new ArrayList<>();
+        private List<SharedPath> sharedPaths = new ArrayList<>();
         private AudioConfig audioConfig;
         private DisplayConfig displayConfig;
         private boolean touch;
@@ -360,7 +486,8 @@ public class VirtualMachineCustomImageConfig {
         private boolean network;
         private GpuConfig gpuConfig;
         private boolean trackpad;
-        private boolean autoMemoryBalloon = true;
+        private boolean autoMemoryBalloon = false;
+        private UsbConfig usbConfig;
 
         /** @hide */
         public Builder() {}
@@ -392,6 +519,12 @@ public class VirtualMachineCustomImageConfig {
         /** @hide */
         public Builder addDisk(Disk disk) {
             this.disks.add(disk);
+            return this;
+        }
+
+        /** @hide */
+        public Builder addSharedPath(SharedPath path) {
+            this.sharedPaths.add(path);
             return this;
         }
 
@@ -462,6 +595,12 @@ public class VirtualMachineCustomImageConfig {
         }
 
         /** @hide */
+        public Builder setUsbConfig(UsbConfig usbConfig) {
+            this.usbConfig = usbConfig;
+            return this;
+        }
+
+        /** @hide */
         public VirtualMachineCustomImageConfig build() {
             return new VirtualMachineCustomImageConfig(
                     this.name,
@@ -470,6 +609,7 @@ public class VirtualMachineCustomImageConfig {
                     this.bootloaderPath,
                     this.params.toArray(new String[0]),
                     this.disks.toArray(new Disk[0]),
+                    this.sharedPaths.toArray(new SharedPath[0]),
                     displayConfig,
                     touch,
                     keyboard,
@@ -479,7 +619,63 @@ public class VirtualMachineCustomImageConfig {
                     gpuConfig,
                     audioConfig,
                     trackpad,
-                    autoMemoryBalloon);
+                    autoMemoryBalloon,
+                    usbConfig);
+        }
+    }
+
+    /** @hide */
+    public static final class UsbConfig {
+        private static final String KEY_USE_CONTROLLER = "use_controller";
+        public final boolean controller;
+
+        public UsbConfig(boolean controller) {
+            this.controller = controller;
+        }
+
+        public boolean getUsbController() {
+            return this.controller;
+        }
+
+        android.system.virtualizationservice.UsbConfig toParceclable() {
+            android.system.virtualizationservice.UsbConfig parcelable =
+                    new android.system.virtualizationservice.UsbConfig();
+            parcelable.controller = this.controller;
+            return parcelable;
+        }
+
+        private static UsbConfig from(PersistableBundle pb) {
+            if (pb == null) {
+                return null;
+            }
+            Builder builder = new Builder();
+            builder.setController(pb.getBoolean(KEY_USE_CONTROLLER));
+            return builder.build();
+        }
+
+        private PersistableBundle toPersistableBundle() {
+            PersistableBundle pb = new PersistableBundle();
+            pb.putBoolean(KEY_USE_CONTROLLER, this.controller);
+            return pb;
+        }
+
+        /** @hide */
+        public static class Builder {
+            private boolean useController = false;
+
+            /** @hide */
+            public Builder() {}
+
+            /** @hide */
+            public Builder setController(boolean useController) {
+                this.useController = useController;
+                return this;
+            }
+
+            /** @hide */
+            public UsbConfig build() {
+                return new UsbConfig(useController);
+            }
         }
     }
 

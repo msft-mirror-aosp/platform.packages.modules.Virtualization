@@ -18,7 +18,6 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
     VirtualMachineAppConfig::DebugLevel::DebugLevel, VirtualMachineConfig::VirtualMachineConfig,
 };
 use anyhow::{anyhow, Context, Error, Result};
-use lazy_static::lazy_static;
 use libfdt::{Fdt, FdtError};
 use log::{info, warn};
 use rustutils::system_properties;
@@ -26,10 +25,12 @@ use std::ffi::{CString, NulError};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use vmconfig::get_debug_level;
 
 const CUSTOM_DEBUG_POLICY_OVERLAY_SYSPROP: &str =
     "hypervisor.virtualizationmanager.debug_policy.path";
+const DUMP_DT_SYSPROP: &str = "hypervisor.virtualizationmanager.dump_device_tree";
 const DEVICE_TREE_EMPTY_TREE_SIZE_BYTES: usize = 100; // rough estimation.
 
 struct DPPath {
@@ -56,11 +57,12 @@ impl DPPath {
     }
 }
 
-lazy_static! {
-    static ref DP_LOG_PATH: DPPath = DPPath::new("/avf/guest/common", "log").unwrap();
-    static ref DP_RAMDUMP_PATH: DPPath = DPPath::new("/avf/guest/common", "ramdump").unwrap();
-    static ref DP_ADB_PATH: DPPath = DPPath::new("/avf/guest/microdroid", "adb").unwrap();
-}
+static DP_LOG_PATH: LazyLock<DPPath> =
+    LazyLock::new(|| DPPath::new("/avf/guest/common", "log").unwrap());
+static DP_RAMDUMP_PATH: LazyLock<DPPath> =
+    LazyLock::new(|| DPPath::new("/avf/guest/common", "ramdump").unwrap());
+static DP_ADB_PATH: LazyLock<DPPath> =
+    LazyLock::new(|| DPPath::new("/avf/guest/microdroid", "adb").unwrap());
 
 /// Get debug policy value in bool. It's true iff the value is explicitly set to <1>.
 fn get_debug_policy_bool(path: &Path) -> Result<bool> {
@@ -182,6 +184,7 @@ impl DebugPolicy {
 #[derive(Debug, Default)]
 pub struct DebugConfig {
     pub debug_level: DebugLevel,
+    pub dump_device_tree: bool,
     debug_policy: DebugPolicy,
 }
 
@@ -192,8 +195,13 @@ impl DebugConfig {
             info!("Debug policy is disabled");
             Default::default()
         });
+        let dump_dt_sysprop = system_properties::read_bool(DUMP_DT_SYSPROP, false);
+        let dump_device_tree = dump_dt_sysprop.unwrap_or_else(|e| {
+            warn!("Failed to read sysprop {DUMP_DT_SYSPROP}: {e}");
+            false
+        });
 
-        Self { debug_level, debug_policy }
+        Self { debug_level, debug_policy, dump_device_tree }
     }
 
     fn get_debug_policy() -> Option<DebugPolicy> {
