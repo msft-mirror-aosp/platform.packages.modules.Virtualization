@@ -10,13 +10,12 @@ rust_ffi_static {
     rustlibs: [
         "libaarch64_paging",
         "libbssl_avf_nostd",
-        "libbssl_sys_nostd",
         "libciborium_io_nostd",
         "libciborium_nostd",
         "libcstr",
         "libdiced_open_dice_nostd",
-        "libfdtpci",
-        "liblibfdt",
+        "libhypervisor_backends",
+        "liblibfdt_nostd",
         "liblog_rust_nostd",
         "libservice_vm_comm_nostd",
         "libservice_vm_fake_chain_nostd",
@@ -36,6 +35,7 @@ cc_binary {
     ],
     static_libs: [
         "librialto",
+        "libvmbase_dice_clear_memory",
     ],
     linker_scripts: [
         "image.ld",

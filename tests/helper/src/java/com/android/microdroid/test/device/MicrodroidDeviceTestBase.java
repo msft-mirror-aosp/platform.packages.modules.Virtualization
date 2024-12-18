@@ -21,6 +21,7 @@ import static android.content.pm.PackageManager.FEATURE_VIRTUALIZATION_FRAMEWORK
 import static android.content.pm.PackageManager.FEATURE_WATCH;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 
 import static org.junit.Assume.assumeFalse;
@@ -70,8 +71,13 @@ public abstract class MicrodroidDeviceTestBase {
     private final String MAX_PERFORMANCE_TASK_PROFILE = "CPUSET_SP_TOP_APP";
 
     protected static final String KERNEL_VERSION = SystemProperties.get("ro.kernel.version");
-    protected static final Set<String> SUPPORTED_GKI_VERSIONS =
-            Collections.unmodifiableSet(new HashSet(Arrays.asList("android15-6.6")));
+    protected static final Set<String> SUPPORTED_OSES =
+            Collections.unmodifiableSet(
+                    new HashSet<>(
+                            Arrays.asList(
+                                    "microdroid",
+                                    "microdroid_16k",
+                                    "microdroid_gki-android15-6.6")));
 
     public static boolean isCuttlefish() {
         return getDeviceProperties().isCuttlefish();
@@ -132,7 +138,7 @@ public abstract class MicrodroidDeviceTestBase {
 
     private final Context mCtx = ApplicationProvider.getApplicationContext();
     private boolean mProtectedVm;
-    private String mGki;
+    private String mOs;
 
     protected Context getContext() {
         return mCtx;
@@ -161,7 +167,7 @@ public abstract class MicrodroidDeviceTestBase {
     }
 
     protected final String os() {
-        return mGki != null ? "microdroid_gki-" + mGki : "microdroid";
+        return mOs;
     }
 
     /**
@@ -190,20 +196,21 @@ public abstract class MicrodroidDeviceTestBase {
         }
     }
 
-    public void prepareTestSetup(boolean protectedVm, String gki) {
+    public void prepareTestSetup(boolean protectedVm, String os) {
         assumeFeatureVirtualizationFramework();
 
         mProtectedVm = protectedVm;
-        mGki = gki;
+        mOs = os;
 
         int capabilities = getVirtualMachineManager().getCapabilities();
         if (protectedVm) {
             assume().withMessage("Skip where protected VMs aren't supported")
                     .that(capabilities & VirtualMachineManager.CAPABILITY_PROTECTED_VM)
                     .isNotEqualTo(0);
-            assume().withMessage("Testing protected VMs on GSI isn't supported. b/272443823")
-                    .that(isGsi())
-                    .isFalse();
+            // TODO(b/376870129): remove this
+            assume().withMessage("pVMs with 16k kernel are not supported yet :(")
+                    .that(mOs)
+                    .doesNotContain("_16k");
         } else {
             assume().withMessage("Skip where VMs aren't supported")
                     .that(capabilities & VirtualMachineManager.CAPABILITY_NON_PROTECTED_VM)
@@ -248,6 +255,14 @@ public abstract class MicrodroidDeviceTestBase {
         return SystemProperties.getInt("ro.board.api_level", 0);
     }
 
+    /**
+     * @return The first vendor API level when the vendor images for an SoC that is qualified for
+     *     vendor freeze are first released with this property, or 0 if the property is not set.
+     */
+    protected static int getFirstVendorApiLevel() {
+        return SystemProperties.getInt("ro.board.first_api_level", 0);
+    }
+
     protected void assumeSupportedDevice() {
         assume().withMessage("Skip on 5.4 kernel. b/218303240")
                 .that(KERNEL_VERSION)
@@ -266,6 +281,24 @@ public abstract class MicrodroidDeviceTestBase {
         assume().withMessage("Secretkeeper not supported")
                 .that(getVirtualMachineManager().isUpdatableVmSupported())
                 .isFalse();
+    }
+
+    protected void ensureVmAttestationSupported() throws Exception {
+        // The first vendor API level is checked because VM attestation requires the VM DICE chain
+        // to be ROM-rooted.
+        int firstVendorApiLevel = getFirstVendorApiLevel();
+        boolean isRemoteAttestationSupported =
+                getVirtualMachineManager().isRemoteAttestationSupported();
+        if (firstVendorApiLevel >= 202504) {
+            assertWithMessage(
+                            "First vendor API '"
+                                    + firstVendorApiLevel
+                                    + "' (>=202504) must support VM remote attestation")
+                    .that(isRemoteAttestationSupported)
+                    .isTrue();
+        } else {
+            assumeTrue("Skip on VM remote attestation not supported", isRemoteAttestationSupported);
+        }
     }
 
     public abstract static class VmEventListener implements VirtualMachineCallback {
@@ -578,6 +611,7 @@ public abstract class MicrodroidDeviceTestBase {
         public int mMountFlags;
         public String mConsoleInput;
         public byte[] mInstanceSecret;
+        public int mPageSize;
 
         public void assertNoException() {
             if (mException != null) {

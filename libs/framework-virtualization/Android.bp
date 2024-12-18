@@ -46,15 +46,15 @@ java_sdk_library {
     impl_library_visibility: [
         "//packages/modules/Virtualization:__subpackages__",
     ],
-    aconfig_declarations: [
-        "avf_aconfig_flags",
-    ],
     lint: {
         baseline_filename: "lint-baseline.xml",
         warning_checks: [
             "FlaggedApi",
         ],
     },
+    aconfig_declarations: [
+        "avf_aconfig_flags",
+    ],
 }
 
 gensrcs {

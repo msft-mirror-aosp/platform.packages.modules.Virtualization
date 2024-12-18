@@ -29,6 +29,7 @@ aidl_interface {
         rust: {
             enabled: true,
             apex_available: [
+                "//apex_available:platform",
                 "com.android.virt",
                 "com.android.compos",
                 "com.android.microfuchsia",
@@ -110,7 +111,7 @@ aidl_interface {
     name: "android.system.virtualmachineservice",
     srcs: ["android/system/virtualmachineservice/**/*.aidl"],
     imports: [
-        "android.hardware.security.secretkeeper-V1",
+        "android.hardware.security.secretkeeper-V2",
         "android.system.virtualizationcommon",
     ],
     unstable: true,
@@ -149,6 +150,7 @@ aidl_interface {
         rust: {
             enabled: true,
             apex_available: [
+                "//apex_available:platform",
                 "com.android.virt",
                 "com.android.compos",
                 "com.android.microfuchsia",

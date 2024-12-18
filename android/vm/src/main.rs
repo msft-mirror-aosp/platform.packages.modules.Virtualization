@@ -72,17 +72,32 @@ pub struct CommonConfig {
     /// Boost uclamp to stablise results for benchmarks.
     #[arg(short, long)]
     boost_uclamp: bool,
+
+    /// Secure services this VM wants to access.
+    #[cfg(tee_services_allowlist)]
+    #[arg(long)]
+    tee_services: Vec<String>,
 }
 
 impl CommonConfig {
-    #[cfg(network)]
     fn network_supported(&self) -> bool {
-        self.network_supported
+        cfg_if::cfg_if! {
+            if #[cfg(network)] {
+                self.network_supported
+            } else {
+                false
+            }
+        }
     }
 
-    #[cfg(not(network))]
-    fn network_supported(&self) -> bool {
-        false
+    fn tee_services(&self) -> &[String] {
+        cfg_if::cfg_if! {
+            if #[cfg(tee_services_allowlist)] {
+                &self.tee_services
+            } else {
+                &[]
+            }
+        }
     }
 }
 
@@ -114,17 +129,21 @@ pub struct DebugConfig {
     #[cfg(debuggable_vms_improvements)]
     #[arg(long)]
     enable_earlycon: bool,
+
+    /// Path to file to dump VM device tree.
+    #[arg(long)]
+    dump_device_tree: Option<PathBuf>,
 }
 
 impl DebugConfig {
-    #[cfg(debuggable_vms_improvements)]
     fn enable_earlycon(&self) -> bool {
-        self.enable_earlycon
-    }
-
-    #[cfg(not(debuggable_vms_improvements))]
-    fn enable_earlycon(&self) -> bool {
-        false
+        cfg_if::cfg_if! {
+            if #[cfg(debuggable_vms_improvements)] {
+                self.enable_earlycon
+            } else {
+                false
+            }
+        }
     }
 }
 
@@ -151,41 +170,31 @@ pub struct MicrodroidConfig {
     #[arg(long)]
     devices: Vec<PathBuf>,
 
-    /// Version of GKI to use. If set, use instead of microdroid kernel
-    #[cfg(vendor_modules)]
+    /// Version of OS to use. If not set, defaults to microdroid.
+    /// You can list all available OSes via `vm info` command.
     #[arg(long)]
-    gki: Option<String>,
+    os: Option<String>,
 }
 
 impl MicrodroidConfig {
-    #[cfg(vendor_modules)]
     fn vendor(&self) -> Option<&PathBuf> {
-        self.vendor.as_ref()
+        cfg_if::cfg_if! {
+            if #[cfg(vendor_modules)] {
+                self.vendor.as_ref()
+            } else {
+                None
+            }
+        }
     }
 
-    #[cfg(not(vendor_modules))]
-    fn vendor(&self) -> Option<&PathBuf> {
-        None
-    }
-
-    #[cfg(vendor_modules)]
-    fn gki(&self) -> Option<&str> {
-        self.gki.as_deref()
-    }
-
-    #[cfg(not(vendor_modules))]
-    fn gki(&self) -> Option<&str> {
-        None
-    }
-
-    #[cfg(device_assignment)]
     fn devices(&self) -> &[PathBuf] {
-        &self.devices
-    }
-
-    #[cfg(not(device_assignment))]
-    fn devices(&self) -> &[PathBuf] {
-        &[]
+        cfg_if::cfg_if! {
+            if #[cfg(device_assignment)] {
+                &self.devices
+            } else {
+                &[]
+            }
+        }
     }
 }
 
@@ -236,35 +245,36 @@ pub struct RunAppConfig {
 }
 
 impl RunAppConfig {
-    #[cfg(multi_tenant)]
     fn extra_apks(&self) -> &[PathBuf] {
-        &self.extra_apks
+        cfg_if::cfg_if! {
+            if #[cfg(multi_tenant)] {
+                &self.extra_apks
+            } else {
+                &[]
+            }
+        }
     }
 
-    #[cfg(not(multi_tenant))]
-    fn extra_apks(&self) -> &[PathBuf] {
-        &[]
-    }
-
-    #[cfg(llpvm_changes)]
     fn instance_id(&self) -> Result<PathBuf, Error> {
-        Ok(self.instance_id.clone())
+        cfg_if::cfg_if! {
+            if #[cfg(llpvm_changes)] {
+                Ok(self.instance_id.clone())
+            } else {
+                Err(anyhow!("LLPVM feature is disabled, --instance_id flag not supported"))
+            }
+        }
     }
 
-    #[cfg(not(llpvm_changes))]
-    fn instance_id(&self) -> Result<PathBuf, Error> {
-        Err(anyhow!("LLPVM feature is disabled, --instance_id flag not supported"))
-    }
-
-    #[cfg(llpvm_changes)]
     fn set_instance_id(&mut self, instance_id_file: PathBuf) -> Result<(), Error> {
-        self.instance_id = instance_id_file;
-        Ok(())
-    }
-
-    #[cfg(not(llpvm_changes))]
-    fn set_instance_id(&mut self, _: PathBuf) -> Result<(), Error> {
-        Err(anyhow!("LLPVM feature is disabled, --instance_id flag not supported"))
+        cfg_if::cfg_if! {
+            if #[cfg(llpvm_changes)] {
+                self.instance_id = instance_id_file;
+                Ok(())
+            } else {
+                let _ = instance_id_file;
+                Err(anyhow!("LLPVM feature is disabled, --instance_id flag not supported"))
+            }
+        }
     }
 }
 
@@ -472,6 +482,9 @@ fn command_info() -> Result<(), Error> {
 
     let os_list = get_service()?.getSupportedOSList()?;
     println!("Available OS list: {}", serde_json::to_string(&os_list)?);
+
+    let debug_policy = get_service()?.getDebugPolicy()?;
+    println!("Debug policy: {}", debug_policy);
 
     Ok(())
 }

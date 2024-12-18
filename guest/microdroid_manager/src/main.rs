@@ -50,7 +50,6 @@ use rpcbinder::RpcSession;
 use rustutils::sockets::android_get_control_socket;
 use rustutils::system_properties;
 use rustutils::system_properties::PropertyWatcher;
-use safe_ownedfd::take_fd_ownership;
 use secretkeeper_comm::data_types::ID_SIZE;
 use std::borrow::Cow::{Borrowed, Owned};
 use std::env;
@@ -141,10 +140,10 @@ fn write_death_reason_to_serial(err: &Error) -> Result<()> {
         Owned(format!("MICRODROID_UNKNOWN_RUNTIME_ERROR|{:?}", err))
     };
 
-    for chunk in death_reason.as_bytes().chunks(16) {
-        // TODO(b/220071963): Sometimes, sending more than 16 bytes at once makes MM hang.
-        OpenOptions::new().read(false).write(true).open(FAILURE_SERIAL_DEVICE)?.write_all(chunk)?;
-    }
+    let mut serial_file = OpenOptions::new().read(false).write(true).open(FAILURE_SERIAL_DEVICE)?;
+    serial_file.write_all(death_reason.as_bytes()).context("serial device write_all failed")?;
+    // Block until the serial port trasmits all the data to the host.
+    nix::sys::termios::tcdrain(&serial_file).context("tcdrain failed")?;
 
     Ok(())
 }
@@ -171,6 +170,10 @@ fn should_defer_rollback_protection() -> bool {
 }
 
 fn main() -> Result<()> {
+    // SAFETY: This is very early in the process. Nobody has taken ownership of the inherited FDs
+    // yet.
+    unsafe { rustutils::inherited_fd::init_once()? };
+
     // If debuggable, print full backtrace to console log with stdio_to_kmsg
     if is_debuggable()? {
         env::set_var("RUST_BACKTRACE", "full");
@@ -200,7 +203,7 @@ fn try_main() -> Result<()> {
     );
     info!("started.");
 
-    let vm_payload_service_fd = prepare_vm_payload_service_socket()?;
+    let vm_payload_service_fd = android_get_control_socket(VM_PAYLOAD_SERVICE_SOCKET_NAME)?;
 
     load_crashkernel_if_supported().context("Failed to load crashkernel")?;
 
@@ -481,12 +484,6 @@ fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
         .context("Could not connect to IVirtualMachineService")
 }
 
-/// Prepares a socket file descriptor for the vm payload service.
-fn prepare_vm_payload_service_socket() -> Result<OwnedFd> {
-    let raw_fd = android_get_control_socket(VM_PAYLOAD_SERVICE_SOCKET_NAME)?;
-    Ok(take_fd_ownership(raw_fd)?)
-}
-
 fn is_strict_boot() -> bool {
     Path::new(AVF_STRICT_BOOT).exists()
 }
@@ -636,7 +633,7 @@ fn load_crashkernel_if_supported() -> Result<()> {
     if requested {
         let status = Command::new("/system/bin/kexec_load").status()?;
         if !status.success() {
-            return Err(anyhow!("Failed to load crashkernel: {:?}", status));
+            return Err(anyhow!("Failed to load crashkernel: {status}"));
         }
         info!("ramdump is loaded: debuggable={debuggable}, ramdump={ramdump}");
     }
@@ -673,7 +670,9 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
         });
     }
 
-    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    if !is_debuggable()? {
+        command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    }
 
     info!("notifying payload started");
     service.notifyPayloadStarted()?;

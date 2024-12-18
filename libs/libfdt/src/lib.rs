@@ -33,7 +33,7 @@ use core::ffi::{c_void, CStr};
 use core::ops::Range;
 use cstr::cstr;
 use libfdt::get_slice_at_ptr;
-use zerocopy::AsBytes as _;
+use zerocopy::IntoBytes as _;
 
 use crate::libfdt::{Libfdt, LibfdtMut};
 
@@ -624,7 +624,7 @@ impl Fdt {
     /// # Safety
     ///
     /// It is undefined to call this function on a slice that does not contain a valid device tree.
-    pub unsafe fn unchecked_from_slice(fdt: &[u8]) -> &Self {
+    pub const unsafe fn unchecked_from_slice(fdt: &[u8]) -> &Self {
         let self_ptr = fdt as *const _ as *const _;
         // SAFETY: The pointer is non-null, dereferenceable, and points to allocated memory.
         unsafe { &*self_ptr }

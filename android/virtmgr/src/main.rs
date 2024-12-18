@@ -33,8 +33,8 @@ use std::os::unix::io::{AsFd, RawFd};
 use std::sync::LazyLock;
 use clap::Parser;
 use nix::unistd::{write, Pid, Uid};
+use rustutils::inherited_fd::take_fd_ownership;
 use std::os::unix::raw::{pid_t, uid_t};
-use safe_ownedfd::take_fd_ownership;
 
 const LOG_TAG: &str = "virtmgr";
 
@@ -83,6 +83,11 @@ fn check_vm_support() -> Result<()> {
 }
 
 fn main() {
+    // SAFETY: This is very early in the process. Nobody has taken ownership of the inherited FDs
+    // yet.
+    unsafe { rustutils::inherited_fd::init_once() }
+        .expect("Failed to take ownership of inherited FDs");
+
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag(LOG_TAG)

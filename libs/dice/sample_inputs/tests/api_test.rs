@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
 use anyhow::Result;
 use diced_open_dice::{derive_cdi_leaf_priv, sign, DiceArtifacts};
 use diced_sample_inputs::make_sample_bcc_and_cdis;

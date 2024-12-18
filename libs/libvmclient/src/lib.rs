@@ -55,6 +55,7 @@ use std::{
     time::Duration,
 };
 
+const EARLY_VIRTMGR_PATH: &str = "/apex/com.android.virt/bin/early_virtmgr";
 const VIRTMGR_PATH: &str = "/apex/com.android.virt/bin/virtmgr";
 const VIRTMGR_THREADS: usize = 2;
 
@@ -122,10 +123,20 @@ impl VirtualizationService {
     /// Spawns a new instance of virtmgr, a child process that will host
     /// the VirtualizationService AIDL service.
     pub fn new() -> Result<VirtualizationService, io::Error> {
+        Self::new_with_path(VIRTMGR_PATH)
+    }
+
+    /// Spawns a new instance of early_virtmgr, a child process that will host
+    /// the VirtualizationService AIDL service for early VMs.
+    pub fn new_early() -> Result<VirtualizationService, io::Error> {
+        Self::new_with_path(EARLY_VIRTMGR_PATH)
+    }
+
+    fn new_with_path(virtmgr_path: &str) -> Result<VirtualizationService, io::Error> {
         let (wait_fd, ready_fd) = posix_pipe()?;
         let (client_fd, server_fd) = posix_socketpair()?;
 
-        let mut command = Command::new(VIRTMGR_PATH);
+        let mut command = Command::new(virtmgr_path);
         // Can't use BorrowedFd as it doesn't implement Display
         command.arg("--rpc-server-fd").arg(format!("{}", server_fd.as_raw_fd()));
         command.arg("--ready-fd").arg(format!("{}", ready_fd.as_raw_fd()));
@@ -197,14 +208,21 @@ impl VmInstance {
         console_out: Option<File>,
         console_in: Option<File>,
         log: Option<File>,
+        dump_dt: Option<File>,
         callback: Option<Box<dyn VmCallback + Send + Sync>>,
     ) -> BinderResult<Self> {
         let console_out = console_out.map(ParcelFileDescriptor::new);
         let console_in = console_in.map(ParcelFileDescriptor::new);
         let log = log.map(ParcelFileDescriptor::new);
+        let dump_dt = dump_dt.map(ParcelFileDescriptor::new);
 
-        let vm =
-            service.createVm(config, console_out.as_ref(), console_in.as_ref(), log.as_ref())?;
+        let vm = service.createVm(
+            config,
+            console_out.as_ref(),
+            console_in.as_ref(),
+            log.as_ref(),
+            dump_dt.as_ref(),
+        )?;
 
         let cid = vm.getCid()?;
 
@@ -223,6 +241,11 @@ impl VmInstance {
     /// Starts the VM.
     pub fn start(&self) -> BinderResult<()> {
         self.vm.start()
+    }
+
+    /// Stops the VM.
+    pub fn stop(&self) -> BinderResult<()> {
+        self.vm.stop()
     }
 
     /// Returns the CID used for vsock connections to the VM.
@@ -288,6 +311,11 @@ impl VmInstance {
                 }
             }
         })
+    }
+
+    /// Opens a vsock connection to the CID of the VM on the given vsock port.
+    pub fn connect_vsock(&self, port: u32) -> BinderResult<ParcelFileDescriptor> {
+        self.vm.connectVsock(port as i32)
     }
 }
 

@@ -28,16 +28,23 @@ use std::{
 use utils::*;
 
 const TEST_IMG_WITH_ONE_HASHDESC_PATH: &str = "test_image_with_one_hashdesc.img";
+const TEST_IMG_WITH_INVALID_PAGE_SIZE_PATH: &str = "test_image_with_invalid_page_size.img";
+const TEST_IMG_WITH_NEGATIVE_PAGE_SIZE_PATH: &str = "test_image_with_negative_page_size.img";
+const TEST_IMG_WITH_OVERFLOW_PAGE_SIZE_PATH: &str = "test_image_with_overflow_page_size.img";
+const TEST_IMG_WITH_0K_PAGE_SIZE_PATH: &str = "test_image_with_0k_page_size.img";
+const TEST_IMG_WITH_1K_PAGE_SIZE_PATH: &str = "test_image_with_1k_page_size.img";
+const TEST_IMG_WITH_4K_PAGE_SIZE_PATH: &str = "test_image_with_4k_page_size.img";
+const TEST_IMG_WITH_9K_PAGE_SIZE_PATH: &str = "test_image_with_9k_page_size.img";
+const TEST_IMG_WITH_16K_PAGE_SIZE_PATH: &str = "test_image_with_16k_page_size.img";
 const TEST_IMG_WITH_ROLLBACK_INDEX_5: &str = "test_image_with_rollback_index_5.img";
-const TEST_IMG_WITH_PROP_DESC_PATH: &str = "test_image_with_prop_desc.img";
 const TEST_IMG_WITH_SERVICE_VM_PROP_PATH: &str = "test_image_with_service_vm_prop.img";
 const TEST_IMG_WITH_UNKNOWN_VM_TYPE_PROP_PATH: &str = "test_image_with_unknown_vm_type_prop.img";
-const TEST_IMG_WITH_MULTIPLE_PROPS_PATH: &str = "test_image_with_multiple_props.img";
 const TEST_IMG_WITH_DUPLICATED_CAP_PATH: &str = "test_image_with_duplicated_capability.img";
 const TEST_IMG_WITH_NON_INITRD_HASHDESC_PATH: &str = "test_image_with_non_initrd_hashdesc.img";
 const TEST_IMG_WITH_INITRD_AND_NON_INITRD_DESC_PATH: &str =
     "test_image_with_initrd_and_non_initrd_desc.img";
 const TEST_IMG_WITH_MULTIPLE_CAPABILITIES: &str = "test_image_with_multiple_capabilities.img";
+const TEST_IMG_WITH_ALL_CAPABILITIES: &str = "test_image_with_all_capabilities.img";
 const UNSIGNED_TEST_IMG_PATH: &str = "unsigned_test.img";
 
 const RANDOM_FOOTER_POS: usize = 30;
@@ -50,6 +57,20 @@ fn latest_normal_payload_passes_verification() -> Result<()> {
         &load_latest_initrd_normal()?,
         b"initrd_normal",
         DebugLevel::None,
+        None,
+    )
+}
+
+#[test]
+fn latest_trusty_security_vm_kernel_passes_verification() -> Result<()> {
+    let salt = b"trusty_security_vm_salt";
+    let expected_rollback_index = 1;
+    assert_payload_without_initrd_passes_verification(
+        &load_latest_trusty_security_vm_signed_kernel()?,
+        salt,
+        expected_rollback_index,
+        vec![Capability::TrustySecurityVm],
+        None,
     )
 }
 
@@ -59,6 +80,7 @@ fn latest_debug_payload_passes_verification() -> Result<()> {
         &load_latest_initrd_debug()?,
         b"initrd_debug",
         DebugLevel::Full,
+        None,
     )
 }
 
@@ -80,6 +102,7 @@ fn payload_expecting_no_initrd_passes_verification_with_no_initrd() -> Result<()
         public_key: &public_key,
         capabilities: vec![],
         rollback_index: 0,
+        page_size: None,
     };
     assert_eq!(expected_boot_data, verified_boot_data);
 
@@ -124,6 +147,7 @@ fn payload_expecting_no_initrd_passes_verification_with_service_vm_prop() -> Res
         public_key: &public_key,
         capabilities: vec![Capability::RemoteAttest],
         rollback_index: 0,
+        page_size: None,
     };
     assert_eq!(expected_boot_data, verified_boot_data);
 
@@ -141,32 +165,12 @@ fn payload_with_unknown_vm_type_fails_verification_with_no_initrd() -> Result<()
 }
 
 #[test]
-fn payload_with_multiple_props_fails_verification_with_no_initrd() -> Result<()> {
-    assert_payload_verification_fails(
-        &fs::read(TEST_IMG_WITH_MULTIPLE_PROPS_PATH)?,
-        /* initrd= */ None,
-        &load_trusted_public_key()?,
-        PvmfwVerifyError::InvalidDescriptors(DescriptorError::InvalidContents),
-    )
-}
-
-#[test]
 fn payload_with_duplicated_capability_fails_verification_with_no_initrd() -> Result<()> {
     assert_payload_verification_fails(
         &fs::read(TEST_IMG_WITH_DUPLICATED_CAP_PATH)?,
         /* initrd= */ None,
         &load_trusted_public_key()?,
         SlotVerifyError::InvalidMetadata.into(),
-    )
-}
-
-#[test]
-fn payload_with_prop_descriptor_fails_verification_with_no_initrd() -> Result<()> {
-    assert_payload_verification_fails(
-        &fs::read(TEST_IMG_WITH_PROP_DESC_PATH)?,
-        /* initrd= */ None,
-        &load_trusted_public_key()?,
-        PvmfwVerifyError::UnknownVbmetaProperty,
     )
 }
 
@@ -241,6 +245,60 @@ fn tampered_kernel_fails_verification() -> Result<()> {
         &load_trusted_public_key()?,
         SlotVerifyError::Verification(None).into(),
     )
+}
+
+#[test]
+fn kernel_has_expected_page_size_invalid() {
+    let kernel = fs::read(TEST_IMG_WITH_INVALID_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_negative() {
+    let kernel = fs::read(TEST_IMG_WITH_NEGATIVE_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_overflow() {
+    let kernel = fs::read(TEST_IMG_WITH_OVERFLOW_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_none() {
+    let kernel = fs::read(TEST_IMG_WITH_ONE_HASHDESC_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Ok(None));
+}
+
+#[test]
+fn kernel_has_expected_page_size_0k() {
+    let kernel = fs::read(TEST_IMG_WITH_0K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_1k() {
+    let kernel = fs::read(TEST_IMG_WITH_1K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_4k() {
+    let kernel = fs::read(TEST_IMG_WITH_4K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Ok(Some(4usize << 10)));
+}
+
+#[test]
+fn kernel_has_expected_page_size_9k() {
+    let kernel = fs::read(TEST_IMG_WITH_9K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Err(PvmfwVerifyError::InvalidPageSize));
+}
+
+#[test]
+fn kernel_has_expected_page_size_16k() {
+    let kernel = fs::read(TEST_IMG_WITH_16K_PAGE_SIZE_PATH).unwrap();
+    assert_eq!(read_page_size(&kernel), Ok(Some(16usize << 10)));
 }
 
 #[test]
@@ -399,6 +457,7 @@ fn payload_with_rollback_index() -> Result<()> {
         public_key: &public_key,
         capabilities: vec![],
         rollback_index: 5,
+        page_size: None,
     };
     assert_eq!(expected_boot_data, verified_boot_data);
     Ok(())
@@ -416,5 +475,25 @@ fn payload_with_multiple_capabilities() -> Result<()> {
 
     assert!(verified_boot_data.has_capability(Capability::RemoteAttest));
     assert!(verified_boot_data.has_capability(Capability::SecretkeeperProtection));
+    Ok(())
+}
+
+#[test]
+fn payload_with_all_capabilities() -> Result<()> {
+    let public_key = load_trusted_public_key()?;
+    let verified_boot_data = verify_payload(
+        &fs::read(TEST_IMG_WITH_ALL_CAPABILITIES)?,
+        /* initrd= */ None,
+        &public_key,
+    )
+    .map_err(|e| anyhow!("Verification failed. Error: {}", e))?;
+
+    assert!(verified_boot_data.has_capability(Capability::RemoteAttest));
+    assert!(verified_boot_data.has_capability(Capability::TrustySecurityVm));
+    assert!(verified_boot_data.has_capability(Capability::SecretkeeperProtection));
+    assert!(verified_boot_data.has_capability(Capability::SupportsUefiBoot));
+    // Fail if this test doesn't actually cover all supported capabilities.
+    assert_eq!(Capability::COUNT, 4);
+
     Ok(())
 }

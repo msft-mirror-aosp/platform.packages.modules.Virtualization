@@ -28,7 +28,7 @@ use ciborium::{
 use core::result;
 use coset::{AsCborValue, CoseSign1, CoseSign1Builder, HeaderBuilder};
 use diced_open_dice::{
-    derive_cdi_leaf_priv, kdf, sign, DiceArtifacts, PrivateKey, DICE_COSE_KEY_ALG_VALUE,
+    derive_cdi_leaf_priv, kdf, sign, DiceArtifacts, PrivateKey, VM_KEY_ALGORITHM,
 };
 use log::{debug, error};
 use service_vm_comm::{EcdsaP256KeyPair, GenerateCertificateRequestParams, RequestProcessingError};
@@ -63,8 +63,7 @@ pub(super) fn generate_ecdsa_p256_key_pair(
 
 const CSR_PAYLOAD_SCHEMA_V3: u8 = 3;
 const AUTH_REQ_SCHEMA_V1: u8 = 1;
-// TODO(b/300624493): Add a new certificate type for AVF CSR.
-const CERTIFICATE_TYPE: &str = "keymint";
+const CERTIFICATE_TYPE: &str = "rkp-vm";
 
 /// Builds the CSR described in:
 ///
@@ -153,8 +152,7 @@ fn build_signed_data(payload: &Value, dice_artifacts: &dyn DiceArtifacts) -> Res
         error!("Failed to derive the CDI_Leaf_Priv: {e}");
         RequestProcessingError::InternalError
     })?;
-    let dice_key_alg = cbor_util::dice_cose_key_alg(DICE_COSE_KEY_ALG_VALUE)?;
-    let protected = HeaderBuilder::new().algorithm(dice_key_alg).build();
+    let protected = HeaderBuilder::new().algorithm(VM_KEY_ALGORITHM.into()).build();
     let signed_data = CoseSign1Builder::new()
         .protected(protected)
         .payload(cbor_util::serialize(payload)?)

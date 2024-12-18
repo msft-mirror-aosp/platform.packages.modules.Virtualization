@@ -26,7 +26,6 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
-import android.system.virtualmachine.VirtualMachineManager;
 
 import com.android.microdroid.test.device.MicrodroidDeviceTestBase;
 import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
@@ -70,14 +69,13 @@ public class RkpdVmAttestationTest extends MicrodroidDeviceTestBase {
             "com.android.virt.rkpd.vm_attestation.testapp";
 
     @Parameterized.Parameter(0)
-    public String mGki;
+    public String mOs;
 
-    @Parameterized.Parameters(name = "gki={0}")
+    @Parameterized.Parameters(name = "os={0}")
     public static Collection<Object[]> params() {
         List<Object[]> ret = new ArrayList<>();
-        ret.add(new Object[] {null /* use microdroid kernel */});
-        for (String gki : SUPPORTED_GKI_VERSIONS) {
-            ret.add(new Object[] {gki});
+        for (String os : SUPPORTED_OSES) {
+            ret.add(new Object[] {os});
         }
         return ret;
     }
@@ -87,21 +85,18 @@ public class RkpdVmAttestationTest extends MicrodroidDeviceTestBase {
         assume().withMessage("RKP Integration tests rely on network availability.")
                 .that(isNetworkConnected(getContext()))
                 .isTrue();
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
-        assume().withMessage("Test needs Remote Attestation support")
-                .that(getVirtualMachineManager().isRemoteAttestationSupported())
-                .isTrue();
+        ensureVmAttestationSupported();
 
-        if (mGki == null) {
+        if (mOs == "microdroid") {
             // We don't need this permission to use the microdroid kernel.
             revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         } else {
-            // The permission is needed to use the GKI kernel.
+            // The permission is needed to use non-default os.
             // Granting the permission is needed as the microdroid kernel test setup
             // can revoke the permission before the GKI kernel test.
             grantPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
         }
-        prepareTestSetup(true /* protectedVm */, mGki);
+        prepareTestSetup(true /* protectedVm */, mOs);
         setMaxPerformanceTaskProfile();
     }
 

@@ -23,16 +23,15 @@ use android_system_virtualizationservice::aidl::android::system::virtualizations
 use anyhow::{ensure, Context, Result};
 use binder::{LazyServiceGuard, ParcelFileDescriptor};
 use log::info;
-use safe_ownedfd::take_fd_ownership;
 use std::ffi::CStr;
 use std::fs::File;
-use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
 use vmclient::VmInstance;
 
 pub struct MicrofuchsiaInstance {
     _vm_instance: VmInstance,
     _lazy_service_guard: LazyServiceGuard,
-    _pty: Pty,
+    _pty: Option<Pty>,
 }
 
 pub struct InstanceStarter {
@@ -65,10 +64,14 @@ impl InstanceStarter {
         let initrd = Some(ParcelFileDescriptor::new(initrd_fd));
 
         // Prepare a pty for console input/output.
-        let pty = openpty()?;
-        let console_in = Some(pty.leader.try_clone().context("cloning pty")?);
-        let console_out = Some(pty.leader.try_clone().context("cloning pty")?);
-
+        let (pty, console_in, console_out) = if cfg!(enable_console) {
+            let pty = openpty()?;
+            let console_in = Some(pty.leader.try_clone().context("cloning pty")?);
+            let console_out = Some(pty.leader.try_clone().context("cloning pty")?);
+            (Some(pty), console_in, console_out)
+        } else {
+            (None, None, None)
+        };
         let config = VirtualMachineConfig::RawConfig(VirtualMachineRawConfig {
             name: "Microfuchsia".into(),
             instanceId: instance_id,
@@ -81,8 +84,9 @@ impl InstanceStarter {
             memoryMib: 256,
             cpuTopology: CpuTopology::ONE_CPU,
             platformVersion: "1.0.0".into(),
-            // Fuchsia uses serial for console by default.
+            #[cfg(enable_console)]
             consoleInputDevice: Some("ttyS0".into()),
+            balloon: true,
             ..Default::default()
         });
         let vm_instance = VmInstance::create(
@@ -91,13 +95,16 @@ impl InstanceStarter {
             console_out,
             console_in,
             /* log= */ None,
+            /* dump_dt= */ None,
             None,
         )
         .context("Failed to create VM")?;
-        vm_instance
-            .vm
-            .setHostConsoleName(&pty.follower_name)
-            .context("Setting host console name")?;
+        if let Some(pty) = &pty {
+            vm_instance
+                .vm
+                .setHostConsoleName(&pty.follower_name)
+                .context("Setting host console name")?;
+        }
         vm_instance.start().context("Starting VM")?;
 
         Ok(MicrofuchsiaInstance {
@@ -134,7 +141,6 @@ fn openpty() -> Result<Pty> {
             "failed to openpty"
         );
     }
-    let leader = take_fd_ownership(leader)?;
 
     // SAFETY: calling these libc functions with valid+initialized variables is safe.
     unsafe {
@@ -147,25 +153,24 @@ fn openpty() -> Result<Pty> {
             c_line: 0,
             c_cc: [0u8; 19],
         };
-        ensure!(
-            libc::tcgetattr(leader.as_raw_fd(), &mut attr) == 0,
-            "failed to get termios attributes"
-        );
+        ensure!(libc::tcgetattr(leader, &mut attr) == 0, "failed to get termios attributes");
 
         // Force it to be a raw pty and re-set it.
         libc::cfmakeraw(&mut attr);
         ensure!(
-            libc::tcsetattr(leader.as_raw_fd(), libc::TCSANOW, &attr) == 0,
+            libc::tcsetattr(leader, libc::TCSANOW, &attr) == 0,
             "failed to set termios attributes"
         );
     }
 
     // Construct the return value.
+    // SAFETY: The file descriptors are valid because openpty returned without error (above).
+    let leader = unsafe { File::from_raw_fd(leader) };
     let follower_name: Vec<u8> = follower_name.iter_mut().map(|x| *x as _).collect();
     let follower_name = CStr::from_bytes_until_nul(&follower_name)
         .context("pty filename missing NUL")?
         .to_str()
         .context("pty filename invalid utf8")?
         .to_string();
-    Ok(Pty { leader: File::from(leader), follower_name })
+    Ok(Pty { leader, follower_name })
 }
