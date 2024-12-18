@@ -20,7 +20,7 @@ use crate::composite::make_composite_image;
 use crate::crosvm::{AudioConfig, CrosvmConfig, DiskFile, SharedPathConfig, DisplayConfig, GpuConfig, InputDeviceOption, PayloadState, UsbConfig, VmContext, VmInstance, VmState};
 use crate::debug_config::{DebugConfig, DebugPolicy};
 use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
-use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
+use crate::payload::{ApexInfoList, add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
 use crate::selinux::{check_tee_service_permission, getfilecon, getprevcon, SeContext};
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::{
@@ -407,9 +407,33 @@ impl IGlobalVmContext for EarlyVmContext {
 }
 
 fn find_partition(path: &Path) -> binder::Result<String> {
-    match path.components().nth(1) {
+    let mut components = path.components();
+    match components.nth(1) {
         Some(std::path::Component::Normal(partition)) => {
-            Ok(partition.to_string_lossy().into_owned())
+            if partition != "apex" {
+                return Ok(partition.to_string_lossy().into_owned());
+            }
+
+            // If path is under /apex, find a partition of the preinstalled .apex path
+            let apex_name = match components.next() {
+                Some(std::path::Component::Normal(name)) => name.to_string_lossy(),
+                _ => {
+                    return Err(anyhow!("Can't find apex name for '{}'", path.display()))
+                        .or_service_specific_exception(-1)
+                }
+            };
+
+            let apex_info_list = ApexInfoList::load()
+                .context("Failed to get apex info list")
+                .or_service_specific_exception(-1)?;
+
+            for apex_info in apex_info_list.list.iter() {
+                if apex_info.name == apex_name {
+                    return Ok(apex_info.partition.to_lowercase());
+                }
+            }
+
+            Err(anyhow!("Can't find apex info for '{apex_name}'")).or_service_specific_exception(-1)
         }
         _ => Err(anyhow!("Can't find partition in '{}'", path.display()))
             .or_service_specific_exception(-1),
