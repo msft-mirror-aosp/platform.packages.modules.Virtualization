@@ -16,15 +16,15 @@
 
 use std::ffi::CStr;
 use std::fs::File;
-use std::os::fd::FromRawFd;
+use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::time::Duration;
 
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::{
-        DiskImage::DiskImage, IVirtualizationService::IVirtualizationService,
-        VirtualMachineConfig::VirtualMachineConfig,
+        CpuTopology::CpuTopology, DiskImage::DiskImage,
+        IVirtualizationService::IVirtualizationService, VirtualMachineConfig::VirtualMachineConfig,
         VirtualMachineRawConfig::VirtualMachineRawConfig,
     },
     binder::{ParcelFileDescriptor, Strong},
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn AVirtualMachineRawConfig_addDisk(
 /// # Safety
 /// `config` must be a pointer returned by `AVirtualMachineRawConfig_create`.
 #[no_mangle]
-pub unsafe extern "C" fn AVirtualMachineRawConfig_setMemoryMib(
+pub unsafe extern "C" fn AVirtualMachineRawConfig_setMemoryMiB(
     config: *mut VirtualMachineRawConfig,
     memory_mib: i32,
 ) {
@@ -188,6 +188,37 @@ pub unsafe extern "C" fn AVirtualMachineRawConfig_setMemoryMib(
     // AVirtualMachineRawConfig_create. It's the only reference to the object.
     let config = unsafe { &mut *config };
     config.memoryMib = memory_mib;
+}
+
+/// Set how much swiotlb will be given to a virtual machine.
+///
+/// # Safety
+/// `config` must be a pointer returned by `AVirtualMachineRawConfig_create`.
+#[no_mangle]
+pub unsafe extern "C" fn AVirtualMachineRawConfig_setSwiotlbMiB(
+    config: *mut VirtualMachineRawConfig,
+    swiotlb_mib: i32,
+) {
+    // SAFETY: `config` is assumed to be a valid, non-null pointer returned by
+    // AVirtualMachineRawConfig_create. It's the only reference to the object.
+    let config = unsafe { &mut *config };
+    config.swiotlbMib = swiotlb_mib;
+}
+
+/// Set vCPU count.
+///
+/// # Safety
+/// `config` must be a pointer returned by `AVirtualMachineRawConfig_create`.
+#[no_mangle]
+pub unsafe extern "C" fn AVirtualMachineRawConfig_setVCpuCount(
+    config: *mut VirtualMachineRawConfig,
+    n: i32,
+) {
+    // SAFETY: `config` is assumed to be a valid, non-null pointer returned by
+    // AVirtualMachineRawConfig_create. It's the only reference to the object.
+    let config = unsafe { &mut *config };
+    config.cpuTopology = CpuTopology::CUSTOM;
+    config.customVcpuCount = n;
 }
 
 /// Set whether a virtual machine is protected or not.
@@ -349,6 +380,21 @@ pub unsafe extern "C" fn AVirtualMachine_stop(vm: *const VmInstance) -> c_int {
     let vm = unsafe { &*vm };
     match vm.stop() {
         Ok(_) => 0,
+        Err(_) => -libc::EIO,
+    }
+}
+
+/// Open a vsock connection to the CID of the virtual machine on the given vsock port.
+///
+/// # Safety
+/// `vm` must be a pointer returned by `AVirtualMachine_create`.
+#[no_mangle]
+pub unsafe extern "C" fn AVirtualMachine_connectVsock(vm: *const VmInstance, port: u32) -> c_int {
+    // SAFETY: `vm` is assumed to be a valid, non-null pointer returned by
+    // `AVirtualMachine_createRaw`. It's the only reference to the object.
+    let vm = unsafe { &*vm };
+    match vm.connect_vsock(port) {
+        Ok(pfd) => pfd.into_raw_fd(),
         Err(_) => -libc::EIO,
     }
 }
