@@ -79,8 +79,8 @@ int AVirtualMachineRawConfig_setName(AVirtualMachineRawConfig* _Nonnull config,
  * \return If successful, it returns 0. If `instanceIdSize` is incorrect, it returns -EINVAL.
  */
 int AVirtualMachineRawConfig_setInstanceId(AVirtualMachineRawConfig* _Nonnull config,
-                                           const int8_t* _Nonnull instanceId, size_t instanceIdSize)
-        __INTRODUCED_IN(36);
+                                           const uint8_t* _Nonnull instanceId,
+                                           size_t instanceIdSize) __INTRODUCED_IN(36);
 
 /**
  * Set a kernel image of a virtual machine.
