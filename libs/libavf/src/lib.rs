@@ -23,14 +23,15 @@ use std::time::Duration;
 
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::{
-        DiskImage::DiskImage, IVirtualizationService::IVirtualizationService,
-        VirtualMachineConfig::VirtualMachineConfig,
+        AssignedDevices::AssignedDevices, CpuTopology::CpuTopology, DiskImage::DiskImage,
+        IVirtualizationService::IVirtualizationService, VirtualMachineConfig::VirtualMachineConfig,
         VirtualMachineRawConfig::VirtualMachineRawConfig,
     },
     binder::{ParcelFileDescriptor, Strong},
 };
 use avf_bindgen::AVirtualMachineStopReason;
 use libc::timespec;
+use log::error;
 use vmclient::{DeathReason, VirtualizationService, VmInstance};
 
 /// Create a new virtual machine config object with no properties.
@@ -205,6 +206,22 @@ pub unsafe extern "C" fn AVirtualMachineRawConfig_setSwiotlbMiB(
     config.swiotlbMib = swiotlb_mib;
 }
 
+/// Set vCPU count.
+///
+/// # Safety
+/// `config` must be a pointer returned by `AVirtualMachineRawConfig_create`.
+#[no_mangle]
+pub unsafe extern "C" fn AVirtualMachineRawConfig_setVCpuCount(
+    config: *mut VirtualMachineRawConfig,
+    n: i32,
+) {
+    // SAFETY: `config` is assumed to be a valid, non-null pointer returned by
+    // AVirtualMachineRawConfig_create. It's the only reference to the object.
+    let config = unsafe { &mut *config };
+    config.cpuTopology = CpuTopology::CUSTOM;
+    config.customVcpuCount = n;
+}
+
 /// Set whether a virtual machine is protected or not.
 ///
 /// # Safety
@@ -244,6 +261,32 @@ pub extern "C" fn AVirtualMachineRawConfig_addCustomMemoryBackingFile(
     _range_end: u64,
 ) -> c_int {
     -libc::ENOTSUP
+}
+
+/// Add device tree overlay blob
+///
+/// # Safety
+/// `config` must be a pointer returned by `AVirtualMachineRawConfig_create`. `fd` must be a valid
+/// file descriptor or -1. `AVirtualMachineRawConfig_setDeviceTreeOverlay` takes ownership of `fd`
+/// and `fd` will be closed upon `AVirtualMachineRawConfig_delete`.
+#[no_mangle]
+pub unsafe extern "C" fn AVirtualMachineRawConfig_setDeviceTreeOverlay(
+    config: *mut VirtualMachineRawConfig,
+    fd: c_int,
+) {
+    // SAFETY: `config` is assumed to be a valid, non-null pointer returned by
+    // AVirtualMachineRawConfig_create. It's the only reference to the object.
+    let config = unsafe { &mut *config };
+
+    match get_file_from_fd(fd) {
+        Some(file) => {
+            let fd = ParcelFileDescriptor::new(file);
+            config.devices = AssignedDevices::Dtbo(Some(fd));
+        }
+        _ => {
+            config.devices = Default::default();
+        }
+    };
 }
 
 /// Spawn a new instance of `virtmgr`, a child process that will host the `VirtualizationService`
@@ -334,7 +377,10 @@ pub unsafe extern "C" fn AVirtualMachine_createRaw(
             }
             0
         }
-        Err(_) => -libc::EIO,
+        Err(e) => {
+            error!("AVirtualMachine_createRaw failed: {e:?}");
+            -libc::EIO
+        }
     }
 }
 
@@ -349,7 +395,10 @@ pub unsafe extern "C" fn AVirtualMachine_start(vm: *const VmInstance) -> c_int {
     let vm = unsafe { &*vm };
     match vm.start() {
         Ok(_) => 0,
-        Err(_) => -libc::EIO,
+        Err(e) => {
+            error!("AVirtualMachine_start failed: {e:?}");
+            -libc::EIO
+        }
     }
 }
 
@@ -364,7 +413,10 @@ pub unsafe extern "C" fn AVirtualMachine_stop(vm: *const VmInstance) -> c_int {
     let vm = unsafe { &*vm };
     match vm.stop() {
         Ok(_) => 0,
-        Err(_) => -libc::EIO,
+        Err(e) => {
+            error!("AVirtualMachine_stop failed: {e:?}");
+            -libc::EIO
+        }
     }
 }
 
@@ -379,7 +431,10 @@ pub unsafe extern "C" fn AVirtualMachine_connectVsock(vm: *const VmInstance, por
     let vm = unsafe { &*vm };
     match vm.connect_vsock(port) {
         Ok(pfd) => pfd.into_raw_fd(),
-        Err(_) => -libc::EIO,
+        Err(e) => {
+            error!("AVirtualMachine_connectVsock failed: {e:?}");
+            -libc::EIO
+        }
     }
 }
 
