@@ -33,7 +33,7 @@ typedef struct AVirtualMachineRawConfig AVirtualMachineRawConfig;
  *
  * This only creates the raw config object. `name` and `kernel` must be set with
  * calls to {@link AVirtualMachineRawConfig_setName} and {@link AVirtualMachineRawConfig_setKernel}.
- * Other properties, set by {@link AVirtualMachineRawConfig_setMemoryMib},
+ * Other properties, set by {@link AVirtualMachineRawConfig_setMemoryMiB},
  * {@link AVirtualMachineRawConfig_setInitRd}, {@link AVirtualMachineRawConfig_addDisk},
  * {@link AVirtualMachineRawConfig_setProtectedVm}, and {@link AVirtualMachineRawConfig_setBalloon}
  * are optional.
@@ -44,7 +44,7 @@ typedef struct AVirtualMachineRawConfig AVirtualMachineRawConfig;
  *
  * \return A new virtual machine raw config object. On failure (such as out of memory), it aborts.
  */
-AVirtualMachineRawConfig* _Nonnull AVirtualMachineRawConfig_create() __INTRODUCED_IN(36);
+AVirtualMachineRawConfig* _Nonnull AVirtualMachineRawConfig_create(void) __INTRODUCED_IN(36);
 
 /**
  * Destroy a virtual machine config object.
@@ -121,12 +121,39 @@ int AVirtualMachineRawConfig_addDisk(AVirtualMachineRawConfig* _Nonnull config, 
 /**
  * Set how much memory will be given to a virtual machine.
  *
+ * When `AVirtualMachineRawConfig_setProtectedVm(..., true)` is set, the memory
+ * size provided here will be automatically augmented with the swiotlb size.
+ *
  * \param config a virtual machine config object.
- * \param memoryMib the amount of RAM to give the virtual machine, in MiB. 0 or negative to use the
+ * \param memoryMiB the amount of RAM to give the virtual machine, in MiB. 0 or negative to use the
  *   default.
  */
-void AVirtualMachineRawConfig_setMemoryMib(AVirtualMachineRawConfig* _Nonnull config,
-                                           int32_t memoryMib) __INTRODUCED_IN(36);
+void AVirtualMachineRawConfig_setMemoryMiB(AVirtualMachineRawConfig* _Nonnull config,
+                                           int32_t memoryMiB) __INTRODUCED_IN(36);
+
+/**
+ * Set how much swiotlb will be given to a virtual machine.
+ *
+ * Only applicable when `AVirtualMachineRawConfig_setProtectedVm(..., true)` is
+ * set.
+ *
+ * For information on swiotlb, see https://docs.kernel.org/core-api/swiotlb.html.
+ *
+ * \param config a virtual machine config object.
+ * \param memoryMiB the amount of swiotlb to give the virtual machine, in MiB.
+ *   0 or negative to use the default.
+ */
+void AVirtualMachineRawConfig_setSwiotlbMiB(AVirtualMachineRawConfig* _Nonnull config,
+                                            int32_t swiotlbMiB) __INTRODUCED_IN(36);
+
+/**
+ * Set vCPU count. The default is 1.
+ *
+ * \param config a virtual machine config object.
+ * \param n number of vCPUs. Must be positive.
+ */
+void AVirtualMachineRawConfig_setVCpuCount(AVirtualMachineRawConfig* _Nonnull config, int32_t n)
+        __INTRODUCED_IN(36);
 
 /**
  * Set whether the virtual machine's memory will be protected from the host, so the host can't
@@ -166,6 +193,19 @@ int AVirtualMachineRawConfig_setHypervisorSpecificAuthMethod(
 int AVirtualMachineRawConfig_addCustomMemoryBackingFile(AVirtualMachineRawConfig* _Nonnull config,
                                                         int fd, uint64_t rangeStart,
                                                         uint64_t rangeEnd) __INTRODUCED_IN(36);
+/**
+ * Use the specified fd as the device tree overlay blob for booting VM.
+ *
+ * Here's the format of the device tree overlay blob.
+ * link: https://source.android.com/docs/core/architecture/dto
+ *
+ * \param config a virtual machine config object.
+ * \param fd a readable, seekable, and sized (i.e. report a valid size using fstat()) file
+ *   descriptor containing device tree overlay, or -1 to unset.
+ *   `AVirtualMachineRawConfig_setDeviceTreeOverlay` takes ownership of `fd`.
+ */
+void AVirtualMachineRawConfig_setDeviceTreeOverlay(AVirtualMachineRawConfig* _Nonnull config,
+                                                   int fd) __INTRODUCED_IN(36);
 
 /**
  * Represents a handle on a virtualization service, responsible for managing virtual machines.
@@ -321,6 +361,19 @@ int AVirtualMachine_start(AVirtualMachine* _Nonnull vm) __INTRODUCED_IN(36);
  * \return If successful, it returns 0. Otherwise, it returns `-EIO`.
  */
 int AVirtualMachine_stop(AVirtualMachine* _Nonnull vm) __INTRODUCED_IN(36);
+
+/**
+ * Open a vsock connection to the VM on the given port. The caller takes ownership of the returned
+ * file descriptor, and is responsible for closing the file descriptor.
+ *
+ * This operation is synchronous and `AVirtualMachine_connectVsock` may block.
+ *
+ * \param vm a handle on a virtual machine.
+ * \param port a vsock port number.
+ *
+ * \return If successful, it returns a valid file descriptor. Otherwise, it returns `-EIO`.
+ */
+int AVirtualMachine_connectVsock(AVirtualMachine* _Nonnull vm, uint32_t port) __INTRODUCED_IN(36);
 
 /**
  * Wait until a virtual machine stops or the given timeout elapses.

@@ -25,6 +25,8 @@ import static android.system.virtualmachine.VirtualMachineConfig.DEBUG_LEVEL_NON
 import static android.system.virtualmachine.VirtualMachineManager.CAPABILITY_NON_PROTECTED_VM;
 import static android.system.virtualmachine.VirtualMachineManager.CAPABILITY_PROTECTED_VM;
 
+import static com.android.system.virtualmachine.flags.Flags.promoteSetShouldUseHugepagesToSystemApi;
+
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
@@ -52,6 +54,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.ParcelFileDescriptor.AutoCloseInputStream;
 import android.os.ParcelFileDescriptor.AutoCloseOutputStream;
 import android.os.SystemProperties;
+import android.platform.test.annotations.RequiresFlagsEnabled;
 import android.system.OsConstants;
 import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineCallback;
@@ -69,6 +72,7 @@ import com.android.microdroid.test.vmshare.IVmShareTestService;
 import com.android.microdroid.testservice.IAppCallback;
 import com.android.microdroid.testservice.ITestService;
 import com.android.microdroid.testservice.IVmCallback;
+import com.android.system.virtualmachine.flags.Flags;
 import com.android.virt.vm_attestation.testservice.IAttestationService.AttestationStatus;
 import com.android.virt.vm_attestation.testservice.IAttestationService.SigningResult;
 import com.android.virt.vm_attestation.util.X509Utils;
@@ -175,15 +179,19 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
 
     private static final String VM_SHARE_APP_PACKAGE_NAME = "com.android.microdroid.vmshare_app";
 
-    private void createAndConnectToVmHelper(int cpuTopology) throws Exception {
+    private void createAndConnectToVmHelper(int cpuTopology, boolean shouldUseHugepages)
+            throws Exception {
         assumeSupportedDevice();
 
-        VirtualMachineConfig config =
+        VirtualMachineConfig.Builder builder =
                 newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
                         .setMemoryBytes(minMemoryRequired())
                         .setDebugLevel(DEBUG_LEVEL_FULL)
-                        .setCpuTopology(cpuTopology)
-                        .build();
+                        .setCpuTopology(cpuTopology);
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            builder.setShouldUseHugepages(shouldUseHugepages);
+        }
+        VirtualMachineConfig config = builder.build();
         VirtualMachine vm = forceCreateNewVirtualMachine("test_vm", config);
 
         TestResults testResults =
@@ -210,13 +218,33 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
     public void createAndConnectToVm() throws Exception {
-        createAndConnectToVmHelper(CPU_TOPOLOGY_ONE_CPU);
+        createAndConnectToVmHelper(CPU_TOPOLOGY_ONE_CPU, /* shouldUseHugepages= */ false);
     }
 
     @Test
     @CddTest(requirements = {"9.17/C-1-1", "9.17/C-2-1"})
     public void createAndConnectToVm_HostCpuTopology() throws Exception {
-        createAndConnectToVmHelper(CPU_TOPOLOGY_MATCH_HOST);
+        createAndConnectToVmHelper(CPU_TOPOLOGY_MATCH_HOST, /* shouldUseHugepages= */ false);
+    }
+
+    @Test
+    @RequiresFlagsEnabled(Flags.FLAG_PROMOTE_SET_SHOULD_USE_HUGEPAGES_TO_SYSTEM_API)
+    public void createAndConnectToVm_WithHugepages() throws Exception {
+        // Note: setting shouldUseHugepages to true only hints that VM wants to use transparent huge
+        // pages. Whether it will actually be used depends on the value in the
+        // /sys/kernel/mm/transparent_hugepages/shmem_enabled.
+        // See packages/modules/Virtualization/docs/hugepages.md
+        createAndConnectToVmHelper(CPU_TOPOLOGY_ONE_CPU, /* shouldUseHugepages= */ true);
+    }
+
+    @Test
+    @RequiresFlagsEnabled(Flags.FLAG_PROMOTE_SET_SHOULD_USE_HUGEPAGES_TO_SYSTEM_API)
+    public void createAndConnectToVm_HostCpuTopology_WithHugepages() throws Exception {
+        // Note: setting shouldUseHugepages to true only hints that VM wants to use transparent huge
+        // pages. Whether it will actually be used depends on the value in the
+        // /sys/kernel/mm/transparent_hugepages/shmem_enabled.
+        // See packages/modules/Virtualization/docs/hugepages.md
+        createAndConnectToVmHelper(CPU_TOPOLOGY_MATCH_HOST, /* shouldUseHugepages= */ true);
     }
 
     @Test
@@ -225,7 +253,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     public void vmAttestationWhenRemoteAttestationIsNotSupported() throws Exception {
         // pVM remote attestation is only supported on protected VMs.
         assumeProtectedVM();
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
         assume().withMessage(
                         "This test does not apply to a device that supports Remote Attestation")
                 .that(getVirtualMachineManager().isRemoteAttestationSupported())
@@ -254,7 +281,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     public void vmAttestationWithVendorPartitionWhenSupported() throws Exception {
         // pVM remote attestation is only supported on protected VMs.
         assumeProtectedVM();
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
         assume().withMessage("Test needs Remote Attestation support")
                 .that(getVirtualMachineManager().isRemoteAttestationSupported())
                 .isTrue();
@@ -273,10 +299,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     public void vmAttestationWhenRemoteAttestationIsSupported() throws Exception {
         // pVM remote attestation is only supported on protected VMs.
         assumeProtectedVM();
-        assumeFeatureEnabled(VirtualMachineManager.FEATURE_REMOTE_ATTESTATION);
-        assume().withMessage("Test needs Remote Attestation support")
-                .that(getVirtualMachineManager().isRemoteAttestationSupported())
-                .isTrue();
+        ensureVmAttestationSupported();
         VirtualMachineConfig config =
                 newVmConfigBuilderWithPayloadBinary(VM_ATTESTATION_PAYLOAD_PATH)
                         .setProtectedVm(mProtectedVm)
@@ -579,6 +602,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(minimal.getEncryptedStorageBytes()).isEqualTo(0);
         assertThat(minimal.isVmOutputCaptured()).isFalse();
         assertThat(minimal.getOs()).isEqualTo("microdroid");
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            assertThat(minimal.shouldUseHugepages()).isFalse();
+        }
 
         // Maximal has everything that can be set to some non-default value. (And has different
         // values than minimal for the required fields.)
@@ -595,6 +621,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         .setEncryptedStorageBytes(1_000_000)
                         .setVmOutputCaptured(true)
                         .setOs("microdroid_gki-android14-6.1");
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            maximalBuilder.setShouldUseHugepages(true);
+        }
         VirtualMachineConfig maximal = maximalBuilder.build();
 
         assertThat(maximal.getApkPath()).isEqualTo("/apk/path");
@@ -611,6 +640,9 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(maximal.getEncryptedStorageBytes()).isEqualTo(1_000_000);
         assertThat(maximal.isVmOutputCaptured()).isTrue();
         assertThat(maximal.getOs()).isEqualTo("microdroid_gki-android14-6.1");
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            assertThat(maximal.shouldUseHugepages()).isTrue();
+        }
 
         assertThat(minimal.isCompatibleWith(maximal)).isFalse();
         assertThat(minimal.isCompatibleWith(minimal)).isTrue();
@@ -680,6 +712,10 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertConfigCompatible(
                         baseline, newBaselineBuilder().setCpuTopology(CPU_TOPOLOGY_MATCH_HOST))
                 .isTrue();
+        if (promoteSetShouldUseHugepagesToSystemApi()) {
+            assertConfigCompatible(baseline, newBaselineBuilder().setShouldUseHugepages(true))
+                    .isTrue();
+        }
 
         // Changes that must be incompatible, since they must change the VM identity.
         assertConfigCompatible(baseline, newBaselineBuilder().addExtraApk("foo")).isFalse();

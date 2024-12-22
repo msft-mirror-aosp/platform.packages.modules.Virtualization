@@ -15,6 +15,7 @@
  */
 package android.system.virtualizationservice;
 
+import android.system.virtualizationservice.AssignedDevices;
 import android.system.virtualizationservice.AudioConfig;
 import android.system.virtualizationservice.CpuTopology;
 import android.system.virtualizationservice.DiskImage;
@@ -62,8 +63,14 @@ parcelable VirtualMachineRawConfig {
     /** The amount of RAM to give the VM, in MiB. 0 or negative to use the default. */
     int memoryMib;
 
+    /** The amount of swiotlb to give the VM, in MiB. 0 or negative to use the default. */
+    int swiotlbMib;
+
     /** The vCPU topology that will be generated for the VM. Default to 1 vCPU. */
     CpuTopology cpuTopology = CpuTopology.ONE_CPU;
+
+    /** The number of vCPUs. Ignored unless `cpuTopology == CUSTOM`. */
+    int customVcpuCount;
 
     /**
      * A version or range of versions of the virtual platform that this config is compatible with.
@@ -85,8 +92,8 @@ parcelable VirtualMachineRawConfig {
      */
     boolean hugePages;
 
-    /** List of SysFS nodes of devices to be assigned */
-    String[] devices;
+    /** Assigned devices */
+    AssignedDevices devices;
 
     @nullable DisplayConfig displayConfig;
 
