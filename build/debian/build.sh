@@ -62,13 +62,11 @@ parse_options() {
 }
 
 prepare_build_id() {
-	local filename=build_id
 	if [ -z "${KOKORO_BUILD_NUMBER}" ]; then
-		echo eng-$(hostname)-$(date --utc) > ${filename}
+		echo eng-$(hostname)-$(date --utc)
 	else
-		echo ${KOKORO_BUILD_NUMBER} > ${filename}
+		echo ${KOKORO_BUILD_NUMBER}
 	fi
-	echo ${filename}
 }
 
 install_prerequisites() {
@@ -313,6 +311,10 @@ generate_output_package() {
 	bios_partition_num=14
 	efi_partition_num=15
 
+	pushd ${workdir} > /dev/null
+
+	echo ${build_id} > build_id
+
 	loop=$(losetup -f --show --partscan $raw_disk_image)
 	dd if="${loop}p$root_partition_num" of=root_part
 	if [[ "$arch" == "x86_64" ]]; then
@@ -321,7 +323,7 @@ generate_output_package() {
 	dd if="${loop}p$efi_partition_num" of=efi_part
 	losetup -d "${loop}"
 
-	cp "$(dirname "$0")/vm_config.json.${arch}" vm_config.json
+	cp ${vm_config} vm_config.json
 	sed -i "s/{root_part_guid}/$(sfdisk --part-uuid $raw_disk_image $root_partition_num)/g" vm_config.json
 	if [[ "$arch" == "x86_64" ]]; then
 		sed -i "s/{bios_part_guid}/$(sfdisk --part-uuid $raw_disk_image $bios_partition_num)/g" vm_config.json
@@ -349,8 +351,10 @@ generate_output_package() {
 		)
 	fi
 
+	popd > /dev/null
+
 	# --sparse option isn't supported in apache-commons-compress
-	tar czv -f ${output} ${build_id} "${images[@]}" vm_config.json
+	tar czv -f ${output} -C ${workdir} build_id "${images[@]}" vm_config.json
 }
 
 clean_up() {
@@ -361,14 +365,15 @@ set -e
 trap clean_up EXIT
 
 output=images.tar.gz
-raw_disk_image=image.raw
 workdir=$(mktemp -d)
+raw_disk_image=${workdir}/image.raw
 build_id=$(prepare_build_id)
 debian_cloud_image=${workdir}/debian_cloud_image
 debian_version=bookworm
 config_space=${debian_cloud_image}/config_space/${debian_version}
 resources_dir=${debian_cloud_image}/src/debian_cloud_images/resources
 arch="$(uname -m)"
+vm_config="$(realpath $(dirname "$0"))/vm_config.json.${arch}"
 mode=debug
 save_workdir=0
 use_custom_kernel=0
