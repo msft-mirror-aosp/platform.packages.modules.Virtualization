@@ -84,6 +84,15 @@ java_test_host {
     data_native_bins: BINS,
 }
 
+java_test_host {
+    name: "MicrodroidHostTestCases.GTS",
+    defaults: ["MicrodroidHostTestCases.default"],
+    test_config: ":MicrodroidHostTestCases.GTS.config",
+    test_suites: ["gts"],
+    data: DEVICE_DATA,
+    data_native_bins: BINS,
+}
+
 genrule {
     name: "MicrodroidHostTestCases.CTS.config",
     srcs: ["AndroidTest.xml"],
@@ -103,5 +112,16 @@ genrule {
         "-e 's/<!-- PLACEHOLDER_FOR_ANNOTATION -->/" +
         "<option name=\"include-annotation\" value=\"com.android.compatibility.common.util.VsrTest\" \\/>/' " +
         "-e 's/MicrodroidHostTestCases.jar/MicrodroidHostTestCases.VTS.jar/' " +
+        "$(in) > $(out)",
+}
+
+genrule {
+    name: "MicrodroidHostTestCases.GTS.config",
+    srcs: ["AndroidTest.xml"],
+    out: ["out.xml"],
+    cmd: "sed " +
+        "-e 's/<!-- PLACEHOLDER_FOR_ANNOTATION -->/" +
+        "<option name=\"include-annotation\" value=\"com.android.compatibility.common.util.GmsTest\" \\/>/' " +
+        "-e 's/MicrodroidHostTestCases.jar/MicrodroidHostTestCases.GTS.jar/' " +
         "$(in) > $(out)",
 }
