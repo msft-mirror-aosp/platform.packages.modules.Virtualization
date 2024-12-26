@@ -28,4 +28,6 @@
     <test class="com.android.compatibility.common.tradefed.testtype.JarHostTest" >
         <option name="jar" value="MicrodroidHostTestCases.jar" />
     </test>
+
+    <!-- PLACEHOLDER_FOR_ANNOTATION -->
 </configuration>
