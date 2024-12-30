@@ -95,15 +95,6 @@ android_test {
     data: DATA,
 }
 
-android_test {
-    name: "MicrodroidTestApp.GTS",
-    defaults: ["MicrodroidVersionsTestAppDefaults"],
-    manifest: "AndroidManifestV5.xml",
-    test_suites: ["gts"],
-    test_config: ":MicrodroidTestApp.GTS.config",
-    data: DATA,
-}
-
 genrule {
     name: "MicrodroidTestApp.CTS.config",
     srcs: ["AndroidTest.xml"],
@@ -123,17 +114,6 @@ genrule {
         "-e 's/<!-- PLACEHOLDER_FOR_ANNOTATION -->/" +
         "<option name=\"include-annotation\" value=\"com.android.compatibility.common.util.VsrTest\" \\/>/' " +
         "-e 's/MicrodroidTestApp.apk/MicrodroidTestApp.VTS.apk/' " +
-        "$(in) > $(out)",
-}
-
-genrule {
-    name: "MicrodroidTestApp.GTS.config",
-    srcs: ["AndroidTest.xml"],
-    out: ["out.xml"],
-    cmd: "sed " +
-        "-e 's/<!-- PLACEHOLDER_FOR_ANNOTATION -->/" +
-        "<option name=\"include-annotation\" value=\"com.android.compatibility.common.util.GmsTest\" \\/>/' " +
-        "-e 's/MicrodroidTestApp.apk/MicrodroidTestApp.GTS.apk/' " +
         "$(in) > $(out)",
 }
 
