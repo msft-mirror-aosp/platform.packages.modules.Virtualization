@@ -42,7 +42,7 @@ class SettingsPortForwardingActivity : AppCompatActivity() {
 
         mPortsStateManager = PortsStateManager.getInstance(this)
 
-        mActivePortsAdapter = SettingsPortForwardingActiveAdapter(mPortsStateManager)
+        mActivePortsAdapter = SettingsPortForwardingActiveAdapter(mPortsStateManager, this)
         val activeRecyclerView: RecyclerView =
             findViewById(R.id.settings_port_forwarding_active_recycler_view)
         activeRecyclerView.layoutManager = LinearLayoutManager(this)
@@ -140,8 +140,10 @@ class SettingsPortForwardingActivity : AppCompatActivity() {
     }
 
     private fun refreshAdapters() {
-        mActivePortsAdapter.refreshItems()
-        mInactivePortsAdapter.refreshItems()
+        runOnUiThread {
+            mActivePortsAdapter.refreshItems()
+            mInactivePortsAdapter.refreshItems()
+        }
     }
 
     override fun onResume() {

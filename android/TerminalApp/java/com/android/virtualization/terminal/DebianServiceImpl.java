@@ -33,7 +33,6 @@ import com.android.virtualization.terminal.proto.ShutdownRequestItem;
 
 import io.grpc.stub.StreamObserver;
 
-import java.util.HashSet;
 import java.util.Set;
 
 final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
@@ -56,8 +55,8 @@ final class DebianServiceImpl extends DebianServiceGrpc.DebianServiceImplBase {
     public void reportVmActivePorts(
             ReportVmActivePortsRequest request,
             StreamObserver<ReportVmActivePortsResponse> responseObserver) {
-        Log.d(TAG, "reportVmActivePorts: " + request.toString());
-        mPortsStateManager.updateActivePorts(new HashSet<>(request.getPortsList()));
+        mPortsStateManager.updateActivePorts(request.getPortsList());
+        Log.d(TAG, "reportVmActivePorts: " + mPortsStateManager.getActivePorts());
         ReportVmActivePortsResponse reply =
                 ReportVmActivePortsResponse.newBuilder().setSuccess(true).build();
         responseObserver.onNext(reply);
