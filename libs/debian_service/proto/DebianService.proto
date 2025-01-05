@@ -31,8 +31,13 @@ message QueueOpeningRequest {
   int32 cid = 1;
 }
 
+message ActivePort {
+  int32 port = 1;
+  string comm = 2;
+}
+
 message ReportVmActivePortsRequest {
-  repeated int32 ports = 1;
+  repeated ActivePort ports = 1;
 }
 
 message ReportVmActivePortsResponse {
