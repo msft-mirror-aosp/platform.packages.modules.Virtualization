@@ -16,7 +16,6 @@
 
 use crate::bootargs::BootArgsIterator;
 use crate::device_assignment::{self, DeviceAssignmentInfo, VmDtbo};
-use crate::helpers::GUEST_PAGE_SIZE;
 use crate::Box;
 use crate::RebootReason;
 use alloc::collections::BTreeMap;
@@ -30,6 +29,8 @@ use core::fmt;
 use core::mem::size_of;
 use core::ops::Range;
 use cstr::cstr;
+use hypervisor_backends::get_device_assigner;
+use hypervisor_backends::get_mem_sharer;
 use libfdt::AddressRange;
 use libfdt::CellIterator;
 use libfdt::Fdt;
@@ -46,11 +47,10 @@ use tinyvec::ArrayVec;
 use vmbase::fdt::pci::PciMemoryFlags;
 use vmbase::fdt::pci::PciRangeType;
 use vmbase::fdt::SwiotlbInfo;
-use vmbase::hyp;
 use vmbase::layout::{crosvm::MEM_START, MAX_VIRT_ADDR};
 use vmbase::memory::SIZE_4KB;
 use vmbase::util::RangeExt as _;
-use zerocopy::AsBytes as _;
+use zerocopy::IntoBytes as _;
 
 // SAFETY: The template DT is automatically generated through DTC, which should produce valid DTBs.
 const FDT_TEMPLATE: &Fdt = unsafe { Fdt::unchecked_from_slice(pvmfw_fdt_template::RAW) };
@@ -82,7 +82,7 @@ impl fmt::Display for FdtValidationError {
 
 /// Extract from /config the address range containing the pre-loaded kernel. Absence of /config is
 /// not an error.
-fn read_kernel_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
+pub fn read_kernel_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
     let addr = cstr!("kernel-address");
     let size = cstr!("kernel-size");
 
@@ -100,7 +100,7 @@ fn read_kernel_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
 
 /// Extract from /chosen the address range containing the pre-loaded ramdisk. Absence is not an
 /// error as there can be initrd-less VM.
-fn read_initrd_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
+pub fn read_initrd_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
     let start = cstr!("linux,initrd-start");
     let end = cstr!("linux,initrd-end");
 
@@ -146,7 +146,10 @@ fn patch_bootargs(fdt: &mut Fdt, bootargs: &CStr) -> libfdt::Result<()> {
 /// Reads and validates the memory range in the DT.
 ///
 /// Only one memory range is expected with the crosvm setup for now.
-fn read_and_validate_memory_range(fdt: &Fdt) -> Result<Range<usize>, RebootReason> {
+fn read_and_validate_memory_range(
+    fdt: &Fdt,
+    guest_page_size: usize,
+) -> Result<Range<usize>, RebootReason> {
     let mut memory = fdt.memory().map_err(|e| {
         error!("Failed to read memory range from DT: {e}");
         RebootReason::InvalidFdt
@@ -168,8 +171,8 @@ fn read_and_validate_memory_range(fdt: &Fdt) -> Result<Range<usize>, RebootReaso
     }
 
     let size = range.len();
-    if size % GUEST_PAGE_SIZE != 0 {
-        error!("Memory size {:#x} is not a multiple of page size {:#x}", size, GUEST_PAGE_SIZE);
+    if size % guest_page_size != 0 {
+        error!("Memory size {:#x} is not a multiple of page size {:#x}", size, guest_page_size);
         return Err(RebootReason::InvalidFdt);
     }
 
@@ -853,16 +856,17 @@ fn patch_serial_info(fdt: &mut Fdt, serial_info: &SerialInfo) -> libfdt::Result<
 fn validate_swiotlb_info(
     swiotlb_info: &SwiotlbInfo,
     memory: &Range<usize>,
+    guest_page_size: usize,
 ) -> Result<(), RebootReason> {
     let size = swiotlb_info.size;
     let align = swiotlb_info.align;
 
-    if size == 0 || (size % GUEST_PAGE_SIZE) != 0 {
+    if size == 0 || (size % guest_page_size) != 0 {
         error!("Invalid swiotlb size {:#x}", size);
         return Err(RebootReason::InvalidFdt);
     }
 
-    if let Some(align) = align.filter(|&a| a % GUEST_PAGE_SIZE != 0) {
+    if let Some(align) = align.filter(|&a| a % guest_page_size != 0) {
         error!("Invalid swiotlb alignment {:#x}", align);
         return Err(RebootReason::InvalidFdt);
     }
@@ -988,7 +992,6 @@ fn patch_vcpufreq(fdt: &mut Fdt, vcpufreq_info: &Option<VcpufreqInfo>) -> libfdt
 
 #[derive(Debug)]
 pub struct DeviceTreeInfo {
-    pub kernel_range: Option<Range<usize>>,
     pub initrd_range: Option<Range<usize>>,
     pub memory_range: Range<usize>,
     bootargs: Option<CString>,
@@ -1014,15 +1017,11 @@ impl DeviceTreeInfo {
 }
 
 pub fn sanitize_device_tree(
-    fdt: &mut [u8],
+    fdt: &mut Fdt,
     vm_dtbo: Option<&mut [u8]>,
     vm_ref_dt: Option<&[u8]>,
+    guest_page_size: usize,
 ) -> Result<DeviceTreeInfo, RebootReason> {
-    let fdt = Fdt::from_mut_slice(fdt).map_err(|e| {
-        error!("Failed to load FDT: {e}");
-        RebootReason::InvalidFdt
-    })?;
-
     let vm_dtbo = match vm_dtbo {
         Some(vm_dtbo) => Some(VmDtbo::from_mut_slice(vm_dtbo).map_err(|e| {
             error!("Failed to load VM DTBO: {e}");
@@ -1031,7 +1030,7 @@ pub fn sanitize_device_tree(
         None => None,
     };
 
-    let info = parse_device_tree(fdt, vm_dtbo.as_deref())?;
+    let info = parse_device_tree(fdt, vm_dtbo.as_deref(), guest_page_size)?;
 
     fdt.clone_from(FDT_TEMPLATE).map_err(|e| {
         error!("Failed to instantiate FDT from the template DT: {e}");
@@ -1084,18 +1083,17 @@ pub fn sanitize_device_tree(
     Ok(info)
 }
 
-fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeInfo, RebootReason> {
-    let kernel_range = read_kernel_range_from(fdt).map_err(|e| {
-        error!("Failed to read kernel range from DT: {e}");
-        RebootReason::InvalidFdt
-    })?;
-
+fn parse_device_tree(
+    fdt: &Fdt,
+    vm_dtbo: Option<&VmDtbo>,
+    guest_page_size: usize,
+) -> Result<DeviceTreeInfo, RebootReason> {
     let initrd_range = read_initrd_range_from(fdt).map_err(|e| {
         error!("Failed to read initrd range from DT: {e}");
         RebootReason::InvalidFdt
     })?;
 
-    let memory_range = read_and_validate_memory_range(fdt)?;
+    let memory_range = read_and_validate_memory_range(fdt, guest_page_size)?;
 
     let bootargs = read_bootargs_from(fdt).map_err(|e| {
         error!("Failed to read bootargs from DT: {e}");
@@ -1139,17 +1137,22 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
         RebootReason::InvalidFdt
     })?;
 
-    let swiotlb_info = SwiotlbInfo::new_from_fdt(fdt).map_err(|e| {
-        error!("Failed to read swiotlb info from DT: {e}");
-        RebootReason::InvalidFdt
-    })?;
-    validate_swiotlb_info(&swiotlb_info, &memory_range)?;
+    let swiotlb_info = SwiotlbInfo::new_from_fdt(fdt)
+        .map_err(|e| {
+            error!("Failed to read swiotlb info from DT: {e}");
+            RebootReason::InvalidFdt
+        })?
+        .ok_or_else(|| {
+            error!("Swiotlb info missing from DT");
+            RebootReason::InvalidFdt
+        })?;
+    validate_swiotlb_info(&swiotlb_info, &memory_range, guest_page_size)?;
 
     let device_assignment = match vm_dtbo {
         Some(vm_dtbo) => {
-            if let Some(hypervisor) = hyp::get_device_assigner() {
+            if let Some(hypervisor) = get_device_assigner() {
                 // TODO(ptosi): Cache the (single?) granule once, in vmbase.
-                let granule = hyp::get_mem_sharer()
+                let granule = get_mem_sharer()
                     .ok_or_else(|| {
                         error!("No MEM_SHARE found during device assignment validation");
                         RebootReason::InternalError
@@ -1188,7 +1191,6 @@ fn parse_device_tree(fdt: &Fdt, vm_dtbo: Option<&VmDtbo>) -> Result<DeviceTreeIn
     })?;
 
     Ok(DeviceTreeInfo {
-        kernel_range,
         initrd_range,
         memory_range,
         bootargs,

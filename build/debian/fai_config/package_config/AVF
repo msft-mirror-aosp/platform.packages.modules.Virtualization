@@ -1,4 +1,7 @@
 PACKAGES install
 
-# Just for testing
-tree
+avahi-daemon
+avahi-utils
+bpfcc-tools
+libnss-mdns
+procps

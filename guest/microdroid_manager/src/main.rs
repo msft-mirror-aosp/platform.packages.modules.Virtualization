@@ -140,10 +140,10 @@ fn write_death_reason_to_serial(err: &Error) -> Result<()> {
         Owned(format!("MICRODROID_UNKNOWN_RUNTIME_ERROR|{:?}", err))
     };
 
-    for chunk in death_reason.as_bytes().chunks(16) {
-        // TODO(b/220071963): Sometimes, sending more than 16 bytes at once makes MM hang.
-        OpenOptions::new().read(false).write(true).open(FAILURE_SERIAL_DEVICE)?.write_all(chunk)?;
-    }
+    let mut serial_file = OpenOptions::new().read(false).write(true).open(FAILURE_SERIAL_DEVICE)?;
+    serial_file.write_all(death_reason.as_bytes()).context("serial device write_all failed")?;
+    // Block until the serial port trasmits all the data to the host.
+    nix::sys::termios::tcdrain(&serial_file).context("tcdrain failed")?;
 
     Ok(())
 }
@@ -670,7 +670,20 @@ fn exec_task(task: &Task, service: &Strong<dyn IVirtualMachineService>) -> Resul
         });
     }
 
-    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // Never accept input from outside
+    command.stdin(Stdio::null());
+
+    // If the VM is debuggable, let stdout/stderr go outside via /dev/kmsg to ease the debugging
+    let (stdout, stderr) = if is_debuggable()? {
+        use std::os::fd::FromRawFd;
+        let kmsg_fd = env::var("ANDROID_FILE__dev_kmsg").unwrap().parse::<i32>().unwrap();
+        // SAFETY: no one closes kmsg_fd
+        unsafe { (Stdio::from_raw_fd(kmsg_fd), Stdio::from_raw_fd(kmsg_fd)) }
+    } else {
+        (Stdio::null(), Stdio::null())
+    };
+    command.stdout(stdout);
+    command.stderr(stderr);
 
     info!("notifying payload started");
     service.notifyPayloadStarted()?;

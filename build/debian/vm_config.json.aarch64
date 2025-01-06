@@ -2,8 +2,20 @@
     "name": "debian",
     "disks": [
         {
-            "image": "$PAYLOAD_DIR/image.raw",
-            "partitions": [],
+            "partitions": [
+                {
+                    "label": "ROOT",
+                    "path": "$PAYLOAD_DIR/root_part",
+                    "writable": true,
+                    "guid": "{root_part_guid}"
+                },
+                {
+                    "label": "EFI",
+                    "path": "$PAYLOAD_DIR/efi_part",
+                    "writable": false,
+                    "guid": "{efi_part_guid}"
+                }
+            ],
             "writable": true
         }
     ],
@@ -21,7 +33,6 @@
     "memory_mib": 4096,
     "debuggable": true,
     "console_out": true,
-    "connect_console": true,
     "console_input_device": "ttyS0",
     "network": true
 }

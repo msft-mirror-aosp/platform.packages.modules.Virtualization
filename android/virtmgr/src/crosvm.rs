@@ -112,6 +112,7 @@ pub struct CrosvmConfig {
     pub protected: bool,
     pub debug_config: DebugConfig,
     pub memory_mib: NonZeroU32,
+    pub swiotlb_mib: Option<NonZeroU32>,
     pub cpus: Option<NonZeroU32>,
     pub host_cpu_topology: bool,
     pub console_out_fd: Option<File>,
@@ -124,7 +125,7 @@ pub struct CrosvmConfig {
     pub gdb_port: Option<NonZeroU16>,
     pub vfio_devices: Vec<VfioDevice>,
     pub dtbo: Option<File>,
-    pub device_tree_overlay: Option<File>,
+    pub device_tree_overlays: Vec<File>,
     pub display_config: Option<DisplayConfig>,
     pub input_device_options: Vec<InputDeviceOption>,
     pub hugepages: bool,
@@ -133,9 +134,11 @@ pub struct CrosvmConfig {
     pub boost_uclamp: bool,
     pub gpu_config: Option<GpuConfig>,
     pub audio_config: Option<AudioConfig>,
-    pub no_balloon: bool,
+    pub balloon: bool,
     pub usb_config: UsbConfig,
     pub dump_dt_fd: Option<File>,
+    pub enable_hypervisor_specific_auth_method: bool,
+    pub instance_id: [u8; 64],
 }
 
 #[derive(Debug)]
@@ -235,6 +238,8 @@ pub struct SharedPathConfig {
     pub mask: i32,
     pub tag: String,
     pub socket_path: String,
+    pub socket_fd: Option<File>,
+    pub app_domain: bool,
 }
 
 /// virtio-input device configuration from `external/crosvm/src/crosvm/config.rs`
@@ -319,7 +324,7 @@ impl VmState {
             let tap =
                 if let Some(tap_file) = &config.tap { Some(tap_file.try_clone()?) } else { None };
 
-            run_virtiofs(&config)?;
+            let vhost_fs_devices = run_virtiofs(&config)?;
 
             // If this fails and returns an error, `self` will be left in the `Failed` state.
             let child =
@@ -334,7 +339,13 @@ impl VmState {
             let child_clone = child.clone();
             let instance_clone = instance.clone();
             let monitor_vm_exit_thread = Some(thread::spawn(move || {
-                instance_clone.monitor_vm_exit(child_clone, failure_pipe_read, vfio_devices, tap);
+                instance_clone.monitor_vm_exit(
+                    child_clone,
+                    failure_pipe_read,
+                    vfio_devices,
+                    tap,
+                    vhost_fs_devices,
+                );
             }));
 
             if detect_hangup {
@@ -360,12 +371,15 @@ pub struct VmContext {
     #[allow(dead_code)] // Keeps the global context alive
     pub(crate) global_context: Strong<dyn IGlobalVmContext>,
     #[allow(dead_code)] // Keeps the server alive
-    vm_server: RpcServer,
+    vm_server: Option<RpcServer>,
 }
 
 impl VmContext {
     /// Construct new VmContext.
-    pub fn new(global_context: Strong<dyn IGlobalVmContext>, vm_server: RpcServer) -> VmContext {
+    pub fn new(
+        global_context: Strong<dyn IGlobalVmContext>,
+        vm_server: Option<RpcServer>,
+    ) -> VmContext {
         VmContext { global_context, vm_server }
     }
 }
@@ -475,10 +489,24 @@ impl VmInstance {
     fn monitor_vm_exit(
         &self,
         child: Arc<SharedChild>,
-        mut failure_pipe_read: File,
+        failure_pipe_read: File,
         vfio_devices: Vec<VfioDevice>,
         tap: Option<File>,
+        vhost_user_devices: Vec<SharedChild>,
     ) {
+        let failure_reason_thread = std::thread::spawn(move || {
+            // Read the pipe to see if any failure reason is written
+            let mut failure_reason = String::new();
+            // Arbitrary max size in case of misbehaving guest.
+            const MAX_SIZE: u64 = 50_000;
+            match failure_pipe_read.take(MAX_SIZE).read_to_string(&mut failure_reason) {
+                Err(e) => error!("Error reading VM failure reason from pipe: {}", e),
+                Ok(len) if len > 0 => error!("VM returned failure reason '{}'", &failure_reason),
+                _ => (),
+            };
+            failure_reason
+        });
+
         let result = child.wait();
         match &result {
             Err(e) => error!("Error waiting for crosvm({}) instance to die: {}", child.id(), e),
@@ -492,19 +520,41 @@ impl VmInstance {
             }
         }
 
+        // In crosvm, when vhost_user frontend is dead, vhost_user backend device will detect and
+        // exit. We can safely wait() for vhost user device after waiting crosvm main
+        // process.
+        for device in vhost_user_devices {
+            match device.wait() {
+                Ok(status) => {
+                    info!("Vhost user device({}) exited with status {}", device.id(), status);
+                    if !status.success() {
+                        if let Some(code) = status.code() {
+                            // vhost_user backend device exit with error code
+                            error!(
+                                "vhost user device({}) exited with error code: {}",
+                                device.id(),
+                                code
+                            );
+                        } else {
+                            // The spawned child process of vhost_user backend device is
+                            // killed by signal
+                            error!("vhost user device({}) killed by signal", device.id());
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Error waiting for vhost user device({}) to die: {}", device.id(), e);
+                }
+            }
+        }
+
+        let failure_reason = failure_reason_thread.join().expect("failure_reason_thread panic'd");
+
         let mut vm_state = self.vm_state.lock().unwrap();
         *vm_state = VmState::Dead;
         // Ensure that the mutex is released before calling the callbacks.
         drop(vm_state);
         info!("{} exited", &self);
-
-        // Read the pipe to see if any failure reason is written
-        let mut failure_reason = String::new();
-        match failure_pipe_read.read_to_string(&mut failure_reason) {
-            Err(e) => error!("Error reading VM failure reason from pipe: {}", e),
-            Ok(len) if len > 0 => info!("VM returned failure reason '{}'", &failure_reason),
-            _ => (),
-        };
 
         // In case of hangup, the pipe doesn't give us any information because the hangup can't be
         // detected on the VM side (otherwise, it isn't a hangup), but in the
@@ -648,7 +698,9 @@ impl VmInstance {
 
         // Now that the VM has been killed, shut down the VirtualMachineService
         // server to eagerly free up the server threads.
-        self.vm_context.vm_server.shutdown()?;
+        if let Some(vm_server) = &self.vm_context.vm_server {
+            vm_server.shutdown()?;
+        }
 
         Ok(())
     }
@@ -898,8 +950,12 @@ fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Erro
     }
 }
 
-fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
+fn run_virtiofs(config: &CrosvmConfig) -> io::Result<Vec<SharedChild>> {
+    let mut devices: Vec<SharedChild> = Vec::new();
     for shared_path in &config.shared_paths {
+        if shared_path.app_domain {
+            continue;
+        }
         let ugid_map_value = format!(
             "{} {} {} {} {} /",
             shared_path.guest_uid,
@@ -927,9 +983,10 @@ fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
 
         let result = SharedChild::spawn(&mut command)?;
         info!("Spawned virtiofs crosvm({})", result.id());
+        devices.push(result);
     }
 
-    Ok(())
+    Ok(devices)
 }
 
 /// Starts an instance of `crosvm` to manage a new VM.
@@ -958,8 +1015,7 @@ fn run_vm(
         .arg("--cid")
         .arg(config.cid.to_string());
 
-    if system_properties::read_bool("hypervisor.memory_reclaim.supported", false)?
-        && !config.no_balloon
+    if system_properties::read_bool("hypervisor.memory_reclaim.supported", false)? && config.balloon
     {
         command.arg("--balloon-page-reporting");
     } else {
@@ -972,19 +1028,52 @@ fn run_vm(
 
     let mut memory_mib = config.memory_mib;
 
+    if config.enable_hypervisor_specific_auth_method && !config.protected {
+        bail!("hypervisor specific auth method only supported for protected VMs");
+    }
     if config.protected {
+        if config.enable_hypervisor_specific_auth_method {
+            if !hypervisor_props::is_gunyah()? {
+                bail!("hypervisor specific auth method not supported for current hypervisor");
+            }
+            // "QCOM Trusted VM" compatibility mode.
+            //
+            // When this mode is enabled, two hypervisor specific IDs are expected to be packed
+            // into the instance ID. We extract them here and pass along to crosvm so they can be
+            // given to the hypervisor driver via an ioctl.
+            let vm_id = u32::from_le_bytes(config.instance_id[60..64].try_into().unwrap());
+            let pas_id = u16::from_le_bytes(config.instance_id[58..60].try_into().unwrap());
+            command.arg("--hypervisor").arg(
+                format!("gunyah[device=/dev/gunyah,qcom_trusted_vm_id={vm_id},qcom_trusted_vm_pas_id={pas_id}]"),
+            );
+            // Put the FDT close to the payload (default is end of RAM) to so that CMA can be used
+            // without bloating memory usage.
+            command.arg("--fdt-position").arg("after-payload");
+        }
+
         match system_properties::read(SYSPROP_CUSTOM_PVMFW_PATH)? {
             Some(pvmfw_path) if !pvmfw_path.is_empty() => {
-                command.arg("--protected-vm-with-firmware").arg(pvmfw_path)
+                if pvmfw_path == "none" {
+                    command.arg("--protected-vm-without-firmware")
+                } else {
+                    command.arg("--protected-vm-with-firmware").arg(pvmfw_path)
+                }
             }
             _ => command.arg("--protected-vm"),
         };
 
-        // 3 virtio-console devices + vsock = 4.
-        let virtio_pci_device_count = 4 + config.disks.len();
-        // crosvm virtio queue has 256 entries, so 2 MiB per device (2 pages per entry) should be
-        // enough.
-        let swiotlb_size_mib = 2 * virtio_pci_device_count as u32;
+        let swiotlb_size_mib = config.swiotlb_mib.map(u32::from).unwrap_or({
+            // 3 virtio-console devices + vsock = 4.
+            // TODO: Count more device types, like balloon, input, and sound.
+            let virtio_pci_device_count = 4 + config.disks.len();
+            // crosvm virtio queue has 256 entries, so 2 MiB per device (2 pages per entry) should
+            // be enough.
+            // NOTE: The above explanation isn't completely accurate, e.g., circa 2024q4, each
+            // virtio-block has 16 queues with 256 entries each and each virito-console has 2
+            // queues of 256 entries each. So, it is allocating less than 2 pages per entry, but
+            // seems to work well enough in practice.
+            2 * virtio_pci_device_count as u32
+        });
         command.arg("--swiotlb").arg(swiotlb_size_mib.to_string());
 
         // b/346770542 for consistent "usable" memory across protected and non-protected VMs.
@@ -1010,6 +1099,13 @@ fn run_vm(
         command.arg("--params").arg("printk.devkmsg=on");
         command.arg("--params").arg("console=hvc0");
     }
+
+    // Move the PCI MMIO regions to near the end of the low-MMIO space.
+    // This is done to accommodate a limitation in a partner's hypervisor.
+    #[cfg(target_arch = "aarch64")]
+    command
+        .arg("--pci")
+        .arg("mem=[start=0x70000000,size=0x2000000],cam=[start=0x72000000,size=0x1000000]");
 
     command.arg("--mem").arg(memory_mib.to_string());
 
@@ -1122,9 +1218,10 @@ fn run_vm(
         .context("failed to create control listener")?;
     command.arg("--socket").arg(add_preserved_fd(&mut preserved_fds, control_sock));
 
-    if let Some(dt_overlay) = config.device_tree_overlay {
-        command.arg("--device-tree-overlay").arg(add_preserved_fd(&mut preserved_fds, dt_overlay));
-    }
+    config.device_tree_overlays.into_iter().for_each(|dt_overlay| {
+        let arg = add_preserved_fd(&mut preserved_fds, dt_overlay);
+        command.arg("--device-tree-overlay").arg(arg);
+    });
 
     if cfg!(paravirtualized_devices) {
         if let Some(gpu_config) = &config.gpu_config {
@@ -1244,12 +1341,23 @@ fn run_vm(
     }
 
     for shared_path in &config.shared_paths {
-        if let Err(e) = wait_for_file(&shared_path.socket_path, 5) {
-            bail!("Error waiting for file: {}", e);
+        if shared_path.app_domain {
+            if let Some(socket_fd) = &shared_path.socket_fd {
+                let socket_path =
+                    add_preserved_fd(&mut preserved_fds, socket_fd.try_clone().unwrap());
+                let raw_fd: i32 = socket_path.rsplit_once('/').unwrap().1.parse().unwrap();
+                command
+                    .arg("--vhost-user-fs")
+                    .arg(format!("tag={},socket-fd={}", &shared_path.tag, raw_fd));
+            }
+        } else {
+            if let Err(e) = wait_for_file(&shared_path.socket_path, 5) {
+                bail!("Error waiting for file: {}", e);
+            }
+            command
+                .arg("--vhost-user-fs")
+                .arg(format!("{},tag={}", &shared_path.socket_path, &shared_path.tag));
         }
-        command
-            .arg("--vhost-user-fs")
-            .arg(format!("{},tag={}", &shared_path.socket_path, &shared_path.tag));
     }
 
     debug!("Preserving FDs {:?}", preserved_fds);

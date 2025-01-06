@@ -17,12 +17,12 @@
 use crate::ops::{Ops, Payload};
 use crate::partition::PartitionName;
 use crate::PvmfwVerifyError;
-use alloc::vec;
 use alloc::vec::Vec;
 use avb::{
-    Descriptor, DescriptorError, DescriptorResult, HashDescriptor, PartitionData,
-    PropertyDescriptor, SlotVerifyError, SlotVerifyNoDataResult, VbmetaData,
+    Descriptor, DescriptorError, DescriptorResult, HashDescriptor, PartitionData, SlotVerifyError,
+    SlotVerifyNoDataResult, VbmetaData,
 };
+use core::str;
 
 // We use this for the rollback_index field if SlotVerifyData has empty rollback_indexes
 const DEFAULT_ROLLBACK_INDEX: u64 = 0;
@@ -45,6 +45,8 @@ pub struct VerifiedBootData<'a> {
     pub capabilities: Vec<Capability>,
     /// Rollback index of kernel.
     pub rollback_index: u64,
+    /// Page size of kernel, if present.
+    pub page_size: Option<usize>,
 }
 
 impl VerifiedBootData<'_> {
@@ -70,6 +72,8 @@ pub enum Capability {
     RemoteAttest,
     /// Secretkeeper protected secrets.
     SecretkeeperProtection,
+    /// Trusty security VM.
+    TrustySecurityVm,
     /// UEFI support for booting guest kernel.
     SupportsUefiBoot,
     /// (internal)
@@ -80,6 +84,7 @@ pub enum Capability {
 impl Capability {
     const KEY: &'static str = "com.android.virt.cap";
     const REMOTE_ATTEST: &'static [u8] = b"remote_attest";
+    const TRUSTY_SECURITY_VM: &'static [u8] = b"trusty_security_vm";
     const SECRETKEEPER_PROTECTION: &'static [u8] = b"secretkeeper_protection";
     const SEPARATOR: u8 = b'|';
     const SUPPORTS_UEFI_BOOT: &'static [u8] = b"supports_uefi_boot";
@@ -88,16 +93,17 @@ impl Capability {
 
     /// Returns the capabilities indicated in `descriptor`, or error if the descriptor has
     /// unexpected contents.
-    fn get_capabilities(descriptor: &PropertyDescriptor) -> Result<Vec<Self>, PvmfwVerifyError> {
-        if descriptor.key != Self::KEY {
-            return Err(PvmfwVerifyError::UnknownVbmetaProperty);
-        }
+    fn get_capabilities(vbmeta_data: &VbmetaData) -> Result<Vec<Self>, PvmfwVerifyError> {
+        let Some(value) = vbmeta_data.get_property_value(Self::KEY) else {
+            return Ok(Vec::new());
+        };
 
         let mut res = Vec::new();
 
-        for v in descriptor.value.split(|b| *b == Self::SEPARATOR) {
+        for v in value.split(|b| *b == Self::SEPARATOR) {
             let cap = match v {
                 Self::REMOTE_ATTEST => Self::RemoteAttest,
+                Self::TRUSTY_SECURITY_VM => Self::TrustySecurityVm,
                 Self::SECRETKEEPER_PROTECTION => Self::SecretkeeperProtection,
                 Self::SUPPORTS_UEFI_BOOT => Self::SupportsUefiBoot,
                 _ => return Err(PvmfwVerifyError::UnknownVbmetaProperty),
@@ -147,30 +153,6 @@ fn verify_loaded_partition_has_expected_length(
     } else {
         Err(SlotVerifyError::Verification(None))
     }
-}
-
-/// Verifies that the vbmeta contains at most one property descriptor and it indicates the
-/// vm type is service VM.
-fn verify_property_and_get_capabilities(
-    descriptors: &[Descriptor],
-) -> Result<Vec<Capability>, PvmfwVerifyError> {
-    let mut iter = descriptors.iter().filter_map(|d| match d {
-        Descriptor::Property(p) => Some(p),
-        _ => None,
-    });
-
-    let descriptor = match iter.next() {
-        // No property descriptors -> no capabilities.
-        None => return Ok(vec![]),
-        Some(d) => d,
-    };
-
-    // Multiple property descriptors -> error.
-    if iter.next().is_some() {
-        return Err(DescriptorError::InvalidContents.into());
-    }
-
-    Capability::get_capabilities(descriptor)
 }
 
 /// Hash descriptors extracted from a vbmeta image.
@@ -239,6 +221,23 @@ fn copy_digest(descriptor: &HashDescriptor) -> SlotVerifyNoDataResult<Digest> {
     Ok(digest)
 }
 
+/// Returns the indicated payload page size, if present.
+fn read_page_size(vbmeta_data: &VbmetaData) -> Result<Option<usize>, PvmfwVerifyError> {
+    let Some(property) = vbmeta_data.get_property_value("com.android.virt.page_size") else {
+        return Ok(None);
+    };
+    let size = str::from_utf8(property)
+        .or(Err(PvmfwVerifyError::InvalidPageSize))?
+        .parse::<usize>()
+        .or(Err(PvmfwVerifyError::InvalidPageSize))?
+        .checked_mul(1024)
+        // TODO(stable(unsigned_is_multiple_of)): use .is_multiple_of()
+        .filter(|sz| sz % (4 << 10) == 0 && *sz != 0)
+        .ok_or(PvmfwVerifyError::InvalidPageSize)?;
+
+    Ok(Some(size))
+}
+
 /// Verifies the given initrd partition, and checks that the resulting contents looks like expected.
 fn verify_initrd(
     ops: &mut Ops,
@@ -274,7 +273,8 @@ pub fn verify_payload<'a>(
     verify_vbmeta_is_from_kernel_partition(vbmeta_image)?;
     let descriptors = vbmeta_image.descriptors()?;
     let hash_descriptors = HashDescriptors::get(&descriptors)?;
-    let capabilities = verify_property_and_get_capabilities(&descriptors)?;
+    let capabilities = Capability::get_capabilities(vbmeta_image)?;
+    let page_size = read_page_size(vbmeta_image)?;
 
     if initrd.is_none() {
         hash_descriptors.verify_no_initrd()?;
@@ -285,6 +285,7 @@ pub fn verify_payload<'a>(
             public_key: trusted_public_key,
             capabilities,
             rollback_index,
+            page_size,
         });
     }
 
@@ -305,5 +306,6 @@ pub fn verify_payload<'a>(
         public_key: trusted_public_key,
         capabilities,
         rollback_index,
+        page_size,
     })
 }

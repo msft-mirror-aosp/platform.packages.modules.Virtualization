@@ -243,6 +243,11 @@ impl VmInstance {
         self.vm.start()
     }
 
+    /// Stops the VM.
+    pub fn stop(&self) -> BinderResult<()> {
+        self.vm.stop()
+    }
+
     /// Returns the CID used for vsock connections to the VM.
     pub fn cid(&self) -> i32 {
         self.cid
@@ -306,6 +311,11 @@ impl VmInstance {
                 }
             }
         })
+    }
+
+    /// Opens a vsock connection to the CID of the VM on the given vsock port.
+    pub fn connect_vsock(&self, port: u32) -> BinderResult<ParcelFileDescriptor> {
+        self.vm.connectVsock(port as i32)
     }
 }
 

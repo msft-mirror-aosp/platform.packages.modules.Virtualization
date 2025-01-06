@@ -28,12 +28,12 @@ use core::ffi::CStr;
 use core::iter::Iterator;
 use core::mem;
 use core::ops::Range;
+// TODO(b/308694211): Use hypervisor_backends::{DeviceAssigningHypervisor, Error} proper for tests.
+#[cfg(not(test))]
+use hypervisor_backends::DeviceAssigningHypervisor;
 use libfdt::{Fdt, FdtError, FdtNode, FdtNodeMut, Phandle, Reg};
 use log::error;
 use log::warn;
-// TODO(b/308694211): Use vmbase::hyp::{DeviceAssigningHypervisor, Error} proper for tests.
-#[cfg(not(test))]
-use vmbase::hyp::DeviceAssigningHypervisor;
 use zerocopy::byteorder::big_endian::U32;
 use zerocopy::FromBytes as _;
 
@@ -784,14 +784,16 @@ impl AssignedDeviceInfo {
             if reg.size != phys_reg.size {
                 return Err(DeviceAssignmentError::InvalidRegSize(reg.size, phys_reg.size));
             }
-            let expected_token = phys_reg.addr;
-            // If this call returns successfully, hyp has mapped the MMIO region at `reg`.
-            let token = hypervisor.get_phys_mmio_token(reg.addr, reg.size).map_err(|e| {
-                error!("Hypervisor error while requesting MMIO token: {e}");
-                DeviceAssignmentError::InvalidReg(reg.addr)
-            })?;
-            if token != expected_token {
-                return Err(DeviceAssignmentError::InvalidRegToken(token, expected_token));
+            for offset in (0..reg.size).step_by(granule) {
+                let expected_token = phys_reg.addr + offset;
+                // If this call returns successfully, hyp has mapped the MMIO granule.
+                let token = hypervisor.get_phys_mmio_token(reg.addr + offset).map_err(|e| {
+                    error!("Hypervisor error while requesting MMIO token: {e}");
+                    DeviceAssignmentError::InvalidReg(reg.addr)
+                })?;
+                if token != expected_token {
+                    return Err(DeviceAssignmentError::InvalidRegToken(token, expected_token));
+                }
             }
         }
 
@@ -1143,7 +1145,7 @@ impl fmt::Display for MockHypervisorError {
 #[cfg(test)]
 trait DeviceAssigningHypervisor {
     /// Returns MMIO token.
-    fn get_phys_mmio_token(&self, base_ipa: u64, size: u64) -> MockHypervisorResult<u64>;
+    fn get_phys_mmio_token(&self, base_ipa: u64) -> MockHypervisorResult<u64>;
 
     /// Returns DMA token as a tuple of (phys_iommu_id, phys_sid).
     fn get_phys_iommu_token(&self, pviommu_id: u64, vsid: u64) -> MockHypervisorResult<(u64, u64)>;
@@ -1206,7 +1208,7 @@ mod tests {
     }
 
     impl DeviceAssigningHypervisor for MockHypervisor {
-        fn get_phys_mmio_token(&self, base_ipa: u64, _size: u64) -> MockHypervisorResult<u64> {
+        fn get_phys_mmio_token(&self, base_ipa: u64) -> MockHypervisorResult<u64> {
             let token = self.get_mmio_token(base_ipa);
 
             Ok(*token.ok_or(MockHypervisorError::FailedGetPhysMmioToken)?)

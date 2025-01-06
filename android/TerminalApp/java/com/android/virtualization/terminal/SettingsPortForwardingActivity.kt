@@ -15,95 +15,151 @@
  */
 package com.android.virtualization.terminal
 
-import android.Manifest
-import android.app.Notification
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.drawable.Icon
+import android.content.DialogInterface
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
+import android.widget.EditText
+import android.widget.ImageButton
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+
+private const val PORT_RANGE_MIN: Int = 1024
+private const val PORT_RANGE_MAX: Int = 65535
 
 class SettingsPortForwardingActivity : AppCompatActivity() {
-    val TAG: String = "VmTerminalApp"
+    private lateinit var portsStateManager: PortsStateManager
+    private lateinit var portsStateListener: Listener
+    private lateinit var activePortsAdapter: SettingsPortForwardingActiveAdapter
+    private lateinit var inactivePortsAdapter: SettingsPortForwardingInactiveAdapter
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.settings_port_forwarding)
 
-        val settingsPortForwardingItems = ArrayList<SettingsPortForwardingItem>()
+        portsStateManager = PortsStateManager.getInstance(this)
 
-        val sharedPref = this.getSharedPreferences(
-            getString(R.string.preference_file_key), Context.MODE_PRIVATE
-        )
+        activePortsAdapter = SettingsPortForwardingActiveAdapter(portsStateManager, this)
+        val activeRecyclerView: RecyclerView =
+            findViewById(R.id.settings_port_forwarding_active_recycler_view)
+        activeRecyclerView.layoutManager = LinearLayoutManager(this)
+        activeRecyclerView.adapter = activePortsAdapter
 
-        val ports =
-            sharedPref.getStringSet(
-                getString(R.string.preference_forwarding_ports),
-                HashSet<String>()
+        inactivePortsAdapter = SettingsPortForwardingInactiveAdapter(portsStateManager, this)
+        val inactiveRecyclerView: RecyclerView =
+            findViewById(R.id.settings_port_forwarding_inactive_recycler_view)
+        inactiveRecyclerView.layoutManager = LinearLayoutManager(this)
+        inactiveRecyclerView.adapter = inactivePortsAdapter
+
+        portsStateListener = Listener()
+
+        val addButton = findViewById<ImageButton>(R.id.settings_port_forwarding_inactive_add_button)
+        addButton.setOnClickListener {
+            val dialog =
+                MaterialAlertDialogBuilder(this)
+                    .setTitle(R.string.settings_port_forwarding_dialog_title)
+                    .setView(R.layout.settings_port_forwarding_inactive_add_dialog)
+                    .setPositiveButton(R.string.settings_port_forwarding_dialog_save) {
+                        dialogInterface,
+                        _ ->
+                        val alertDialog = dialogInterface as AlertDialog
+                        val editText =
+                            alertDialog.findViewById<EditText>(
+                                R.id.settings_port_forwarding_inactive_add_dialog_text
+                            )!!
+                        val port = editText.text.toString().toInt()
+                        portsStateManager.updateEnabledPort(port, true)
+                    }
+                    .setNegativeButton(R.string.settings_port_forwarding_dialog_cancel, null)
+                    .create()
+            dialog.show()
+
+            val positiveButton = dialog.getButton(DialogInterface.BUTTON_POSITIVE)
+            positiveButton.setEnabled(false)
+            val editText =
+                dialog.findViewById<EditText>(
+                    R.id.settings_port_forwarding_inactive_add_dialog_text
+                )!!
+            editText.addTextChangedListener(
+                object : TextWatcher {
+                    override fun beforeTextChanged(
+                        s: CharSequence?,
+                        start: Int,
+                        count: Int,
+                        after: Int,
+                    ) {}
+
+                    override fun afterTextChanged(s: Editable?) {}
+
+                    override fun onTextChanged(
+                        s: CharSequence?,
+                        start: Int,
+                        before: Int,
+                        count: Int,
+                    ) {
+                        val port =
+                            try {
+                                s.toString().toInt()
+                            } catch (e: NumberFormatException) {
+                                editText.setError(
+                                    getString(
+                                        R.string.settings_port_forwarding_dialog_error_invalid_input
+                                    )
+                                )
+                                positiveButton.setEnabled(false)
+                                return@onTextChanged
+                            }
+                        if (port > PORT_RANGE_MAX || port < PORT_RANGE_MIN) {
+                            editText.setError(
+                                getString(
+                                    R.string
+                                        .settings_port_forwarding_dialog_error_invalid_port_range
+                                )
+                            )
+                            positiveButton.setEnabled(false)
+                        } else if (
+                            portsStateManager.getActivePorts().contains(port) ||
+                                portsStateManager.getEnabledPorts().contains(port)
+                        ) {
+                            editText.setError(
+                                getString(
+                                    R.string.settings_port_forwarding_dialog_error_existing_port
+                                )
+                            )
+                            positiveButton.setEnabled(false)
+                        } else {
+                            positiveButton.setEnabled(true)
+                        }
+                    }
+                }
             )
-
-        for (port in ports!!) {
-            val enabled =
-                sharedPref.getBoolean(
-                    getString(R.string.preference_forwarding_port_is_enabled) + port,
-                    false
-                )
-            settingsPortForwardingItems.add(SettingsPortForwardingItem(port.toInt(), enabled));
         }
+    }
 
-        val settingsPortForwardingAdapter =
-            SettingsPortForwardingAdapter(settingsPortForwardingItems, this)
+    private fun refreshAdapters() {
+        runOnUiThread {
+            activePortsAdapter.refreshItems()
+            inactivePortsAdapter.refreshItems()
+        }
+    }
 
-        val recyclerView: RecyclerView = findViewById(R.id.settings_port_forwarding_recycler_view)
-        recyclerView.layoutManager = LinearLayoutManager(this)
-        recyclerView.adapter = settingsPortForwardingAdapter
+    override fun onResume() {
+        super.onResume()
+        portsStateManager.registerListener(portsStateListener)
+        refreshAdapters()
+    }
 
-        // TODO: implement intent for accept, deny and tap to the notification
-        // Currently show a mock notification of a port opening
-        val terminalIntent = Intent()
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, terminalIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification =
-            Notification.Builder(this, TAG)
-                .setChannelId(TAG)
-                .setSmallIcon(R.drawable.ic_launcher_foreground)
-                .setContentTitle(resources.getString(R.string.settings_port_forwarding_notification_title))
-                .setContentText(
-                    resources.getString(
-                        R.string.settings_port_forwarding_notification_content,
-                        8080
-                    )
-                )
-                .addAction(
-                    Notification.Action.Builder(
-                        Icon.createWithResource(resources, R.drawable.ic_launcher_foreground),
-                        resources.getString(R.string.settings_port_forwarding_notification_accept),
-                        pendingIntent
-                    ).build()
-                )
-                .addAction(
-                    Notification.Action.Builder(
-                        Icon.createWithResource(resources, R.drawable.ic_launcher_foreground),
-                        resources.getString(R.string.settings_port_forwarding_notification_deny),
-                        pendingIntent
-                    ).build()
-                )
-                .build()
+    override fun onPause() {
+        portsStateManager.unregisterListener(portsStateListener)
+        super.onPause()
+    }
 
-        with(NotificationManager.from(this)) {
-            if (ActivityCompat.checkSelfPermission(
-                    this@SettingsPortForwardingActivity, Manifest.permission.POST_NOTIFICATIONS
-                ) == PackageManager.PERMISSION_GRANTED
-            ) {
-                notify(0, notification)
-            }
+    private inner class Listener : PortsStateManager.Listener {
+        override fun onPortsStateUpdated(oldActivePorts: Set<Int>, newActivePorts: Set<Int>) {
+            refreshAdapters()
         }
     }
 }
