@@ -38,6 +38,7 @@ use std::fs;
 use zeroize::Zeroizing;
 use std::sync::Mutex;
 use std::sync::Arc;
+use crate::VmInstanceState;
 
 const ENCRYPTEDSTORE_KEY_IDENTIFIER: &str = "encryptedstore_key";
 const AUTHORITY_HASH: i64 = -4670549;
@@ -71,13 +72,20 @@ pub enum VmSecret {
     // with downgraded images will not have access to VM's secret.
     // V2 secrets require hardware support - Secretkeeper HAL, which (among other things)
     // is backed by tamper-evident storage, providing rollback protection to these secrets.
-    V2 { dice_artifacts: OwnedDiceArtifactsWithExplicitKey, skp_secret: ZVec },
+    V2 {
+        instance_id: [u8; ID_SIZE],
+        dice_artifacts: OwnedDiceArtifactsWithExplicitKey,
+        skp_secret: ZVec,
+        secretkeeper_session: SkVmSession,
+    },
     // V1 secrets are not protected against rollback of boot images.
     // They are reliable only if rollback of images was prevented by verified boot ie,
     // each stage (including pvmfw/Microdroid/Microdroid Manager) prevents downgrade of next
     // stage. These are now legacy secrets & used only when Secretkeeper HAL is not supported
     // by device.
-    V1 { dice_artifacts: OwnedDiceArtifacts },
+    V1 {
+        dice_artifacts: OwnedDiceArtifacts,
+    },
 }
 
 // For supporting V2 secrets, guest expects the public key to be present in the Linux device tree.
@@ -92,6 +100,7 @@ impl VmSecret {
     pub fn new(
         dice_artifacts: OwnedDiceArtifacts,
         vm_service: &Strong<dyn IVirtualMachineService>,
+        state: &mut VmInstanceState,
     ) -> Result<Self> {
         ensure!(dice_artifacts.bcc().is_some(), "Dice chain missing");
         if !crate::should_defer_rollback_protection() {
@@ -100,24 +109,28 @@ impl VmSecret {
 
         let explicit_dice = OwnedDiceArtifactsWithExplicitKey::from_owned_artifacts(dice_artifacts)
             .context("Failed to get Dice artifacts in explicit key format")?;
-        let session = SkVmSession::new(vm_service, &explicit_dice)?;
         let id = super::get_instance_id()?.ok_or(anyhow!("Missing instance_id"))?;
         let explicit_dice_chain = explicit_dice
             .explicit_key_dice_chain()
             .ok_or(anyhow!("Missing explicit dice chain, this is unusual"))?;
         let policy = sealing_policy(explicit_dice_chain)
             .map_err(|e| anyhow!("Failed to build a sealing_policy: {e}"))?;
+        let session = SkVmSession::new(vm_service, &explicit_dice, policy)?;
         let mut skp_secret = Zeroizing::new([0u8; SECRET_SIZE]);
-        if let Some(secret) = session.get_secret(id, Some(policy.clone()))? {
-            *skp_secret = secret
+        if let Some(secret) = session.get_secret(id)? {
+            *skp_secret = secret;
+            *state = VmInstanceState::PreviouslySeen;
         } else {
             log::warn!("No entry found in Secretkeeper for this VM instance, creating new secret.");
             *skp_secret = rand::random();
-            session.store_secret(id, skp_secret.clone(), policy)?;
+            session.store_secret(id, skp_secret.clone())?;
+            *state = VmInstanceState::NewlyCreated;
         }
         Ok(Self::V2 {
+            instance_id: id,
             dice_artifacts: explicit_dice,
             skp_secret: ZVec::try_from(skp_secret.to_vec())?,
+            secretkeeper_session: session,
         })
     }
 
@@ -130,7 +143,7 @@ impl VmSecret {
 
     fn get_vm_secret(&self, salt: &[u8], identifier: &[u8], key: &mut [u8]) -> Result<()> {
         match self {
-            Self::V2 { dice_artifacts, skp_secret } => {
+            Self::V2 { dice_artifacts, skp_secret, .. } => {
                 let mut hasher = sha::Sha256::new();
                 hasher.update(dice_artifacts.cdi_seal());
                 hasher.update(skp_secret);
@@ -151,6 +164,23 @@ impl VmSecret {
     /// Derive encryptedstore key. This uses hardcoded random salt & fixed identifier.
     pub fn derive_encryptedstore_key(&self, key: &mut [u8]) -> Result<()> {
         self.get_vm_secret(SALT_ENCRYPTED_STORE, ENCRYPTEDSTORE_KEY_IDENTIFIER.as_bytes(), key)
+    }
+
+    pub fn read_payload_data_rp(&self) -> Result<Option<[u8; SECRET_SIZE]>> {
+        let Self::V2 { instance_id, secretkeeper_session, .. } = self else {
+            return Err(anyhow!("Rollback protected data is not available with V1 secrets"));
+        };
+        let payload_id = sha::sha512(instance_id);
+        secretkeeper_session.get_secret(payload_id)
+    }
+
+    pub fn write_payload_data_rp(&self, data: &[u8; SECRET_SIZE]) -> Result<()> {
+        let data = Zeroizing::new(*data);
+        let Self::V2 { instance_id, secretkeeper_session, .. } = self else {
+            return Err(anyhow!("Rollback protected data is not available with V1 secrets"));
+        };
+        let payload_id = sha::sha512(instance_id);
+        secretkeeper_session.store_secret(payload_id, data)
     }
 }
 
@@ -227,31 +257,35 @@ fn sealing_policy(dice: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 // The secure session between VM & Secretkeeper
-struct SkVmSession(Arc<Mutex<SkSession>>);
+pub(crate) struct SkVmSession {
+    session: Arc<Mutex<SkSession>>,
+    sealing_policy: Vec<u8>,
+}
+
+// TODO(b/378911776): This get_secret/store_secret fails on expired session.
+// Introduce retry after refreshing the session
 impl SkVmSession {
     fn new(
         vm_service: &Strong<dyn IVirtualMachineService>,
         dice: &OwnedDiceArtifactsWithExplicitKey,
+        sealing_policy: Vec<u8>,
     ) -> Result<Self> {
         let secretkeeper_proxy = get_secretkeeper_service(vm_service)?;
-        let secure_session =
-            SkSession::new(secretkeeper_proxy, dice, Some(get_secretkeeper_identity()?))?;
-        let secure_session = Arc::new(Mutex::new(secure_session));
-        Ok(Self(secure_session))
+        let session = SkSession::new(secretkeeper_proxy, dice, Some(get_secretkeeper_identity()?))?;
+        let session = Arc::new(Mutex::new(session));
+        Ok(Self { session, sealing_policy })
     }
 
-    fn store_secret(
-        &self,
-        id: [u8; ID_SIZE],
-        secret: Zeroizing<[u8; SECRET_SIZE]>,
-        sealing_policy: Vec<u8>,
-    ) -> Result<()> {
-        let store_request =
-            StoreSecretRequest { id: Id(id), secret: Secret(*secret), sealing_policy };
+    fn store_secret(&self, id: [u8; ID_SIZE], secret: Zeroizing<[u8; SECRET_SIZE]>) -> Result<()> {
+        let store_request = StoreSecretRequest {
+            id: Id(id),
+            secret: Secret(*secret),
+            sealing_policy: self.sealing_policy.clone(),
+        };
         log::info!("Secretkeeper operation: {:?}", store_request);
 
         let store_request = store_request.serialize_to_packet().to_vec().map_err(anyhow_err)?;
-        let session = &mut *self.0.lock().unwrap();
+        let session = &mut *self.session.lock().unwrap();
         let store_response = session.secret_management_request(&store_request)?;
         let store_response = ResponsePacket::from_slice(&store_response).map_err(anyhow_err)?;
         let response_type = store_response.response_type().map_err(anyhow_err)?;
@@ -263,15 +297,14 @@ impl SkVmSession {
         Ok(())
     }
 
-    fn get_secret(
-        &self,
-        id: [u8; ID_SIZE],
-        updated_sealing_policy: Option<Vec<u8>>,
-    ) -> Result<Option<[u8; SECRET_SIZE]>> {
-        let get_request = GetSecretRequest { id: Id(id), updated_sealing_policy };
+    fn get_secret(&self, id: [u8; ID_SIZE]) -> Result<Option<[u8; SECRET_SIZE]>> {
+        let get_request = GetSecretRequest {
+            id: Id(id),
+            updated_sealing_policy: Some(self.sealing_policy.clone()),
+        };
         log::info!("Secretkeeper operation: {:?}", get_request);
         let get_request = get_request.serialize_to_packet().to_vec().map_err(anyhow_err)?;
-        let session = &mut *self.0.lock().unwrap();
+        let session = &mut *self.session.lock().unwrap();
         let get_response = session.secret_management_request(&get_request)?;
         let get_response = ResponsePacket::from_slice(&get_response).map_err(anyhow_err)?;
         let response_type = get_response.response_type().map_err(anyhow_err)?;
