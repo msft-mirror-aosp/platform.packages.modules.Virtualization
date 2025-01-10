@@ -15,6 +15,7 @@
  */
 package com.android.virtualization.terminal
 
+import android.content.Context
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -22,12 +23,14 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.materialswitch.MaterialSwitch
 
-class SettingsPortForwardingActiveAdapter(private val mPortsStateManager: PortsStateManager) :
-    SettingsPortForwardingBaseAdapter<SettingsPortForwardingActiveAdapter.ViewHolder>() {
+class SettingsPortForwardingActiveAdapter(
+    private val portsStateManager: PortsStateManager,
+    private val context: Context,
+) : SettingsPortForwardingBaseAdapter<SettingsPortForwardingActiveAdapter.ViewHolder>() {
 
     override fun getItems(): ArrayList<SettingsPortForwardingItem> {
-        val enabledPorts = mPortsStateManager.getEnabledPorts()
-        return mPortsStateManager
+        val enabledPorts = portsStateManager.getEnabledPorts()
+        return portsStateManager
             .getActivePorts()
             .map { SettingsPortForwardingItem(it, enabledPorts.contains(it)) }
             .toCollection(ArrayList())
@@ -47,12 +50,18 @@ class SettingsPortForwardingActiveAdapter(private val mPortsStateManager: PortsS
     }
 
     override fun onBindViewHolder(viewHolder: ViewHolder, position: Int) {
-        val port = mItems[position].port
-        viewHolder.port.text = port.toString()
+        val port = items[position].port
+        viewHolder.port.text =
+            context.getString(
+                R.string.settings_port_forwarding_active_ports_content,
+                port,
+                portsStateManager.getActivePortInfo(port)?.comm,
+            )
         viewHolder.enabledSwitch.contentDescription = viewHolder.port.text
-        viewHolder.enabledSwitch.isChecked = mItems[position].enabled
+        viewHolder.enabledSwitch.setOnCheckedChangeListener(null)
+        viewHolder.enabledSwitch.isChecked = items[position].enabled
         viewHolder.enabledSwitch.setOnCheckedChangeListener { _, isChecked ->
-            mPortsStateManager.updateEnabledPort(port, isChecked)
+            portsStateManager.updateEnabledPort(port, isChecked)
         }
     }
 }

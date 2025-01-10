@@ -70,7 +70,13 @@ int AVirtualMachineRawConfig_setName(AVirtualMachineRawConfig* _Nonnull config,
                                      const char* _Nonnull name) __INTRODUCED_IN(36);
 
 /**
- * Set an instance ID of a virtual machine.
+ * Set an instance ID of a virtual machine. Every virtual machine is identified by a unique
+ * `instanceId` which the virtual machine uses as its persistent identity while performing stateful
+ * operations that are expected to outlast single boot of the VM. For example, some virtual machines
+ * use it as a `Id` for storing secrets in Secretkeeper, which are retrieved on next boot of th VM.
+ *
+ * The `instanceId` is expected to be re-used for the VM instance with an associated state (secret,
+ * encrypted storage) - i.e., rebooting the VM must not change the instanceId.
  *
  * \param config a virtual machine config object.
  * \param instanceId a pointer to a 64-byte buffer for the instance ID.
@@ -79,8 +85,8 @@ int AVirtualMachineRawConfig_setName(AVirtualMachineRawConfig* _Nonnull config,
  * \return If successful, it returns 0. If `instanceIdSize` is incorrect, it returns -EINVAL.
  */
 int AVirtualMachineRawConfig_setInstanceId(AVirtualMachineRawConfig* _Nonnull config,
-                                           const int8_t* _Nonnull instanceId, size_t instanceIdSize)
-        __INTRODUCED_IN(36);
+                                           const uint8_t* _Nonnull instanceId,
+                                           size_t instanceIdSize) __INTRODUCED_IN(36);
 
 /**
  * Set a kernel image of a virtual machine.
@@ -193,6 +199,19 @@ int AVirtualMachineRawConfig_setHypervisorSpecificAuthMethod(
 int AVirtualMachineRawConfig_addCustomMemoryBackingFile(AVirtualMachineRawConfig* _Nonnull config,
                                                         int fd, uint64_t rangeStart,
                                                         uint64_t rangeEnd) __INTRODUCED_IN(36);
+/**
+ * Use the specified fd as the device tree overlay blob for booting VM.
+ *
+ * Here's the format of the device tree overlay blob.
+ * link: https://source.android.com/docs/core/architecture/dto
+ *
+ * \param config a virtual machine config object.
+ * \param fd a readable, seekable, and sized (i.e. report a valid size using fstat()) file
+ *   descriptor containing device tree overlay, or -1 to unset.
+ *   `AVirtualMachineRawConfig_setDeviceTreeOverlay` takes ownership of `fd`.
+ */
+void AVirtualMachineRawConfig_setDeviceTreeOverlay(AVirtualMachineRawConfig* _Nonnull config,
+                                                   int fd) __INTRODUCED_IN(36);
 
 /**
  * Represents a handle on a virtualization service, responsible for managing virtual machines.

@@ -125,7 +125,7 @@ pub struct CrosvmConfig {
     pub gdb_port: Option<NonZeroU16>,
     pub vfio_devices: Vec<VfioDevice>,
     pub dtbo: Option<File>,
-    pub device_tree_overlay: Option<File>,
+    pub device_tree_overlays: Vec<File>,
     pub display_config: Option<DisplayConfig>,
     pub input_device_options: Vec<InputDeviceOption>,
     pub hugepages: bool,
@@ -137,6 +137,8 @@ pub struct CrosvmConfig {
     pub balloon: bool,
     pub usb_config: UsbConfig,
     pub dump_dt_fd: Option<File>,
+    pub enable_hypervisor_specific_auth_method: bool,
+    pub instance_id: [u8; 64],
 }
 
 #[derive(Debug)]
@@ -322,7 +324,7 @@ impl VmState {
             let tap =
                 if let Some(tap_file) = &config.tap { Some(tap_file.try_clone()?) } else { None };
 
-            run_virtiofs(&config)?;
+            let vhost_fs_devices = run_virtiofs(&config)?;
 
             // If this fails and returns an error, `self` will be left in the `Failed` state.
             let child =
@@ -337,7 +339,13 @@ impl VmState {
             let child_clone = child.clone();
             let instance_clone = instance.clone();
             let monitor_vm_exit_thread = Some(thread::spawn(move || {
-                instance_clone.monitor_vm_exit(child_clone, failure_pipe_read, vfio_devices, tap);
+                instance_clone.monitor_vm_exit(
+                    child_clone,
+                    failure_pipe_read,
+                    vfio_devices,
+                    tap,
+                    vhost_fs_devices,
+                );
             }));
 
             if detect_hangup {
@@ -484,6 +492,7 @@ impl VmInstance {
         failure_pipe_read: File,
         vfio_devices: Vec<VfioDevice>,
         tap: Option<File>,
+        vhost_user_devices: Vec<SharedChild>,
     ) {
         let failure_reason_thread = std::thread::spawn(move || {
             // Read the pipe to see if any failure reason is written
@@ -507,6 +516,34 @@ impl VmInstance {
                     if exit_status_code == CROSVM_WATCHDOG_REBOOT_STATUS {
                         info!("detected vcpu stall on crosvm");
                     }
+                }
+            }
+        }
+
+        // In crosvm, when vhost_user frontend is dead, vhost_user backend device will detect and
+        // exit. We can safely wait() for vhost user device after waiting crosvm main
+        // process.
+        for device in vhost_user_devices {
+            match device.wait() {
+                Ok(status) => {
+                    info!("Vhost user device({}) exited with status {}", device.id(), status);
+                    if !status.success() {
+                        if let Some(code) = status.code() {
+                            // vhost_user backend device exit with error code
+                            error!(
+                                "vhost user device({}) exited with error code: {}",
+                                device.id(),
+                                code
+                            );
+                        } else {
+                            // The spawned child process of vhost_user backend device is
+                            // killed by signal
+                            error!("vhost user device({}) killed by signal", device.id());
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Error waiting for vhost user device({}) to die: {}", device.id(), e);
                 }
             }
         }
@@ -913,7 +950,8 @@ fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Erro
     }
 }
 
-fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
+fn run_virtiofs(config: &CrosvmConfig) -> io::Result<Vec<SharedChild>> {
+    let mut devices: Vec<SharedChild> = Vec::new();
     for shared_path in &config.shared_paths {
         if shared_path.app_domain {
             continue;
@@ -945,9 +983,10 @@ fn run_virtiofs(config: &CrosvmConfig) -> io::Result<()> {
 
         let result = SharedChild::spawn(&mut command)?;
         info!("Spawned virtiofs crosvm({})", result.id());
+        devices.push(result);
     }
 
-    Ok(())
+    Ok(devices)
 }
 
 /// Starts an instance of `crosvm` to manage a new VM.
@@ -989,7 +1028,29 @@ fn run_vm(
 
     let mut memory_mib = config.memory_mib;
 
+    if config.enable_hypervisor_specific_auth_method && !config.protected {
+        bail!("hypervisor specific auth method only supported for protected VMs");
+    }
     if config.protected {
+        if config.enable_hypervisor_specific_auth_method {
+            if !hypervisor_props::is_gunyah()? {
+                bail!("hypervisor specific auth method not supported for current hypervisor");
+            }
+            // "QCOM Trusted VM" compatibility mode.
+            //
+            // When this mode is enabled, two hypervisor specific IDs are expected to be packed
+            // into the instance ID. We extract them here and pass along to crosvm so they can be
+            // given to the hypervisor driver via an ioctl.
+            let vm_id = u32::from_le_bytes(config.instance_id[60..64].try_into().unwrap());
+            let pas_id = u16::from_le_bytes(config.instance_id[58..60].try_into().unwrap());
+            command.arg("--hypervisor").arg(
+                format!("gunyah[device=/dev/gunyah,qcom_trusted_vm_id={vm_id},qcom_trusted_vm_pas_id={pas_id}]"),
+            );
+            // Put the FDT close to the payload (default is end of RAM) to so that CMA can be used
+            // without bloating memory usage.
+            command.arg("--fdt-position").arg("after-payload");
+        }
+
         match system_properties::read(SYSPROP_CUSTOM_PVMFW_PATH)? {
             Some(pvmfw_path) if !pvmfw_path.is_empty() => {
                 if pvmfw_path == "none" {
@@ -1157,9 +1218,10 @@ fn run_vm(
         .context("failed to create control listener")?;
     command.arg("--socket").arg(add_preserved_fd(&mut preserved_fds, control_sock));
 
-    if let Some(dt_overlay) = config.device_tree_overlay {
-        command.arg("--device-tree-overlay").arg(add_preserved_fd(&mut preserved_fds, dt_overlay));
-    }
+    config.device_tree_overlays.into_iter().for_each(|dt_overlay| {
+        let arg = add_preserved_fd(&mut preserved_fds, dt_overlay);
+        command.arg("--device-tree-overlay").arg(arg);
+    });
 
     if cfg!(paravirtualized_devices) {
         if let Some(gpu_config) = &config.gpu_config {

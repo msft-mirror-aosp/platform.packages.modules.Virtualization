@@ -29,6 +29,7 @@ use android_system_virtualizationcommon::aidl::android::system::virtualizationco
     ErrorCode::ErrorCode,
 };
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
+    AssignedDevices::AssignedDevices,
     AssignableDevice::AssignableDevice,
     CpuTopology::CpuTopology,
     DiskImage::DiskImage,
@@ -67,7 +68,6 @@ use binder::{
     self, wait_for_interface, Accessor, BinderFeatures, ConnectionInfo, ExceptionCode, Interface, ParcelFileDescriptor,
     SpIBinder, Status, StatusCode, Strong, IntoBinderResult,
 };
-use cstr::cstr;
 use glob::glob;
 use libc::{AF_VSOCK, sa_family_t, sockaddr_vm};
 use log::{debug, error, info, warn};
@@ -587,7 +587,22 @@ impl VirtualizationService {
             check_gdb_allowed(config)?;
         }
 
-        let device_tree_overlay = maybe_create_device_tree_overlay(config, &temporary_directory)?;
+        let instance_id = extract_instance_id(config);
+        let mut device_tree_overlays = vec![];
+        if let Some(dt_overlay) =
+            maybe_create_reference_dt_overlay(config, &instance_id, &temporary_directory)?
+        {
+            device_tree_overlays.push(dt_overlay);
+        }
+        if let Some(dtbo) = get_dtbo(config) {
+            let dtbo = File::from(
+                dtbo.as_ref()
+                    .try_clone()
+                    .context("Failed to create VM DTBO from ParcelFileDescriptor")
+                    .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?,
+            );
+            device_tree_overlays.push(dtbo);
+        }
 
         let debug_config = DebugConfig::new(config);
         let ramdump = if !uses_gki_kernel(config) && debug_config.is_ramdump_needed() {
@@ -715,29 +730,30 @@ impl VirtualizationService {
             }
         };
 
-        let (vfio_devices, dtbo) = if !config.devices.is_empty() {
-            let mut set = HashSet::new();
-            for device in config.devices.iter() {
-                let path = canonicalize(device)
-                    .with_context(|| format!("can't canonicalize {device}"))
-                    .or_service_specific_exception(-1)?;
-                if !set.insert(path) {
-                    return Err(anyhow!("duplicated device {device}"))
-                        .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT);
+        let (vfio_devices, dtbo) = match &config.devices {
+            AssignedDevices::Devices(devices) if !devices.is_empty() => {
+                let mut set = HashSet::new();
+                for device in devices.iter() {
+                    let path = canonicalize(device)
+                        .with_context(|| format!("can't canonicalize {device}"))
+                        .or_service_specific_exception(-1)?;
+                    if !set.insert(path) {
+                        return Err(anyhow!("duplicated device {device}"))
+                            .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT);
+                    }
                 }
+                let devices = GLOBAL_SERVICE.bindDevicesToVfioDriver(devices)?;
+                let dtbo_file = File::from(
+                    GLOBAL_SERVICE
+                        .getDtboFile()?
+                        .as_ref()
+                        .try_clone()
+                        .context("Failed to create VM DTBO from ParcelFileDescriptor")
+                        .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?,
+                );
+                (devices, Some(dtbo_file))
             }
-            let devices = GLOBAL_SERVICE.bindDevicesToVfioDriver(&config.devices)?;
-            let dtbo_file = File::from(
-                GLOBAL_SERVICE
-                    .getDtboFile()?
-                    .as_ref()
-                    .try_clone()
-                    .context("Failed to create VM DTBO from ParcelFileDescriptor")
-                    .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?,
-            );
-            (devices, Some(dtbo_file))
-        } else {
-            (vec![], None)
+            _ => (vec![], None),
         };
         let display_config = if cfg!(paravirtualized_devices) {
             config
@@ -803,6 +819,8 @@ impl VirtualizationService {
             .unwrap_or(Ok(UsbConfig { controller: false }))
             .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?;
 
+        let detect_hangup = is_app_config && gdb_port.is_none();
+
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -830,11 +848,11 @@ impl VirtualizationService {
             ramdump,
             indirect_files,
             platform_version: parse_platform_version_req(&config.platformVersion)?,
-            detect_hangup: is_app_config,
+            detect_hangup,
             gdb_port,
             vfio_devices,
             dtbo,
-            device_tree_overlay,
+            device_tree_overlays,
             display_config,
             input_device_options,
             hugepages: config.hugePages,
@@ -846,6 +864,8 @@ impl VirtualizationService {
             balloon: config.balloon,
             usb_config,
             dump_dt_fd,
+            enable_hypervisor_specific_auth_method: config.enableHypervisorSpecificAuthMethod,
+            instance_id,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -931,8 +951,9 @@ fn extract_vendor_hashtree_digest(config: &VirtualMachineConfig) -> Result<Optio
     Err(anyhow!("No hashtree digest is extracted from microdroid vendor image"))
 }
 
-fn maybe_create_device_tree_overlay(
+fn maybe_create_reference_dt_overlay(
     config: &VirtualMachineConfig,
+    instance_id: &[u8; 64],
     temporary_directory: &Path,
 ) -> binder::Result<Option<File>> {
     // Currently, VirtMgr adds the host copy of reference DT & untrusted properties
@@ -956,28 +977,26 @@ fn maybe_create_device_tree_overlay(
             "Passing vendor hashtree digest to pvmfw. This will be rejected if it doesn't \
                 match the trusted digest in the pvmfw config, causing the VM to fail to start."
         );
-        vec![(cstr!("vendor_hashtree_descriptor_root_digest"), vendor_hashtree_digest.as_slice())]
+        vec![(c"vendor_hashtree_descriptor_root_digest", vendor_hashtree_digest.as_slice())]
     } else {
         vec![]
     };
 
-    let instance_id;
     let key_material;
     let mut untrusted_props = Vec::with_capacity(2);
     if cfg!(llpvm_changes) {
-        instance_id = extract_instance_id(config);
-        untrusted_props.push((cstr!("instance-id"), &instance_id[..]));
+        untrusted_props.push((c"instance-id", &instance_id[..]));
         let want_updatable = extract_want_updatable(config);
         if want_updatable && is_secretkeeper_supported() {
             // Let guest know that it can defer rollback protection to Secretkeeper by setting
             // an empty property in untrusted node in DT. This enables Updatable VMs.
-            untrusted_props.push((cstr!("defer-rollback-protection"), &[]));
+            untrusted_props.push((c"defer-rollback-protection", &[]));
             let sk: Strong<dyn ISecretkeeper> =
                 binder::wait_for_interface(SECRETKEEPER_IDENTIFIER)?;
             if sk.getInterfaceVersion()? >= 2 {
                 let PublicKey { keyMaterial } = sk.getSecretkeeperIdentity()?;
                 key_material = keyMaterial;
-                trusted_props.push((cstr!("secretkeeper_public_key"), key_material.as_slice()));
+                trusted_props.push((c"secretkeeper_public_key", key_material.as_slice()));
             }
         }
     }
@@ -998,6 +1017,16 @@ fn maybe_create_device_tree_overlay(
         None
     };
     Ok(device_tree_overlay)
+}
+
+fn get_dtbo(config: &VirtualMachineConfig) -> Option<&ParcelFileDescriptor> {
+    let VirtualMachineConfig::RawConfig(config) = config else {
+        return None;
+    };
+    match &config.devices {
+        AssignedDevices::Dtbo(dtbo) => dtbo.as_ref(),
+        _ => None,
+    }
 }
 
 fn write_zero_filler(zero_filler_path: &Path) -> Result<()> {
@@ -1260,7 +1289,7 @@ fn load_app_config(
             append_kernel_param("androidboot.microdroid.mount_vendor=1", &mut vm_config)
         }
 
-        vm_config.devices.clone_from(&custom_config.devices);
+        vm_config.devices = AssignedDevices::Devices(custom_config.devices.clone());
         vm_config.networkSupported = custom_config.networkSupported;
 
         for param in custom_config.extraKernelCmdlineParams.iter() {
