@@ -233,7 +233,10 @@ public class MainActivity :
                     view: WebView?,
                     request: WebResourceRequest?,
                 ): Boolean {
-                    return false
+                    val intent = Intent(Intent.ACTION_VIEW, request?.url)
+                    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(intent)
+                    return true
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
