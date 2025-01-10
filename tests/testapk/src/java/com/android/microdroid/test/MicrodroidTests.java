@@ -119,6 +119,7 @@ import java.util.List;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -1909,7 +1910,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         (ts, tr) -> {
                             tr.mPayloadRpData = ts.insecurelyReadPayloadRpData();
                         });
-        // ainsecurelyReadPayloadRpData()` must've failed since no data was ever written!
+        // `insecurelyReadPayloadRpData()` must've failed since no data was ever written!
         assertWithMessage("The read (unexpectedly) succeeded!")
                 .that(testResults.mException)
                 .isNotNull();
@@ -1937,6 +1938,62 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         });
         testResults.assertNoException();
         assertThat(testResults.mPayloadRpData).isEqualTo(value2);
+    }
+
+    @Test
+    public void rollbackProtectedDataCanBeAccessedPostConnectionExpiration() throws Exception {
+        final long vmSize = minMemoryRequired();
+        // The reference implementation of Secretkeeper maintains 4 live session keys,
+        // dropping the oldest one when new connections are requested. Therefore we spin 8 VMs
+        // asynchronously.
+        // Within a VM, wait for 5 sec (> Microdroid boot time) and trigger rp data access
+        // hoping at least some of the connection between VM <-> Secretkeeper are expired.
+        final int numVMs = 8;
+        final long availableMem = getAvailableMemory();
+
+        // Let's not use more than half of the available memory
+        assume().withMessage("Available memory (" + availableMem + " bytes) too small")
+                .that((numVMs * vmSize) <= (availableMem / 2))
+                .isTrue();
+
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setMemoryBytes(vmSize)
+                        .build();
+        byte[] data = new byte[32];
+        Arrays.fill(data, (byte) 0xcc);
+
+        CompletableFuture<TestResults>[] resultFutureList = new CompletableFuture[numVMs];
+        for (int i = 0; i < numVMs; i++) {
+            final VirtualMachine vm =
+                    forceCreateNewVirtualMachine("test_sk_session_expiration_vm_" + i, config);
+            resultFutureList[i] =
+                    CompletableFuture.supplyAsync(
+                            () -> {
+                                try {
+                                    TestResults testResults =
+                                            runVmTestService(
+                                                    TAG,
+                                                    vm,
+                                                    (ts, tr) -> {
+                                                        ts.insecurelyWritePayloadRpData(data);
+                                                        Thread.sleep(5 * 1000); // 5 seconds of wait
+                                                        tr.mPayloadRpData =
+                                                                ts.insecurelyReadPayloadRpData();
+                                                    });
+                                    return testResults;
+                                } catch (Exception e) {
+                                    throw new CompletionException(e);
+                                }
+                            });
+        }
+
+        for (int i = 0; i < numVMs; i++) {
+            TestResults testResult = resultFutureList[i].get();
+            testResult.assertNoException();
+            assertThat(testResult.mPayloadRpData).isEqualTo(data);
+        }
     }
 
     @Test
