@@ -68,7 +68,6 @@ use binder::{
     self, wait_for_interface, Accessor, BinderFeatures, ConnectionInfo, ExceptionCode, Interface, ParcelFileDescriptor,
     SpIBinder, Status, StatusCode, Strong, IntoBinderResult,
 };
-use cstr::cstr;
 use glob::glob;
 use libc::{AF_VSOCK, sa_family_t, sockaddr_vm};
 use log::{debug, error, info, warn};
@@ -820,6 +819,8 @@ impl VirtualizationService {
             .unwrap_or(Ok(UsbConfig { controller: false }))
             .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?;
 
+        let detect_hangup = is_app_config && gdb_port.is_none();
+
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -847,7 +848,7 @@ impl VirtualizationService {
             ramdump,
             indirect_files,
             platform_version: parse_platform_version_req(&config.platformVersion)?,
-            detect_hangup: is_app_config,
+            detect_hangup,
             gdb_port,
             vfio_devices,
             dtbo,
@@ -976,7 +977,7 @@ fn maybe_create_reference_dt_overlay(
             "Passing vendor hashtree digest to pvmfw. This will be rejected if it doesn't \
                 match the trusted digest in the pvmfw config, causing the VM to fail to start."
         );
-        vec![(cstr!("vendor_hashtree_descriptor_root_digest"), vendor_hashtree_digest.as_slice())]
+        vec![(c"vendor_hashtree_descriptor_root_digest", vendor_hashtree_digest.as_slice())]
     } else {
         vec![]
     };
@@ -984,18 +985,18 @@ fn maybe_create_reference_dt_overlay(
     let key_material;
     let mut untrusted_props = Vec::with_capacity(2);
     if cfg!(llpvm_changes) {
-        untrusted_props.push((cstr!("instance-id"), &instance_id[..]));
+        untrusted_props.push((c"instance-id", &instance_id[..]));
         let want_updatable = extract_want_updatable(config);
         if want_updatable && is_secretkeeper_supported() {
             // Let guest know that it can defer rollback protection to Secretkeeper by setting
             // an empty property in untrusted node in DT. This enables Updatable VMs.
-            untrusted_props.push((cstr!("defer-rollback-protection"), &[]));
+            untrusted_props.push((c"defer-rollback-protection", &[]));
             let sk: Strong<dyn ISecretkeeper> =
                 binder::wait_for_interface(SECRETKEEPER_IDENTIFIER)?;
             if sk.getInterfaceVersion()? >= 2 {
                 let PublicKey { keyMaterial } = sk.getSecretkeeperIdentity()?;
                 key_material = keyMaterial;
-                trusted_props.push((cstr!("secretkeeper_public_key"), key_material.as_slice()));
+                trusted_props.push((c"secretkeeper_public_key", key_material.as_slice()));
             }
         }
     }

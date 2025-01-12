@@ -22,7 +22,7 @@ import android.system.virtualmachine.VirtualMachineConfig
 import android.system.virtualmachine.VirtualMachineException
 import android.system.virtualmachine.VirtualMachineManager
 import android.util.Log
-import com.android.virtualization.terminal.MainActivity.TAG
+import com.android.virtualization.terminal.MainActivity.Companion.TAG
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ForkJoinPool
 
@@ -59,7 +59,6 @@ internal class Runner private constructor(val vm: VirtualMachine?, callback: Cal
 
     companion object {
         /** Create a virtual machine of the given config, under the given context. */
-        @JvmStatic
         @Throws(VirtualMachineException::class)
         fun create(context: Context, config: VirtualMachineConfig): Runner {
             // context may already be the app context, but calling this again is not harmful.
