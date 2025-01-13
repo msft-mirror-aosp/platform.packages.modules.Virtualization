@@ -20,6 +20,8 @@ use std::ffi::CStr;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::os::fd::IntoRawFd;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use vsock::{VsockListener, VsockStream, VMADDR_CID_HOST};
 
@@ -33,6 +35,13 @@ const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: timespec = timespec { tv_sec: 10, tv_nsec: 0 };
+
+static ON_STOPPED_EVENT: LazyLock<Mutex<Sender<(usize, AVirtualMachineStopReason)>>> =
+    LazyLock::new(|| {
+        // Returning stub here because `Receiver` isn't `Send`.
+        let (tx, _) = mpsc::channel();
+        Mutex::new(tx)
+    });
 
 /// Processes the request in the service VM.
 fn process_request(vsock_stream: &mut VsockStream, request: Request) -> Result<Response> {
@@ -74,10 +83,22 @@ fn listen_from_guest(port: u32) -> Result<VsockStream> {
     }
 }
 
+unsafe extern "C" fn on_stopped(vm: *const AVirtualMachine, reason: AVirtualMachineStopReason) {
+    ON_STOPPED_EVENT.lock().unwrap().send((vm as usize, reason)).unwrap();
+
+    // SAFETY: `vm` is a valid pointer created by AVirtualMachine_create().
+    unsafe {
+        AVirtualMachine_destroy(vm);
+    }
+}
+
 fn run_rialto(protected_vm: bool) -> Result<()> {
     let kernel_file =
         File::open("/data/local/tmp/rialto.bin").context("Failed to open kernel file")?;
     let kernel_fd = kernel_file.into_raw_fd();
+
+    let (tx, rx) = mpsc::channel();
+    (*ON_STOPPED_EVENT.lock().unwrap()) = tx;
 
     // SAFETY: AVirtualMachineRawConfig_create() isn't unsafe but rust_bindgen forces it to be seen
     // as unsafe
@@ -96,7 +117,7 @@ fn run_rialto(protected_vm: bool) -> Result<()> {
         AVirtualMachineRawConfig_setMemoryMiB(config, VM_MEMORY_MB);
     }
 
-    let mut vm = std::ptr::null_mut();
+    let mut vm = std::ptr::null();
     let mut service = std::ptr::null_mut();
 
     ensure!(
@@ -104,11 +125,6 @@ fn run_rialto(protected_vm: bool) -> Result<()> {
         unsafe { AVirtualizationService_create(&mut service, false) } == 0,
         "AVirtualizationService_create failed"
     );
-
-    scopeguard::defer! {
-        // SAFETY: service is a valid pointer to AVirtualizationService
-        unsafe { AVirtualizationService_destroy(service); }
-    }
 
     ensure!(
         // SAFETY: &mut vm is a valid pointer to *AVirtualMachine
@@ -136,8 +152,10 @@ fn run_rialto(protected_vm: bool) -> Result<()> {
 
     // SAFETY: vm is the only reference to a valid object
     unsafe {
-        AVirtualMachine_start(vm);
+        AVirtualMachine_start(vm, Some(on_stopped));
     }
+
+    let vm_ptr = vm as usize;
 
     info!("VM started");
 
@@ -169,6 +187,14 @@ fn run_rialto(protected_vm: bool) -> Result<()> {
         unsafe { AVirtualMachine_waitForStop(vm, &STOP_TIMEOUT, &mut stop_reason) },
         "AVirtualMachine_waitForStop failed"
     );
+
+    assert_eq!(AVirtualMachineStopReason::AVIRTUAL_MACHINE_SHUTDOWN, stop_reason);
+
+    let timeout = Duration::from_secs(STOP_TIMEOUT.tv_sec.try_into().unwrap());
+    let (stopped_vm_ptr, stopped_reason) =
+        rx.recv_timeout(timeout).expect("Callback should have been called");
+    assert_eq!(stopped_vm_ptr, vm_ptr);
+    assert_eq!(stopped_reason, stop_reason);
 
     info!("stopped");
 
