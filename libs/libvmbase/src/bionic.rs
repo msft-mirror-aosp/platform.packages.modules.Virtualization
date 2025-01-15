@@ -20,7 +20,6 @@ use core::ffi::c_char;
 use core::ffi::c_int;
 use core::ffi::c_void;
 use core::ffi::CStr;
-use core::ptr::addr_of_mut;
 use core::slice;
 use core::str;
 
@@ -74,7 +73,7 @@ pub static mut ERRNO: c_int = 0;
 // SAFETY: C functions which call this are only called from the main thread, not from exception
 // handlers.
 unsafe extern "C" fn __errno() -> *mut c_int {
-    addr_of_mut!(ERRNO) as *mut _
+    (&raw mut ERRNO).cast()
 }
 
 fn set_errno(value: c_int) {
