@@ -17,12 +17,19 @@ LOCAL_DIR := $(GET_LOCAL_DIR)
 
 MODULE := $(LOCAL_DIR)
 
-SRC_DIR := packages/modules/Virtualization/libs/cstr
+MODULE_SRCS := $(LOCAL_DIR)/api_test.rs
 
-MODULE_SRCS := $(SRC_DIR)/src/lib.rs
+MODULE_CRATE_NAME := diced_open_dice_tests
 
-MODULE_CRATE_NAME := cstr
+MODULE_LIBRARY_DEPS += \
+	packages/modules/Virtualization/libs/dice/open_dice \
 
-MODULE_RUST_EDITION := 2021
+MODULE_RUST_TESTS := true
+
+# Enables trusty test initialization
+MODULE_RUSTFLAGS += \
+	--cfg 'feature="trusty"' \
+
+MANIFEST := $(LOCAL_DIR)/manifest.json
 
 include make/library.mk
