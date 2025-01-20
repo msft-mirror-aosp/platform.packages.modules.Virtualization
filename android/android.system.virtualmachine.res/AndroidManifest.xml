@@ -40,5 +40,14 @@
   <permission android:name="android.permission.DEBUG_VIRTUAL_MACHINE"
       android:protectionLevel="signature" />
 
+  <!-- @hide Makes Microdroid pVM use a more relaxed rollback protection scheme.
+    Should only be used by payloads delivered inside Mainline modules.
+    See packages/modules/Virtualization/docs/mainline_module_payload.md.
+    <p>Protection level: signature|development|privileged
+  -->
+  <permission android:name="android.permission.USE_RELAXED_MICRODROID_ROLLBACK_PROTECTION"
+      android:protectionLevel="signature|development|privileged" />
+
+
   <application android:hasCode="false" />
 </manifest>
