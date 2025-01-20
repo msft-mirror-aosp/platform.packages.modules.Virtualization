@@ -384,6 +384,20 @@ Result<void> start_test_service() {
             }
         }
 
+        ScopedAStatus checkLibIcuIsAccessible() override {
+            static constexpr const char* kLibIcuPath = "/apex/com.android.i18n/lib64/libicu.so";
+            if (access(kLibIcuPath, R_OK) == 0) {
+                // TODO(ioffe): call an API provided by libicu.so and check that it returns expected
+                // value.
+                return ScopedAStatus::ok();
+            } else {
+                std::string msg = "failed to access " + std::string(kLibIcuPath) + "(" +
+                        std::to_string(errno) + ")";
+                return ScopedAStatus::fromExceptionCodeWithMessage(EX_SERVICE_SPECIFIC,
+                                                                   msg.c_str());
+            }
+        }
+
         ScopedAStatus quit() override { exit(0); }
     };
     auto testService = ndk::SharedRefBase::make<TestService>();
