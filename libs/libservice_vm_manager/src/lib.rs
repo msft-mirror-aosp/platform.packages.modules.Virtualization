@@ -152,7 +152,7 @@ impl ServiceVm {
         let vsock_listener = VsockListener::bind_with_cid_port(VMADDR_CID_HOST, vm_type.port())?;
 
         // Starts the service VM.
-        vm.start(None).context("Failed to start service VM")?;
+        vm.start().context("Failed to start service VM")?;
         info!("Service VM started");
 
         // Accepts the connection from the service VM.
@@ -245,7 +245,8 @@ pub fn protected_vm_instance(instance_img_path: PathBuf) -> Result<VmInstance> {
     let console_in = None;
     let log = Some(android_log_fd()?);
     let dump_dt = None;
-    VmInstance::create(service.as_ref(), &config, console_out, console_in, log, dump_dt)
+    let callback = None;
+    VmInstance::create(service.as_ref(), &config, console_out, console_in, log, dump_dt, callback)
         .context("Failed to create service VM")
 }
 
