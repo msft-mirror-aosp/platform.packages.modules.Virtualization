@@ -47,6 +47,7 @@ java_defaults {
     ],
     jni_libs: [
         "MicrodroidTestNativeLib",
+        "MicrodroidTestNativeLibWithLibIcu",
         "MicrodroidIdleNativeLib",
         "MicrodroidEmptyNativeLib",
         "MicrodroidExitNativeLib",
@@ -185,6 +186,17 @@ cc_library_shared {
 cc_library_shared {
     name: "MicrodroidTestNativeLib",
     defaults: ["MicrodroidTestNativeLibDefaults"],
+}
+
+cc_library_shared {
+    name: "MicrodroidTestNativeLibWithLibIcu",
+    defaults: ["MicrodroidTestNativeLibDefaults"],
+    shared_libs: [
+        "libicu",
+    ],
+    cflags: [
+        "-D__MICRODROID_TEST_PAYLOAD_USES_LIBICU__",
+    ],
 }
 
 cc_library_shared {

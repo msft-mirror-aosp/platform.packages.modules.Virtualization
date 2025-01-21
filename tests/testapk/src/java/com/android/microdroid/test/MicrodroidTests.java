@@ -2760,7 +2760,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         grantPermission(USE_RELAXED_MICRODROID_ROLLBACK_PROTECTION_PERMISSION);
 
         VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLibWithLibIcu.so")
                         .setDebugLevel(DEBUG_LEVEL_FULL)
                         .build();
 
