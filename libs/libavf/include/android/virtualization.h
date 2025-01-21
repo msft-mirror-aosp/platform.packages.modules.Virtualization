@@ -337,30 +337,17 @@ enum AVirtualMachineStopReason : int32_t {
 int AVirtualMachine_createRaw(const AVirtualizationService* _Nonnull service,
                               AVirtualMachineRawConfig* _Nonnull config, int consoleOutFd,
                               int consoleInFd, int logFd,
-                              const AVirtualMachine* _Null_unspecified* _Nonnull vm)
-        __INTRODUCED_IN(36);
-
-/**
- * A callback to be called when virtual machine stops.
- *
- * \param vm stopped vm
- * \param reason stop reason
- */
-typedef void (*AVirtualMachine_stopCallback)(const AVirtualMachine* _Nonnull vm,
-                                             enum AVirtualMachineStopReason reason);
+                              AVirtualMachine* _Null_unspecified* _Nonnull vm) __INTRODUCED_IN(36);
 
 /**
  * Start a virtual machine. `AVirtualMachine_start` is synchronous and blocks until the virtual
  * machine is initialized and free to start executing code, or until an error happens.
  *
  * \param vm a handle on a virtual machine.
- * \param callback an optional callback to be called when VM stops.
  *
  * \return If successful, it returns 0. Otherwise, it returns `-EIO`.
  */
-int AVirtualMachine_start(const AVirtualMachine* _Nonnull vm,
-                          const AVirtualMachine_stopCallback _Nullable callback)
-        __INTRODUCED_IN(36);
+int AVirtualMachine_start(AVirtualMachine* _Nonnull vm) __INTRODUCED_IN(36);
 
 /**
  * Stop a virtual machine. Stopping a virtual machine is like pulling the plug on a real computer;
@@ -379,7 +366,7 @@ int AVirtualMachine_start(const AVirtualMachine* _Nonnull vm,
  *
  * \return If successful, it returns 0. Otherwise, it returns `-EIO`.
  */
-int AVirtualMachine_stop(const AVirtualMachine* _Nonnull vm) __INTRODUCED_IN(36);
+int AVirtualMachine_stop(AVirtualMachine* _Nonnull vm) __INTRODUCED_IN(36);
 
 /**
  * Open a vsock connection to the VM on the given port. The caller takes ownership of the returned
@@ -392,8 +379,7 @@ int AVirtualMachine_stop(const AVirtualMachine* _Nonnull vm) __INTRODUCED_IN(36)
  *
  * \return If successful, it returns a valid file descriptor. Otherwise, it returns `-EIO`.
  */
-int AVirtualMachine_connectVsock(const AVirtualMachine* _Nonnull vm, uint32_t port)
-        __INTRODUCED_IN(36);
+int AVirtualMachine_connectVsock(AVirtualMachine* _Nonnull vm, uint32_t port) __INTRODUCED_IN(36);
 
 /**
  * Wait until a virtual machine stops or the given timeout elapses.
@@ -407,7 +393,7 @@ int AVirtualMachine_connectVsock(const AVirtualMachine* _Nonnull vm, uint32_t po
  *     sets `reason` and returns true.
  *   - If the timeout expired, it returns `false`.
  */
-bool AVirtualMachine_waitForStop(const AVirtualMachine* _Nonnull vm,
+bool AVirtualMachine_waitForStop(AVirtualMachine* _Nonnull vm,
                                  const struct timespec* _Nullable timeout,
                                  enum AVirtualMachineStopReason* _Nonnull reason)
         __INTRODUCED_IN(36);
@@ -422,6 +408,6 @@ bool AVirtualMachine_waitForStop(const AVirtualMachine* _Nonnull vm,
  *
  * \param vm a handle on a virtual machine.
  */
-void AVirtualMachine_destroy(const AVirtualMachine* _Nullable vm) __INTRODUCED_IN(36);
+void AVirtualMachine_destroy(AVirtualMachine* _Nullable vm) __INTRODUCED_IN(36);
 
 __END_DECLS
