@@ -32,7 +32,6 @@ import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 
 import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
 
@@ -1869,6 +1868,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
+    @CddTest
     public void rollbackProtectedDataOfPayload() throws Exception {
         assumeSupportedDevice();
         // Rollback protected data is only possible if Updatable VMs is supported -
@@ -2514,25 +2514,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
-    public void kernelVersionRequirement() throws Exception {
-        assumeVsrCompliant();
-        int firstApiLevel = SystemProperties.getInt("ro.product.first_api_level", 0);
-        assume().withMessage("Skip on devices launched before Android 14 (API level 34)")
-                .that(firstApiLevel)
-                .isAtLeast(34);
-
-        String[] tokens = KERNEL_VERSION.split("\\.");
-        int major = Integer.parseInt(tokens[0]);
-        int minor = Integer.parseInt(tokens[1]);
-
-        // Check kernel version >= 5.15
-        assertTrue(major >= 5);
-        if (major == 5) {
-            assertTrue(minor >= 15);
-        }
-    }
-
-    @Test
+    @CddTest
     public void createAndRunRustVm() throws Exception {
         // This test is here mostly to exercise the Rust wrapper around the VM Payload API.
         // We're testing the same functionality as in other tests, the only difference is
@@ -2736,6 +2718,7 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     }
 
     @Test
+    @GmsTest(requirements = {"GMS-3-7.1-001.002"})
     public void pageSize() throws Exception {
         assumeSupportedDevice();
 
