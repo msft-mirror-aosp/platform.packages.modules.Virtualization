@@ -39,7 +39,6 @@ import static org.junit.Assume.assumeTrue;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static java.util.stream.Collectors.toList;
 
-import android.app.ActivityManager;
 import android.app.Instrumentation;
 import android.app.UiAutomation;
 import android.content.ComponentName;
@@ -47,7 +46,6 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.ServiceConnection;
-import android.os.Build;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.ParcelFileDescriptor;
@@ -172,11 +170,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     public void tearDown() {
         revokePermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION);
     }
-
-    private static final long ONE_MEBI = 1024 * 1024;
-
-    private static final long MIN_MEM_ARM64 = 170 * ONE_MEBI;
-    private static final long MIN_MEM_X86_64 = 196 * ONE_MEBI;
     private static final String EXAMPLE_STRING = "Literally any string!! :)";
 
     private static final String VM_SHARE_APP_PACKAGE_NAME = "com.android.microdroid.vmshare_app";
@@ -2828,13 +2821,6 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         }
     }
 
-    private long getAvailableMemory() {
-        ActivityManager am = getContext().getSystemService(ActivityManager.class);
-        ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
-        am.getMemoryInfo(memoryInfo);
-        return memoryInfo.availMem;
-    }
-
     private VirtualMachineDescriptor toParcelFromParcel(VirtualMachineDescriptor descriptor) {
         Parcel parcel = Parcel.obtain();
         descriptor.writeToParcel(parcel, 0);
@@ -2866,18 +2852,5 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
             ThrowingRunnable runnable, String expectedContents) {
         Exception e = assertThrows(VirtualMachineException.class, runnable);
         assertThat(e).hasMessageThat().contains(expectedContents);
-    }
-
-    private long minMemoryRequired() {
-        assertThat(Build.SUPPORTED_ABIS).isNotEmpty();
-        String primaryAbi = Build.SUPPORTED_ABIS[0];
-        switch (primaryAbi) {
-            case "x86_64":
-                return MIN_MEM_X86_64;
-            case "arm64-v8a":
-            case "arm64-v8a-hwasan":
-                return MIN_MEM_ARM64;
-        }
-        throw new AssertionError("Unsupported ABI: " + primaryAbi);
     }
 }
