@@ -101,9 +101,10 @@ fn main() -> Result<()> {
         None, // console_out
         None, // log
         None, // dump_dt
+        None, // callback
     )
     .context("Failed to create VM")?;
-    vm.start(None /* callback */).context("Failed to start VM")?;
+    vm.start().context("Failed to start VM")?;
 
     println!("started trusty_security_vm_launcher VM");
     let death_reason = vm.wait_for_death();
