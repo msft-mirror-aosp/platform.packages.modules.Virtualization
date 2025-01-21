@@ -96,7 +96,6 @@ impl InstanceStarter {
             console_in,
             /* log= */ None,
             /* dump_dt= */ None,
-            None,
         )
         .context("Failed to create VM")?;
         if let Some(pty) = &pty {
@@ -105,7 +104,7 @@ impl InstanceStarter {
                 .setHostConsoleName(&pty.follower_name)
                 .context("Setting host console name")?;
         }
-        vm_instance.start().context("Starting VM")?;
+        vm_instance.start(None).context("Starting VM")?;
 
         Ok(MicrofuchsiaInstance {
             _vm_instance: vm_instance,
