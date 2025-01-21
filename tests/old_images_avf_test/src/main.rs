@@ -92,7 +92,7 @@ fn run_vm(image_path: &str, test_name: &CStr, protected_vm: bool) -> Result<()> 
         AVirtualMachineRawConfig_setMemoryMiB(config, VM_MEMORY_MB);
     }
 
-    let mut vm = std::ptr::null();
+    let mut vm = std::ptr::null_mut();
     let mut service = std::ptr::null_mut();
 
     ensure!(
@@ -132,7 +132,7 @@ fn run_vm(image_path: &str, test_name: &CStr, protected_vm: bool) -> Result<()> 
 
     // SAFETY: vm is the only reference to a valid object
     unsafe {
-        AVirtualMachine_start(vm, None /* callback */);
+        AVirtualMachine_start(vm);
     }
 
     info!("VM started");
