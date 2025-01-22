@@ -253,8 +253,10 @@ package_custom_kernel() {
 	            --require-valid-signature \
 	            --extract "${dsc_file}"
 	pushd "linux-${debian_kver%-*}" > /dev/null
-	# TODO: Copy our own kernel patches to debian/patches
-	#       and add patch file names in the desired order to debian/patches/series
+
+	local kpatches_src="$(dirname "$0")/kernel_patches"
+	cp -r "${kpatches_src}/avf" debian/patches/
+	cat "${kpatches_src}/series" >> debian/patches/series
 	./debian/rules orig
 
 	local custom_flavour="avf"
