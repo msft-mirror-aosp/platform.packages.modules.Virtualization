@@ -16,4 +16,3 @@
 
 #include <dice/dice.h>
 #include <dice/ops.h>
-#include <dice/ops/trait/cose.h>
