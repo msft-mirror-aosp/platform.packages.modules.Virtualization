@@ -39,7 +39,6 @@ MODULE_BINDGEN_ALLOW_FUNCTIONS := \
 	DiceKdf \
 	DiceKeypairFromSeed \
 	DiceSign \
-	DiceCoseSignAndEncodeSign1 \
 	DiceVerify \
 	DiceGenerateCertificate \
 
