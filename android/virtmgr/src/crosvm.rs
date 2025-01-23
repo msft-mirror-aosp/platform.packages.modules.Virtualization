@@ -1110,7 +1110,7 @@ fn run_vm(
     command.arg("--mem").arg(memory_mib.to_string());
 
     if let Some(cpus) = config.cpus {
-        command.arg("--cpus").arg(cpus.to_string());
+        command.arg("--cpus").arg(cpus.to_string() + ",sve=[auto=true]");
     }
 
     if config.host_cpu_topology {
@@ -1121,8 +1121,9 @@ fn run_vm(
                     command.arg("--virt-cpufreq");
                 }
             }
+            command.arg("--cpus").arg("sve=[auto=true]");
         } else if let Some(cpus) = get_num_cpus() {
-            command.arg("--cpus").arg(cpus.to_string());
+            command.arg("--cpus").arg(cpus.to_string() + ",sve=[auto=true]");
         } else {
             bail!("Could not determine the number of CPUs in the system");
         }
