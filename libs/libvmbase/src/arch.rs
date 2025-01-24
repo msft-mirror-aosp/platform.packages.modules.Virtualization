@@ -20,6 +20,9 @@ pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::platform;
 
+#[cfg(target_arch = "aarch64")]
+pub use aarch64::layout;
+
 /// Write with well-defined compiled behavior.
 ///
 /// See https://github.com/rust-lang/rust/issues/131894
@@ -47,7 +50,6 @@ pub(crate) fn flush_region(start: usize, size: usize) {
             let line_size = aarch64::min_dcache_line_size();
             let end = start + size;
             let start = crate::util::unchecked_align_down(start, line_size);
-
             for line in (start..end).step_by(line_size) {
                 crate::dc!("cvau", line);
             }

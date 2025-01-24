@@ -15,8 +15,8 @@
 //! Helper functions and structs for exception handlers.
 
 use crate::{
+    arch::aarch64::layout::UART_PAGE_ADDR,
     eprintln,
-    layout::UART_PAGE_ADDR,
     memory::{page_4kb_of, MemoryTrackerError, MEMORY},
     read_sysreg,
 };

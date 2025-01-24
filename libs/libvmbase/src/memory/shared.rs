@@ -74,7 +74,7 @@ impl MmioSharer {
         let base = unchecked_align_down(phys, self.granule);
 
         // TODO(ptosi): Share the UART using this method and remove the hardcoded check.
-        if self.frames.contains(&base) || base == layout::UART_PAGE_ADDR {
+        if self.frames.contains(&base) || base == layout::crosvm::UART_PAGE_ADDR {
             return Err(MemoryTrackerError::DuplicateMmioShare(base));
         }
 
