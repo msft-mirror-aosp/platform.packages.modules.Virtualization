@@ -16,6 +16,7 @@ android_app {
         "androidx-constraintlayout_constraintlayout",
         "androidx.window_window",
         "apache-commons-compress",
+        "avf_aconfig_flags_java",
         "com.google.android.material_material",
         "debian-service-grpclib-lite",
         "gson",
@@ -40,6 +41,7 @@ android_app {
         //optimize: true,
         proguard_flags_files: ["proguard.flags"],
         shrink_resources: true,
+        keep_runtime_invisible_annotations: true,
     },
     apex_available: [
         "com.android.virt",
