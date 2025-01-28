@@ -64,6 +64,8 @@ java_defaults {
 DATA = [
     ":MicrodroidTestAppUpdated",
     ":MicrodroidTestHelperAppRelaxedRollbackProtection_correct_V5",
+    ":MicrodroidTestHelperAppRelaxedRollbackProtection_no_permission",
+    ":MicrodroidTestHelperAppRelaxedRollbackProtection_no_rollback_index",
     ":MicrodroidVmShareApp",
     ":test_microdroid_vendor_image",
     ":test_microdroid_vendor_image_unsigned",
@@ -74,6 +76,29 @@ android_test_helper_app {
     defaults: ["MicrodroidTestAppsDefaults"],
     manifest: "AndroidManifestV5_relaxed_rollback_protection.xml",
     jni_libs: [
+        "MicrodroidTestNativeLib",
+        "MicrodroidTestNativeLibWithLibIcu",
+    ],
+    min_sdk_version: "33",
+}
+
+android_test_helper_app {
+    name: "MicrodroidTestHelperAppRelaxedRollbackProtection_no_rollback_index",
+    defaults: ["MicrodroidTestAppsDefaults"],
+    manifest: "AndroidManifestV5_relaxed_rollback_protection_no_rollback_index.xml",
+    jni_libs: [
+        "MicrodroidTestNativeLib",
+        "MicrodroidTestNativeLibWithLibIcu",
+    ],
+    min_sdk_version: "33",
+}
+
+android_test_helper_app {
+    name: "MicrodroidTestHelperAppRelaxedRollbackProtection_no_permission",
+    defaults: ["MicrodroidTestAppsDefaults"],
+    manifest: "AndroidManifestV5_relaxed_rollback_protection_no_permission.xml",
+    jni_libs: [
+        "MicrodroidTestNativeLib",
         "MicrodroidTestNativeLibWithLibIcu",
     ],
     min_sdk_version: "33",
