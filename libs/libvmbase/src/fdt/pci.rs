@@ -14,11 +14,11 @@
 
 //! Library for working with (VirtIO) PCI devices discovered from a device tree.
 
-use core::{ffi::CStr, ops::Range};
+use core::ops::Range;
 use libfdt::{AddressRange, Fdt, FdtError, FdtNode};
 use log::debug;
 use thiserror::Error;
-use virtio_drivers::transport::pci::bus::{Cam, PciRoot};
+use virtio_drivers::transport::pci::bus::{Cam, ConfigurationAccess, MmioCam, PciRoot};
 
 /// PCI MMIO configuration region size.
 const PCI_CFG_SIZE: usize = 0x100_0000;
@@ -94,16 +94,16 @@ impl PciInfo {
     /// To prevent concurrent access, only one `PciRoot` should exist in the program. Thus this
     /// method must only be called once, and there must be no other `PciRoot` constructed using the
     /// same CAM.
-    pub unsafe fn make_pci_root(&self) -> PciRoot {
+    pub unsafe fn make_pci_root(&self) -> PciRoot<impl ConfigurationAccess> {
         // SAFETY: We trust that the FDT gave us a valid MMIO base address for the CAM. The caller
         // guarantees to only call us once, so there are no other references to it.
-        unsafe { PciRoot::new(self.cam_range.start as *mut u8, Cam::MmioCam) }
+        PciRoot::new(unsafe { MmioCam::new(self.cam_range.start as *mut u8, Cam::MmioCam) })
     }
 }
 
 /// Finds an FDT node with compatible=pci-host-cam-generic.
 fn pci_node(fdt: &Fdt) -> Result<FdtNode, PciError> {
-    fdt.compatible_nodes(CStr::from_bytes_with_nul(b"pci-host-cam-generic\0").unwrap())
+    fdt.compatible_nodes(c"pci-host-cam-generic")
         .map_err(PciError::FdtErrorPci)?
         .next()
         .ok_or(PciError::FdtNoPci)
