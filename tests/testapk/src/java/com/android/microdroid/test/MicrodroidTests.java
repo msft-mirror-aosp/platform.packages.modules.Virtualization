@@ -177,6 +177,8 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     private static final String EXAMPLE_STRING = "Literally any string!! :)";
 
     private static final String VM_SHARE_APP_PACKAGE_NAME = "com.android.microdroid.vmshare_app";
+    private static final String RELAXED_ROLLBACK_PROTECTION_SCHEME_PACKAGE_NAME =
+            "com.android.microdroid.test_relaxed_rollback_protection_scheme";
 
     private void createAndConnectToVmHelper(int cpuTopology, boolean shouldUseHugepages)
             throws Exception {
@@ -2755,13 +2757,20 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
     @Test
     public void libIcuIsLoadable() throws Exception {
         assumeSupportedDevice();
-        // This test relies on the test having USE_RELAXED_MICRODROID_ROLLBACK_PROTECTION
+
+        // This test relies on the test apk having USE_RELAXED_MICRODROID_ROLLBACK_PROTECTION
         // permission.
         grantPermission(USE_RELAXED_MICRODROID_ROLLBACK_PROTECTION_PERMISSION);
 
+        Context otherAppCtx =
+                getContext()
+                        .createPackageContext(RELAXED_ROLLBACK_PROTECTION_SCHEME_PACKAGE_NAME, 0);
         VirtualMachineConfig config =
-                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLibWithLibIcu.so")
+                new VirtualMachineConfig.Builder(otherAppCtx)
                         .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setPayloadBinaryName("MicrodroidTestNativeLibWithLibIcu.so")
+                        .setProtectedVm(isProtectedVm())
+                        .setOs(os())
                         .build();
 
         VirtualMachine vm = forceCreateNewVirtualMachine("test_libicu_is_loadable", config);
