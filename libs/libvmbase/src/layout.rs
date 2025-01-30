@@ -18,9 +18,8 @@
 
 #[cfg(target_arch = "aarch64")]
 use crate::arch::aarch64::linker::__stack_chk_guard;
+use crate::arch::VirtualAddress;
 use crate::memory::{max_stack_size, PAGE_SIZE};
-#[cfg(target_arch = "aarch64")]
-use aarch64_paging::paging::VirtualAddress;
 use core::ops::Range;
 
 #[cfg(target_arch = "aarch64")]
