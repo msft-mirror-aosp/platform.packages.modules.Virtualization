@@ -484,7 +484,7 @@ public class MicrodroidHostTests extends MicrodroidHostTestCaseBase {
 
     @Test
     @GmsTest(requirements = {"GMS-3-7.1-010"})
-    public void protectedVmRunsPvmfw(String os) throws Exception {
+    public void protectedVmRunsPvmfw() throws Exception {
         // Arrange
         assumeProtectedVm();
         final String configPath = "assets/vm_config_apex.json";
