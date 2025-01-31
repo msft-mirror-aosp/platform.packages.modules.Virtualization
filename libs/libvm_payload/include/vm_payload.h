@@ -315,6 +315,6 @@ int32_t AVmPayload_readRollbackProtectedSecret(void* _Nullable buf, size_t n) __
  *
  *  \return true if this is the first run of an instance, false otherwise.
  */
-bool AVmPayload_isNewInstance() __INTRODUCED_IN(36);
+bool AVmPayload_isNewInstance(void) __INTRODUCED_IN(36);
 
 __END_DECLS
