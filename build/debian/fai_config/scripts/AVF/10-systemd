@@ -1,6 +1,7 @@
 #!/bin/bash
 
 chmod +x $target/usr/local/bin/ttyd
+chmod +x $target/usr/local/bin/enable_display
 ln -s /etc/systemd/system/ttyd.service $target/etc/systemd/system/multi-user.target.wants/ttyd.service
 ln -s /etc/systemd/system/avahi_ttyd.service $target/etc/systemd/system/multi-user.target.wants/avahi_ttyd.service
 ln -s /etc/systemd/system/virtiofs.service $target/etc/systemd/system/multi-user.target.wants/virtiofs.service
