@@ -25,7 +25,7 @@ use libfdt::Fdt;
 use log::{error, info};
 use pvmfw_avb::Capability;
 use pvmfw_avb::VerifiedBootData;
-use virtio_drivers::transport::pci::bus::PciRoot;
+use virtio_drivers::transport::pci::bus::{ConfigurationAccess, PciRoot};
 use vmbase::fdt::{pci::PciInfo, SwiotlbInfo};
 use vmbase::memory::init_shared_pool;
 use vmbase::rand;
@@ -44,17 +44,16 @@ pub fn perform_rollback_protection(
     cdi_seal: &[u8],
     instance_hash: Option<Hidden>,
 ) -> Result<(bool, Hidden, bool), RebootReason> {
-    if should_defer_rollback_protection(fdt)?
-        && verified_boot_data.has_capability(Capability::SecretkeeperProtection)
+    if let Some(fixed) = get_fixed_rollback_protection(verified_boot_data) {
+        // Prevent attackers from impersonating well-known images.
+        perform_fixed_index_rollback_protection(verified_boot_data, fixed)?;
+        Ok((false, instance_hash.unwrap(), false))
+    } else if (should_defer_rollback_protection(fdt)?
+        && verified_boot_data.has_capability(Capability::SecretkeeperProtection))
+        || verified_boot_data.has_capability(Capability::TrustySecurityVm)
     {
         perform_deferred_rollback_protection(verified_boot_data)?;
         Ok((false, instance_hash.unwrap(), true))
-    } else if verified_boot_data.has_capability(Capability::RemoteAttest) {
-        perform_fixed_index_rollback_protection(verified_boot_data)?;
-        Ok((false, instance_hash.unwrap(), false))
-    } else if verified_boot_data.has_capability(Capability::TrustySecurityVm) {
-        skip_rollback_protection()?;
-        Ok((false, instance_hash.unwrap(), false))
     } else {
         perform_legacy_rollback_protection(fdt, dice_inputs, cdi_seal, instance_hash)
     }
@@ -74,11 +73,19 @@ fn perform_deferred_rollback_protection(
     }
 }
 
+fn get_fixed_rollback_protection(verified_boot_data: &VerifiedBootData) -> Option<u64> {
+    if verified_boot_data.has_capability(Capability::RemoteAttest) {
+        Some(service_vm_version::VERSION)
+    } else {
+        None
+    }
+}
+
 fn perform_fixed_index_rollback_protection(
     verified_boot_data: &VerifiedBootData,
+    fixed_index: u64,
 ) -> Result<(), RebootReason> {
     info!("Performing fixed-index rollback protection");
-    let fixed_index = service_vm_version::VERSION;
     let index = verified_boot_data.rollback_index;
     if index != fixed_index {
         error!("Rollback index mismatch: expected {fixed_index}, found {index}");
@@ -86,11 +93,6 @@ fn perform_fixed_index_rollback_protection(
     } else {
         Ok(())
     }
-}
-
-fn skip_rollback_protection() -> Result<(), RebootReason> {
-    info!("Skipping rollback protection");
-    Ok(())
 }
 
 /// Performs RBP using instance.img where updates require clearing old entries, causing new CDIs.
@@ -167,7 +169,9 @@ fn should_defer_rollback_protection(fdt: &Fdt) -> Result<bool, RebootReason> {
 }
 
 /// Set up PCI bus and VirtIO-blk device containing the instance.img partition.
-fn initialize_instance_img_device(fdt: &Fdt) -> Result<PciRoot, RebootReason> {
+fn initialize_instance_img_device(
+    fdt: &Fdt,
+) -> Result<PciRoot<impl ConfigurationAccess>, RebootReason> {
     let pci_info = PciInfo::from_fdt(fdt).map_err(|e| {
         error!("Failed to detect PCI from DT: {e}");
         RebootReason::InvalidFdt
