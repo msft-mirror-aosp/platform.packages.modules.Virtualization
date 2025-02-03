@@ -149,6 +149,12 @@ apex_defaults {
             "microdroid_gki-android15-6.6_kernel",
             "microdroid_gki-android15-6.6.json",
         ],
+        "android16_612": [
+            "microdroid_gki-android16-6.12_initrd_debuggable",
+            "microdroid_gki-android16-6.12_initrd_normal",
+            "microdroid_gki-android16-6.12_kernel",
+            "microdroid_gki-android16-6.12.json",
+        ],
         default: [],
     }) + select(release_flag("RELEASE_AVF_ENABLE_DEVICE_ASSIGNMENT"), {
         true: ["com.android.virt.vfio_handler.rc"],
