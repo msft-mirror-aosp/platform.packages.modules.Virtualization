@@ -3,7 +3,8 @@
 set -e
 
 # pyenv set up to use python 3.11
-sudo apt update; sudo apt install build-essential libssl-dev zlib1g-dev \
+sudo apt update; sudo apt install --no-install-recommends --assume-yes \
+  build-essential libssl-dev zlib1g-dev \
   libbz2-dev libreadline-dev libsqlite3-dev curl git \
   libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev
 git clone https://github.com/pyenv/pyenv.git ~/.pyenv
