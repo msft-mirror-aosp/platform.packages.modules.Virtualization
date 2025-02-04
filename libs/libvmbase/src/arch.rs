@@ -30,6 +30,9 @@ pub use aarch64::linker;
 pub use aarch64::dbm;
 
 #[cfg(target_arch = "aarch64")]
+pub use aarch64::rand;
+
+#[cfg(target_arch = "aarch64")]
 pub use aarch64::uart;
 
 #[cfg(target_arch = "aarch64")]

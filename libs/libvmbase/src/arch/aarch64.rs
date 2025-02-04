@@ -21,6 +21,7 @@ pub mod layout;
 pub mod linker;
 pub mod page_table;
 pub mod platform;
+pub mod rand;
 pub mod uart;
 
 /// Reads a value from a system register.
