@@ -12,7 +12,6 @@ export PYENV_ROOT="$HOME/.pyenv"
 export PATH="$PYENV_ROOT/bin:$PATH"
 pyenv install 3.11
 pyenv global 3.11
-python --version
 
 cd "${KOKORO_ARTIFACTS_DIR}/git/avf/build/debian/"
 sudo losetup -D
