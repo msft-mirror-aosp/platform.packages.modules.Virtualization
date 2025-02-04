@@ -2861,6 +2861,116 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
                         VirtualMachineCallback.STOP_REASON_MICRODROID_PAYLOAD_VERIFICATION_FAILED);
     }
 
+    @Test
+    public void relaxedRollbackProtectionScheme_rollbackVersionDoesNotChange() throws Exception {
+        assumeSupportedDevice();
+        // Relaxed rollback protection scheme only makes sense if VM updates are supported.
+        assumeTrue("Missing Updatable VM support", isUpdatableVmSupported());
+
+        installApp("MicrodroidTestHelperAppRelaxedRollbackProtection_V6.apk");
+
+        Context testHelperAppCtx =
+                getContext()
+                        .createPackageContext(
+                                RELAXED_ROLLBACK_PROTECTION_SCHEME_TEST_PACKAGE_NAME, 0);
+
+        VirtualMachineConfig config =
+                new VirtualMachineConfig.Builder(testHelperAppCtx)
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                        .setProtectedVm(isProtectedVm())
+                        .setOs(os())
+                        .setEncryptedStorageBytes(1 * 1024 * 1024)
+                        .build();
+
+        VirtualMachine vm =
+                forceCreateNewVirtualMachine("test_rollback_version_does_not_change", config);
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            ts.writeToFile(
+                                    /* content= */ EXAMPLE_STRING,
+                                    /* path= */ "/mnt/encryptedstore/test_file");
+                        });
+        testResults.assertNoException();
+
+        // Simulate a rollback by installing a downgraded version of the helper apk.
+        installApp("MicrodroidTestHelperAppRelaxedRollbackProtection_V5.apk", "-d");
+
+        testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mFileContent = ts.readFromFile("/mnt/encryptedstore/test_file");
+                        });
+        testResults.assertNoException();
+        assertThat(testResults.mFileContent).isEqualTo(EXAMPLE_STRING);
+    }
+
+    @Test
+    public void relaxedRollbackProtectionScheme_rollbackVersionChanges() throws Exception {
+        assumeSupportedDevice();
+        // Relaxed rollback protection scheme only makes sense if VM updates are supported.
+        assumeTrue("Missing Updatable VM support", isUpdatableVmSupported());
+        assumeProtectedVM();
+
+        installApp("MicrodroidTestHelperAppRelaxedRollbackProtection_V5.apk");
+
+        Context testHelperAppCtx =
+                getContext()
+                        .createPackageContext(
+                                RELAXED_ROLLBACK_PROTECTION_SCHEME_TEST_PACKAGE_NAME, 0);
+
+        VirtualMachineConfig config =
+                new VirtualMachineConfig.Builder(testHelperAppCtx)
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setPayloadBinaryName("MicrodroidTestNativeLib.so")
+                        .setProtectedVm(isProtectedVm())
+                        .setOs(os())
+                        .setEncryptedStorageBytes(1 * 1024 * 1024)
+                        .build();
+
+        VirtualMachine vm = forceCreateNewVirtualMachine("test_rollback_version_changes", config);
+
+        TestResults testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            ts.writeToFile(
+                                    /* content= */ EXAMPLE_STRING,
+                                    /* path= */ "/mnt/encryptedstore/test_file");
+                        });
+        testResults.assertNoException();
+
+        installApp("MicrodroidTestHelperAppRelaxedRollbackProtection_V7_inc_rollback_version.apk");
+
+        testResults =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mFileContent = ts.readFromFile("/mnt/encryptedstore/test_file");
+                        });
+        testResults.assertNoException();
+        assertThat(testResults.mFileContent).isEqualTo(EXAMPLE_STRING);
+
+        assertThat(vm.getStatus()).isEqualTo(VirtualMachine.STATUS_STOPPED);
+
+        // Simulate a rollback by installing a downgraded version of the helper apk.
+        installApp("MicrodroidTestHelperAppRelaxedRollbackProtection_V6.apk", "-d");
+
+        // Now pVM shouldn't boot.
+        BootResult bootResult = tryBootVm(TAG, vm);
+        assertThat(bootResult.deathReason)
+                .isEqualTo(
+                        // TODO(ioffe): this should probably be payload verification error?
+                        VirtualMachineCallback.STOP_REASON_MICRODROID_UNKNOWN_RUNTIME_ERROR);
+    }
+
     private static class VmShareServiceConnection implements ServiceConnection {
 
         private final CountDownLatch mLatch = new CountDownLatch(1);
@@ -2956,14 +3066,15 @@ public class MicrodroidTests extends MicrodroidDeviceTestBase {
         assertThat(e).hasMessageThat().contains(expectedContents);
     }
 
-    private void installApp(String apkName) throws Exception {
+    private void installApp(String apkName, String... additionalArgs) throws Exception {
         String apkFile = new File("/data/local/tmp/cts/microdroid/", apkName).getAbsolutePath();
         UiAutomation uai = InstrumentationRegistry.getInstrumentation().getUiAutomation();
         Log.i(TAG, "Installing apk " + apkFile);
         // We read the output of the shell command not only to see if it succeeds, but also to make
         // sure that the installation finishes. This avoids a race condition when test tries to
         // create a context of the installed package before the installation finished.
-        try (ParcelFileDescriptor pfd = uai.executeShellCommand("pm install " + apkFile)) {
+        String installCmd = "pm install " + String.join(" ", additionalArgs) + " " + apkFile;
+        try (ParcelFileDescriptor pfd = uai.executeShellCommand(installCmd)) {
             try (InputStream is = new FileInputStream(pfd.getFileDescriptor())) {
                 try (BufferedReader br = new BufferedReader(new InputStreamReader(is))) {
                     String line;
