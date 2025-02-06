@@ -29,7 +29,6 @@ use core::fmt;
 use core::mem::size_of;
 use core::ops::Range;
 use hypervisor_backends::get_device_assigner;
-use hypervisor_backends::get_mem_sharer;
 use libfdt::AddressRange;
 use libfdt::CellIterator;
 use libfdt::Fdt;
@@ -1043,6 +1042,7 @@ pub fn sanitize_device_tree(
     vm_dtbo: Option<&mut [u8]>,
     vm_ref_dt: Option<&[u8]>,
     guest_page_size: usize,
+    hyp_page_size: Option<usize>,
 ) -> Result<DeviceTreeInfo, RebootReason> {
     let vm_dtbo = match vm_dtbo {
         Some(vm_dtbo) => Some(VmDtbo::from_mut_slice(vm_dtbo).map_err(|e| {
@@ -1052,7 +1052,7 @@ pub fn sanitize_device_tree(
         None => None,
     };
 
-    let info = parse_device_tree(fdt, vm_dtbo.as_deref(), guest_page_size)?;
+    let info = parse_device_tree(fdt, vm_dtbo.as_deref(), guest_page_size, hyp_page_size)?;
 
     fdt.clone_from(FDT_TEMPLATE).map_err(|e| {
         error!("Failed to instantiate FDT from the template DT: {e}");
@@ -1109,13 +1109,15 @@ fn parse_device_tree(
     fdt: &Fdt,
     vm_dtbo: Option<&VmDtbo>,
     guest_page_size: usize,
+    hyp_page_size: Option<usize>,
 ) -> Result<DeviceTreeInfo, RebootReason> {
     let initrd_range = read_initrd_range_from(fdt).map_err(|e| {
         error!("Failed to read initrd range from DT: {e}");
         RebootReason::InvalidFdt
     })?;
 
-    let memory_alignment = guest_page_size;
+    // Ensure that MMIO_GUARD can't be used to inadvertently map some memory as MMIO.
+    let memory_alignment = max(hyp_page_size, Some(guest_page_size)).unwrap();
     let memory_range = read_and_validate_memory_range(fdt, memory_alignment)?;
 
     let bootargs = read_bootargs_from(fdt).map_err(|e| {
@@ -1169,22 +1171,17 @@ fn parse_device_tree(
             error!("Swiotlb info missing from DT");
             RebootReason::InvalidFdt
         })?;
-    let swiotlb_alignment = guest_page_size;
+    // Ensure that MEM_SHARE won't inadvertently map beyond the shared region.
+    let swiotlb_alignment = max(hyp_page_size, Some(guest_page_size)).unwrap();
     validate_swiotlb_info(&swiotlb_info, &memory_range, swiotlb_alignment)?;
 
     let device_assignment = if let Some(vm_dtbo) = vm_dtbo {
         if let Some(hypervisor) = get_device_assigner() {
-            // TODO(ptosi): Cache the (single?) granule once, in vmbase.
-            let granule = get_mem_sharer()
-                .ok_or_else(|| {
-                    error!("No MEM_SHARE found during device assignment validation");
-                    RebootReason::InternalError
-                })?
-                .granule()
-                .map_err(|e| {
-                    error!("Failed to get granule for device assignment validation: {e}");
-                    RebootReason::InternalError
-                })?;
+            let granule = hyp_page_size.ok_or_else(|| {
+                error!("No granule found during device assignment validation");
+                RebootReason::InternalError
+            })?;
+
             DeviceAssignmentInfo::parse(fdt, vm_dtbo, hypervisor, granule).map_err(|e| {
                 error!("Failed to parse device assignment from DT and VM DTBO: {e}");
                 RebootReason::InvalidFdt
