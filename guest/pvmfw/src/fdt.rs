@@ -182,6 +182,11 @@ fn read_and_validate_memory_range(
         );
     }
     let base = range.start;
+    if base % alignment != 0 {
+        error!("Memory base address {:#x} is not aligned to {:#x}", base, alignment);
+        return Err(RebootReason::InvalidFdt);
+    }
+    // For simplicity, force a hardcoded memory base, for now.
     if base != MEM_START {
         error!("Memory base address {:#x} is not {:#x}", base, MEM_START);
         return Err(RebootReason::InvalidFdt);
@@ -889,6 +894,10 @@ fn validate_swiotlb_info(
     if let Some(addr) = swiotlb_info.addr {
         if addr.checked_add(size).is_none() {
             error!("Invalid swiotlb range: addr:{addr:#x} size:{size:#x}");
+            return Err(RebootReason::InvalidFdt);
+        }
+        if (addr % alignment) != 0 {
+            error!("Swiotlb address {:#x} not aligned to {:#x}", addr, alignment);
             return Err(RebootReason::InvalidFdt);
         }
     }
