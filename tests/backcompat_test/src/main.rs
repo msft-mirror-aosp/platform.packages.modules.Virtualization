@@ -16,7 +16,8 @@
 
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::{
-        CpuTopology::CpuTopology, DiskImage::DiskImage, VirtualMachineConfig::VirtualMachineConfig,
+        CpuOptions::CpuOptions, CpuOptions::CpuTopology::CpuTopology, DiskImage::DiskImage,
+        VirtualMachineConfig::VirtualMachineConfig,
         VirtualMachineRawConfig::VirtualMachineRawConfig,
     },
     binder::{ParcelFileDescriptor, ProcessState},
@@ -98,7 +99,7 @@ fn run_test(protected: bool, golden_dt: &str) -> Result<(), Error> {
         disks: vec![disk_image, empty_disk_image],
         protectedVm: protected,
         memoryMib: 300,
-        cpuTopology: CpuTopology::ONE_CPU,
+        cpuOptions: CpuOptions { cpuTopology: CpuTopology::CpuCount(1) },
         platformVersion: "~1.0".to_string(),
         ..Default::default()
     });
@@ -152,12 +153,17 @@ fn run_test(protected: bool, golden_dt: &str) -> Result<(), Error> {
         .arg("/chosen/kaslr-seed")
         .arg("--ignore-path-value")
         .arg("/chosen/rng-seed")
+        // TODO: b/391420337 Investigate if bootargs may mutate VM
+        .arg("--ignore-path-value")
+        .arg("/chosen/bootargs")
+        .arg("--ignore-path-value")
+        .arg("/config/kernel-size")
         .arg("--ignore-path-value")
         .arg("/avf/untrusted/instance-id")
         .arg("--ignore-path-value")
-        .arg("/chosen/linuxinitrd-start")
+        .arg("/chosen/linux,initrd-start")
         .arg("--ignore-path-value")
-        .arg("/chosen/linuxinitrd-end")
+        .arg("/chosen/linux,initrd-end")
         .arg("--ignore-path-value")
         .arg("/avf/secretkeeper_public_key")
         .arg("--ignore-path")

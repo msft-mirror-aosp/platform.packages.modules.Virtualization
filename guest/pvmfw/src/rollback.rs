@@ -16,93 +16,118 @@
 
 use crate::dice::PartialInputs;
 use crate::entry::RebootReason;
+use crate::fdt::read_defer_rollback_protection;
 use crate::instance::EntryBody;
 use crate::instance::Error as InstanceError;
 use crate::instance::{get_recorded_entry, record_instance_entry};
-use cstr::cstr;
 use diced_open_dice::Hidden;
-use libfdt::{Fdt, FdtNode};
+use libfdt::Fdt;
 use log::{error, info};
 use pvmfw_avb::Capability;
 use pvmfw_avb::VerifiedBootData;
-use virtio_drivers::transport::pci::bus::PciRoot;
+use virtio_drivers::transport::pci::bus::{ConfigurationAccess, PciRoot};
+use vmbase::fdt::{pci::PciInfo, SwiotlbInfo};
+use vmbase::memory::init_shared_pool;
 use vmbase::rand;
+use vmbase::virtio::pci;
 
 /// Performs RBP based on the input payload, current DICE chain, and host-controlled platform.
 ///
 /// On success, returns a tuple containing:
-/// - `new_instance`: true if a new entry was created using the legacy instance.img solution;
+/// - `new_instance`: true if the legacy instance.img solution was used and a new entry created;
 /// - `salt`: the salt representing the instance, to be used during DICE derivation;
 /// - `defer_rollback_protection`: if RBP is being deferred.
 pub fn perform_rollback_protection(
     fdt: &Fdt,
     verified_boot_data: &VerifiedBootData,
     dice_inputs: &PartialInputs,
-    pci_root: &mut PciRoot,
     cdi_seal: &[u8],
     instance_hash: Option<Hidden>,
 ) -> Result<(bool, Hidden, bool), RebootReason> {
-    let defer_rollback_protection = should_defer_rollback_protection(fdt)?
-        && verified_boot_data.has_capability(Capability::SecretkeeperProtection);
-    let (new_instance, salt) = if defer_rollback_protection {
-        info!("Guest OS is capable of Secretkeeper protection, deferring rollback protection");
-        // rollback_index of the image is used as security_version and is expected to be > 0 to
-        // discourage implicit allocation.
-        if verified_boot_data.rollback_index == 0 {
-            error!("Expected positive rollback_index, found 0");
-            return Err(RebootReason::InvalidPayload);
-        };
-        (false, instance_hash.unwrap())
-    } else if verified_boot_data.has_capability(Capability::RemoteAttest) {
-        info!("Service VM capable of remote attestation detected, performing version checks");
-        if service_vm_version::VERSION != verified_boot_data.rollback_index {
-            // For RKP VM, we only boot if the version in the AVB footer of its kernel matches
-            // the one embedded in pvmfw at build time.
-            // This prevents the pvmfw from booting a roll backed RKP VM.
-            error!(
-                "Service VM version mismatch: expected {}, found {}",
-                service_vm_version::VERSION,
-                verified_boot_data.rollback_index
-            );
-            return Err(RebootReason::InvalidPayload);
-        }
-        (false, instance_hash.unwrap())
-    } else if verified_boot_data.has_capability(Capability::TrustySecurityVm) {
-        // The rollback protection of Trusty VMs are handled by AuthMgr, so we don't need to
-        // handle it here.
-        info!("Trusty Security VM detected");
-        (false, instance_hash.unwrap())
+    if let Some(fixed) = get_fixed_rollback_protection(verified_boot_data) {
+        // Prevent attackers from impersonating well-known images.
+        perform_fixed_index_rollback_protection(verified_boot_data, fixed)?;
+        Ok((false, instance_hash.unwrap(), false))
+    } else if (should_defer_rollback_protection(fdt)?
+        && verified_boot_data.has_capability(Capability::SecretkeeperProtection))
+        || verified_boot_data.has_capability(Capability::TrustySecurityVm)
+    {
+        perform_deferred_rollback_protection(verified_boot_data)?;
+        Ok((false, instance_hash.unwrap(), true))
     } else {
-        info!("Fallback to instance.img based rollback checks");
-        let (recorded_entry, mut instance_img, header_index) =
-            get_recorded_entry(pci_root, cdi_seal).map_err(|e| {
-                error!("Failed to get entry from instance.img: {e}");
-                RebootReason::InternalError
-            })?;
-        let (new_instance, salt) = if let Some(entry) = recorded_entry {
-            check_dice_measurements_match_entry(dice_inputs, &entry)?;
-            let salt = instance_hash.unwrap_or(entry.salt);
-            (false, salt)
-        } else {
-            // New instance!
-            let salt = instance_hash.map_or_else(rand::random_array, Ok).map_err(|e| {
-                error!("Failed to generated instance.img salt: {e}");
-                RebootReason::InternalError
-            })?;
+        perform_legacy_rollback_protection(fdt, dice_inputs, cdi_seal, instance_hash)
+    }
+}
 
-            let entry = EntryBody::new(dice_inputs, &salt);
-            record_instance_entry(&entry, cdi_seal, &mut instance_img, header_index).map_err(
-                |e| {
-                    error!("Failed to get recorded entry in instance.img: {e}");
-                    RebootReason::InternalError
-                },
-            )?;
-            (true, salt)
-        };
-        (new_instance, salt)
+fn perform_deferred_rollback_protection(
+    verified_boot_data: &VerifiedBootData,
+) -> Result<(), RebootReason> {
+    info!("Deferring rollback protection");
+    // rollback_index of the image is used as security_version and is expected to be > 0 to
+    // discourage implicit allocation.
+    if verified_boot_data.rollback_index == 0 {
+        error!("Expected positive rollback_index, found 0");
+        Err(RebootReason::InvalidPayload)
+    } else {
+        Ok(())
+    }
+}
+
+fn get_fixed_rollback_protection(verified_boot_data: &VerifiedBootData) -> Option<u64> {
+    if verified_boot_data.has_capability(Capability::RemoteAttest) {
+        Some(service_vm_version::VERSION)
+    } else {
+        None
+    }
+}
+
+fn perform_fixed_index_rollback_protection(
+    verified_boot_data: &VerifiedBootData,
+    fixed_index: u64,
+) -> Result<(), RebootReason> {
+    info!("Performing fixed-index rollback protection");
+    let index = verified_boot_data.rollback_index;
+    if index != fixed_index {
+        error!("Rollback index mismatch: expected {fixed_index}, found {index}");
+        Err(RebootReason::InvalidPayload)
+    } else {
+        Ok(())
+    }
+}
+
+/// Performs RBP using instance.img where updates require clearing old entries, causing new CDIs.
+fn perform_legacy_rollback_protection(
+    fdt: &Fdt,
+    dice_inputs: &PartialInputs,
+    cdi_seal: &[u8],
+    instance_hash: Option<Hidden>,
+) -> Result<(bool, Hidden, bool), RebootReason> {
+    info!("Fallback to instance.img based rollback checks");
+    let mut pci_root = initialize_instance_img_device(fdt)?;
+    let (recorded_entry, mut instance_img, header_index) =
+        get_recorded_entry(&mut pci_root, cdi_seal).map_err(|e| {
+            error!("Failed to get entry from instance.img: {e}");
+            RebootReason::InternalError
+        })?;
+    let (new_instance, salt) = if let Some(entry) = recorded_entry {
+        check_dice_measurements_match_entry(dice_inputs, &entry)?;
+        let salt = instance_hash.unwrap_or(entry.salt);
+        (false, salt)
+    } else {
+        // New instance!
+        let salt = instance_hash.map_or_else(rand::random_array, Ok).map_err(|e| {
+            error!("Failed to generated instance.img salt: {e}");
+            RebootReason::InternalError
+        })?;
+
+        let entry = EntryBody::new(dice_inputs, &salt);
+        record_instance_entry(&entry, cdi_seal, &mut instance_img, header_index).map_err(|e| {
+            error!("Failed to get recorded entry in instance.img: {e}");
+            RebootReason::InternalError
+        })?;
+        (true, salt)
     };
-
-    Ok((new_instance, salt, defer_rollback_protection))
+    Ok((new_instance, salt, false))
 }
 
 fn check_dice_measurements_match_entry(
@@ -136,24 +161,36 @@ fn ensure_dice_measurements_match_entry(
 }
 
 fn should_defer_rollback_protection(fdt: &Fdt) -> Result<bool, RebootReason> {
-    let node = avf_untrusted_node(fdt)?;
-    let defer_rbp = node
-        .getprop(cstr!("defer-rollback-protection"))
-        .map_err(|e| {
-            error!("Failed to get defer-rollback-protection property in DT: {e}");
-            RebootReason::InvalidFdt
-        })?
-        .is_some();
-    Ok(defer_rbp)
-}
-
-fn avf_untrusted_node(fdt: &Fdt) -> Result<FdtNode, RebootReason> {
-    let node = fdt.node(cstr!("/avf/untrusted")).map_err(|e| {
-        error!("Failed to get /avf/untrusted node: {e}");
+    let defer_rbp = read_defer_rollback_protection(fdt).map_err(|e| {
+        error!("Failed to get defer-rollback-protection property in DT: {e}");
         RebootReason::InvalidFdt
     })?;
-    node.ok_or_else(|| {
-        error!("/avf/untrusted node is missing in DT");
+    Ok(defer_rbp.is_some())
+}
+
+/// Set up PCI bus and VirtIO-blk device containing the instance.img partition.
+fn initialize_instance_img_device(
+    fdt: &Fdt,
+) -> Result<PciRoot<impl ConfigurationAccess>, RebootReason> {
+    let pci_info = PciInfo::from_fdt(fdt).map_err(|e| {
+        error!("Failed to detect PCI from DT: {e}");
         RebootReason::InvalidFdt
-    })
+    })?;
+    let swiotlb_range = SwiotlbInfo::new_from_fdt(fdt)
+        .map_err(|e| {
+            error!("Failed to detect swiotlb from DT: {e}");
+            RebootReason::InvalidFdt
+        })?
+        .and_then(|info| info.fixed_range());
+
+    let pci_root = pci::initialize(pci_info).map_err(|e| {
+        error!("Failed to initialize PCI: {e}");
+        RebootReason::InternalError
+    })?;
+    init_shared_pool(swiotlb_range).map_err(|e| {
+        error!("Failed to initialize shared pool: {e}");
+        RebootReason::InternalError
+    })?;
+
+    Ok(pci_root)
 }

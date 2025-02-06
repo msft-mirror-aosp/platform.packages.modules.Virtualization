@@ -80,8 +80,33 @@ interface ITestService {
     String readLineFromConsole();
 
     /**
+     * Read payload's rollback protected data. The `AVmAccessRollbackProtectedSecretStatus` is
+     * wrapped as service_specific error in case of failure. This is _only_ used for testing.
+     */
+    byte[32] insecurelyReadPayloadRpData();
+
+    /**
+     * Request VM to write payload's rollback protected data. The
+     * `AVmAccessRollbackProtectedSecretStatus` is wrapped as service_specific error in case of
+     * failure. This is _only_ used for testing.
+     */
+    void insecurelyWritePayloadRpData(in byte[32] data);
+
+    /**
      * Request the service to exit, triggering the termination of the VM. This may cause any
      * requests in flight to fail.
      */
     oneway void quit();
+
+    /**
+     * Checks whether the VM instance is new - i.e., if this is the first run of an instance.
+     *
+     * @return true on the first boot of the instance & false on subsequent boot.
+     */
+    boolean isNewInstance();
+
+    /**
+     * Checks that libicu is accessible to the payload that has com.android.i18n APEX mounted.
+     */
+    void checkLibIcuIsAccessible();
 }

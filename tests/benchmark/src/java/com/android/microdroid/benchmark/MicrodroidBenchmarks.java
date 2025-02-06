@@ -27,6 +27,8 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 
+import static org.junit.Assume.assumeTrue;
+
 import android.app.Application;
 import android.app.Instrumentation;
 import android.content.ComponentCallbacks2;
@@ -69,13 +71,16 @@ import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.Random;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
@@ -96,6 +101,7 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
     private static final double NANO_TO_MICRO = 1_000.0;
     private static final String MICRODROID_IMG_PREFIX = "microdroid_";
     private static final String MICRODROID_IMG_SUFFIX = ".img";
+    static final long ENCRYPTED_STORE_SIZE = 1_073_741_824; // 1G
 
     @Parameterized.Parameters(name = "protectedVm={0},os={1}")
     public static Collection<Object[]> params() {
@@ -926,5 +932,224 @@ public class MicrodroidBenchmarks extends MicrodroidDeviceTestBase {
             assertThat(exception.getNow(null)).isNull();
         }
         reportMetrics(requestAttestationTime, "request_attestation_time", "microsecond");
+    }
+
+    List<Double> rpDataAccessWithExistingSession(boolean measureWrite) throws Exception {
+        assumeTrue(
+                "Rollback protected secrets are only available in Updatable VMs",
+                isUpdatableVmSupported());
+        final int NUM_WARMUPS = 10;
+        final int NUM_REQUESTS = 10_000;
+
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .build();
+
+        byte[] data = new byte[32];
+        Arrays.fill(data, (byte) 0xcc);
+
+        List<Double> requestLatencies = new ArrayList<>(NUM_REQUESTS);
+        VirtualMachine vm = forceCreateNewVirtualMachine("rp_data_access", config);
+        TestResults testResult =
+                runVmTestService(
+                        TAG,
+                        vm,
+                        (ts, tr) -> {
+                            tr.mTimings = new long[NUM_REQUESTS];
+                            for (int i = 0; i < NUM_WARMUPS; i++) {
+                                ts.insecurelyWritePayloadRpData(data);
+                                ts.insecurelyReadPayloadRpData();
+                            }
+                            for (int i = 0; i < NUM_REQUESTS; i++) {
+                                long start = System.nanoTime();
+                                if (measureWrite) {
+                                    ts.insecurelyWritePayloadRpData(data);
+                                    tr.mTimings[i] = System.nanoTime() - start;
+                                } else {
+                                    tr.mPayloadRpData = ts.insecurelyReadPayloadRpData();
+                                    tr.mTimings[i] = System.nanoTime() - start;
+                                    assertThat(tr.mPayloadRpData).isEqualTo(data);
+                                }
+                            }
+                        });
+        // Correctness check.
+        testResult.assertNoException();
+        for (long timings : testResult.mTimings) {
+            requestLatencies.add((double) timings / NANO_TO_MICRO);
+        }
+        return requestLatencies;
+    }
+
+    @Test
+    public void rpDataReadWithExistingSession() throws Exception {
+        reportMetrics(
+                rpDataAccessWithExistingSession(false),
+                "latency/readRollbackProtectedSecretWithExistingSession",
+                "us");
+    }
+
+    @Test
+    public void rpDataWriteWithExistingSession() throws Exception {
+        reportMetrics(
+                rpDataAccessWithExistingSession(true),
+                "latency/writeRollbackProtectedSecretWithExistingSession",
+                "us");
+    }
+
+    List<Double> rpDataAccessWithRefreshingSession(boolean measureWrite) throws Exception {
+        assumeTrue(
+                "Rollback protected secrets are only available in Updatable VMs",
+                isUpdatableVmSupported());
+        final long vmSize = minMemoryRequired();
+        final int numVMs = 8;
+        final int NUM_REQUESTS = 10;
+        final long availableMem = getAvailableMemory();
+
+        // Let's not use more than half of the available memory
+        assume().withMessage("Available memory (" + availableMem + " bytes) too small")
+                .that((numVMs * vmSize) <= (availableMem / 2))
+                .isTrue();
+
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadBinary("MicrodroidTestNativeLib.so")
+                        .setDebugLevel(DEBUG_LEVEL_FULL)
+                        .setMemoryBytes(vmSize)
+                        .build();
+
+        byte[] data = new byte[32];
+        Arrays.fill(data, (byte) 0xcc);
+
+        List<Double> requestLatencies = new ArrayList<>(numVMs * NUM_REQUESTS);
+        CompletableFuture<TestResults>[] resultFutureList = new CompletableFuture[numVMs];
+        RunTestsAgainstTestService testToRun =
+                (ts, tr) -> {
+                    tr.mTimings = new long[NUM_REQUESTS];
+                    // Warm up request!
+                    ts.insecurelyWritePayloadRpData(data);
+                    for (int j = 0; j < NUM_REQUESTS; j++) {
+                        // Sleep time between 2 requests.
+                        // Randomized
+                        // between 200ms-300ms.
+                        long rnd_sleep_time = (long) (200.0 + new Random().nextDouble() * 100);
+                        Thread.sleep(rnd_sleep_time); // Sleep
+                        long start = System.nanoTime();
+                        if (measureWrite) {
+                            // Write
+                            ts.insecurelyWritePayloadRpData(data);
+                            tr.mTimings[j] = System.nanoTime() - start;
+
+                        } else {
+                            tr.mPayloadRpData = ts.insecurelyReadPayloadRpData();
+                            tr.mTimings[j] = System.nanoTime() - start;
+                            assertThat(tr.mPayloadRpData).isEqualTo(data);
+                        }
+                    }
+                };
+        for (int i = 0; i < numVMs; i++) {
+            final VirtualMachine vm =
+                    forceCreateNewVirtualMachine("rp_data_access_refresh" + i, config);
+            resultFutureList[i] =
+                    CompletableFuture.supplyAsync(
+                            () -> {
+                                try {
+                                    TestResults testResult = runVmTestService(TAG, vm, testToRun);
+                                    // Correctness check.
+                                    testResult.assertNoException();
+                                    return testResult;
+                                } catch (Exception e) {
+                                    throw new CompletionException(e);
+                                }
+                            });
+        }
+
+        for (int i = 0; i < numVMs; i++) {
+            TestResults tr = resultFutureList[i].get();
+            tr.assertNoException();
+            for (long timings : tr.mTimings) {
+                requestLatencies.add((double) timings / NANO_TO_MICRO);
+            }
+        }
+        return requestLatencies;
+    }
+
+    // The following benchmark corresponds to cases when payload access rollback protected secret,
+    // but there is no existing session with Secretkeeper - which could be the case when several VMs
+    // are attempting to establish a connection.
+    //
+    // Implementation detail of the API in such scenario: Microdroid attempts to access the secret
+    // from Secretkeeper -> gets an error ("UnknownKeyId") -> Refreshes the session (this includes
+    // several call to AuthGraphKey Exchange HAL) -> retries access.
+    //
+    // Essentially this latency is (Failed Secretkeeper access from pVM + AuthGraphKeyExchange
+    // protocol between pVM & Secretkeeper + Successful Secretkeeper access from pVM)
+    @Test
+    public void rpDataReadWithRefreshingSession() throws Exception {
+        reportMetrics(
+                rpDataAccessWithRefreshingSession(false),
+                "latency/readRollbackProtectedSecretWithRefreshSession",
+                "us");
+    }
+
+    @Test
+    public void rpDataWriteWithRefreshingSession() throws Exception {
+        reportMetrics(
+                rpDataAccessWithRefreshingSession(true),
+                "latency/writeRollbackProtectedSecretWithRefreshSession",
+                "us");
+    }
+
+    @Test
+    public void encryptedstoreIoRate() throws Exception {
+        VirtualMachineConfig config =
+                newVmConfigBuilderWithPayloadConfig("assets/vm_config_io.json")
+                        .setDebugLevel(DEBUG_LEVEL_NONE)
+                        .setShouldUseHugepages(true)
+                        .setEncryptedStorageBytes(ENCRYPTED_STORE_SIZE)
+                        .build();
+        List<Double> writeThroughput = new ArrayList<>(IO_TEST_TRIAL_COUNT);
+        List<Double> readThroughput = new ArrayList<>(IO_TEST_TRIAL_COUNT);
+
+        for (int i = 0; i < IO_TEST_TRIAL_COUNT; ++i) {
+            String vmName = "vm_encryptedstore_io" + i;
+            VirtualMachine vm = forceCreateNewVirtualMachine(vmName, config);
+            BenchmarkVmListener.create(new EncryptedstoreBenchmarkListener(writeThroughput, true))
+                    .runToFinish(TAG, vm);
+            // Rerun the VM & read the storage!
+            BenchmarkVmListener.create(new EncryptedstoreBenchmarkListener(readThroughput, false))
+                    .runToFinish(TAG, vm);
+        }
+        reportMetrics(writeThroughput, "encryptedstore/sequential_write", "mb_per_sec");
+        reportMetrics(readThroughput, "encryptedstore/sequential_read", "mb_per_sec");
+    }
+
+    private static class EncryptedstoreBenchmarkListener
+            implements BenchmarkVmListener.InnerListener {
+        private static final String FILENAME = "/mnt/encryptedstore/test_file";
+
+        private final List<Double> mIoThroughput;
+        // Set to true iff write is to be measured, read throughput is measured otherwise
+        private final boolean mMeasureWrite;
+
+        EncryptedstoreBenchmarkListener(List<Double> ioThroughput, boolean measureWrite) {
+            mIoThroughput = ioThroughput;
+            mMeasureWrite = measureWrite;
+        }
+
+        @Override
+        public void onPayloadReady(VirtualMachine vm, IBenchmarkService benchmarkService)
+                throws RemoteException {
+            double rate;
+            if (mMeasureWrite) {
+                // Fill 3/4 of the storage by writing (random) data into a file!
+                rate =
+                        benchmarkService.measureWriteRate(
+                                FILENAME, /*sizeBytes */ (ENCRYPTED_STORE_SIZE * 3) / 4);
+            } else {
+                // Sequentially read the file, just written.
+                rate = benchmarkService.measureReadRate(FILENAME, /*isRand */ false);
+            }
+            mIoThroughput.add(rate);
+        }
     }
 }

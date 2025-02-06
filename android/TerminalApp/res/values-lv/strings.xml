@@ -33,13 +33,14 @@
     <string name="installer_error_no_wifi" msgid="1180164894845030969">"Instalēšana neizdevās, jo nav pieejams Wi‑Fi savienojums"</string>
     <string name="installer_error_unknown" msgid="5657920711470180224">"Neizdevās instalēt — mēģiniet vēlreiz"</string>
     <string name="action_settings" msgid="5729342767795123227">"Iestatījumi"</string>
+    <string name="action_display" msgid="8487008779926038139">"Displejs"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Notiek termināļa sagatavošana."</string>
     <string name="vm_stop_message" msgid="3978349856095529255">"Notiek termināļa apturēšana."</string>
     <string name="vm_error_message" msgid="5231867246177661525">"Terminālis avarēja."</string>
     <string name="settings_disk_resize_title" msgid="8648082439414122069">"Diska lieluma mainīšana"</string>
     <string name="settings_disk_resize_sub_title" msgid="568100064927028058">"Saknes nodalījuma lieluma mainīšana"</string>
     <string name="settings_disk_resize_resize_message" msgid="5990475712303845087">"Diska lielums ir iestatīts."</string>
-    <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"Piešķirtais lielums: <xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g>"</string>
+    <string name="settings_disk_resize_resize_gb_assigned_format" msgid="109301857555401579">"Piešķirts: <xliff:g id="ASSIGNED_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_gb_max_format" msgid="6221210151688630371">"Maksimālais lielums: <xliff:g id="MAX_SIZE">%1$s</xliff:g>"</string>
     <string name="settings_disk_resize_resize_cancel" msgid="2182388126941686562">"Atcelt"</string>
     <string name="settings_disk_resize_resize_restart_vm_to_apply" msgid="6651018335906339973">"Lietot"</string>
@@ -48,8 +49,7 @@
     <string name="settings_port_forwarding_title" msgid="4971368519093858377">"Portu kontrole"</string>
     <string name="settings_port_forwarding_sub_title" msgid="6547942778715654953">"Atļaut/aizliegt klausīšanās portus"</string>
     <string name="settings_port_forwarding_active_ports_title" msgid="1841436780635889858">"Klausīšanās porti"</string>
-    <!-- no translation found for settings_port_forwarding_active_ports_content (1818090784030797758) -->
-    <skip />
+    <string name="settings_port_forwarding_active_ports_content" msgid="1818090784030797758">"<xliff:g id="PORT_NUMBER">%1$d</xliff:g> (<xliff:g id="PROCESS_NAME">%2$s</xliff:g>)"</string>
     <string name="settings_port_forwarding_other_enabled_ports_title" msgid="2644381842623436676">"Saglabātie atļautie porti"</string>
     <string name="settings_port_forwarding_other_enabled_port_add_button" msgid="4402301203801949152">"Pievienot"</string>
     <string name="settings_port_forwarding_other_enabled_port_close_button" msgid="8475029060852721339">"Dzēst <xliff:g id="PORT_NUMBER">%d</xliff:g>"</string>
@@ -61,8 +61,7 @@
     <string name="settings_port_forwarding_dialog_error_invalid_port_range" msgid="6682935312557379651">"Nederīgs porta numurs"</string>
     <string name="settings_port_forwarding_dialog_error_existing_port" msgid="768426750758769928">"Ports jau pastāv"</string>
     <string name="settings_port_forwarding_notification_title" msgid="6950621555592547524">"Terminālis pieprasa jauna porta atvēršanu"</string>
-    <!-- no translation found for settings_port_forwarding_notification_content (779450349212040908) -->
-    <skip />
+    <string name="settings_port_forwarding_notification_content" msgid="779450349212040908">"Pieprasītais ports: <xliff:g id="PORT_NUMBER">%1$d</xliff:g> (<xliff:g id="PROCESS_NAME">%2$s</xliff:g>)"</string>
     <string name="settings_port_forwarding_notification_accept" msgid="3571520986524038185">"Piekrist"</string>
     <string name="settings_port_forwarding_notification_deny" msgid="636848749634710403">"Noraidīt"</string>
     <string name="settings_recovery_title" msgid="6586840079226383285">"Atkopšana"</string>
@@ -89,4 +88,6 @@
     <string name="service_notification_close_title" msgid="1442526433361428844">"Terminālis tiek aizvērts"</string>
     <string name="service_notification_force_quit_action" msgid="3462226330416157775">"Veikt piespiedu aizvēršanu"</string>
     <string name="virgl_enabled" msgid="5242525588039698086">"<xliff:g id="ID_1">VirGL</xliff:g> ir iespējots"</string>
+    <string name="notification_channel_long_running_name" msgid="7916541360369402952">"Ilgstoši uzdevumi"</string>
+    <string name="notification_channel_system_events_name" msgid="1004951444029742137">"Sistēmas notikumi"</string>
 </resources>

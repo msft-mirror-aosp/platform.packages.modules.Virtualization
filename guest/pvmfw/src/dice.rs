@@ -92,7 +92,8 @@ impl PartialInputs {
         let mode = to_dice_mode(data.debug_level);
         // We use rollback_index from vbmeta as the security_version field in dice certificate.
         let security_version = data.rollback_index;
-        let rkp_vm_marker = data.has_capability(Capability::RemoteAttest);
+        let rkp_vm_marker = data.has_capability(Capability::RemoteAttest)
+            || data.has_capability(Capability::TrustySecurityVm);
 
         Ok(Self { code_hash, auth_hash, mode, security_version, rkp_vm_marker })
     }
@@ -156,9 +157,7 @@ impl PartialInputs {
     fn generate_config_descriptor(&self, instance_hash: Option<Hash>) -> Result<Vec<u8>> {
         let mut config = Vec::with_capacity(4);
         config.push((cbor!(COMPONENT_NAME_KEY)?, cbor!("vm_entry")?));
-        if cfg!(dice_changes) {
-            config.push((cbor!(SECURITY_VERSION_KEY)?, cbor!(self.security_version)?));
-        }
+        config.push((cbor!(SECURITY_VERSION_KEY)?, cbor!(self.security_version)?));
         if self.rkp_vm_marker {
             config.push((cbor!(RKP_VM_MARKER_KEY)?, Value::Null))
         }
@@ -185,6 +184,7 @@ mod tests {
     use diced_open_dice::KeyAlgorithm;
     use diced_open_dice::HIDDEN_SIZE;
     use diced_sample_inputs::make_sample_bcc_and_cdis;
+    use hwtrust::{dice, session::Session};
     use pvmfw_avb::Capability;
     use pvmfw_avb::DebugLevel;
     use pvmfw_avb::Digest;
@@ -244,21 +244,24 @@ mod tests {
         assert_eq!(config_map.get(&COMPONENT_NAME_KEY).unwrap().as_text().unwrap(), "vm_entry");
         assert_eq!(config_map.get(&COMPONENT_VERSION_KEY), None);
         assert_eq!(config_map.get(&RESETTABLE_KEY), None);
-        if cfg!(dice_changes) {
-            assert_eq!(
-                config_map.get(&SECURITY_VERSION_KEY).unwrap().as_integer().unwrap(),
-                42.into()
-            );
-        } else {
-            assert_eq!(config_map.get(&SECURITY_VERSION_KEY), None);
-        }
+        assert_eq!(config_map.get(&SECURITY_VERSION_KEY).unwrap().as_integer().unwrap(), 42.into());
         assert_eq!(config_map.get(&RKP_VM_MARKER_KEY), None);
     }
 
     #[test]
-    fn config_descriptor_with_rkp_vm() {
+    fn rkp_vm_config_descriptor_has_rkp_vm_marker() {
         let vb_data =
             VerifiedBootData { capabilities: vec![Capability::RemoteAttest], ..BASE_VB_DATA };
+        let inputs = PartialInputs::new(&vb_data).unwrap();
+        let config_map = decode_config_descriptor(&inputs, Some(HASH));
+
+        assert!(config_map.get(&RKP_VM_MARKER_KEY).unwrap().is_null());
+    }
+
+    #[test]
+    fn security_vm_config_descriptor_has_rkp_vm_marker() {
+        let vb_data =
+            VerifiedBootData { capabilities: vec![Capability::TrustySecurityVm], ..BASE_VB_DATA };
         let inputs = PartialInputs::new(&vb_data).unwrap();
         let config_map = decode_config_descriptor(&inputs, Some(HASH));
 
@@ -426,14 +429,11 @@ mod tests {
                 },
             )
             .expect("Failed to derive EcdsaP384 -> Ed25519 BCC");
-        let _bcc_handover3 = diced_open_dice::bcc_handover_parse(&buffer).unwrap();
+        let bcc_handover3 = diced_open_dice::bcc_handover_parse(&buffer).unwrap();
 
-        // TODO(b/378813154): Check the DICE chain with `hwtrust` once the profile version
-        // is updated.
-        // The check cannot be done now because parsing the chain causes the following error:
-        // Invalid payload at index 3. Caused by:
-        // 0: opendice.example.p256
-        // 1: unknown profile version
+        let mut session = Session::default();
+        session.set_allow_any_mode(true);
+        let _chain = dice::Chain::from_cbor(&session, bcc_handover3.bcc().unwrap()).unwrap();
     }
 
     fn to_bcc_handover(dice_artifacts: &dyn DiceArtifacts) -> Vec<u8> {

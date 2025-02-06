@@ -27,9 +27,11 @@ import static com.google.common.truth.TruthJUnit.assume;
 import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
 
+import android.app.ActivityManager;
 import android.app.Instrumentation;
 import android.app.UiAutomation;
 import android.content.Context;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemProperties;
 import android.system.Os;
@@ -78,6 +80,10 @@ public abstract class MicrodroidDeviceTestBase {
                                     "microdroid",
                                     "microdroid_16k",
                                     "microdroid_gki-android15-6.6")));
+
+    private static final long ONE_MEBI = 1024 * 1024;
+    private static final long MIN_MEM_ARM64 = 170 * ONE_MEBI;
+    private static final long MIN_MEM_X86_64 = 196 * ONE_MEBI;
 
     public static boolean isCuttlefish() {
         return getDeviceProperties().isCuttlefish();
@@ -278,9 +284,11 @@ public abstract class MicrodroidDeviceTestBase {
     }
 
     protected void assumeNoUpdatableVmSupport() throws VirtualMachineException {
-        assume().withMessage("Secretkeeper not supported")
-                .that(getVirtualMachineManager().isUpdatableVmSupported())
-                .isFalse();
+        assume().withMessage("Secretkeeper not supported").that(isUpdatableVmSupported()).isFalse();
+    }
+
+    protected boolean isUpdatableVmSupported() throws VirtualMachineException {
+        return getVirtualMachineManager().isUpdatableVmSupported();
     }
 
     protected void ensureVmAttestationSupported() throws Exception {
@@ -391,6 +399,10 @@ public abstract class MicrodroidDeviceTestBase {
             return mProcessedBootTimeMetrics;
         }
 
+        // Stopping a virtual machine is like pulling the plug on a real computer. VM may be left in
+        // an inconsistent state.
+        // For a graceful shutdown, request the payload to call {@code exit()} and wait for
+        // VirtualMachineCallback#onPayloadFinished} to be called.
         protected void forceStop(VirtualMachine vm) {
             try {
                 vm.stop();
@@ -526,6 +538,11 @@ public abstract class MicrodroidDeviceTestBase {
     public BootResult tryBootVm(String logTag, String vmName)
             throws VirtualMachineException, InterruptedException {
         VirtualMachine vm = getVirtualMachineManager().get(vmName);
+        return tryBootVm(logTag, vm);
+    }
+
+    public BootResult tryBootVm(String logTag, VirtualMachine vm)
+            throws VirtualMachineException, InterruptedException {
         final CompletableFuture<Boolean> payloadStarted = new CompletableFuture<>();
         final CompletableFuture<Integer> deathReason = new CompletableFuture<>();
         final CompletableFuture<Long> endTime = new CompletableFuture<>();
@@ -612,6 +629,8 @@ public abstract class MicrodroidDeviceTestBase {
         public String mConsoleInput;
         public byte[] mInstanceSecret;
         public int mPageSize;
+        public byte[] mPayloadRpData;
+        public boolean mIsNewInstance;
 
         public void assertNoException() {
             if (mException != null) {
@@ -718,7 +737,6 @@ public abstract class MicrodroidDeviceTestBase {
                     public void onPayloadFinished(VirtualMachine vm, int exitCode) {
                         Log.i(logTag, "onPayloadFinished: " + exitCode);
                         payloadFinished.complete(true);
-                        forceStop(vm);
                     }
                 };
 
@@ -727,6 +745,26 @@ public abstract class MicrodroidDeviceTestBase {
         assertThat(payloadReady.getNow(false)).isTrue();
         assertThat(payloadFinished.getNow(false)).isTrue();
         return testResults;
+    }
+
+    protected long getAvailableMemory() {
+        ActivityManager am = getContext().getSystemService(ActivityManager.class);
+        ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
+        am.getMemoryInfo(memoryInfo);
+        return memoryInfo.availMem;
+    }
+
+    protected long minMemoryRequired() {
+        assertThat(Build.SUPPORTED_ABIS).isNotEmpty();
+        String primaryAbi = Build.SUPPORTED_ABIS[0];
+        switch (primaryAbi) {
+            case "x86_64":
+                return MIN_MEM_X86_64;
+            case "arm64-v8a":
+            case "arm64-v8a-hwasan":
+                return MIN_MEM_ARM64;
+        }
+        throw new AssertionError("Unsupported ABI: " + primaryAbi);
     }
 
     @FunctionalInterface

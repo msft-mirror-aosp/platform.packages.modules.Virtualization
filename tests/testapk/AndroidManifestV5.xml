@@ -22,6 +22,7 @@
     <uses-feature android:name="android.software.virtualization_framework" android:required="false" />
     <queries>
         <package android:name="com.android.microdroid.vmshare_app" />
+        <package android:name="com.android.microdroid.test_relaxed_rollback_protection_scheme" />
     </queries>
     <application />
     <instrumentation android:name="androidx.test.runner.AndroidJUnitRunner"

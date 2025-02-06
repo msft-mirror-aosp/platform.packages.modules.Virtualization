@@ -41,7 +41,7 @@ pub struct DiceConfigValues<'a> {
 }
 
 /// Formats a configuration descriptor following the Android Profile for DICE specification.
-/// See https://pigweed.googlesource.com/open-dice/+/refs/heads/main/docs/android.md.
+/// See <https://pigweed.googlesource.com/open-dice/+/refs/heads/main/docs/android.md>.
 pub fn bcc_format_config_descriptor(values: &DiceConfigValues, buffer: &mut [u8]) -> Result<usize> {
     let mut configs = 0;
 
@@ -172,7 +172,7 @@ pub struct BccHandover<'a> {
     bcc: Option<&'a [u8]>,
 }
 
-impl<'a> DiceArtifacts for BccHandover<'a> {
+impl DiceArtifacts for BccHandover<'_> {
     fn cdi_attest(&self) -> &[u8; CDI_SIZE] {
         self.cdi_attest
     }

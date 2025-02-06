@@ -33,6 +33,7 @@
     <string name="installer_error_no_wifi" msgid="1180164894845030969">"Wi-Fi उपलब्ध नभएकाले इन्स्टल गर्न सकिएन"</string>
     <string name="installer_error_unknown" msgid="5657920711470180224">"इन्स्टल गर्न सकिएन। कृपया फेरि प्रयास गर्नुहोस्"</string>
     <string name="action_settings" msgid="5729342767795123227">"सेटिङ"</string>
+    <string name="action_display" msgid="8487008779926038139">"डिस्प्ले"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"टर्मिनल तयार पारिँदै छ"</string>
     <string name="vm_stop_message" msgid="3978349856095529255">"टर्मिनल रोकिँदै छ"</string>
     <string name="vm_error_message" msgid="5231867246177661525">"टर्मिनल क्र्यास भयो"</string>
@@ -48,8 +49,7 @@
     <string name="settings_port_forwarding_title" msgid="4971368519093858377">"पोर्टसम्बन्धी कन्ट्रोल"</string>
     <string name="settings_port_forwarding_sub_title" msgid="6547942778715654953">"लिसनिङ पोर्टहरू हाल्ने अनुमति दिनुहोस्/नदिनुहोस्"</string>
     <string name="settings_port_forwarding_active_ports_title" msgid="1841436780635889858">"लिसनिङ पोर्टहरू"</string>
-    <!-- no translation found for settings_port_forwarding_active_ports_content (1818090784030797758) -->
-    <skip />
+    <string name="settings_port_forwarding_active_ports_content" msgid="1818090784030797758">"<xliff:g id="PORT_NUMBER">%1$d</xliff:g> (<xliff:g id="PROCESS_NAME">%2$s</xliff:g>)"</string>
     <string name="settings_port_forwarding_other_enabled_ports_title" msgid="2644381842623436676">"सेभ गरिएका अनुमति दिइएका पोर्टहरू"</string>
     <string name="settings_port_forwarding_other_enabled_port_add_button" msgid="4402301203801949152">"हाल्नुहोस्"</string>
     <string name="settings_port_forwarding_other_enabled_port_close_button" msgid="8475029060852721339">"<xliff:g id="PORT_NUMBER">%d</xliff:g> मेटाउनुहोस्"</string>
@@ -61,8 +61,7 @@
     <string name="settings_port_forwarding_dialog_error_invalid_port_range" msgid="6682935312557379651">"अवैध पोर्ट नम्बर"</string>
     <string name="settings_port_forwarding_dialog_error_existing_port" msgid="768426750758769928">"पोर्ट पहिल्यैदेखि छ"</string>
     <string name="settings_port_forwarding_notification_title" msgid="6950621555592547524">"टर्मिनलले एउटा नयाँ पोर्ट खोल्न अनुरोध गरिरहेको छ"</string>
-    <!-- no translation found for settings_port_forwarding_notification_content (779450349212040908) -->
-    <skip />
+    <string name="settings_port_forwarding_notification_content" msgid="779450349212040908">"निम्न पोर्ट खोल्न अनुरोध गरिएको छ: <xliff:g id="PORT_NUMBER">%1$d</xliff:g> (<xliff:g id="PROCESS_NAME">%2$s</xliff:g>)"</string>
     <string name="settings_port_forwarding_notification_accept" msgid="3571520986524038185">"स्वीकार गर्नुहोस्"</string>
     <string name="settings_port_forwarding_notification_deny" msgid="636848749634710403">"अस्वीकार गर्नुहोस्"</string>
     <string name="settings_recovery_title" msgid="6586840079226383285">"रिकभरी"</string>
@@ -89,4 +88,6 @@
     <string name="service_notification_close_title" msgid="1442526433361428844">"टर्मिनल एप बन्द हुँदै छ"</string>
     <string name="service_notification_force_quit_action" msgid="3462226330416157775">"बलपूर्वक बन्द गर्नुहोस्"</string>
     <string name="virgl_enabled" msgid="5242525588039698086">"<xliff:g id="ID_1">VirGL</xliff:g> अन गरिएको छ"</string>
+    <string name="notification_channel_long_running_name" msgid="7916541360369402952">"लामो समयसम्म चलिरहने कार्यहरू"</string>
+    <string name="notification_channel_system_events_name" msgid="1004951444029742137">"सिस्टमसम्बन्धी गतिविधिहरू"</string>
 </resources>

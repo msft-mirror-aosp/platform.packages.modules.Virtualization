@@ -47,6 +47,8 @@ use android_system_virtualizationcommon::aidl::android::system::virtualizationco
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     VirtualMachineAppConfig::DebugLevel::DebugLevel,
     AudioConfig::AudioConfig as AudioConfigParcelable,
+    CpuOptions::CpuOptions,
+    CpuOptions::CpuTopology::CpuTopology,
     DisplayConfig::DisplayConfig as DisplayConfigParcelable,
     GpuConfig::GpuConfig as GpuConfigParcelable,
     UsbConfig::UsbConfig as UsbConfigParcelable,
@@ -113,8 +115,7 @@ pub struct CrosvmConfig {
     pub debug_config: DebugConfig,
     pub memory_mib: NonZeroU32,
     pub swiotlb_mib: Option<NonZeroU32>,
-    pub cpus: Option<NonZeroU32>,
-    pub host_cpu_topology: bool,
+    pub cpus: CpuOptions,
     pub console_out_fd: Option<File>,
     pub console_in_fd: Option<File>,
     pub log_fd: Option<File>,
@@ -1105,26 +1106,35 @@ fn run_vm(
     #[cfg(target_arch = "aarch64")]
     command
         .arg("--pci")
-        .arg("mem=[start=0x70000000,size=0x2000000],cam=[start=0x72000000,size=0x1000000]");
+        .arg("mem=[start=0x2c000000,size=0x2000000],cam=[start=0x2e000000,size=0x1000000]");
 
     command.arg("--mem").arg(memory_mib.to_string());
 
-    if let Some(cpus) = config.cpus {
-        command.arg("--cpus").arg(cpus.to_string());
+    fn cpu_arg_command(command: &mut Command, count: usize) {
+        #[cfg(target_arch = "aarch64")]
+        command.arg("--cpus").arg(count.to_string() + ",sve=[auto=true]");
+        #[cfg(not(target_arch = "aarch64"))]
+        command.arg("--cpus").arg(count.to_string());
     }
-
-    if config.host_cpu_topology {
-        if cfg!(virt_cpufreq) && check_if_all_cpus_allowed()? {
-            command.arg("--host-cpu-topology");
-            cfg_if::cfg_if! {
-                if #[cfg(any(target_arch = "aarch64"))] {
+    match config.cpus.cpuTopology {
+        CpuTopology::MatchHost(_) => {
+            if cfg!(virt_cpufreq) && check_if_all_cpus_allowed()? {
+                command.arg("--host-cpu-topology");
+                #[cfg(target_arch = "aarch64")]
+                {
                     command.arg("--virt-cpufreq");
+                    command.arg("--cpus").arg("sve=[auto=true]");
                 }
+            } else {
+                cpu_arg_command(
+                    &mut command,
+                    get_num_cpus()
+                        .context("Could not determine the number of CPUs in the system")?,
+                )
             }
-        } else if let Some(cpus) = get_num_cpus() {
-            command.arg("--cpus").arg(cpus.to_string());
-        } else {
-            bail!("Could not determine the number of CPUs in the system");
+        }
+        CpuTopology::CpuCount(count) => {
+            cpu_arg_command(&mut command, count.try_into().context("invalid cpu count")?)
         }
     }
 

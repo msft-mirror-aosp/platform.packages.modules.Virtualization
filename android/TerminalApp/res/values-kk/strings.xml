@@ -33,6 +33,7 @@
     <string name="installer_error_no_wifi" msgid="1180164894845030969">"Орнатылмады, себебі Wi-Fi желісі жоқ."</string>
     <string name="installer_error_unknown" msgid="5657920711470180224">"Орнату мүмкін болмады. Қайталап көріңіз."</string>
     <string name="action_settings" msgid="5729342767795123227">"Параметрлер"</string>
+    <string name="action_display" msgid="8487008779926038139">"Дисплей"</string>
     <string name="vm_creation_message" msgid="6594953532721367502">"Терминал дайындалып жатыр."</string>
     <string name="vm_stop_message" msgid="3978349856095529255">"Терминал тоқтатылып жатыр."</string>
     <string name="vm_error_message" msgid="5231867246177661525">"Терминал бұзылды."</string>
@@ -48,8 +49,7 @@
     <string name="settings_port_forwarding_title" msgid="4971368519093858377">"Портты басқару"</string>
     <string name="settings_port_forwarding_sub_title" msgid="6547942778715654953">"Тыңдау порттарына рұқсат беру/тыйым салу"</string>
     <string name="settings_port_forwarding_active_ports_title" msgid="1841436780635889858">"Тыңдау порттары"</string>
-    <!-- no translation found for settings_port_forwarding_active_ports_content (1818090784030797758) -->
-    <skip />
+    <string name="settings_port_forwarding_active_ports_content" msgid="1818090784030797758">"<xliff:g id="PORT_NUMBER">%1$d</xliff:g> (<xliff:g id="PROCESS_NAME">%2$s</xliff:g>)"</string>
     <string name="settings_port_forwarding_other_enabled_ports_title" msgid="2644381842623436676">"Рұқсат берілген порттар сақталды"</string>
     <string name="settings_port_forwarding_other_enabled_port_add_button" msgid="4402301203801949152">"Қосу"</string>
     <string name="settings_port_forwarding_other_enabled_port_close_button" msgid="8475029060852721339">"<xliff:g id="PORT_NUMBER">%d</xliff:g> портты жою"</string>
@@ -61,8 +61,7 @@
     <string name="settings_port_forwarding_dialog_error_invalid_port_range" msgid="6682935312557379651">"Порт нөмірі жарамсыз."</string>
     <string name="settings_port_forwarding_dialog_error_existing_port" msgid="768426750758769928">"Порт бұрыннан бар."</string>
     <string name="settings_port_forwarding_notification_title" msgid="6950621555592547524">"Терминал жаңа порт ашуды сұрайды"</string>
-    <!-- no translation found for settings_port_forwarding_notification_content (779450349212040908) -->
-    <skip />
+    <string name="settings_port_forwarding_notification_content" msgid="779450349212040908">"Қажетті порт: <xliff:g id="PORT_NUMBER">%1$d</xliff:g> (<xliff:g id="PROCESS_NAME">%2$s</xliff:g>)"</string>
     <string name="settings_port_forwarding_notification_accept" msgid="3571520986524038185">"Қабылдау"</string>
     <string name="settings_port_forwarding_notification_deny" msgid="636848749634710403">"Қабылдамау"</string>
     <string name="settings_recovery_title" msgid="6586840079226383285">"Қалпына келтіру"</string>
@@ -89,4 +88,6 @@
     <string name="service_notification_close_title" msgid="1442526433361428844">"Терминал жабылып жатыр"</string>
     <string name="service_notification_force_quit_action" msgid="3462226330416157775">"Қолмен жабу"</string>
     <string name="virgl_enabled" msgid="5242525588039698086">"<xliff:g id="ID_1">VirGL</xliff:g> қосылды."</string>
+    <string name="notification_channel_long_running_name" msgid="7916541360369402952">"Ұзақ орындалатын тапсырмалар"</string>
+    <string name="notification_channel_system_events_name" msgid="1004951444029742137">"Жүйе оқиғалары"</string>
 </resources>

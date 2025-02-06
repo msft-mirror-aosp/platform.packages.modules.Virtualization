@@ -35,12 +35,14 @@ import android.os.Environment
 import android.os.SystemProperties
 import android.os.Trace
 import android.provider.Settings
+import android.util.DisplayMetrics
 import android.util.Log
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
 import android.webkit.ClientCertRequest
 import android.webkit.SslErrorHandler
@@ -56,6 +58,7 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult
 import com.android.internal.annotations.VisibleForTesting
 import com.android.microdroid.test.common.DeviceProperties
+import com.android.system.virtualmachine.flags.Flags.terminalGuiSupport
 import com.android.virtualization.terminal.CertificateUtils.createOrGetKey
 import com.android.virtualization.terminal.CertificateUtils.writeCertificateToFile
 import com.android.virtualization.terminal.ErrorActivity.Companion.start
@@ -87,6 +90,7 @@ public class MainActivity :
     private val bootCompleted = ConditionVariable()
     private lateinit var manageExternalStorageActivityResultLauncher: ActivityResultLauncher<Intent>
     private lateinit var modifierKeysController: ModifierKeysController
+    private var displayMenu: MenuItem? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -209,7 +213,10 @@ public class MainActivity :
                     view: WebView?,
                     request: WebResourceRequest?,
                 ): Boolean {
-                    return false
+                    val intent = Intent(Intent.ACTION_VIEW, request?.url)
+                    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(intent)
+                    return true
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -253,6 +260,10 @@ public class MainActivity :
                                     Trace.endAsyncSection("executeTerminal", 0)
                                     findViewById<View?>(R.id.boot_progress).visibility = View.GONE
                                     terminalContainer.visibility = View.VISIBLE
+                                    if (terminalGuiSupport()) {
+                                        displayMenu?.setVisible(true)
+                                        displayMenu?.setEnabled(true)
+                                    }
                                     bootCompleted.open()
                                     modifierKeysController.update()
                                     terminalView.mapTouchToMouseEvent()
@@ -293,6 +304,8 @@ public class MainActivity :
             info,
             executorService,
             object : NsdManager.ServiceInfoCallback {
+                var loaded: Boolean = false
+
                 override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {}
 
                 override fun onServiceInfoCallbackUnregistered() {}
@@ -300,13 +313,15 @@ public class MainActivity :
                 override fun onServiceLost() {}
 
                 override fun onServiceUpdated(info: NsdServiceInfo) {
-                    nsdManager.unregisterServiceInfoCallback(this)
-
                     Log.i(TAG, "Service found: $info")
                     val ipAddress = info.hostAddresses[0].hostAddress
                     val port = info.port
                     val url = getTerminalServiceUrl(ipAddress, port)
-                    runOnUiThread(Runnable { terminalView.loadUrl(url.toString()) })
+                    if (!loaded) {
+                        loaded = true
+                        nsdManager.unregisterServiceInfoCallback(this)
+                        runOnUiThread(Runnable { terminalView.loadUrl(url.toString()) })
+                    }
                 }
             },
         )
@@ -337,6 +352,11 @@ public class MainActivity :
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
         menuInflater.inflate(R.menu.main_menu, menu)
+        displayMenu =
+            menu?.findItem(R.id.menu_item_display).also {
+                it?.setVisible(terminalGuiSupport())
+                it?.setEnabled(false)
+            }
         return true
     }
 
@@ -344,6 +364,12 @@ public class MainActivity :
         val id = item.getItemId()
         if (id == R.id.menu_item_settings) {
             val intent = Intent(this, SettingsActivity::class.java)
+            this.startActivity(intent)
+            return true
+        } else if (id == R.id.menu_item_display) {
+            val intent = Intent(this, DisplayActivity::class.java)
+            intent.flags =
+                intent.flags or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             this.startActivity(intent)
             return true
         }
@@ -409,7 +435,7 @@ public class MainActivity :
             )
         val icon = Icon.createWithResource(resources, R.drawable.ic_launcher_foreground)
         val notification: Notification =
-            Notification.Builder(this, this.packageName)
+            Notification.Builder(this, Application.CHANNEL_LONG_RUNNING_ID)
                 .setSilent(true)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle(resources.getString(R.string.service_notification_title))
@@ -435,7 +461,7 @@ public class MainActivity :
                 .build()
 
         Trace.beginAsyncSection("executeTerminal", 0)
-        run(this, this, notification)
+        run(this, this, notification, getDisplayInfo())
         connectToTerminalService()
     }
 
@@ -488,5 +514,19 @@ public class MainActivity :
                 R.id.btn_pgup to KeyEvent.KEYCODE_PAGE_UP,
                 R.id.btn_pgdn to KeyEvent.KEYCODE_PAGE_DOWN,
             )
+    }
+
+    fun getDisplayInfo(): DisplayInfo {
+        val wm = getSystemService<WindowManager>(WindowManager::class.java)
+        val metrics = wm.currentWindowMetrics
+        val dispBounds = metrics.bounds
+
+        // For now, display activity runs as landscape mode
+        val height = Math.min(dispBounds.right, dispBounds.bottom)
+        val width = Math.max(dispBounds.right, dispBounds.bottom)
+        var dpi = (DisplayMetrics.DENSITY_DEFAULT * metrics.density).toInt()
+        var refreshRate = display.refreshRate.toInt()
+
+        return DisplayInfo(width, height, dpi, refreshRate)
     }
 }

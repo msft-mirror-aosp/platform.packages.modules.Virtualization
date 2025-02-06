@@ -31,7 +31,6 @@ use android_system_virtualizationcommon::aidl::android::system::virtualizationco
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     AssignedDevices::AssignedDevices,
     AssignableDevice::AssignableDevice,
-    CpuTopology::CpuTopology,
     DiskImage::DiskImage,
     SharedPath::SharedPath,
     InputDevice::InputDevice,
@@ -68,11 +67,10 @@ use binder::{
     self, wait_for_interface, Accessor, BinderFeatures, ConnectionInfo, ExceptionCode, Interface, ParcelFileDescriptor,
     SpIBinder, Status, StatusCode, Strong, IntoBinderResult,
 };
-use cstr::cstr;
 use glob::glob;
 use libc::{AF_VSOCK, sa_family_t, sockaddr_vm};
 use log::{debug, error, info, warn};
-use microdroid_payload_config::{ApkConfig, Task, TaskType, VmPayloadConfig};
+use microdroid_payload_config::{ApexConfig, ApkConfig, Task, TaskType, VmPayloadConfig};
 use nix::unistd::pipe;
 use rpcbinder::RpcServer;
 use rustutils::system_properties;
@@ -713,24 +711,6 @@ impl VirtualizationService {
 
         let shared_paths = assemble_shared_paths(&config.sharedPaths, &temporary_directory)?;
 
-        let (cpus, host_cpu_topology) = match config.cpuTopology {
-            CpuTopology::MATCH_HOST => (None, true),
-            CpuTopology::ONE_CPU => (NonZeroU32::new(1), false),
-            CpuTopology::CUSTOM => (
-                NonZeroU32::new(
-                    u32::try_from(config.customVcpuCount)
-                        .context("bad customVcpuCount")
-                        .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?,
-                ),
-                false,
-            ),
-            val => {
-                return Err(anyhow!("Failed to parse CPU topology value {:?}", val))
-                    .with_log()
-                    .or_service_specific_exception(-1);
-            }
-        };
-
         let (vfio_devices, dtbo) = match &config.devices {
             AssignedDevices::Devices(devices) if !devices.is_empty() => {
                 let mut set = HashSet::new();
@@ -820,6 +800,8 @@ impl VirtualizationService {
             .unwrap_or(Ok(UsbConfig { controller: false }))
             .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?;
 
+        let detect_hangup = is_app_config && gdb_port.is_none();
+
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -839,15 +821,14 @@ impl VirtualizationService {
                 .and_then(NonZeroU32::new)
                 .unwrap_or(NonZeroU32::new(256).unwrap()),
             swiotlb_mib: config.swiotlbMib.try_into().ok().and_then(NonZeroU32::new),
-            cpus,
-            host_cpu_topology,
+            cpus: config.cpuOptions.clone(),
             console_out_fd,
             console_in_fd,
             log_fd,
             ramdump,
             indirect_files,
             platform_version: parse_platform_version_req(&config.platformVersion)?,
-            detect_hangup: is_app_config,
+            detect_hangup,
             gdb_port,
             vfio_devices,
             dtbo,
@@ -976,7 +957,7 @@ fn maybe_create_reference_dt_overlay(
             "Passing vendor hashtree digest to pvmfw. This will be rejected if it doesn't \
                 match the trusted digest in the pvmfw config, causing the VM to fail to start."
         );
-        vec![(cstr!("vendor_hashtree_descriptor_root_digest"), vendor_hashtree_digest.as_slice())]
+        vec![(c"vendor_hashtree_descriptor_root_digest", vendor_hashtree_digest.as_slice())]
     } else {
         vec![]
     };
@@ -984,18 +965,18 @@ fn maybe_create_reference_dt_overlay(
     let key_material;
     let mut untrusted_props = Vec::with_capacity(2);
     if cfg!(llpvm_changes) {
-        untrusted_props.push((cstr!("instance-id"), &instance_id[..]));
+        untrusted_props.push((c"instance-id", &instance_id[..]));
         let want_updatable = extract_want_updatable(config);
         if want_updatable && is_secretkeeper_supported() {
             // Let guest know that it can defer rollback protection to Secretkeeper by setting
             // an empty property in untrusted node in DT. This enables Updatable VMs.
-            untrusted_props.push((cstr!("defer-rollback-protection"), &[]));
+            untrusted_props.push((c"defer-rollback-protection", &[]));
             let sk: Strong<dyn ISecretkeeper> =
                 binder::wait_for_interface(SECRETKEEPER_IDENTIFIER)?;
             if sk.getInterfaceVersion()? >= 2 {
                 let PublicKey { keyMaterial } = sk.getSecretkeeperIdentity()?;
                 key_material = keyMaterial;
-                trusted_props.push((cstr!("secretkeeper_public_key"), key_material.as_slice()));
+                trusted_props.push((c"secretkeeper_public_key", key_material.as_slice()));
             }
         }
     }
@@ -1298,23 +1279,13 @@ fn load_app_config(
         vm_config.teeServices.clone_from(&custom_config.teeServices);
     }
 
-    // Unfortunately specifying page_shift = 14 in bootconfig doesn't enable 16k pages emulation,
-    // so we need to provide it in the kernel cmdline.
-    // TODO(b/376901009): remove this after passing page_shift in bootconfig is supported.
-    if os_name.ends_with("_16k") && cfg!(target_arch = "x86_64") {
-        append_kernel_param("page_shift=14", &mut vm_config);
-    }
-
     if config.memoryMib > 0 {
         vm_config.memoryMib = config.memoryMib;
     }
 
     vm_config.name.clone_from(&config.name);
     vm_config.protectedVm = config.protectedVm;
-    vm_config.cpuTopology = config.cpuTopology;
-    if config.cpuTopology == CpuTopology::CUSTOM {
-        bail!("AppConfig doesn't support CpuTopology::CUSTOM");
-    }
+    vm_config.cpuOptions = config.cpuOptions.clone();
     vm_config.hugePages = config.hugePages || vm_payload_config.hugepages;
     vm_config.boostUclamp = config.boostUclamp;
 
@@ -1408,7 +1379,19 @@ fn create_vm_payload_config(
     let extra_apks =
         (0..extra_apk_count).map(|i| ApkConfig { path: format!("extra-apk-{i}") }).collect();
 
-    Ok(VmPayloadConfig { task: Some(task), extra_apks, ..Default::default() })
+    if check_use_relaxed_microdroid_rollback_protection().is_ok() {
+        // The only payload delivered via Mainline module in this release requires
+        // com.android.i18n apex. However, we are past all the reasonable deadlines to add new
+        // APIs, so we use the fact that the payload is granted
+        // USE_RELAXED_MICRODROID_ROLLBACK_PROTECTION permission as a signal that we should include
+        // com.android.i18n APEX.
+        // TODO: remove this after we provide a stable @SystemApi to load additional APEXes to
+        // Microdroid pVMs.
+        let apexes = vec![ApexConfig { name: String::from("com.android.i18n") }];
+        Ok(VmPayloadConfig { task: Some(task), apexes, extra_apks, ..Default::default() })
+    } else {
+        Ok(VmPayloadConfig { task: Some(task), extra_apks, ..Default::default() })
+    }
 }
 
 /// Generates a unique filename to use for a composite disk image.
@@ -1466,6 +1449,12 @@ fn check_manage_access() -> binder::Result<()> {
 /// Check whether the caller of the current Binder method is allowed to create custom VMs
 fn check_use_custom_virtual_machine() -> binder::Result<()> {
     check_permission("android.permission.USE_CUSTOM_VIRTUAL_MACHINE")
+}
+
+/// Check whether the caller of the current binder method is allowed to use relaxed microdroid
+/// rollback protection schema.
+fn check_use_relaxed_microdroid_rollback_protection() -> binder::Result<()> {
+    check_permission("android.permission.USE_RELAXED_MICRODROID_ROLLBACK_PROTECTION")
 }
 
 /// Return whether a partition is exempt from selinux label checks, because we know that it does
@@ -2032,7 +2021,7 @@ enum BorrowedOrOwned<'a, T> {
     Owned(T),
 }
 
-impl<'a, T> AsRef<T> for BorrowedOrOwned<'a, T> {
+impl<T> AsRef<T> for BorrowedOrOwned<'_, T> {
     fn as_ref(&self) -> &T {
         match self {
             Self::Borrowed(b) => b,

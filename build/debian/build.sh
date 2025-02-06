@@ -5,6 +5,8 @@
 # - Add Android-specific packages via a new class
 # - Use a stable release from debian-cloud-images
 
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
 show_help() {
 	echo "Usage: sudo $0 [OPTION]... [FILE]"
 	echo "Builds a debian image and save it to FILE. [sudo is required]"
@@ -156,10 +158,11 @@ install_prerequisites() {
 	source "$HOME"/.cargo/env
 	rustup target add "${arch}"-unknown-linux-gnu
 	cargo install cargo-license
+	cargo install cargo-deb
 }
 
 download_debian_cloud_image() {
-	local ver=master
+	local ver=38da93fe
 	local prj=debian-cloud-images
 	local url="https://salsa.debian.org/cloud-team/${prj}/-/archive/${ver}/${prj}-${ver}.tar.gz"
 	local outdir="${debian_cloud_image}"
@@ -168,30 +171,18 @@ download_debian_cloud_image() {
 	wget -O - "${url}" | tar xz -C "${outdir}" --strip-components=1
 }
 
-build_rust_binary_and_copy() {
-	pushd "$(dirname "$0")/../../guest/$1" > /dev/null
-	local release_flag=
-	local artifact_mode=debug
-	if [[ "$mode" == "release" ]]; then
-		release_flag="--release"
-		artifact_mode=release
-	fi
-	RUSTFLAGS="-C linker=${arch}-linux-gnu-gcc" cargo build \
+build_rust_as_deb() {
+	pushd "$SCRIPT_DIR/../../guest/$1" > /dev/null
+	cargo deb \
 		--target "${arch}-unknown-linux-gnu" \
-		--target-dir "${workdir}/$1" ${release_flag}
-	mkdir -p "${dst}/files/usr/local/bin/$1"
-	cp "${workdir}/$1/${arch}-unknown-linux-gnu/${artifact_mode}/$1" "${dst}/files/usr/local/bin/$1/AVF"
-	chmod 777 "${dst}/files/usr/local/bin/$1/AVF"
-
-	mkdir -p "${dst}/files/usr/share/doc/$1"
-	cargo license > "${dst}/files/usr/share/doc/$1/copyright"
+		--output "${debian_cloud_image}/localdebs"
 	popd > /dev/null
 }
 
 build_ttyd() {
 	local ttyd_version=1.7.7
 	local url="https://github.com/tsl0922/ttyd/archive/refs/tags/${ttyd_version}.tar.gz"
-	cp -r "$(dirname "$0")/ttyd" "${workdir}/ttyd"
+	cp -r "$SCRIPT_DIR/ttyd" "${workdir}/ttyd"
 
 	pushd "${workdir}" > /dev/null
 	wget "${url}" -O - | tar xz
@@ -210,17 +201,17 @@ build_ttyd() {
 copy_android_config() {
 	local src
 	local dst
-	src="$(dirname "$0")/fai_config"
+	src="$SCRIPT_DIR/fai_config"
 	dst="${config_space}"
 
 	cp -R "${src}"/* "${dst}"
-	cp "$(dirname "$0")/image.yaml" "${resources_dir}"
+	cp "$SCRIPT_DIR/image.yaml" "${resources_dir}"
 
-	cp -R "$(dirname "$0")/localdebs/" "${debian_cloud_image}/"
+	cp -R "$SCRIPT_DIR/localdebs/" "${debian_cloud_image}/"
 	build_ttyd
-	build_rust_binary_and_copy forwarder_guest
-	build_rust_binary_and_copy forwarder_guest_launcher
-	build_rust_binary_and_copy shutdown_runner
+	build_rust_as_deb forwarder_guest
+	build_rust_as_deb forwarder_guest_launcher
+	build_rust_as_deb shutdown_runner
 }
 
 package_custom_kernel() {
@@ -229,35 +220,55 @@ package_custom_kernel() {
 		return
 	fi
 
+	local deb_base_url="https://deb.debian.org/debian"
+	local deb_security_base_url="https://security.debian.org/debian-security"
+
+	local pool_dir="pool/main/l/linux"
+	local ksrc_base_url="${deb_base_url}/${pool_dir}"
+	local ksrc_security_base_url="${deb_security_base_url}/${pool_dir}"
+
 	# NOTE: 6.1 is the latest LTS kernel for which Debian's kernel build scripts
 	#       work on Python 3.10, the default version on our Ubuntu 22.04 builders.
-	local debian_kver="6.1.119-1"
-	local custom_flavour="avf"
-	local ksrc_base_url="https://deb.debian.org/debian/pool/main/l/linux"
+	#
+	#       We track the latest Debian stable kernel version for the 6.1 branch,
+	#       which can be found at:
+	#       https://packages.debian.org/stable/linux-source-6.1
+	local debian_kver="6.1.123-1"
 
-	local dsc_url="${ksrc_base_url}/linux_${debian_kver}.dsc"
-	local debian_ksrc_url="${ksrc_base_url}/linux_${debian_kver}.debian.tar.xz"
-	local orig_ksrc_url="${ksrc_base_url}/linux_${debian_kver%-*}.orig.tar.xz"
+	local dsc_file="linux_${debian_kver}.dsc"
+	local orig_ksrc_file="linux_${debian_kver%-*}.orig.tar.xz"
+	local debian_ksrc_file="linux_${debian_kver}.debian.tar.xz"
 
 	# 0. Grab the kernel sources, and the latest debian keyrings
 	mkdir -p "${workdir}/kernel"
 	pushd "${workdir}/kernel" > /dev/null
-	wget "$dsc_url"
-	wget "$orig_ksrc_url"
-	wget "$debian_ksrc_url"
+
+	wget "${ksrc_security_base_url}/${dsc_file}" || \
+	wget "${ksrc_base_url}/${dsc_file}"
+
+	wget "${ksrc_security_base_url}/${orig_ksrc_file}" || \
+	wget "${ksrc_base_url}/${orig_ksrc_file}"
+
+	wget "${ksrc_security_base_url}/${debian_ksrc_file}" || \
+	wget "${ksrc_base_url}/${debian_ksrc_file}"
+
 	rsync -az --progress keyring.debian.org::keyrings/keyrings/ /usr/share/keyrings/
 
 	# 1. Verify, extract and merge patches into the original kernel sources
 	dpkg-source --require-strong-checksums \
 	            --require-valid-signature \
-	            --extract linux_${debian_kver}.dsc
+	            --extract "${dsc_file}"
 	pushd "linux-${debian_kver%-*}" > /dev/null
-	# TODO: Copy our own kernel patches to debian/patches
-	#       and add patch file names in the desired order to debian/patches/series
+
+	local kpatches_src="$SCRIPT_DIR/kernel_patches"
+	cp -r "${kpatches_src}/avf" debian/patches/
+	cat "${kpatches_src}/series" >> debian/patches/series
 	./debian/rules orig
 
-	local abi_kver="$(sed -nE 's;Package: linux-support-(.*);\1;p' debian/control)"
+	local custom_flavour="avf"
 	local debarch_flavour="${custom_flavour}-${debian_arch}"
+
+	local abi_kver="$(sed -nE 's;Package: linux-support-(.*);\1;p' debian/control)"
 	local abi_flavour="${abi_kver}-${debarch_flavour}"
 
 	# 2. Define our custom flavour and regenerate control file
@@ -307,7 +318,7 @@ run_fai() {
 
 generate_output_package() {
 	fdisk -l "${raw_disk_image}"
-	local vm_config="$(realpath $(dirname "$0"))/vm_config.json.${arch}"
+	local vm_config="$SCRIPT_DIR/vm_config.json.${arch}"
 	local root_partition_num=1
 	local bios_partition_num=14
 	local efi_partition_num=15

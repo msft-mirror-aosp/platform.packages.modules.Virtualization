@@ -26,22 +26,22 @@ extern crate alloc;
 use crate::layout::print_addresses;
 use crate::pci::check_pci;
 use alloc::{vec, vec::Vec};
-use core::ptr::addr_of_mut;
-use cstr::cstr;
 use libfdt::Fdt;
 use log::{debug, error, info, trace, warn, LevelFilter};
+use spin::mutex::SpinMutex;
 use vmbase::{
+    arch::linker,
     bionic, configure_heap,
     fdt::pci::PciInfo,
     generate_image_header,
     layout::crosvm::FDT_MAX_SIZE,
-    linker, logger, main,
+    logger, main,
     memory::{deactivate_dynamic_page_tables, map_data, SIZE_64KB},
 };
 
 static INITIALISED_DATA: [u32; 4] = [1, 2, 3, 4];
-static mut ZEROED_DATA: [u32; 10] = [0; 10];
-static mut MUTABLE_DATA: [u32; 4] = [1, 2, 3, 4];
+static ZEROED_DATA: SpinMutex<[u32; 10]> = SpinMutex::new([0; 10]);
+static MUTABLE_DATA: SpinMutex<[u32; 4]> = SpinMutex::new([1, 2, 3, 4]);
 
 generate_image_header!();
 main!(main);
@@ -104,22 +104,16 @@ fn check_stack_guard() {
 
 fn check_data() {
     info!("INITIALISED_DATA: {:?}", INITIALISED_DATA.as_ptr());
-    // SAFETY: We only print the addresses of the static mutable variable, not actually access it.
-    info!("ZEROED_DATA: {:?}", unsafe { ZEROED_DATA.as_ptr() });
-    // SAFETY: We only print the addresses of the static mutable variable, not actually access it.
-    info!("MUTABLE_DATA: {:?}", unsafe { MUTABLE_DATA.as_ptr() });
 
     assert_eq!(INITIALISED_DATA[0], 1);
     assert_eq!(INITIALISED_DATA[1], 2);
     assert_eq!(INITIALISED_DATA[2], 3);
     assert_eq!(INITIALISED_DATA[3], 4);
 
-    // SAFETY: Nowhere else in the program accesses this static mutable variable, so there is no
-    // chance of concurrent access.
-    let zeroed_data = unsafe { &mut *addr_of_mut!(ZEROED_DATA) };
-    // SAFETY: Nowhere else in the program accesses this static mutable variable, so there is no
-    // chance of concurrent access.
-    let mutable_data = unsafe { &mut *addr_of_mut!(MUTABLE_DATA) };
+    let zeroed_data = &mut *ZEROED_DATA.lock();
+    let mutable_data = &mut *MUTABLE_DATA.lock();
+    info!("ZEROED_DATA: {:?}", zeroed_data.as_ptr());
+    info!("MUTABLE_DATA: {:?}", mutable_data.as_ptr());
 
     for element in zeroed_data.iter() {
         assert_eq!(*element, 0);
@@ -147,7 +141,7 @@ fn check_fdt(reader: &Fdt) {
         info!("memory @ {reg:#x?}");
     }
 
-    let compatible = cstr!("ns16550a");
+    let compatible = c"ns16550a";
 
     for c in reader.compatible_nodes(compatible).unwrap() {
         let reg = c.reg().unwrap().unwrap().next().unwrap();
@@ -159,17 +153,17 @@ fn modify_fdt(writer: &mut Fdt) {
     writer.unpack().unwrap();
     info!("FDT successfully unpacked.");
 
-    let path = cstr!("/memory");
+    let path = c"/memory";
     let node = writer.node_mut(path).unwrap().unwrap();
-    let name = cstr!("child");
+    let name = c"child";
     let mut child = node.add_subnode(name).unwrap();
     info!("Created subnode '{}/{}'.", path.to_str().unwrap(), name.to_str().unwrap());
 
-    let name = cstr!("str-property");
+    let name = c"str-property";
     child.appendprop(name, b"property-value\0").unwrap();
     info!("Appended property '{}'.", name.to_str().unwrap());
 
-    let name = cstr!("pair-property");
+    let name = c"pair-property";
     let addr = 0x0123_4567u64;
     let size = 0x89ab_cdefu64;
     child.appendprop_addrrange(name, addr, size).unwrap();
