@@ -2210,6 +2210,10 @@ impl IVirtualMachineService for VirtualMachineService {
     fn requestAttestation(&self, csr: &[u8], test_mode: bool) -> binder::Result<Vec<Certificate>> {
         GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32, test_mode)
     }
+
+    fn claimSecretkeeperEntry(&self, id: &[u8; 64]) -> binder::Result<()> {
+        GLOBAL_SERVICE.claimSecretkeeperEntry(id)
+    }
 }
 
 fn is_secretkeeper_supported() -> bool {
