@@ -203,6 +203,7 @@ fn get_data_from_apk(
         cert_hash,
         package_name: manifest_info.package,
         version_code: manifest_info.version_code,
+        rollback_index: manifest_info.rollback_index,
     })
 }
 
