@@ -58,7 +58,8 @@ java_defaults {
         // Non-VM payload libraries
         "libhwtrust_jni",
     ],
-    min_sdk_version: "33",
+    // AVF java APIs were introduced in Android U.
+    min_sdk_version: "34",
 }
 
 DATA = [
