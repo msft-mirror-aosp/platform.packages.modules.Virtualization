@@ -1,11 +1,11 @@
 /*
- * Copyright 2023 The Android Open Source Project
+ * Copyright 2025 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,15 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package android.system.virtualizationservice;
 
-/** The vCPU topology that will be generated for the VM. */
-@Backing(type="byte")
-enum CpuTopology {
-    /** One vCPU */
-    ONE_CPU = 0,
-    /** Match physical CPU topology of the host. */
-    MATCH_HOST = 1,
-    /** Number of vCPUs specified in the config. */
-    CUSTOM = 2,
+ENTRY(vm_payload_signed)
+
+SECTIONS
+{
+    . = 0x0;
+    .text : {
+        *(.vm_payload_signed.bin)
+    }
 }

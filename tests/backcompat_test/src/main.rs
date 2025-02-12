@@ -16,7 +16,8 @@
 
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::{
-        CpuTopology::CpuTopology, DiskImage::DiskImage, VirtualMachineConfig::VirtualMachineConfig,
+        CpuOptions::CpuOptions, CpuOptions::CpuTopology::CpuTopology, DiskImage::DiskImage,
+        VirtualMachineConfig::VirtualMachineConfig,
         VirtualMachineRawConfig::VirtualMachineRawConfig,
     },
     binder::{ParcelFileDescriptor, ProcessState},
@@ -98,7 +99,7 @@ fn run_test(protected: bool, golden_dt: &str) -> Result<(), Error> {
         disks: vec![disk_image, empty_disk_image],
         protectedVm: protected,
         memoryMib: 300,
-        cpuTopology: CpuTopology::ONE_CPU,
+        cpuOptions: CpuOptions { cpuTopology: CpuTopology::CpuCount(1) },
         platformVersion: "~1.0".to_string(),
         ..Default::default()
     });
@@ -117,10 +118,9 @@ fn run_test(protected: bool, golden_dt: &str) -> Result<(), Error> {
         /* consoleIn */ None,
         None,
         Some(dump_dt),
-        None,
     )
     .context("Failed to create VM")?;
-    vm.start().context("Failed to start VM")?;
+    vm.start(None).context("Failed to start VM")?;
     info!("Started example VM.");
 
     // Wait for VM to finish

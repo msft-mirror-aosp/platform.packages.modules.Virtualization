@@ -29,7 +29,6 @@ use core::fmt;
 use core::mem::size_of;
 use core::ops::Range;
 use hypervisor_backends::get_device_assigner;
-use hypervisor_backends::get_mem_sharer;
 use libfdt::AddressRange;
 use libfdt::CellIterator;
 use libfdt::Fdt;
@@ -79,37 +78,99 @@ impl fmt::Display for FdtValidationError {
     }
 }
 
-/// Extract from /config the address range containing the pre-loaded kernel. Absence of /config is
-/// not an error.
+/// For non-standardly sized integer properties, not following <#size-cells> or <#address-cells>.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DeviceTreeInteger {
+    SingleCell(u32),
+    DoubleCell(u64),
+}
+
+impl DeviceTreeInteger {
+    fn read_from(node: &FdtNode, name: &CStr) -> libfdt::Result<Option<Self>> {
+        if let Some(bytes) = node.getprop(name)? {
+            Ok(Some(Self::from_bytes(bytes).ok_or(FdtError::BadValue)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if let Some(val) = bytes.try_into().ok().map(u32::from_be_bytes) {
+            return Some(Self::SingleCell(val));
+        } else if let Some(val) = bytes.try_into().ok().map(u64::from_be_bytes) {
+            return Some(Self::DoubleCell(val));
+        }
+        None
+    }
+
+    fn write_to(&self, node: &mut FdtNodeMut, name: &CStr) -> libfdt::Result<()> {
+        match self {
+            Self::SingleCell(value) => node.setprop(name, &value.to_be_bytes()),
+            Self::DoubleCell(value) => node.setprop(name, &value.to_be_bytes()),
+        }
+    }
+}
+
+impl From<DeviceTreeInteger> for usize {
+    fn from(i: DeviceTreeInteger) -> Self {
+        match i {
+            DeviceTreeInteger::SingleCell(v) => v.try_into().unwrap(),
+            DeviceTreeInteger::DoubleCell(v) => v.try_into().unwrap(),
+        }
+    }
+}
+
+/// Returns the pair or integers or an error if only one value is present.
+fn read_two_ints(
+    node: &FdtNode,
+    name_a: &CStr,
+    name_b: &CStr,
+) -> libfdt::Result<Option<(DeviceTreeInteger, DeviceTreeInteger)>> {
+    let a = DeviceTreeInteger::read_from(node, name_a)?;
+    let b = DeviceTreeInteger::read_from(node, name_b)?;
+
+    match (a, b) {
+        (Some(a), Some(b)) => Ok(Some((a, b))),
+        (None, None) => Ok(None),
+        _ => Err(FdtError::NotFound),
+    }
+}
+
+/// Extract from /config the address range containing the pre-loaded kernel.
+///
+/// Absence of /config is not an error. However, an error is returned if only one of the two
+/// properties is present.
 pub fn read_kernel_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
-    let addr = c"kernel-address";
-    let size = c"kernel-size";
-
-    if let Some(config) = fdt.node(c"/config")? {
-        if let (Some(addr), Some(size)) = (config.getprop_u32(addr)?, config.getprop_u32(size)?) {
-            let addr = addr as usize;
-            let size = size as usize;
-
+    if let Some(ref config) = fdt.node(c"/config")? {
+        if let Some((addr, size)) = read_two_ints(config, c"kernel-address", c"kernel-size")? {
+            let addr = usize::from(addr);
+            let size = usize::from(size);
             return Ok(Some(addr..(addr + size)));
         }
     }
-
     Ok(None)
 }
 
-/// Extract from /chosen the address range containing the pre-loaded ramdisk. Absence is not an
-/// error as there can be initrd-less VM.
-pub fn read_initrd_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
-    let start = c"linux,initrd-start";
-    let end = c"linux,initrd-end";
-
-    if let Some(chosen) = fdt.chosen()? {
-        if let (Some(start), Some(end)) = (chosen.getprop_u32(start)?, chosen.getprop_u32(end)?) {
-            return Ok(Some((start as usize)..(end as usize)));
-        }
+fn read_initrd_range_props(
+    fdt: &Fdt,
+) -> libfdt::Result<Option<(DeviceTreeInteger, DeviceTreeInteger)>> {
+    if let Some(ref chosen) = fdt.chosen()? {
+        read_two_ints(chosen, c"linux,initrd-start", c"linux,initrd-end")
+    } else {
+        Ok(None)
     }
+}
 
-    Ok(None)
+/// Extract from /chosen the address range containing the pre-loaded ramdisk.
+///
+/// Absence is not an error as there can be initrd-less VM. However, an error is returned if only
+/// one of the two properties is present.
+pub fn read_initrd_range_from(fdt: &Fdt) -> libfdt::Result<Option<Range<usize>>> {
+    if let Some((start, end)) = read_initrd_range_props(fdt)? {
+        Ok(Some(usize::from(start)..usize::from(end)))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Read /avf/untrusted/instance-id, if present.
@@ -130,13 +191,14 @@ fn read_avf_untrusted_prop<'a>(fdt: &'a Fdt, prop: &CStr) -> libfdt::Result<Opti
     }
 }
 
-fn patch_initrd_range(fdt: &mut Fdt, initrd_range: &Range<usize>) -> libfdt::Result<()> {
-    let start = u32::try_from(initrd_range.start).unwrap();
-    let end = u32::try_from(initrd_range.end).unwrap();
-
+fn patch_initrd_range(
+    fdt: &mut Fdt,
+    start: &DeviceTreeInteger,
+    end: &DeviceTreeInteger,
+) -> libfdt::Result<()> {
     let mut node = fdt.chosen_mut()?.ok_or(FdtError::NotFound)?;
-    node.setprop(c"linux,initrd-start", &start.to_be_bytes())?;
-    node.setprop(c"linux,initrd-end", &end.to_be_bytes())?;
+    start.write_to(&mut node, c"linux,initrd-start")?;
+    end.write_to(&mut node, c"linux,initrd-end")?;
     Ok(())
 }
 
@@ -165,7 +227,7 @@ fn patch_bootargs(fdt: &mut Fdt, bootargs: &CStr) -> libfdt::Result<()> {
 /// Only one memory range is expected with the crosvm setup for now.
 fn read_and_validate_memory_range(
     fdt: &Fdt,
-    guest_page_size: usize,
+    alignment: usize,
 ) -> Result<Range<usize>, RebootReason> {
     let mut memory = fdt.memory().map_err(|e| {
         error!("Failed to read memory range from DT: {e}");
@@ -182,14 +244,19 @@ fn read_and_validate_memory_range(
         );
     }
     let base = range.start;
+    if base % alignment != 0 {
+        error!("Memory base address {:#x} is not aligned to {:#x}", base, alignment);
+        return Err(RebootReason::InvalidFdt);
+    }
+    // For simplicity, force a hardcoded memory base, for now.
     if base != MEM_START {
         error!("Memory base address {:#x} is not {:#x}", base, MEM_START);
         return Err(RebootReason::InvalidFdt);
     }
 
     let size = range.len();
-    if size % guest_page_size != 0 {
-        error!("Memory size {:#x} is not a multiple of page size {:#x}", size, guest_page_size);
+    if size % alignment != 0 {
+        error!("Memory size {:#x} is not aligned to {:#x}", size, alignment);
         return Err(RebootReason::InvalidFdt);
     }
 
@@ -871,24 +938,28 @@ fn patch_serial_info(fdt: &mut Fdt, serial_info: &SerialInfo) -> libfdt::Result<
 fn validate_swiotlb_info(
     swiotlb_info: &SwiotlbInfo,
     memory: &Range<usize>,
-    guest_page_size: usize,
+    alignment: usize,
 ) -> Result<(), RebootReason> {
     let size = swiotlb_info.size;
     let align = swiotlb_info.align;
 
-    if size == 0 || (size % guest_page_size) != 0 {
+    if size == 0 || (size % alignment) != 0 {
         error!("Invalid swiotlb size {:#x}", size);
         return Err(RebootReason::InvalidFdt);
     }
 
-    if let Some(align) = align.filter(|&a| a % guest_page_size != 0) {
-        error!("Invalid swiotlb alignment {:#x}", align);
+    if let Some(align) = align.filter(|&a| a % alignment != 0) {
+        error!("Swiotlb alignment {:#x} not aligned to {:#x}", align, alignment);
         return Err(RebootReason::InvalidFdt);
     }
 
     if let Some(addr) = swiotlb_info.addr {
         if addr.checked_add(size).is_none() {
             error!("Invalid swiotlb range: addr:{addr:#x} size:{size:#x}");
+            return Err(RebootReason::InvalidFdt);
+        }
+        if (addr % alignment) != 0 {
+            error!("Swiotlb address {:#x} not aligned to {:#x}", addr, alignment);
             return Err(RebootReason::InvalidFdt);
         }
     }
@@ -1005,7 +1076,7 @@ fn patch_vcpufreq(fdt: &mut Fdt, vcpufreq_info: &Option<VcpufreqInfo>) -> libfdt
 
 #[derive(Debug)]
 pub struct DeviceTreeInfo {
-    pub initrd_range: Option<Range<usize>>,
+    initrd_range: Option<(DeviceTreeInteger, DeviceTreeInteger)>,
     pub memory_range: Range<usize>,
     bootargs: Option<CString>,
     cpus: ArrayVec<[CpuInfo; DeviceTreeInfo::MAX_CPUS]>,
@@ -1034,6 +1105,7 @@ pub fn sanitize_device_tree(
     vm_dtbo: Option<&mut [u8]>,
     vm_ref_dt: Option<&[u8]>,
     guest_page_size: usize,
+    hyp_page_size: Option<usize>,
 ) -> Result<DeviceTreeInfo, RebootReason> {
     let vm_dtbo = match vm_dtbo {
         Some(vm_dtbo) => Some(VmDtbo::from_mut_slice(vm_dtbo).map_err(|e| {
@@ -1043,7 +1115,7 @@ pub fn sanitize_device_tree(
         None => None,
     };
 
-    let info = parse_device_tree(fdt, vm_dtbo.as_deref(), guest_page_size)?;
+    let info = parse_device_tree(fdt, vm_dtbo.as_deref(), guest_page_size, hyp_page_size)?;
 
     fdt.clone_from(FDT_TEMPLATE).map_err(|e| {
         error!("Failed to instantiate FDT from the template DT: {e}");
@@ -1100,13 +1172,16 @@ fn parse_device_tree(
     fdt: &Fdt,
     vm_dtbo: Option<&VmDtbo>,
     guest_page_size: usize,
+    hyp_page_size: Option<usize>,
 ) -> Result<DeviceTreeInfo, RebootReason> {
-    let initrd_range = read_initrd_range_from(fdt).map_err(|e| {
+    let initrd_range = read_initrd_range_props(fdt).map_err(|e| {
         error!("Failed to read initrd range from DT: {e}");
         RebootReason::InvalidFdt
     })?;
 
-    let memory_range = read_and_validate_memory_range(fdt, guest_page_size)?;
+    // Ensure that MMIO_GUARD can't be used to inadvertently map some memory as MMIO.
+    let memory_alignment = max(hyp_page_size, Some(guest_page_size)).unwrap();
+    let memory_range = read_and_validate_memory_range(fdt, memory_alignment)?;
 
     let bootargs = read_bootargs_from(fdt).map_err(|e| {
         error!("Failed to read bootargs from DT: {e}");
@@ -1159,34 +1234,27 @@ fn parse_device_tree(
             error!("Swiotlb info missing from DT");
             RebootReason::InvalidFdt
         })?;
-    validate_swiotlb_info(&swiotlb_info, &memory_range, guest_page_size)?;
+    // Ensure that MEM_SHARE won't inadvertently map beyond the shared region.
+    let swiotlb_alignment = max(hyp_page_size, Some(guest_page_size)).unwrap();
+    validate_swiotlb_info(&swiotlb_info, &memory_range, swiotlb_alignment)?;
 
-    let device_assignment = match vm_dtbo {
-        Some(vm_dtbo) => {
-            if let Some(hypervisor) = get_device_assigner() {
-                // TODO(ptosi): Cache the (single?) granule once, in vmbase.
-                let granule = get_mem_sharer()
-                    .ok_or_else(|| {
-                        error!("No MEM_SHARE found during device assignment validation");
-                        RebootReason::InternalError
-                    })?
-                    .granule()
-                    .map_err(|e| {
-                        error!("Failed to get granule for device assignment validation: {e}");
-                        RebootReason::InternalError
-                    })?;
-                DeviceAssignmentInfo::parse(fdt, vm_dtbo, hypervisor, granule).map_err(|e| {
-                    error!("Failed to parse device assignment from DT and VM DTBO: {e}");
-                    RebootReason::InvalidFdt
-                })?
-            } else {
-                warn!(
-                    "Device assignment is ignored because device assigning hypervisor is missing"
-                );
-                None
-            }
+    let device_assignment = if let Some(vm_dtbo) = vm_dtbo {
+        if let Some(hypervisor) = get_device_assigner() {
+            let granule = hyp_page_size.ok_or_else(|| {
+                error!("No granule found during device assignment validation");
+                RebootReason::InternalError
+            })?;
+
+            DeviceAssignmentInfo::parse(fdt, vm_dtbo, hypervisor, granule).map_err(|e| {
+                error!("Failed to parse device assignment from DT and VM DTBO: {e}");
+                RebootReason::InvalidFdt
+            })?
+        } else {
+            warn!("Device assignment is ignored because device assigning hypervisor is missing");
+            None
         }
-        None => None,
+    } else {
+        None
     };
 
     let untrusted_props = parse_untrusted_props(fdt).map_err(|e| {
@@ -1220,8 +1288,8 @@ fn parse_device_tree(
 }
 
 fn patch_device_tree(fdt: &mut Fdt, info: &DeviceTreeInfo) -> Result<(), RebootReason> {
-    if let Some(initrd_range) = &info.initrd_range {
-        patch_initrd_range(fdt, initrd_range).map_err(|e| {
+    if let Some((start, end)) = &info.initrd_range {
+        patch_initrd_range(fdt, start, end).map_err(|e| {
             error!("Failed to patch initrd range to DT: {e}");
             RebootReason::InvalidFdt
         })?;

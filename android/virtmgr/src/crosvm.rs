@@ -47,6 +47,8 @@ use android_system_virtualizationcommon::aidl::android::system::virtualizationco
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     VirtualMachineAppConfig::DebugLevel::DebugLevel,
     AudioConfig::AudioConfig as AudioConfigParcelable,
+    CpuOptions::CpuOptions,
+    CpuOptions::CpuTopology::CpuTopology,
     DisplayConfig::DisplayConfig as DisplayConfigParcelable,
     GpuConfig::GpuConfig as GpuConfigParcelable,
     UsbConfig::UsbConfig as UsbConfigParcelable,
@@ -113,8 +115,7 @@ pub struct CrosvmConfig {
     pub debug_config: DebugConfig,
     pub memory_mib: NonZeroU32,
     pub swiotlb_mib: Option<NonZeroU32>,
-    pub cpus: Option<NonZeroU32>,
-    pub host_cpu_topology: bool,
+    pub cpus: CpuOptions,
     pub console_out_fd: Option<File>,
     pub console_in_fd: Option<File>,
     pub log_fd: Option<File>,
@@ -139,6 +140,8 @@ pub struct CrosvmConfig {
     pub dump_dt_fd: Option<File>,
     pub enable_hypervisor_specific_auth_method: bool,
     pub instance_id: [u8; 64],
+    // (memfd, guest address, size)
+    pub custom_memory_backing_files: Vec<(OwnedFd, u64, u64)>,
 }
 
 #[derive(Debug)]
@@ -1041,8 +1044,8 @@ fn run_vm(
             // When this mode is enabled, two hypervisor specific IDs are expected to be packed
             // into the instance ID. We extract them here and pass along to crosvm so they can be
             // given to the hypervisor driver via an ioctl.
-            let vm_id = u32::from_le_bytes(config.instance_id[60..64].try_into().unwrap());
-            let pas_id = u16::from_le_bytes(config.instance_id[58..60].try_into().unwrap());
+            let pas_id = u32::from_le_bytes(config.instance_id[60..64].try_into().unwrap());
+            let vm_id = u16::from_le_bytes(config.instance_id[58..60].try_into().unwrap());
             command.arg("--hypervisor").arg(
                 format!("gunyah[device=/dev/gunyah,qcom_trusted_vm_id={vm_id},qcom_trusted_vm_pas_id={pas_id}]"),
             );
@@ -1109,30 +1112,31 @@ fn run_vm(
 
     command.arg("--mem").arg(memory_mib.to_string());
 
-    if let Some(cpus) = config.cpus {
+    fn cpu_arg_command(command: &mut Command, count: usize) {
         #[cfg(target_arch = "aarch64")]
-        command.arg("--cpus").arg(cpus.to_string() + ",sve=[auto=true]");
+        command.arg("--cpus").arg(count.to_string() + ",sve=[auto=true]");
         #[cfg(not(target_arch = "aarch64"))]
-        command.arg("--cpus").arg(cpus.to_string());
+        command.arg("--cpus").arg(count.to_string());
     }
-
-    if config.host_cpu_topology {
-        if cfg!(virt_cpufreq) && check_if_all_cpus_allowed()? {
-            command.arg("--host-cpu-topology");
-            cfg_if::cfg_if! {
-                if #[cfg(any(target_arch = "aarch64"))] {
+    match config.cpus.cpuTopology {
+        CpuTopology::MatchHost(_) => {
+            if cfg!(virt_cpufreq) && check_if_all_cpus_allowed()? {
+                command.arg("--host-cpu-topology");
+                #[cfg(target_arch = "aarch64")]
+                {
                     command.arg("--virt-cpufreq");
+                    command.arg("--cpus").arg("sve=[auto=true]");
                 }
+            } else {
+                cpu_arg_command(
+                    &mut command,
+                    get_num_cpus()
+                        .context("Could not determine the number of CPUs in the system")?,
+                )
             }
-            #[cfg(target_arch = "aarch64")]
-            command.arg("--cpus").arg("sve=[auto=true]");
-        } else if let Some(cpus) = get_num_cpus() {
-            #[cfg(target_arch = "aarch64")]
-            command.arg("--cpus").arg(cpus.to_string() + ",sve=[auto=true]");
-            #[cfg(not(target_arch = "aarch64"))]
-            command.arg("--cpus").arg(cpus.to_string());
-        } else {
-            bail!("Could not determine the number of CPUs in the system");
+        }
+        CpuTopology::CpuCount(count) => {
+            cpu_arg_command(&mut command, count.try_into().context("invalid cpu count")?)
         }
     }
 
@@ -1366,6 +1370,13 @@ fn run_vm(
                 .arg("--vhost-user-fs")
                 .arg(format!("{},tag={}", &shared_path.socket_path, &shared_path.tag));
         }
+    }
+
+    for (fd, addr, size) in config.custom_memory_backing_files {
+        command.arg("--file-backed-mapping").arg(format!(
+            "{},addr={addr:#0x},size={size:#0x},rw,ram",
+            add_preserved_fd(&mut preserved_fds, fd)
+        ));
     }
 
     debug!("Preserving FDs {:?}", preserved_fds);
