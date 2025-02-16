@@ -16,7 +16,8 @@
 
 use android_system_virtualizationservice::{
     aidl::android::system::virtualizationservice::{
-        CpuTopology::CpuTopology, DiskImage::DiskImage, VirtualMachineConfig::VirtualMachineConfig,
+        CpuOptions::CpuOptions, CpuOptions::CpuTopology::CpuTopology, DiskImage::DiskImage,
+        VirtualMachineConfig::VirtualMachineConfig,
         VirtualMachineRawConfig::VirtualMachineRawConfig,
     },
     binder::{ParcelFileDescriptor, ProcessState},
@@ -24,7 +25,6 @@ use android_system_virtualizationservice::{
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Error;
-use log::error;
 use log::info;
 use std::fs::read_to_string;
 use std::fs::File;
@@ -98,7 +98,7 @@ fn run_test(protected: bool, golden_dt: &str) -> Result<(), Error> {
         disks: vec![disk_image, empty_disk_image],
         protectedVm: protected,
         memoryMib: 300,
-        cpuTopology: CpuTopology::ONE_CPU,
+        cpuOptions: CpuOptions { cpuTopology: CpuTopology::CpuCount(1) },
         platformVersion: "~1.0".to_string(),
         ..Default::default()
     });
@@ -117,10 +117,9 @@ fn run_test(protected: bool, golden_dt: &str) -> Result<(), Error> {
         /* consoleIn */ None,
         None,
         Some(dump_dt),
-        None,
     )
     .context("Failed to create VM")?;
-    vm.start().context("Failed to start VM")?;
+    vm.start(None).context("Failed to start VM")?;
     info!("Started example VM.");
 
     // Wait for VM to finish
@@ -188,15 +187,15 @@ fn run_test(protected: bool, golden_dt: &str) -> Result<(), Error> {
             return Err(anyhow!("failed to execute dtc"));
         }
         let dt2 = read_to_string("dump_dt_failed.dts")?;
-        error!(
+        eprintln!(
             "Device tree 2 does not match golden DT.\n
                Device Tree 2: {}",
             dt2
         );
         return Err(anyhow!(
-            "stdout: {:?}\n stderr: {:?}",
-            dtcompare_res.stdout,
-            dtcompare_res.stderr
+            "stdout: {}\n stderr: {}",
+            String::from_utf8_lossy(&dtcompare_res.stdout),
+            String::from_utf8_lossy(&dtcompare_res.stderr)
         ));
     }
 

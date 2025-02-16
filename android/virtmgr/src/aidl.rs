@@ -31,7 +31,6 @@ use android_system_virtualizationcommon::aidl::android::system::virtualizationco
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     AssignedDevices::AssignedDevices,
     AssignableDevice::AssignableDevice,
-    CpuTopology::CpuTopology,
     DiskImage::DiskImage,
     SharedPath::SharedPath,
     InputDevice::InputDevice,
@@ -426,6 +425,11 @@ fn find_partition(path: Option<&Path>) -> binder::Result<String> {
         Some(path) => path,
         None => return Ok("system".to_owned()),
     };
+    if path.starts_with("/system/system_ext/") {
+        return Ok("system_ext".to_owned());
+    } else if path.starts_with("/system/product/") {
+        return Ok("product".to_owned());
+    }
     let mut components = path.components();
     match components.nth(1) {
         Some(std::path::Component::Normal(partition)) => {
@@ -483,7 +487,10 @@ impl VirtualizationService {
                     .or_service_specific_exception(-1)
             }
         };
-        if Path::new(&early_vm.path) != calling_exe_path {
+        let expected_exe_path = Path::new(&early_vm.path);
+        if expected_exe_path != calling_exe_path
+            && Path::new("/system").join(expected_exe_path) != calling_exe_path
+        {
             return Err(anyhow!(
                 "VM '{name}' in partition '{calling_partition}' must be created with '{}', not '{}'",
                 &early_vm.path,
@@ -712,24 +719,6 @@ impl VirtualizationService {
 
         let shared_paths = assemble_shared_paths(&config.sharedPaths, &temporary_directory)?;
 
-        let (cpus, host_cpu_topology) = match config.cpuTopology {
-            CpuTopology::MATCH_HOST => (None, true),
-            CpuTopology::ONE_CPU => (NonZeroU32::new(1), false),
-            CpuTopology::CUSTOM => (
-                NonZeroU32::new(
-                    u32::try_from(config.customVcpuCount)
-                        .context("bad customVcpuCount")
-                        .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?,
-                ),
-                false,
-            ),
-            val => {
-                return Err(anyhow!("Failed to parse CPU topology value {:?}", val))
-                    .with_log()
-                    .or_service_specific_exception(-1);
-            }
-        };
-
         let (vfio_devices, dtbo) = match &config.devices {
             AssignedDevices::Devices(devices) if !devices.is_empty() => {
                 let mut set = HashSet::new();
@@ -821,6 +810,25 @@ impl VirtualizationService {
 
         let detect_hangup = is_app_config && gdb_port.is_none();
 
+        let custom_memory_backing_files = config
+            .customMemoryBackingFiles
+            .iter()
+            .map(|memory_backing_file| {
+                Ok((
+                    clone_file(
+                        memory_backing_file
+                            .file
+                            .as_ref()
+                            .context("missing CustomMemoryBackingFile FD")
+                            .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?,
+                    )?
+                    .into(),
+                    memory_backing_file.rangeStart as u64,
+                    memory_backing_file.size as u64,
+                ))
+            })
+            .collect::<binder::Result<_>>()?;
+
         // Actually start the VM.
         let crosvm_config = CrosvmConfig {
             cid,
@@ -840,8 +848,7 @@ impl VirtualizationService {
                 .and_then(NonZeroU32::new)
                 .unwrap_or(NonZeroU32::new(256).unwrap()),
             swiotlb_mib: config.swiotlbMib.try_into().ok().and_then(NonZeroU32::new),
-            cpus,
-            host_cpu_topology,
+            cpus: config.cpuOptions.clone(),
             console_out_fd,
             console_in_fd,
             log_fd,
@@ -866,6 +873,7 @@ impl VirtualizationService {
             dump_dt_fd,
             enable_hypervisor_specific_auth_method: config.enableHypervisorSpecificAuthMethod,
             instance_id,
+            custom_memory_backing_files,
         };
         let instance = Arc::new(
             VmInstance::new(
@@ -1305,10 +1313,7 @@ fn load_app_config(
 
     vm_config.name.clone_from(&config.name);
     vm_config.protectedVm = config.protectedVm;
-    vm_config.cpuTopology = config.cpuTopology;
-    if config.cpuTopology == CpuTopology::CUSTOM {
-        bail!("AppConfig doesn't support CpuTopology::CUSTOM");
-    }
+    vm_config.cpuOptions = config.cpuOptions.clone();
     vm_config.hugePages = config.hugePages || vm_payload_config.hugepages;
     vm_config.boostUclamp = config.boostUclamp;
 
@@ -1571,9 +1576,17 @@ impl IVirtualMachine::IVirtualMachine for VirtualMachine {
     ) -> binder::Result<()> {
         // Don't check permission. The owner of the VM might have passed this binder object to
         // others.
-        //
-        // TODO: Should this give an error if the VM is already dead?
-        self.instance.callbacks.add(callback.clone());
+
+        // Only register callback if it may be notified.
+        // This also ensures no cyclic reference between callback and VmInstance after VM is died.
+        let vm_state = self.instance.vm_state.lock().unwrap();
+        if matches!(*vm_state, VmState::Dead) {
+            warn!("Ignoring registerCallback() after VM is died");
+        } else {
+            self.instance.callbacks.add(callback.clone());
+        }
+        drop(vm_state);
+
         Ok(())
     }
 
@@ -1739,12 +1752,17 @@ impl VirtualMachineCallbacks {
 
     /// Call all registered callbacks to say that the VM has died.
     pub fn callback_on_died(&self, cid: Cid, reason: DeathReason) {
-        let callbacks = &*self.0.lock().unwrap();
-        for callback in callbacks {
+        let mut callbacks = self.0.lock().unwrap();
+        for callback in &*callbacks {
             if let Err(e) = callback.onDied(cid as i32, reason) {
                 error!("Error notifying exit of VM CID {}: {:?}", cid, e);
             }
         }
+
+        // Nothing to notify afterward because VM cannot be restarted.
+        // Explicitly clear callbacks to prevent potential cyclic references
+        // between callback and VmInstance.
+        (*callbacks).clear();
     }
 
     /// Add a new callback to the set.
@@ -2014,16 +2032,22 @@ fn clone_or_prepare_logger_fd(
     let mut reader = BufReader::new(File::from(read_fd));
     let write_fd = File::from(write_fd);
 
+    let mut buf = vec![];
     std::thread::spawn(move || loop {
-        let mut buf = vec![];
+        buf.clear();
+        buf.shrink_to(1024);
         match reader.read_until(b'\n', &mut buf) {
             Ok(0) => {
                 // EOF
                 return;
             }
-            Ok(size) => {
-                if buf[size - 1] == b'\n' {
+            Ok(_size) => {
+                if buf.last() == Some(&b'\n') {
                     buf.pop();
+                    // Logs sent via TTY usually end lines with "\r\n".
+                    if buf.last() == Some(&b'\r') {
+                        buf.pop();
+                    }
                 }
                 info!("{}: {}", &tag, &String::from_utf8_lossy(&buf));
             }
@@ -2635,6 +2659,22 @@ mod tests {
             assert!(validate_cid_range(&early_vms, &cid_range).is_err(), "should fail");
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_symlink_to_system_ext_supported() -> Result<()> {
+        let link_path = Path::new("/system/system_ext/file");
+        let partition = find_partition(Some(link_path)).unwrap();
+        assert_eq!("system_ext", partition);
+        Ok(())
+    }
+
+    #[test]
+    fn test_symlink_to_product_supported() -> Result<()> {
+        let link_path = Path::new("/system/product/file");
+        let partition = find_partition(Some(link_path)).unwrap();
+        assert_eq!("product", partition);
         Ok(())
     }
 

@@ -26,13 +26,12 @@ rust_defaults {
         "libthiserror",
     ],
     prefer_rlib: true,
-    target: {
-        darwin: {
+    multilib: {
+        lib32: {
             enabled: false,
         },
     },
     defaults: [
-        "crosvm_defaults",
         "avf_build_flags_rust",
     ],
 }
@@ -47,5 +46,4 @@ filegroup {
 rust_binary {
     name: "authfs",
     defaults: ["authfs_defaults"],
-    apex_available: ["com.android.virt"],
 }
