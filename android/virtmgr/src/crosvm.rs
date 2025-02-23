@@ -21,7 +21,7 @@ use anyhow::{anyhow, bail, Context, Error, Result};
 use binder::ParcelFileDescriptor;
 use command_fds::CommandFdExt;
 use libc::{sysconf, _SC_CLK_TCK};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use semver::{Version, VersionReq};
 use nix::{fcntl::OFlag, unistd::pipe2, unistd::Uid, unistd::User};
 use regex::{Captures, Regex};
@@ -628,6 +628,7 @@ impl VmInstance {
 
     fn monitor_vm_status(&self, child: Arc<SharedChild>) {
         let pid = child.id();
+        let mut metric_countdown = 0;
 
         loop {
             {
@@ -637,23 +638,34 @@ impl VmInstance {
                     break;
                 }
 
-                let mut vm_metric = self.vm_metric.lock().unwrap();
+                if metric_countdown > 0 {
+                    metric_countdown -= 1;
+                } else {
+                    metric_countdown = 10;
+                    let mut vm_metric = self.vm_metric.lock().unwrap();
 
-                // Get CPU Information
-                match get_guest_time(pid) {
-                    Ok(guest_time) => vm_metric.cpu_guest_time = Some(guest_time),
-                    Err(e) => error!("Failed to get guest CPU time: {e:?}"),
-                }
-
-                // Get Memory Information
-                match get_rss(pid) {
-                    Ok(rss) => {
-                        vm_metric.rss = match &vm_metric.rss {
-                            Some(x) => Some(Rss::extract_max(x, &rss)),
-                            None => Some(rss),
+                    // Get CPU Information
+                    match get_guest_time(pid) {
+                        Ok(guest_time) => vm_metric.cpu_guest_time = Some(guest_time),
+                        Err(e) => {
+                            metric_countdown = 0;
+                            warn!("Failed to get guest CPU time: {}", e);
                         }
                     }
-                    Err(e) => error!("Failed to get guest RSS: {}", e),
+
+                    // Get Memory Information
+                    match get_rss(pid) {
+                        Ok(rss) => {
+                            vm_metric.rss = match &vm_metric.rss {
+                                Some(x) => Some(Rss::extract_max(x, &rss)),
+                                None => Some(rss),
+                            }
+                        }
+                        Err(e) => {
+                            metric_countdown = 0;
+                            warn!("Failed to get guest RSS: {}", e);
+                        }
+                    }
                 }
             }
 
@@ -845,6 +857,9 @@ fn get_guest_time(pid: u32) -> Result<i64> {
     }
 
     let guest_time_ticks = data_list[42].parse::<i64>()?;
+    if guest_time_ticks == 0 {
+        bail!("zero value is measured on elapsed CPU guest_time");
+    }
     // SAFETY: It just returns an integer about CPU tick information.
     let ticks_per_sec = unsafe { sysconf(_SC_CLK_TCK) };
     Ok(guest_time_ticks * MILLIS_PER_SEC / ticks_per_sec)
@@ -875,7 +890,12 @@ fn get_rss(pid: u32) -> Result<Rss> {
             rss_crosvm_total += rss;
         }
     }
-
+    if rss_crosvm_total == 0 {
+        bail!("zero value is measured on RSS of crosvm");
+    }
+    if rss_vm_total == 0 {
+        bail!("zero value is measured on RSS of VM");
+    }
     Ok(Rss { vm: rss_vm_total, crosvm: rss_crosvm_total })
 }
 
