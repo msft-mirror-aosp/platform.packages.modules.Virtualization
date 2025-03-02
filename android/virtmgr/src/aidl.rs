@@ -303,6 +303,34 @@ impl IVirtualizationService for VirtualizationService {
         Ok(())
     }
 
+    fn setEncryptedStorageSize(
+        &self,
+        image_fd: &ParcelFileDescriptor,
+        size: i64,
+    ) -> binder::Result<()> {
+        check_manage_access()?;
+
+        let size = size
+            .try_into()
+            .with_context(|| format!("Invalid size: {}", size))
+            .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?;
+        let size = round_up(size, PARTITION_GRANULARITY_BYTES);
+
+        let image = clone_file(image_fd)?;
+        let image_size = image.metadata().unwrap().len();
+
+        if image_size > size {
+            return Err(Status::new_exception_str(
+                ExceptionCode::ILLEGAL_ARGUMENT,
+                Some("Can't shrink encrypted storage"),
+            ));
+        }
+        // Reset the file length. In most filesystems, this will not allocate any physical disk
+        // space, it will only change the logical size.
+        image.set_len(size).context("Failed to extend file").or_service_specific_exception(-1)?;
+        Ok(())
+    }
+
     /// Creates or update the idsig file by digesting the input APK file.
     fn createOrUpdateIdsigFile(
         &self,
@@ -459,6 +487,12 @@ fn find_partition(path: Option<&Path>) -> binder::Result<CallingPartition> {
     if path.starts_with("/system/product/") {
         return Ok(CallingPartition::Product);
     }
+    if path.starts_with("/data/nativetest/vendor/")
+        || path.starts_with("/data/nativetest64/vendor/")
+    {
+        return Ok(CallingPartition::Vendor);
+    }
+
     let partition = {
         let mut components = path.components();
         let Some(std::path::Component::Normal(partition)) = components.nth(1) else {
@@ -2210,6 +2244,10 @@ impl IVirtualMachineService for VirtualMachineService {
     fn requestAttestation(&self, csr: &[u8], test_mode: bool) -> binder::Result<Vec<Certificate>> {
         GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32, test_mode)
     }
+
+    fn claimSecretkeeperEntry(&self, id: &[u8; 64]) -> binder::Result<()> {
+        GLOBAL_SERVICE.claimSecretkeeperEntry(id)
+    }
 }
 
 fn is_secretkeeper_supported() -> bool {
@@ -2759,6 +2797,14 @@ mod tests {
         let partition = find_partition(Some(link_path)).unwrap();
         assert_eq!(CallingPartition::Product, partition);
         Ok(())
+    }
+
+    #[test]
+    fn test_vendor_in_data() {
+        assert_eq!(
+            CallingPartition::Vendor,
+            find_partition(Some(Path::new("/data/nativetest64/vendor/file"))).unwrap()
+        );
     }
 
     #[test]
