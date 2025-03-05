@@ -38,10 +38,9 @@ import android.system.virtualmachine.VirtualMachineCustomImageConfig.AudioConfig
 import android.system.virtualmachine.VirtualMachineException
 import android.util.Log
 import android.widget.Toast
-import com.android.system.virtualmachine.flags.Flags.terminalGuiSupport
+import com.android.system.virtualmachine.flags.Flags
 import com.android.virtualization.terminal.MainActivity.Companion.TAG
 import com.android.virtualization.terminal.Runner.Companion.create
-import com.android.virtualization.terminal.VmLauncherService.VmLauncherServiceCallback
 import io.grpc.Grpc
 import io.grpc.InsecureServerCredentials
 import io.grpc.Metadata
@@ -54,7 +53,6 @@ import io.grpc.okhttp.OkHttpServerBuilder
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.lang.RuntimeException
 import java.net.InetSocketAddress
 import java.net.SocketAddress
 import java.nio.file.Files
@@ -285,7 +283,7 @@ class VmLauncherService : Service() {
 
         // Set the initial display size
         // TODO(jeongik): set up the display size on demand
-        if (terminalGuiSupport() && displayInfo != null) {
+        if (Flags.terminalGuiSupport() && displayInfo != null) {
             builder
                 .setDisplayConfig(
                     VirtualMachineCustomImageConfig.DisplayConfig.Builder()
@@ -360,6 +358,10 @@ class VmLauncherService : Service() {
                 }
             }
         )
+
+        if (Flags.terminalStorageBalloon()) {
+            StorageBalloonWorker.start(this, debianService!!)
+        }
     }
 
     override fun onDestroy() {
@@ -383,6 +385,7 @@ class VmLauncherService : Service() {
 
     private fun stopDebianServer() {
         debianService?.killForwarderHost()
+        debianService?.closeStorageBalloonRequestQueue()
         server?.shutdown()
     }
 
