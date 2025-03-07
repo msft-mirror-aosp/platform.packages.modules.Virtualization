@@ -26,10 +26,9 @@ pub mod api {
 #[derive(Parser)]
 /// Flags for running command
 pub struct Args {
-    /// grpc port number
+    /// Path to a file where grpc port number is written
     #[arg(long)]
-    #[arg(alias = "grpc_port")]
-    grpc_port: String,
+    grpc_port_file: String,
 }
 
 #[tokio::main]
@@ -38,7 +37,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let gateway_ip_addr = netdev::get_default_gateway()?.ipv4[0];
 
-    let server_addr = format!("http://{}:{}", gateway_ip_addr.to_string(), args.grpc_port);
+    // Wait for `grpc_port_file` becomes available.
+    const GRPC_PORT_MAX_RETRY_COUNT: u32 = 10;
+    for _ in 0..GRPC_PORT_MAX_RETRY_COUNT {
+        if std::path::Path::new(&args.grpc_port_file).exists() {
+            break;
+        }
+        debug!("{} does not exist. Wait 1 second", args.grpc_port_file);
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    let grpc_port = std::fs::read_to_string(&args.grpc_port_file)?.trim().to_string();
+    let server_addr = format!("http://{}:{}", gateway_ip_addr.to_string(), grpc_port);
 
     debug!("connect to grpc server {}", server_addr);
 
