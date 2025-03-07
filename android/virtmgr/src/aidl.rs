@@ -117,6 +117,9 @@ const MICRODROID_OS_NAME: &str = "microdroid";
 const SECRETKEEPER_IDENTIFIER: &str =
     "android.hardware.security.secretkeeper.ISecretkeeper/default";
 
+const VM_CAPABILITIES_HAL_IDENTIFIER: &str =
+    "android.hardware.virtualization.capabilities.IVmCapabilitiesService/default";
+
 const UNFORMATTED_STORAGE_MAGIC: &str = "UNFORMATTED-STORAGE";
 
 /// crosvm requires all partitions to be a multiple of 4KiB.
@@ -750,6 +753,12 @@ impl VirtualizationService {
 
         // TODO(b/391774181): handle vendor tee services (which require talking to HAL) as well.
         if !vendor_tee_services.is_empty() {
+            if !is_vm_capabilities_hal_supported() {
+                return Err(anyhow!(
+                    "requesting access to tee services requires {VM_CAPABILITIES_HAL_IDENTIFIER}"
+                ))
+                .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION);
+            }
             return Err(anyhow!("support for vendor tee services is coming soon!"))
                 .or_binder_exception(ExceptionCode::UNSUPPORTED_OPERATION);
         }
@@ -2319,6 +2328,11 @@ impl IVirtualMachineService for VirtualMachineService {
 fn is_secretkeeper_supported() -> bool {
     binder::is_declared(SECRETKEEPER_IDENTIFIER)
         .expect("Could not check for declared Secretkeeper interface")
+}
+
+fn is_vm_capabilities_hal_supported() -> bool {
+    binder::is_declared(VM_CAPABILITIES_HAL_IDENTIFIER)
+        .expect("failed to check if {VM_CAPABILITIES_HAL_IDENTIFIER} is present")
 }
 
 impl VirtualMachineService {
