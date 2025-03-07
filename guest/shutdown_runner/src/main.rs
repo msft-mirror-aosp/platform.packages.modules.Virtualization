@@ -34,6 +34,7 @@ pub struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::builder().filter_level(log::LevelFilter::Debug).init();
     let args = Args::parse();
     let gateway_ip_addr = netdev::get_default_gateway()?.ipv4[0];
 
