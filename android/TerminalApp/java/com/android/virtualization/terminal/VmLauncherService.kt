@@ -38,6 +38,7 @@ import android.system.virtualmachine.VirtualMachineCustomImageConfig.AudioConfig
 import android.system.virtualmachine.VirtualMachineException
 import android.util.Log
 import android.widget.Toast
+import com.android.internal.annotations.GuardedBy
 import com.android.system.virtualmachine.flags.Flags.terminalGuiSupport
 import com.android.virtualization.terminal.MainActivity.Companion.TAG
 import com.android.virtualization.terminal.Runner.Companion.create
@@ -54,10 +55,12 @@ import io.grpc.okhttp.OkHttpServerBuilder
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.lang.Math.min
 import java.lang.RuntimeException
 import java.net.InetSocketAddress
 import java.net.SocketAddress
 import java.nio.file.Files
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -75,9 +78,47 @@ class VmLauncherService : Service() {
     private var server: Server? = null
     private var debianService: DebianServiceImpl? = null
     private var portNotifier: PortNotifier? = null
+    private var mLock = Object()
+    @GuardedBy("mLock") private var currentMemBalloonPercent = 0
+
+    @GuardedBy("mLock") private val inflateMemBalloonHandler = Handler(Looper.getMainLooper())
+    private val inflateMemBalloonTask: Runnable =
+        object : Runnable {
+            override fun run() {
+                synchronized(mLock) {
+                    if (
+                        currentMemBalloonPercent < INITIAL_MEM_BALLOON_PERCENT ||
+                            currentMemBalloonPercent > MAX_MEM_BALLOON_PERCENT
+                    ) {
+                        Log.e(
+                            TAG,
+                            "currentBalloonPercent=$currentMemBalloonPercent is invalid," +
+                                " should be in range: " +
+                                "$INITIAL_MEM_BALLOON_PERCENT~$MAX_MEM_BALLOON_PERCENT",
+                        )
+                        return
+                    }
+                    // Increases the balloon size by MEM_BALLOON_PERCENT_STEP% every time
+                    if (currentMemBalloonPercent < MAX_MEM_BALLOON_PERCENT) {
+                        currentMemBalloonPercent =
+                            min(
+                                MAX_MEM_BALLOON_PERCENT,
+                                currentMemBalloonPercent + MEM_BALLOON_PERCENT_STEP,
+                            )
+                        virtualMachine?.setMemoryBalloonByPercent(currentMemBalloonPercent)
+                        inflateMemBalloonHandler.postDelayed(
+                            this,
+                            MEM_BALLOON_INFLATE_INTERVAL_MILLIS,
+                        )
+                    }
+                }
+            }
+        }
 
     interface VmLauncherServiceCallback {
         fun onVmStart()
+
+        fun onTerminalAvailable(info: TerminalInfo)
 
         fun onVmStop()
 
@@ -99,13 +140,26 @@ class VmLauncherService : Service() {
             // When the app starts, reset the memory balloon to 0%.
             // This gives the app maximum available memory.
             ApplicationLifeCycleEvent.APP_ON_START -> {
-                virtualMachine?.setMemoryBalloonByPercent(0)
+                synchronized(mLock) {
+                    inflateMemBalloonHandler.removeCallbacks(inflateMemBalloonTask)
+                    currentMemBalloonPercent = 0
+                    virtualMachine?.setMemoryBalloonByPercent(currentMemBalloonPercent)
+                }
             }
             ApplicationLifeCycleEvent.APP_ON_STOP -> {
-                // When the app stops, inflate the memory balloon to 10%.
-                // This allows the system to reclaim memory while the app is in the background.
-                // TODO(b/400590341) Inflate the balloon while the application remains Stop status.
-                virtualMachine?.setMemoryBalloonByPercent(10)
+                // When the app stops, inflate the memory balloon to INITIAL_MEM_BALLOON_PERCENT.
+                // Inflate the balloon by MEM_BALLOON_PERCENT_STEP every
+                // MEM_BALLOON_INFLATE_INTERVAL_MILLIS milliseconds until reaching
+                // MAX_MEM_BALLOON_PERCENT of total memory. This allows the system to reclaim
+                // memory while the app is in the background.
+                synchronized(mLock) {
+                    currentMemBalloonPercent = INITIAL_MEM_BALLOON_PERCENT
+                    virtualMachine?.setMemoryBalloonByPercent(currentMemBalloonPercent)
+                    inflateMemBalloonHandler.postDelayed(
+                        inflateMemBalloonTask,
+                        MEM_BALLOON_INFLATE_INTERVAL_MILLIS,
+                    )
+                }
             }
             else -> {
                 Log.e(TAG, "unrecognized lifecycle event: $event")
@@ -139,10 +193,7 @@ class VmLauncherService : Service() {
         val displaySize = intent.getParcelableExtra(EXTRA_DISPLAY_INFO, DisplayInfo::class.java)
 
         customImageConfigBuilder.setAudioConfig(
-            AudioConfig.Builder()
-                .setUseSpeaker(true)
-                .setUseMicrophone(true)
-                .build()
+            AudioConfig.Builder().setUseSpeaker(true).setUseMicrophone(true).build()
         )
         if (overrideConfigIfNecessary(customImageConfigBuilder, displaySize)) {
             configBuilder.setCustomImageConfig(customImageConfigBuilder.build())
@@ -170,8 +221,8 @@ class VmLauncherService : Service() {
             resultReceiver?.send(if (success) RESULT_STOP else RESULT_ERROR, null)
             stopSelf()
         }
-        val logPath = getFileStreamPath(virtualMachine!!.name + ".log").toPath()
-        Logger.setup(virtualMachine!!, logPath, executorService!!)
+        val logDir = getFileStreamPath(virtualMachine!!.name + ".log").toPath()
+        Logger.setup(virtualMachine!!, logDir, executorService!!)
 
         val notification =
             intent.getParcelableExtra<Notification?>(EXTRA_NOTIFICATION, Notification::class.java)
@@ -182,35 +233,56 @@ class VmLauncherService : Service() {
 
         portNotifier = PortNotifier(this)
 
-        // TODO: dedup this part
+        getTerminalServiceInfo()
+            .thenAcceptAsync(
+                { info ->
+                    val ipAddress = info.hostAddresses[0].hostAddress
+                    val port = info.port
+                    val bundle = Bundle()
+                    bundle.putString(KEY_TERMINAL_IPADDRESS, ipAddress)
+                    bundle.putInt(KEY_TERMINAL_PORT, port)
+                    resultReceiver!!.send(RESULT_TERMINAL_AVAIL, bundle)
+                    startDebianServer(ipAddress)
+                },
+                executorService,
+            )
+
+        return START_NOT_STICKY
+    }
+
+    private fun getTerminalServiceInfo(): CompletableFuture<NsdServiceInfo> {
+        val executor = Executors.newSingleThreadExecutor(TerminalThreadFactory(applicationContext))
         val nsdManager = getSystemService<NsdManager?>(NsdManager::class.java)
-        val info = NsdServiceInfo()
-        info.serviceType = "_http._tcp"
-        info.serviceName = "ttyd"
+        val queryInfo = NsdServiceInfo()
+        queryInfo.serviceType = "_http._tcp"
+        queryInfo.serviceName = "ttyd"
+        var resolvedInfo = CompletableFuture<NsdServiceInfo>()
+
         nsdManager.registerServiceInfoCallback(
-            info,
-            executorService!!,
+            queryInfo,
+            executor,
             object : NsdManager.ServiceInfoCallback {
-                var started: Boolean = false
+                var found: Boolean = false
 
                 override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {}
 
-                override fun onServiceInfoCallbackUnregistered() {}
+                override fun onServiceInfoCallbackUnregistered() {
+                    executor.shutdown()
+                }
 
                 override fun onServiceLost() {}
 
                 override fun onServiceUpdated(info: NsdServiceInfo) {
                     Log.i(TAG, "Service found: $info")
-                    if (!started) {
-                        started = true
+                    if (!found) {
+                        found = true
                         nsdManager.unregisterServiceInfoCallback(this)
-                        startDebianServer(info.hostAddresses[0].hostAddress)
+                        resolvedInfo.complete(info)
                     }
                 }
             },
         )
-
-        return START_NOT_STICKY
+        return resolvedInfo
     }
 
     private fun createNotificationForTerminalClose(): Notification {
@@ -257,6 +329,21 @@ class VmLauncherService : Service() {
                     .build()
             )
             Toast.makeText(this, R.string.virgl_enabled, Toast.LENGTH_SHORT).show()
+            changed = true
+        } else if (Files.exists(ImageArchive.getSdcardPathForTesting().resolve("gfxstream"))) {
+            // TODO: check if the configuration is right. current config comes from cuttlefish's one
+            builder.setGpuConfig(
+                VirtualMachineCustomImageConfig.GpuConfig.Builder()
+                    .setBackend("gfxstream")
+                    .setRendererUseEgl(false)
+                    .setRendererUseGles(false)
+                    .setRendererUseGlx(false)
+                    .setRendererUseSurfaceless(true)
+                    .setRendererUseVulkan(true)
+                    .setContextTypes(arrayOf<String>("gfxstream-vulkan", "gfxstream-composer"))
+                    .build()
+            )
+            Toast.makeText(this, "gfxstream", Toast.LENGTH_SHORT).show()
             changed = true
         }
 
@@ -375,6 +462,15 @@ class VmLauncherService : Service() {
         private const val RESULT_START = 0
         private const val RESULT_STOP = 1
         private const val RESULT_ERROR = 2
+        private const val RESULT_TERMINAL_AVAIL = 3
+
+        private const val KEY_TERMINAL_IPADDRESS = "address"
+        private const val KEY_TERMINAL_PORT = "port"
+
+        private const val INITIAL_MEM_BALLOON_PERCENT = 10
+        private const val MAX_MEM_BALLOON_PERCENT = 50
+        private const val MEM_BALLOON_INFLATE_INTERVAL_MILLIS = 60000L
+        private const val MEM_BALLOON_PERCENT_STEP = 5
 
         private fun getMyIntent(context: Context): Intent {
             return Intent(context.getApplicationContext(), VmLauncherService::class.java)
@@ -395,6 +491,11 @@ class VmLauncherService : Service() {
                         }
                         when (resultCode) {
                             RESULT_START -> callback.onVmStart()
+                            RESULT_TERMINAL_AVAIL -> {
+                                val ipAddress = resultData!!.getString(KEY_TERMINAL_IPADDRESS)
+                                val port = resultData!!.getInt(KEY_TERMINAL_PORT)
+                                callback.onTerminalAvailable(TerminalInfo(ipAddress!!, port))
+                            }
                             RESULT_STOP -> callback.onVmStop()
                             RESULT_ERROR -> callback.onVmError()
                         }
@@ -420,6 +521,8 @@ class VmLauncherService : Service() {
         }
     }
 }
+
+data class TerminalInfo(val ipAddress: String, val port: Int)
 
 data class DisplayInfo(val width: Int, val height: Int, val dpi: Int, val refreshRate: Int) :
     Parcelable {
