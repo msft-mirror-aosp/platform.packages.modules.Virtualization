@@ -80,7 +80,13 @@ fn main<'a>(
         debug_policy = None;
     }
 
-    let (verified_boot_data, debuggable, guest_page_size) = {
+    // Policy/Hidden ABI: If the pvmfw loader (typically ABL) didn't pass a DICE handover (which is
+    // technically still mandatory, as per the config data specification), skip DICE, AVB, and RBP.
+    // This is to support Qualcomm QTVMs, which perform guest image verification in TrustZone.
+    let (verified_boot_data, debuggable, guest_page_size) = if current_dice_handover.is_none() {
+        warn!("Verified boot is disabled!");
+        (None, false, SIZE_4KB)
+    } else {
         let (dat, debug, sz) = perform_verified_boot(signed_kernel, ramdisk)?;
         (Some(dat), debug, sz)
     };
