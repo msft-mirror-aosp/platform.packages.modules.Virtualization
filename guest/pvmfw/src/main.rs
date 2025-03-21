@@ -46,6 +46,7 @@ use libfdt::Fdt;
 use log::{debug, error, info, trace, warn};
 use pvmfw_avb::verify_payload;
 use pvmfw_avb::DebugLevel;
+use pvmfw_avb::VerifiedBootData;
 use pvmfw_embedded_key::PUBLIC_KEY;
 use vmbase::heap;
 use vmbase::memory::{flush, SIZE_4KB};
@@ -80,17 +81,9 @@ fn main<'a>(
         debug_policy = None;
     }
 
-    let verified_boot_data = verify_payload(signed_kernel, ramdisk, PUBLIC_KEY).map_err(|e| {
-        error!("Failed to verify the payload: {e}");
-        RebootReason::PayloadVerificationError
-    })?;
-    let debuggable = verified_boot_data.debug_level != DebugLevel::None;
-    if debuggable {
-        info!("Successfully verified a debuggable payload.");
-        info!("Please disregard any previous libavb ERROR about initrd_normal.");
-    }
+    let (verified_boot_data, debuggable, guest_page_size) =
+        perform_verified_boot(signed_kernel, ramdisk)?;
 
-    let guest_page_size = verified_boot_data.page_size.unwrap_or(SIZE_4KB);
     let hyp_page_size = hypervisor_backends::get_granule_size();
     let _ =
         sanitize_device_tree(untrusted_fdt, vm_dtbo, vm_ref_dt, guest_page_size, hyp_page_size)?;
@@ -215,6 +208,24 @@ fn perform_dice_derivation<'a>(
         })?;
     flush(next_dice_handover);
     Ok(next_dice_handover)
+}
+
+fn perform_verified_boot<'a>(
+    signed_kernel: &[u8],
+    ramdisk: Option<&[u8]>,
+) -> Result<(VerifiedBootData<'a>, bool, usize), RebootReason> {
+    let verified_boot_data = verify_payload(signed_kernel, ramdisk, PUBLIC_KEY).map_err(|e| {
+        error!("Failed to verify the payload: {e}");
+        RebootReason::PayloadVerificationError
+    })?;
+    let debuggable = verified_boot_data.debug_level != DebugLevel::None;
+    if debuggable {
+        info!("Successfully verified a debuggable payload.");
+        info!("Please disregard any previous libavb ERROR about initrd_normal.");
+    }
+    let guest_page_size = verified_boot_data.page_size.unwrap_or(SIZE_4KB);
+
+    Ok((verified_boot_data, debuggable, guest_page_size))
 }
 
 // Get the "salt" which is one of the input for DICE derivation.
