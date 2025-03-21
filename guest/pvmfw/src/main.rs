@@ -110,18 +110,17 @@ fn main<'a>(
     // By leaking the slice, its content will be left behind for the next stage.
     let next_dice_handover = Box::leak(next_dice_handover);
 
-    let dice_inputs = PartialInputs::new(&verified_boot_data).map_err(|e| {
+    let instance_hash = salt_from_instance_id(fdt)?;
+    let dice_inputs = PartialInputs::new(&verified_boot_data, instance_hash).map_err(|e| {
         error!("Failed to compute partial DICE inputs: {e:?}");
         RebootReason::InternalError
     })?;
 
-    let instance_hash = salt_from_instance_id(fdt)?;
     let (new_instance, salt, defer_rollback_protection) = perform_rollback_protection(
         fdt,
         &verified_boot_data,
         &dice_inputs,
         dice_handover.cdi_seal(),
-        instance_hash,
     )?;
     trace!("Got salt for instance: {salt:x?}");
 
@@ -154,7 +153,6 @@ fn main<'a>(
         .write_next_handover(
             new_dice_handover.as_ref(),
             &salt,
-            instance_hash,
             defer_rollback_protection,
             next_dice_handover,
             dice_context,
