@@ -1349,7 +1349,7 @@ mod tests {
             node_path: CString::new("/bus0/backlight").unwrap(),
             reg: vec![[0x9, 0xFF].into()],
             interrupts: Some(into_fdt_prop(vec![0x0, 0xF, 0x4])),
-            iommus: Some(vec![]),
+            iommus: None,
         }];
 
         assert_eq!(device_info.assigned_devices, expected);
@@ -1455,7 +1455,6 @@ mod tests {
             (Ok(c"android,backlight,ignore-gctrl-reset"), Ok(Vec::new())),
             (Ok(c"compatible"), Ok(Vec::from(*b"android,backlight\0"))),
             (Ok(c"interrupts"), Ok(into_fdt_prop(vec![0x0, 0xF, 0x4]))),
-            (Ok(c"iommus"), Ok(Vec::new())),
             (Ok(c"phandle"), Ok(into_fdt_prop(vec![phandle.unwrap()]))),
             (Ok(c"reg"), Ok(into_fdt_prop(vec![0x0, 0x9, 0x0, 0xFF]))),
         ];
