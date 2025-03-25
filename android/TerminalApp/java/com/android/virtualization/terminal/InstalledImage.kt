@@ -19,6 +19,7 @@ import android.content.Context
 import android.os.FileUtils
 import android.system.ErrnoException
 import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import com.android.virtualization.terminal.MainActivity.Companion.TAG
 import java.io.BufferedReader
@@ -64,6 +65,16 @@ public class InstalledImage private constructor(val installDir: Path) {
         } catch (e: IOException) {
             throw RuntimeException("Failed to read build ID", e)
         }
+    }
+
+    fun isOlderThanCurrentVersion(): Boolean {
+        val year =
+            try {
+                buildId.split(" ").last().toInt()
+            } catch (_: Exception) {
+                0
+            }
+        return year < RELEASE_YEAR
     }
 
     @Throws(IOException::class)
@@ -127,10 +138,33 @@ public class InstalledImage private constructor(val installDir: Path) {
         }
 
         if (roundedUpDesiredSize > curSize) {
-            allocateSpace(rootPartition, roundedUpDesiredSize)
+            if (!allocateSpace(roundedUpDesiredSize)) {
+                return curSize
+            }
         }
         resizeFilesystem(rootPartition, roundedUpDesiredSize)
         return getApparentSize()
+    }
+
+    @Throws(IOException::class)
+    private fun allocateSpace(sizeInBytes: Long): Boolean {
+        val curSizeInBytes = getApparentSize()
+        try {
+            RandomAccessFile(rootPartition.toFile(), "rw").use { raf ->
+                Os.posix_fallocate(raf.fd, 0, sizeInBytes)
+            }
+            Log.d(TAG, "Allocated space to: $sizeInBytes bytes")
+            return true
+        } catch (e: ErrnoException) {
+            Log.e(TAG, "Failed to allocate space", e)
+            if (e.errno == OsConstants.ENOSPC) {
+                Log.d(TAG, "Trying to truncate disk into the original size")
+                truncate(curSizeInBytes)
+                return false
+            } else {
+                throw IOException("Failed to allocate space", e)
+            }
+        }
     }
 
     @Throws(IOException::class)
@@ -153,8 +187,8 @@ public class InstalledImage private constructor(val installDir: Path) {
             RandomAccessFile(rootPartition.toFile(), "rw").use { raf -> Os.ftruncate(raf.fd, size) }
             Log.d(TAG, "Truncated space to: $size bytes")
         } catch (e: ErrnoException) {
-            Log.e(TAG, "Failed to allocate space", e)
-            throw IOException("Failed to allocate space", e)
+            Log.e(TAG, "Failed to truncate space", e)
+            throw IOException("Failed to truncate space", e)
         }
     }
 
@@ -167,24 +201,12 @@ public class InstalledImage private constructor(val installDir: Path) {
         const val MARKER_FILENAME: String = "completed"
 
         const val RESIZE_STEP_BYTES: Long = 4 shl 20 // 4 MiB
+        const val RELEASE_YEAR: Int = 2025
 
         /** Returns InstalledImage for a given app context */
         fun getDefault(context: Context): InstalledImage {
             val installDir = context.getFilesDir().toPath().resolve(INSTALL_DIRNAME)
             return InstalledImage(installDir)
-        }
-
-        @Throws(IOException::class)
-        private fun allocateSpace(path: Path, sizeInBytes: Long) {
-            try {
-                RandomAccessFile(path.toFile(), "rw").use { raf ->
-                    Os.posix_fallocate(raf.fd, 0, sizeInBytes)
-                }
-                Log.d(TAG, "Allocated space to: $sizeInBytes bytes")
-            } catch (e: ErrnoException) {
-                Log.e(TAG, "Failed to allocate space", e)
-                throw IOException("Failed to allocate space", e)
-            }
         }
 
         @Throws(IOException::class)

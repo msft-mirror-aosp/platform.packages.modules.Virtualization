@@ -24,6 +24,7 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.graphics.fonts.FontStyle
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -78,6 +79,7 @@ public class MainActivity :
     private lateinit var terminalTabAdapter: TerminalTabAdapter
     private val terminalInfo = CompletableFuture<TerminalInfo>()
     private val terminalViewModel: TerminalViewModel by viewModels()
+    private var isVmRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -103,7 +105,13 @@ public class MainActivity :
 
         // if installer is launched, it will be handled in onActivityResult
         if (!launchInstaller) {
-            if (!Environment.isExternalStorageManager()) {
+            if (image.isOlderThanCurrentVersion()) {
+                val intent = Intent(this, UpgradeActivity::class.java)
+                intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+                // Explicitly finish to make sure that user can't go back from ErrorActivity.
+                finish()
+            } else if (!Environment.isExternalStorageManager()) {
                 requestStoragePermissions(this, manageExternalStorageActivityResultLauncher)
             } else {
                 startVm()
@@ -179,18 +187,18 @@ public class MainActivity :
         terminalViewModel.terminalTabs[tabId] = tab
         tab.customView!!
             .findViewById<Button>(R.id.tab_close_button)
-            .setOnClickListener(
-                View.OnClickListener { _: View? ->
-                    if (terminalTabAdapter.tabs.size == 1) {
-                        finishAndRemoveTask()
-                    }
-                    viewPager.offscreenPageLimit -= 1
-                    terminalTabAdapter.deleteTab(tab.position)
-                    tabLayout.removeTab(tab)
-                }
-            )
+            .setOnClickListener(View.OnClickListener { _: View? -> closeTab(tab) })
         // Add and select the tab
         tabLayout.addTab(tab, true)
+    }
+
+    fun closeTab(tab: TabLayout.Tab) {
+        if (terminalTabAdapter.tabs.size == 1) {
+            finish()
+        }
+        viewPager.offscreenPageLimit -= 1
+        terminalTabAdapter.deleteTab(tab.position)
+        tabLayout.removeTab(tab)
     }
 
     private fun lockOrientationIfNecessary() {
@@ -228,6 +236,16 @@ public class MainActivity :
         activityResultLauncher.launch(intent)
     }
 
+    override fun onPause() {
+        super.onPause()
+        MediaScannerConnection.scanFile(
+            this,
+            arrayOf("/storage/emulated/${userId}/Download"),
+            null /* mimeTypes */,
+            null, /* callback */
+        )
+    }
+
     private fun getTerminalServiceUrl(ipAddress: String?, port: Int): URL? {
         val config = resources.configuration
         // TODO: Always enable screenReaderMode (b/395845063)
@@ -263,13 +281,16 @@ public class MainActivity :
         executorService.shutdown()
         getSystemService<AccessibilityManager>(AccessibilityManager::class.java)
             .removeAccessibilityStateChangeListener(this)
-        val intent = VmLauncherService.getIntentForShutdown(this, this)
-        startService(intent)
+        if (isVmRunning) {
+            val intent = VmLauncherService.getIntentForShutdown(this, this)
+            startService(intent)
+        }
         super.onDestroy()
     }
 
     override fun onVmStart() {
         Log.i(TAG, "onVmStart()")
+        isVmRunning = true
     }
 
     override fun onTerminalAvailable(info: TerminalInfo) {
@@ -278,11 +299,13 @@ public class MainActivity :
 
     override fun onVmStop() {
         Log.i(TAG, "onVmStop()")
+        isVmRunning = false
         finish()
     }
 
     override fun onVmError() {
         Log.i(TAG, "onVmError()")
+        isVmRunning = false
         // TODO: error cause is too simple.
         ErrorActivity.start(this, Exception("onVmError"))
     }
